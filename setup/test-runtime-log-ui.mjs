@@ -44,12 +44,12 @@ setTimeout(() => {
 setTimeout(() => {
   const text = document.body.innerText;
   document.body.dataset.timelineCount = String(document.querySelectorAll("details.compact-operation").length);
-  document.body.dataset.hasOperations = String(text.includes("操作日志") || text.includes("Operations"));
+  document.body.dataset.hasOperations = String(Boolean(document.querySelector("[data-devspace-operations='true']")));
   document.body.dataset.hasRan = String(text.includes("已在 1.2 s 内运行") || text.includes("Ran in 1.2 s"));
   document.body.dataset.hasModified = String(text.includes("已修改") || text.includes("Modified"));
   document.body.dataset.hasFile = String(text.includes("src/train.py"));
   document.body.dataset.timelineOk = String(
-    (text.includes("操作日志") || text.includes("Operations"))
+    document.querySelector("[data-devspace-operations='true']")
     && (text.includes("已在 1.2 s 内运行") || text.includes("Ran in 1.2 s"))
     && (text.includes("已修改") || text.includes("Modified"))
     && text.includes("src/train.py")

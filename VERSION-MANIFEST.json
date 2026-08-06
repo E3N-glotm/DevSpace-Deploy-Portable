@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.14",
-  "builtAt": "2026-08-06T19:02:11+08:00",
+  "builtAt": "2026-08-06T19:05:39+08:00",
   "platform": "win32-x64",
   "runtime": {
     "node": "24.18.1",
@@ -451,7 +451,7 @@
     "setup/test-portable-ui-heartbeat.mjs.sha256": "ece17ca02e1a9e9e5a61560076f5848889275d943ccd003c89140f6422de4b04",
     "setup/test-portable-ui-workflows.mjs.sha256": "e9059dc5d2357aa79884bab9424f7e371e9c2a5c73dc46af14da9f82cb4d6aa9",
     "setup/test-runtime-cards.mjs.sha256": "012ed0421e5f46995995b5085d42d6908ee7fe4de40c4c1a0b3ebecad59d9afc",
-    "setup/test-runtime-log-ui.mjs.sha256": "8544737f305246eb7a823a025f61b734a3d6c046b07ee05f9821abe8e017bc19",
+    "setup/test-runtime-log-ui.mjs.sha256": "a653dd2f3d50c4bb43b64038ca9356bdced38e198ac8c2fe58847db2a222f8ac",
     "setup/test-session-capabilities.mjs.sha256": "a5289b4b0bb68b30c8f4a2e2606dc5c92b5d2fc7c17968cbb19ee044939dad6b",
     "setup/test-strict-stop.mjs.sha256": "1448d00523335391e0975ca8f151f54d4f5dc8d9a5b0b919d66b76fe32be1ddd",
     "setup/tunnel-launcher.cjs.sha256": "5febc462b87eb9fe517ee301c7871d9cee99a90aa64c19da735257aa6be7c9a0"
