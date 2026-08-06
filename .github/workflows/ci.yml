@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-source-and-runtime-tests:
+    runs-on: windows-2025
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.1
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Prepare test runtime node
+        shell: pwsh
+        run: ./scripts/prepare-ci-runtime.ps1
+
+      - name: Verify source boundary
+        run: npm run source:verify
+
+      - name: Pack maintained DevSpace core
+        run: npm run core:pack
+
+      - name: Install locked runtime dependencies
+        run: npm ci --prefix app
+
+      - name: Harden nested dependencies
+        run: node setup/harden-nested-dependencies.mjs
+
+      - name: Build and run Portable regression tests
+        shell: pwsh
+        run: ./scripts/test-source.ps1 -SkipInstall -SkipAudit
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --prefix app
+

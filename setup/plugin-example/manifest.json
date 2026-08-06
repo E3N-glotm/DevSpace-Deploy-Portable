@@ -1,0 +1,28 @@
+{
+  "id": "devspace-example",
+  "name": "DevSpace Example Plugin",
+  "description": "用于验证本地插件版本缓存、动态工具注册和 Skill 根加载。",
+  "version": "1.0.0",
+  "maturity": "stable",
+  "enabledByDefault": false,
+  "skillRoots": [
+    "skills"
+  ],
+  "tools": [
+    {
+      "name": "echo",
+      "title": "Plugin echo",
+      "description": "通过结构化 argv 输出 message 参数，用于验证插件执行链。",
+      "maturity": "stable",
+      "argv": [
+        "node",
+        "-e",
+        "console.log(process.argv[1])",
+        "${message}"
+      ],
+      "readOnly": true,
+      "persistent": false,
+      "tty": false
+    }
+  ]
+}

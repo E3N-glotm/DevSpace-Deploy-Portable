@@ -1,0 +1,83 @@
+{
+  "id": "codex-runtime-bridge",
+  "name": "Codex Runtime Bridge",
+  "description": "Safe compatibility bridge for local Codex inventory, portable Codex Skills, shell snapshots, Git workspace checkpoints, and Windows keep-awake sessions.",
+  "version": "1.1.1",
+  "maturity": "stable",
+  "enabledByDefault": true,
+  "dependencies": {
+    "platforms": ["win32"],
+    "executables": ["node", "git", "powershell"],
+    "optionalExecutables": ["codex"],
+    "files": ["runtime.mjs", "keep-awake.ps1"]
+  },
+  "skillRoots": [
+    "skills",
+    "%USERPROFILE%\\.cache\\codex-runtimes\\codex-primary-runtime\\plugins\\openai-primary-runtime\\plugins\\documents\\skills",
+    "%USERPROFILE%\\.cache\\codex-runtimes\\codex-primary-runtime\\plugins\\openai-primary-runtime\\plugins\\pdf\\skills",
+    "%USERPROFILE%\\.cache\\codex-runtimes\\codex-primary-runtime\\plugins\\openai-primary-runtime\\plugins\\spreadsheets\\skills",
+    "%USERPROFILE%\\.cache\\codex-runtimes\\codex-primary-runtime\\plugins\\openai-primary-runtime\\plugins\\presentations\\skills",
+    "%USERPROFILE%\\.cache\\codex-runtimes\\codex-primary-runtime\\plugins\\openai-primary-runtime\\plugins\\template-creator\\skills",
+    "%USERPROFILE%\\.codex\\.tmp\\bundled-marketplaces\\openai-bundled\\plugins\\sites\\skills",
+    "%USERPROFILE%\\.codex\\.tmp\\bundled-marketplaces\\openai-bundled\\plugins\\visualize\\skills",
+    "%USERPROFILE%\\.codex\\.tmp\\plugins\\plugins\\github\\skills"
+  ],
+  "tools": [
+    {
+      "name": "inventory",
+      "title": "Inspect local Codex runtime",
+      "description": "Return a redacted summary of the local Codex version, feature maturity, installed plugins, and failing doctor checks.",
+      "readOnly": true,
+      "argv": ["node", "${pluginDir}\\runtime.mjs", "inventory"]
+    },
+    {
+      "name": "shell_snapshot",
+      "title": "Capture shell environment snapshot",
+      "description": "Capture a redacted workspace, runtime, PATH, executable, Git, and selected environment snapshot without modifying files.",
+      "readOnly": true,
+      "argv": ["node", "${pluginDir}\\runtime.mjs", "shell-snapshot", "--workspace", "${workspaceRoot}"]
+    },
+    {
+      "name": "checkpoint_list",
+      "title": "List workspace checkpoints",
+      "description": "List hidden DevSpace Git checkpoints for the current workspace.",
+      "readOnly": true,
+      "argv": ["node", "${pluginDir}\\runtime.mjs", "checkpoint-list", "--workspace", "${workspaceRoot}"]
+    },
+    {
+      "name": "checkpoint_create",
+      "title": "Create workspace checkpoint",
+      "description": "Create a hidden Git snapshot of tracked, staged, unstaged, and untracked files without changing HEAD or the working tree.",
+      "readOnly": false,
+      "argv": ["node", "${pluginDir}\\runtime.mjs", "checkpoint-create", "--workspace", "${workspaceRoot}", "--name", "${name}"]
+    },
+    {
+      "name": "checkpoint_restore",
+      "title": "Restore workspace checkpoint",
+      "description": "Restore the working tree to a named hidden checkpoint after exact confirmation. An automatic safety checkpoint is created first.",
+      "readOnly": false,
+      "argv": ["node", "${pluginDir}\\runtime.mjs", "checkpoint-restore", "--workspace", "${workspaceRoot}", "--checkpoint", "${checkpoint}", "--confirm", "${confirm}"]
+    },
+    {
+      "name": "keep_awake_status",
+      "title": "Read keep-awake status",
+      "description": "Check whether the Codex Runtime Bridge currently holds a Windows system-awake request.",
+      "readOnly": true,
+      "argv": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& '${pluginDir}\\keep-awake.ps1' status '${pluginDir}\\state\\keep-awake.pid'"]
+    },
+    {
+      "name": "keep_awake_start",
+      "title": "Start keep-awake session",
+      "description": "Start a persistent Windows system-awake request for long training, inference, transfer, or build jobs.",
+      "readOnly": false,
+      "argv": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& '${pluginDir}\\keep-awake.ps1' start '${pluginDir}\\state\\keep-awake.pid'"]
+    },
+    {
+      "name": "keep_awake_stop",
+      "title": "Stop keep-awake session",
+      "description": "Stop the Windows system-awake request created by this plugin.",
+      "readOnly": false,
+      "argv": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& '${pluginDir}\\keep-awake.ps1' stop '${pluginDir}\\state\\keep-awake.pid'"]
+    }
+  ]
+}

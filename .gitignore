@@ -1,0 +1,48 @@
+# IDE and editor state
+.idea/
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Installed dependencies. The maintained Portable fork lives under vendor/.
+app/node_modules/
+node_modules/
+
+# Bundled third-party runtimes are restored from a Release or local cache.
+runtime/
+
+# Local runtime state, credentials, OAuth databases, logs, and reports.
+data/
+logs/
+reports/
+
+# Generated package and release artifacts.
+packages/*.tgz
+packages/staging/
+DevSpacePortable-Windows-x64-*.zip
+SHA256SUMS.txt
+release-assets/*
+!release-assets/README.md
+
+# Native build output and temporary replacement executables.
+/DevSpace-Portable.exe
+/*_DevSpace-Portable.exe
+
+# Update/build staging directories.
+.hotupdate-*/
+.live-upgrade-*/
+.update-staging/
+release-output/
+
+# Language caches.
+__pycache__/
+*.py[cod]
+*.pyo
+*.tmp
+*.log
+
+# OS metadata.
+Thumbs.db
+.DS_Store
+

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=9">
+  <title>DevSpace Portable</title>
+  <HTA:APPLICATION
+    ID="portableSetupRedirect"
+    APPLICATIONNAME="DevSpace Portable"
+    BORDER="none"
+    CAPTION="no"
+    SHOWINTASKBAR="no"
+    SINGLEINSTANCE="yes"
+    SYSMENU="no"
+    WINDOWSTATE="minimize"
+  />
+  <script language="javascript">
+    window.onload = function () {
+      try {
+        var shell = new ActiveXObject("WScript.Shell");
+        var fso = new ActiveXObject("Scripting.FileSystemObject");
+        var root = fso.GetParentFolderName(fso.GetParentFolderName(unescape(location.pathname).replace(/^\//, "").replace(/\//g, "\\")));
+        var executable = root + "\\DevSpace-Portable.exe";
+        if (!fso.FileExists(executable)) throw new Error("原生 DevSpace Portable 程序不存在：" + executable);
+        shell.Run('"' + executable + '"', 1, false);
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+      window.close();
+    };
+  </script>
+</head>
+<body></body>
+</html>

@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the leading v
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.ref_name != 'v1.1.14' }}
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $version = "${{ inputs.version }}".TrimStart('v')
+          } else {
+            $version = "${{ github.ref_name }}".TrimStart('v')
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $version" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.1
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore bundled runtime from latest stable Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/hydrate-runtime-from-release.ps1 -Repository "${{ github.repository }}" -Force
+
+      - name: Verify tag and source version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content VERSION-MANIFEST.json -Raw | ConvertFrom-Json
+          $actual = [string]$manifest.runtime.devspacePortable
+          if ($actual -ne $env:VERSION) {
+            throw "Tag version $env:VERSION does not match VERSION-MANIFEST portable version $actual"
+          }
+          $notes = "docs/releases/HOTFIX-$env:VERSION.md"
+          if (-not (Test-Path $notes)) { throw "Missing release notes: $notes" }
+
+      - name: Pack maintained core and install dependencies
+        shell: pwsh
+        run: |
+          npm run core:pack
+          npm ci --prefix app
+          node setup/harden-nested-dependencies.mjs
+
+      - name: Test source and Portable runtime
+        shell: pwsh
+        run: ./scripts/test-source.ps1 -SkipInstall -SkipAudit
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --prefix app
+
+      - name: Finalize metadata and build ZIP
+        shell: pwsh
+        run: |
+          python setup/finalize-release.py $env:VERSION --hotfix "docs/releases/HOTFIX-$env:VERSION.md"
+          python setup/build-release.py
+          python setup/create-update-manifest.py --repository "${{ github.repository }}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: DevSpace Portable ${{ steps.version.outputs.version }}
+          body_path: docs/releases/HOTFIX-${{ steps.version.outputs.version }}.md
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            DevSpacePortable-Windows-x64-${{ steps.version.outputs.version }}.zip
+            release-assets/update-manifest.json
+            release-assets/SHA256SUMS-release.txt
+

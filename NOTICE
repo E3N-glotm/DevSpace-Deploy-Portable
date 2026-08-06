@@ -1,0 +1,18 @@
+DevSpace Deploy Portable
+Copyright (c) 2026 E3N-glotm contributors
+
+This repository contains a maintained Portable fork of DevSpace 1.0.5.
+The upstream project is Waishnav/devspace and is distributed under the MIT
+License. The pinned upstream release commit is recorded in
+VERSION-MANIFEST.json and vendor/waishnav-devspace/UPSTREAM.md.
+
+The repository license applies to the original Portable integration code and
+modifications contributed here. Third-party components retain their own
+licenses and notices; see THIRD-PARTY-NOTICES.md and the license files shipped
+inside each dependency.
+
+The ngrok Agent is proprietary software and is not covered by this MIT
+License. Do not publish a public binary distribution containing ngrok.exe
+without confirming that the intended redistribution is permitted by ngrok's
+current terms or obtaining separate permission.
+

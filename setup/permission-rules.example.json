@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "defaultDecision": "allow",
+  "rules": [
+    {
+      "id": "audit-ssh",
+      "description": "记录 SSH 命令但不阻断执行",
+      "executable": "ssh.exe",
+      "decision": "audit"
+    },
+    {
+      "id": "deny-format-drive",
+      "description": "拒绝磁盘格式化程序",
+      "executable": "format.exe",
+      "decision": "deny"
+    },
+    {
+      "id": "audit-reg-delete",
+      "description": "审计注册表删除操作",
+      "executable": "reg.exe",
+      "commandPattern": "\\bdelete\\b",
+      "decision": "audit"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "devspace-portable-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned production runtime for DevSpace Portable",
+  "dependencies": {
+    "@waishnav/devspace": "file:../packages/waishnav-devspace-1.0.5.tgz",
+    "brace-expansion": "5.0.9",
+    "protobufjs": "7.6.5"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "protobufjs": "7.6.5",
+    "hono": "4.13.0",
+    "undici": "8.10.0"
+  }
+}

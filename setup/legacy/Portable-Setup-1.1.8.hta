@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=9">
+  <title>DevSpace Portable 1.1.8 旧版部署与控制</title>
+  <HTA:APPLICATION
+    ID="portableSetup"
+    APPLICATIONNAME="DevSpace Portable Setup"
+    BORDER="thin"
+    CAPTION="yes"
+    MAXIMIZEBUTTON="yes"
+    MINIMIZEBUTTON="yes"
+    SCROLL="yes"
+    SINGLEINSTANCE="yes"
+    SYSMENU="yes"
+    WINDOWSTATE="normal"
+  />
+  <style>
+    html, body { margin: 0; padding: 0; background: #f2f4f8; color: #182033; font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 14px; }
+    .shell { width: 940px; margin: 0 auto; padding: 22px 24px 28px; }
+    h1 { margin: 0 0 5px; font-size: 24px; }
+    .subtitle { margin: 0 0 18px; color: #596579; line-height: 1.55; }
+    .card { margin-bottom: 14px; padding: 16px; border: 1px solid #d8deea; background: #fff; border-radius: 9px; }
+    .card h2 { margin: 0 0 13px; font-size: 16px; }
+    .field { margin-bottom: 12px; }
+    .field:last-child { margin-bottom: 0; }
+    label { display: block; margin-bottom: 5px; font-weight: 600; }
+    .hint { margin-top: 4px; color: #6c7688; font-size: 12px; line-height: 1.45; }
+    input[type=text], input[type=password], textarea, select { box-sizing: border-box; width: 100%; border: 1px solid #c9d0dc; border-radius: 6px; padding: 8px 9px; background: #fff; color: #182033; font-family: Consolas, "Microsoft YaHei UI", sans-serif; font-size: 13px; }
+    textarea { height: 92px; resize: vertical; }
+    .provider-fields { margin-top: 12px; padding-top: 12px; border-top: 1px solid #e3e7ef; }
+    #cloudflareFields { display: none; }
+    #customPermissionFields, #fullAccessWarning { display: none; }
+    .permission-fields { margin-top: 12px; padding: 12px; border: 1px solid #d8deea; border-radius: 7px; background: #f8fafc; }
+    .permission-fields label { margin-bottom: 8px; font-weight: 500; }
+    .inline { display: table; width: 100%; }
+    .inline-cell { display: table-cell; vertical-align: top; padding-right: 12px; }
+    .inline-cell:last-child { padding-right: 0; }
+    .port { width: 130px; }
+    .warning { margin-top: 10px; padding: 10px 12px; border-left: 4px solid #d58a1f; background: #fff6e8; color: #704b18; line-height: 1.5; }
+    .owner { display: none; margin-top: 10px; padding: 12px; border: 1px solid #d1b34b; border-radius: 7px; background: #fff9dc; }
+    .owner code { display: block; margin-top: 7px; padding: 8px; background: #fff; word-break: break-all; user-select: all; }
+    .buttons { margin: 0 -4px -8px; }
+    button { min-width: 128px; height: 37px; margin: 0 4px 8px; border: 1px solid #c7cfdd; border-radius: 6px; background: #fff; color: #182033; font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; font-size: 14px; cursor: hand; }
+    button:hover { border-color: #286bd1; background: #f0f5ff; }
+    .primary { border-color: #2468ca; background: #2468ca; color: #fff; }
+    .primary:hover { background: #1857ad; color: #fff; }
+    .danger { border-color: #d1a5a5; color: #a12b2b; }
+    pre { min-height: 110px; max-height: 260px; overflow: auto; margin: 0; padding: 11px; border-radius: 6px; background: #111827; color: #d9e2f1; white-space: pre-wrap; word-wrap: break-word; font-family: Consolas, monospace; font-size: 12px; }
+    .footer { color: #697487; font-size: 12px; line-height: 1.55; }
+    .plugin-toolbar { margin: 0 -4px 8px; }
+    .plugin-toolbar button { min-width: 105px; }
+    .plugin-grid { display: table; width: 100%; table-layout: fixed; }
+    .plugin-column { display: table-cell; width: 50%; vertical-align: top; padding-right: 10px; }
+    .plugin-column:last-child { padding-right: 0; padding-left: 10px; }
+    .plugin-panel { padding: 12px; border: 1px solid #d8deea; border-radius: 7px; background: #f8fafc; }
+    .plugin-panel h3 { margin: 0 0 10px; font-size: 14px; }
+    .plugin-table-wrap { max-height: 280px; overflow: auto; border: 1px solid #d8deea; border-radius: 6px; background: #fff; }
+    .plugin-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+    .plugin-table th, .plugin-table td { padding: 7px 8px; border-bottom: 1px solid #e5e9f0; text-align: left; vertical-align: top; word-wrap: break-word; }
+    .plugin-table th { position: sticky; top: 0; background: #edf2f8; color: #3d495d; }
+    .plugin-table tr:last-child td { border-bottom: 0; }
+    .state-enabled { color: #16723a; font-weight: 600; }
+    .state-disabled { color: #8b4d16; font-weight: 600; }
+    .slot-ready { color: #16723a; }
+    .slot-warning { color: #a12b2b; }
+    .compact-row { display: table; width: 100%; margin-bottom: 9px; }
+    .compact-cell { display: table-cell; vertical-align: bottom; padding-right: 8px; }
+    .compact-cell:last-child { padding-right: 0; }
+    .compact-small { width: 115px; }
+    .plugin-path-row { display: table; width: 100%; }
+    .plugin-path-main { display: table-cell; vertical-align: middle; padding-right: 8px; }
+    .plugin-path-button { display: table-cell; width: 116px; vertical-align: middle; }
+    .plugin-path-button button { width: 112px; min-width: 112px; margin: 0; }
+    .feature-grid { display: table; width: 100%; table-layout: fixed; }
+    .feature-column { display: table-cell; width: 50%; vertical-align: top; padding-right: 9px; }
+    .feature-column:last-child { padding-right: 0; padding-left: 9px; }
+    .feature-item { min-height: 82px; margin-bottom: 10px; padding: 11px 12px; border: 1px solid #d8deea; border-radius: 7px; background: #f8fafc; }
+    .feature-item label { margin-bottom: 5px; }
+    .feature-state { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: #edf7ef; color: #21613a; font-size: 12px; }
+    .version-line { margin-top: 8px; color: #3e4b60; font-family: Consolas, monospace; font-weight: 600; }
+  </style>
+  <script language="javascript">
+    var fso = new ActiveXObject("Scripting.FileSystemObject");
+    var shell = new ActiveXObject("WScript.Shell");
+    var rootPath = "";
+    var nodeExe = "";
+    var managerFile = "";
+    var providerUrls = { ngrok: "", cloudflare: "" };
+    var activeProvider = "";
+    var pluginState = { plugins: [], slots: [] };
+    var pluginLoadError = null;
+    var uiLeaseId = "";
+    var uiHeartbeatTimer = null;
+    var portableVersion = "1.1.8";
+    var protocolVersion = "1.5";
+
+    function resolveRoot() {
+      var filePath = decodeURIComponent(window.location.pathname).replace(/\//g, "\\");
+      if (/^\\[A-Za-z]:/.test(filePath)) filePath = filePath.substring(1);
+      var setupDir = fso.GetParentFolderName(filePath);
+      return fso.GetParentFolderName(setupDir);
+    }
+
+    function runHelper(action, payload) {
+      var tempFolder = fso.GetSpecialFolder(2);
+      var token = "devspace-" + new Date().getTime() + "-" + Math.floor(Math.random() * 1000000000);
+      var inputFile = tempFolder + "\\" + token + ".input.json";
+      var outputFile = tempFolder + "\\" + token + ".output.txt";
+      var errorFile = tempFolder + "\\" + token + ".error.txt";
+      var input = fso.CreateTextFile(inputFile, true, true);
+      input.Write(JSON.stringify(payload !== null && typeof payload !== "undefined" ? payload : {}));
+      input.Close();
+      var command = '"' + nodeExe + '" "' + managerFile + '" ' + action
+        + ' --ascii-json --input-file "' + inputFile + '"'
+        + ' --output-file "' + outputFile + '"'
+        + ' --error-file "' + errorFile + '"'
+        + ' --file-encoding utf16le';
+      var exitCode = -1;
+      var output = "";
+      var errorText = "";
+      try {
+        exitCode = shell.Run(command, 0, true);
+        if (fso.FileExists(outputFile)) {
+          var outputStream = fso.OpenTextFile(outputFile, 1, false, -1);
+          output = outputStream.ReadAll();
+          outputStream.Close();
+        }
+        if (fso.FileExists(errorFile)) {
+          var errorStream = fso.OpenTextFile(errorFile, 1, false, -1);
+          errorText = errorStream.ReadAll();
+          errorStream.Close();
+        }
+      } finally {
+        try { if (fso.FileExists(inputFile)) fso.DeleteFile(inputFile, true); } catch (cleanupInputError) {}
+        try { if (fso.FileExists(outputFile)) fso.DeleteFile(outputFile, true); } catch (cleanupOutputError) {}
+        try { if (fso.FileExists(errorFile)) fso.DeleteFile(errorFile, true); } catch (cleanupErrorError) {}
+      }
+      if (exitCode !== 0) throw new Error(errorText || output || ("操作失败：" + action));
+      return output;
+    }
+
+    function setOutput(text) {
+      document.getElementById("output").innerText = text || "完成。";
+    }
+
+    function showError(error) {
+      setOutput("错误：\r\n" + (error.message || error));
+    }
+
+    function setUiState(text, active) {
+      var state = document.getElementById("uiSessionState");
+      if (!state) return;
+      state.innerText = text;
+      state.style.background = active ? "#edf7ef" : "#fff3e5";
+      state.style.color = active ? "#21613a" : "#7a4b12";
+    }
+
+    function startUiLease() {
+      try {
+        var lease = JSON.parse(runHelper("ui-open", null));
+        uiLeaseId = lease.leaseId || "";
+        var brokerText = lease.broker && lease.broker.ready
+          ? "常驻 Broker PID " + lease.broker.pid + "，轮询 " + lease.broker.pollIntervalMs + " ms"
+          : "常驻 Broker 尚未就绪";
+        setUiState("本地 UI 会话已启用；" + brokerText + "；Computer Use 与会话级变更统计/回退正在受心跳保护。", true);
+        if (uiHeartbeatTimer) window.clearInterval(uiHeartbeatTimer);
+        uiHeartbeatTimer = window.setInterval(function() {
+          if (!uiLeaseId) return;
+          try {
+            var heartbeat = JSON.parse(runHelper("ui-heartbeat", { leaseId: uiLeaseId }));
+            var broker = heartbeat.broker || {};
+            var brokerState = broker.ready
+              ? "Broker PID " + broker.pid + " 在线"
+              : "Broker 未就绪（" + (broker.reason || "unknown") + "）";
+            setUiState("本地 UI 会话在线；" + brokerState + "；最后心跳：" + new Date().toLocaleTimeString(), !!broker.ready);
+          } catch (error) {
+            setUiState("本地 UI 心跳失败；受 UI 门控的能力将自动失效。", false);
+          }
+        }, 1500);
+      } catch (error) {
+        setUiState("无法建立本地 UI 会话：" + (error.message || error), false);
+      }
+    }
+
+    function closeUiLease() {
+      if (uiHeartbeatTimer) {
+        window.clearInterval(uiHeartbeatTimer);
+        uiHeartbeatTimer = null;
+      }
+      if (!uiLeaseId || !nodeExe || !managerFile) return;
+      var leaseId = uiLeaseId;
+      uiLeaseId = "";
+      try { runHelper("ui-close", { leaseId: leaseId }); } catch (error) {}
+    }
+
+    function lines(value) {
+      var result = [];
+      var parts = String(value || "").split(/\r?\n/);
+      for (var index = 0; index < parts.length; index += 1) {
+        var item = parts[index].replace(/^\s+|\s+$/g, "");
+        if (item) result.push(item);
+      }
+      return result;
+    }
+
+    function loadConfiguration() {
+      try {
+        rootPath = resolveRoot();
+        nodeExe = rootPath + "\\runtime\\node\\node.exe";
+        managerFile = rootPath + "\\setup\\portable-manager.cjs";
+        var config = JSON.parse(runHelper("show-config", null));
+        providerUrls = config.providerUrls || { ngrok: "", cloudflare: "" };
+        activeProvider = config.tunnelProvider || "ngrok";
+        document.getElementById("tunnelProvider").value = activeProvider;
+        document.getElementById("publicBaseUrl").value = providerUrls[activeProvider] || config.publicBaseUrl || "";
+        document.getElementById("port").value = config.port || 7676;
+        document.getElementById("toolMode").value = config.toolMode || "full";
+        var permissions = config.permissions || { profile: "workspace" };
+        document.getElementById("accessProfile").value = permissions.profile || "workspace";
+        document.getElementById("allowExternalPaths").checked = !!permissions.allowExternalPaths;
+        document.getElementById("allowArbitraryCommands").checked = !!permissions.allowArbitraryCommands;
+        document.getElementById("allowShellMutation").checked = !!permissions.allowShellMutation;
+        document.getElementById("allowNetworkAccess").checked = permissions.allowNetworkAccess !== false;
+        document.getElementById("allowCredentialAccess").checked = !!permissions.allowCredentialAccess;
+        document.getElementById("allowComputerUse").checked = !!permissions.allowComputerUse;
+        document.getElementById("allowInteractiveProcesses").checked = permissions.allowInteractiveProcesses !== false;
+        document.getElementById("allowPersistentProcesses").checked = permissions.allowPersistentProcesses !== false;
+        document.getElementById("allowedRoots").value = (config.allowedRoots || []).join("\r\n");
+        document.getElementById("allDrives").checked = config.permissionMode === "all-drive-roots";
+        document.getElementById("rootDisplay").innerText = rootPath;
+        document.getElementById("tokenHint").innerText = config.hasNgrokToken ? "已保存 Token；留空将保留现有值。" : "首次使用 ngrok 时必须填写。";
+        document.getElementById("cloudflareTokenHint").innerText = config.hasCloudflareToken ? "已保存 Tunnel Token；留空将保留现有值。" : "首次使用 Cloudflare Tunnel 时必须填写。";
+        document.getElementById("cloudflaredHint").innerText = config.cloudflaredInstalled ? ("已安装并固定 cloudflared " + config.cloudflaredVersion + "。") : ("选择 Cloudflare 并保存时，将下载并校验 cloudflared " + config.cloudflaredVersion + "。");
+        document.getElementById("ngrokProxyUrl").value = config.ngrokProxyUrl || "";
+        document.getElementById("ngrokConnectCasHost").checked = !!config.ngrokConnectCasHost;
+        document.getElementById("ownerHint").innerText = config.hasOwnerToken ? "已存在 Owner Password；留空将保留。" : "留空将自动生成高强度密码。";
+        var features = config.features || {};
+        document.getElementById("featureComputerUse").checked = !!features.computerUse;
+        document.getElementById("featureMemories").checked = features.memories !== false;
+        document.getElementById("featureHooks").checked = features.hooks !== false;
+        document.getElementById("featureUiSessionReview").checked = features.uiSessionReview !== false;
+        portableVersion = config.portableVersion || portableVersion;
+        protocolVersion = config.protocolVersion || protocolVersion;
+        document.getElementById("versionDisplay").innerText = "DevSpace Portable " + portableVersion + " · Protocol " + protocolVersion;
+        toggleTunnelFields(false);
+        toggleAccessProfile();
+        loadPlugins(true);
+        if (pluginLoadError) {
+          showError(pluginLoadError);
+        } else {
+          setOutput(config.configured ? ("已加载现有配置。\r\n工具模式: " + config.toolMode + "\r\n访问权限: " + permissions.profile + "\r\n隧道提供商: " + config.tunnelProvider + "\r\nMCP URL: " + config.mcpUrl + "\r\nauth.json 路径: " + config.authFile) : "尚未配置。请填写上方项目后点击“保存并自动部署”。");
+        }
+      } catch (error) {
+        showError(error);
+      }
+    }
+
+    function toggleTunnelFields(rememberCurrent) {
+      var provider = document.getElementById("tunnelProvider").value;
+      if (rememberCurrent !== false && activeProvider) {
+        providerUrls[activeProvider] = document.getElementById("publicBaseUrl").value;
+      }
+      if (activeProvider !== provider) {
+        document.getElementById("publicBaseUrl").value = providerUrls[provider] || "";
+      }
+      activeProvider = provider;
+      document.getElementById("ngrokFields").style.display = provider === "ngrok" ? "block" : "none";
+      document.getElementById("cloudflareFields").style.display = provider === "cloudflare" ? "block" : "none";
+    }
+
+    function toggleAccessProfile() {
+      var profile = document.getElementById("accessProfile").value;
+      document.getElementById("customPermissionFields").style.display = profile === "custom" ? "block" : "none";
+      document.getElementById("fullAccessWarning").style.display = profile === "full-access" ? "block" : "none";
+    }
+
+    function collectInput() {
+      var roots = lines(document.getElementById("allowedRoots").value);
+      var accessProfile = document.getElementById("accessProfile").value;
+      if (accessProfile === "full-access") {
+        if (!window.confirm("完整主机访问会允许已授权的 MCP 客户端以当前 Windows 用户身份执行任意命令、访问凭据接口、进行 SSH/网络操作并访问任意可访问路径。Windows ACL 和 UAC 仍然有效。确定启用吗？")) {
+          throw new Error("已取消完整主机访问。\r\n");
+        }
+      }
+      if (document.getElementById("allDrives").checked) {
+        if (!window.confirm("高风险：这会把本机当前存在的全部盘符根目录加入 allowedRoots，包括可移动盘或映射盘。确定继续吗？")) {
+          throw new Error("已取消全部磁盘根目录开放。");
+        }
+        roots = JSON.parse(runHelper("list-drives", null));
+        document.getElementById("allowedRoots").value = roots.join("\r\n");
+      }
+      return {
+        tunnelProvider: document.getElementById("tunnelProvider").value,
+        publicBaseUrl: document.getElementById("publicBaseUrl").value,
+        port: document.getElementById("port").value,
+        toolMode: document.getElementById("toolMode").value,
+        permissions: {
+          profile: accessProfile,
+          allowExternalPaths: document.getElementById("allowExternalPaths").checked,
+          allowArbitraryCommands: document.getElementById("allowArbitraryCommands").checked,
+          allowShellMutation: document.getElementById("allowShellMutation").checked,
+          allowNetworkAccess: document.getElementById("allowNetworkAccess").checked,
+          allowCredentialAccess: document.getElementById("allowCredentialAccess").checked,
+          allowComputerUse: document.getElementById("allowComputerUse").checked,
+          allowInteractiveProcesses: document.getElementById("allowInteractiveProcesses").checked,
+          allowPersistentProcesses: document.getElementById("allowPersistentProcesses").checked
+        },
+        features: {
+          computerUse: document.getElementById("featureComputerUse").checked,
+          memories: document.getElementById("featureMemories").checked,
+          hooks: document.getElementById("featureHooks").checked,
+          uiSessionReview: document.getElementById("featureUiSessionReview").checked
+        },
+        allowedRoots: roots,
+        allowAllFixedDrives: document.getElementById("allDrives").checked,
+        ngrokToken: document.getElementById("ngrokToken").value,
+        ngrokProxyUrl: document.getElementById("ngrokProxyUrl").value,
+        ngrokConnectCasHost: document.getElementById("ngrokConnectCasHost").checked,
+        cloudflareToken: document.getElementById("cloudflareToken").value,
+        ownerToken: document.getElementById("ownerToken").value
+      };
+    }
+
+    function saveConfiguration() {
+      var result = JSON.parse(runHelper("configure", collectInput()));
+      providerUrls = result.providerUrls || providerUrls;
+      activeProvider = result.tunnelProvider || activeProvider;
+      document.getElementById("ngrokToken").value = "";
+      document.getElementById("cloudflareToken").value = "";
+      document.getElementById("ownerToken").value = "";
+      if (result.generatedOwnerToken && result.ownerToken) {
+        document.getElementById("ownerBox").style.display = "block";
+        document.getElementById("ownerValue").innerText = result.ownerToken;
+      } else {
+        document.getElementById("ownerBox").style.display = "none";
+      }
+      setOutput("配置已保存。\r\n工具模式: " + result.toolMode + "\r\n访问权限: " + result.permissions.profile + "\r\n隧道提供商: " + result.tunnelProvider + "\r\nMCP URL: " + result.mcpUrl + "\r\nauth.json 路径: " + result.authFile + "\r\n配置目录: " + result.configDir + "\r\n提示: 工具模式和权限配置在下次启动或重启 DevSpace 后生效。");
+      return result;
+    }
+
+    function saveOnly() {
+      try { saveConfiguration(); } catch (error) { showError(error); }
+    }
+
+    function deployAll() {
+      try {
+        var result = saveConfiguration();
+        setOutput("正在创建用户级计划任务，请稍候……");
+        var installText = runHelper("install-tasks", null);
+        var startText = runHelper("restart", null);
+        var testText = "";
+        try { testText = runHelper("test", null); } catch (testError) { testText = "部署已完成，但公网验证尚未通过：\r\n" + testError.message; }
+        setOutput(installText + startText + "工具模式: " + result.toolMode + "\r\n访问权限: " + result.permissions.profile + "\r\nMCP URL: " + result.mcpUrl + "\r\nauth.json 路径: " + result.authFile + "\r\n\r\n" + testText);
+      } catch (error) { showError(error); }
+    }
+
+    function simpleAction(action, confirmation) {
+      try {
+        if (confirmation && !window.confirm(confirmation)) return;
+        setOutput("正在执行：" + action + "……");
+        setOutput(runHelper(action, null));
+      } catch (error) { showError(error); }
+    }
+
+    function clearElement(element) {
+      while (element.firstChild) element.removeChild(element.firstChild);
+    }
+
+    function appendOption(select, value, text) {
+      var option = document.createElement("option");
+      option.value = value;
+      option.innerText = text;
+      select.appendChild(option);
+    }
+
+    function pluginById(pluginId) {
+      for (var index = 0; index < pluginState.plugins.length; index += 1) {
+        if (pluginState.plugins[index].id === pluginId) return pluginState.plugins[index];
+      }
+      return null;
+    }
+
+    function loadPlugins(silent) {
+      try {
+        pluginLoadError = null;
+        pluginState = JSON.parse(runHelper("plugin-list", null));
+        renderPlugins();
+        if (!silent) setOutput("插件缓存和 16 个预留槽位已刷新。\r\n插件数量: " + pluginState.plugins.length);
+      } catch (error) {
+        pluginLoadError = error;
+        if (!silent) showError(error);
+      }
+    }
+
+    function applyPluginResult(result, message) {
+      if (result.plugins) pluginState.plugins = result.plugins;
+      if (result.slots) pluginState.slots = result.slots;
+      renderPlugins();
+      setOutput(message + "\r\n无需刷新网页 MCP 工具定义；plugin_query、plugin_action 和已绑定槽位会读取最新状态。\r\n插件 Skill 会在下一次打开工作区时重新同步。");
+    }
+
+    function renderPlugins() {
+      var pluginSelect = document.getElementById("pluginSelect");
+      var slotPluginSelect = document.getElementById("slotPluginSelect");
+      var slotSelect = document.getElementById("slotSelect");
+      if (!slotSelect.options.length) {
+        for (var slotIndex = 1; slotIndex <= 16; slotIndex += 1) {
+          appendOption(slotSelect, String(slotIndex), "plugin_slot_" + (slotIndex < 10 ? "0" : "") + slotIndex);
+        }
+      }
+      var previousPlugin = pluginSelect.value;
+      var previousSlotPlugin = slotPluginSelect.value;
+      clearElement(pluginSelect);
+      clearElement(slotPluginSelect);
+      appendOption(pluginSelect, "", "请选择插件");
+      appendOption(slotPluginSelect, "", "请选择已启用插件");
+      for (var index = 0; index < pluginState.plugins.length; index += 1) {
+        var plugin = pluginState.plugins[index];
+        appendOption(pluginSelect, plugin.id, plugin.name + " (" + plugin.id + ")");
+        if (plugin.enabled) appendOption(slotPluginSelect, plugin.id, plugin.name + " @ " + plugin.selectedVersion);
+      }
+      pluginSelect.value = pluginById(previousPlugin) ? previousPlugin : "";
+      slotPluginSelect.value = pluginById(previousSlotPlugin) && pluginById(previousSlotPlugin).enabled ? previousSlotPlugin : "";
+      renderPluginTable();
+      renderSlotTable();
+      updatePluginControls();
+      updateSlotTools();
+    }
+
+    function renderPluginTable() {
+      var body = document.getElementById("pluginTableBody");
+      clearElement(body);
+      if (!pluginState.plugins.length) {
+        var emptyRow = document.createElement("tr");
+        var emptyCell = document.createElement("td");
+        emptyCell.colSpan = 6;
+        emptyCell.innerText = "尚未安装插件。";
+        emptyRow.appendChild(emptyCell);
+        body.appendChild(emptyRow);
+        return;
+      }
+      for (var index = 0; index < pluginState.plugins.length; index += 1) {
+        var plugin = pluginState.plugins[index];
+        var row = document.createElement("tr");
+        var values = [
+          plugin.id,
+          plugin.selectedVersion || "-",
+          plugin.enabled ? "已启用" : "已禁用",
+          plugin.dependencyStatus ? plugin.dependencyStatus.status : "未知",
+          plugin.maturity || "experimental",
+          String((plugin.dispatchTools || []).length)
+        ];
+        for (var valueIndex = 0; valueIndex < values.length; valueIndex += 1) {
+          var cell = document.createElement("td");
+          cell.innerText = values[valueIndex];
+          if (valueIndex === 2) cell.className = plugin.enabled ? "state-enabled" : "state-disabled";
+          if (valueIndex === 3) cell.className = values[valueIndex] === "ready" ? "state-enabled" : (values[valueIndex] === "degraded" ? "slot-warning" : "state-disabled");
+          row.appendChild(cell);
+        }
+        row.onclick = (function(pluginId) {
+          return function() {
+            document.getElementById("pluginSelect").value = pluginId;
+            updatePluginControls();
+          };
+        })(plugin.id);
+        body.appendChild(row);
+      }
+    }
+
+    function renderSlotTable() {
+      var body = document.getElementById("slotTableBody");
+      clearElement(body);
+      for (var index = 0; index < pluginState.slots.length; index += 1) {
+        var slot = pluginState.slots[index];
+        var row = document.createElement("tr");
+        var binding = slot.bound ? (slot.pluginId + "/" + slot.toolName + " @ " + slot.pluginVersion) : "未绑定";
+        var values = [String(slot.slot), slot.name, binding, slot.status];
+        for (var valueIndex = 0; valueIndex < values.length; valueIndex += 1) {
+          var cell = document.createElement("td");
+          cell.innerText = values[valueIndex];
+          if (valueIndex === 3) cell.className = slot.status === "ready" ? "slot-ready" : (slot.status === "unbound" ? "" : "slot-warning");
+          row.appendChild(cell);
+        }
+        row.onclick = (function(slotNumber) {
+          return function() { document.getElementById("slotSelect").value = String(slotNumber); };
+        })(slot.slot);
+        body.appendChild(row);
+      }
+    }
+
+    function updatePluginControls() {
+      var plugin = pluginById(document.getElementById("pluginSelect").value);
+      var versionSelect = document.getElementById("pluginVersionSelect");
+      clearElement(versionSelect);
+      if (!plugin) {
+        appendOption(versionSelect, "", "-");
+        document.getElementById("pluginDetail").innerText = "选择插件后可启用、禁用或卸载。";
+        return;
+      }
+      for (var index = 0; index < plugin.versions.length; index += 1) {
+        appendOption(versionSelect, plugin.versions[index].version, plugin.versions[index].version);
+      }
+      versionSelect.value = plugin.selectedVersion;
+      var dependency = plugin.dependencyStatus || { status: "未知", missing: {} };
+      var missingParts = [];
+      for (var key in dependency.missing) {
+        if (dependency.missing.hasOwnProperty(key) && dependency.missing[key] && dependency.missing[key].length) {
+          missingParts.push(key + ": " + dependency.missing[key].join(", "));
+        }
+      }
+      document.getElementById("pluginDetail").innerText = (plugin.description || "无描述") +
+        "\r\n依赖: " + dependency.status + (missingParts.length ? "（" + missingParts.join("；") + "）" : "") +
+        "\r\n工具: " + (plugin.dispatchTools || []).map(function(tool) { return tool.name + (tool.readOnly ? " [只读]" : " [操作]"); }).join(", ");
+    }
+
+    function updateSlotTools() {
+      var plugin = pluginById(document.getElementById("slotPluginSelect").value);
+      var toolSelect = document.getElementById("slotToolSelect");
+      clearElement(toolSelect);
+      appendOption(toolSelect, "", "请选择工具");
+      if (!plugin || !plugin.enabled) return;
+      var tools = plugin.dispatchTools || [];
+      for (var index = 0; index < tools.length; index += 1) {
+        appendOption(toolSelect, tools[index].name, tools[index].name + (tools[index].readOnly ? "（只读）" : "（可修改）"));
+      }
+    }
+
+    function browsePluginFolder() {
+      try {
+        var picker = new ActiveXObject("Shell.Application");
+        var folder = picker.BrowseForFolder(0, "选择包含 manifest.json 的插件目录", 0x10, rootPath);
+        if (folder) document.getElementById("pluginSource").value = folder.Self.Path;
+      } catch (error) { showError(error); }
+    }
+
+    function usePluginZip() {
+      var value = document.getElementById("pluginZip").value;
+      if (value) document.getElementById("pluginSource").value = value;
+    }
+
+    function installPlugin() {
+      try {
+        var sourcePath = document.getElementById("pluginSource").value.replace(/^\s+|\s+$/g, "");
+        if (!sourcePath) throw new Error("请选择插件目录、manifest.json 或 ZIP 文件。");
+        var replace = document.getElementById("replacePluginVersion").checked;
+        if (!window.confirm("安装过程只校验和复制插件文件，不执行插件脚本。确定从以下路径安装吗？\r\n" + sourcePath)) return;
+        var result = JSON.parse(runHelper("plugin-install", { sourcePath: sourcePath, replace: replace }));
+        applyPluginResult(result, "插件安装完成: " + result.plugin.id + " @ " + result.plugin.installedVersion);
+      } catch (error) { showError(error); }
+    }
+
+    function enableSelectedPlugin(enabled) {
+      try {
+        var pluginId = document.getElementById("pluginSelect").value;
+        if (!pluginId) throw new Error("请先选择插件。");
+        var action = enabled ? "plugin-enable" : "plugin-disable";
+        var payload = { pluginId: pluginId };
+        if (enabled) payload.version = document.getElementById("pluginVersionSelect").value;
+        var result = JSON.parse(runHelper(action, payload));
+        applyPluginResult(result, enabled ? "插件已启用: " + pluginId : "插件已禁用: " + pluginId);
+      } catch (error) { showError(error); }
+    }
+
+    function uninstallSelectedPlugin(allVersions) {
+      try {
+        var pluginId = document.getElementById("pluginSelect").value;
+        if (!pluginId) throw new Error("请先选择插件。");
+        var version = allVersions ? null : document.getElementById("pluginVersionSelect").value;
+        var target = allVersions ? pluginId + " 的全部版本" : pluginId + " @ " + version;
+        if (!window.confirm("将从 data\\plugins\\installed 删除 " + target + "。相关预留槽位会失效或自动解除。确定继续吗？")) return;
+        var payload = { pluginId: pluginId };
+        if (!allVersions) payload.version = version;
+        var result = JSON.parse(runHelper("plugin-uninstall", payload));
+        applyPluginResult(result, "插件已卸载: " + target);
+      } catch (error) { showError(error); }
+    }
+
+    function bindPluginSlot() {
+      try {
+        var slot = Number(document.getElementById("slotSelect").value);
+        var pluginId = document.getElementById("slotPluginSelect").value;
+        var toolName = document.getElementById("slotToolSelect").value;
+        if (!pluginId || !toolName) throw new Error("请选择已启用插件和工具。");
+        if (!window.confirm("槽位会固定当前插件版本和内容哈希；插件升级或文件变化后将拒绝执行，直到重新绑定。确定绑定 plugin_slot_" + (slot < 10 ? "0" : "") + slot + " 吗？")) return;
+        var result = JSON.parse(runHelper("plugin-slot-bind", { slot: slot, pluginId: pluginId, toolName: toolName }));
+        applyPluginResult(result, "预留槽位已绑定: " + result.slot.name + " -> " + pluginId + "/" + toolName);
+      } catch (error) { showError(error); }
+    }
+
+    function unbindPluginSlot() {
+      try {
+        var slot = Number(document.getElementById("slotSelect").value);
+        var result = JSON.parse(runHelper("plugin-slot-unbind", { slot: slot }));
+        applyPluginResult(result, "预留槽位已解除: plugin_slot_" + (slot < 10 ? "0" : "") + slot);
+      } catch (error) { showError(error); }
+    }
+
+    function openLogs() {
+      var devspaceLog = rootPath + "\\logs\\devspace.log";
+      var provider = document.getElementById("tunnelProvider").value;
+      var tunnelLog = rootPath + "\\logs\\" + (provider === "cloudflare" ? "cloudflared.log" : "ngrok.log");
+      if (fso.FileExists(devspaceLog)) shell.Run('notepad.exe "' + devspaceLog + '"', 1, false);
+      if (fso.FileExists(tunnelLog)) shell.Run('notepad.exe "' + tunnelLog + '"', 1, false);
+    }
+
+    function initializeWindow() {
+      window.resizeTo(1080, 1120);
+      window.moveTo(Math.max(0, (screen.availWidth - 1080) / 2), Math.max(0, (screen.availHeight - 1120) / 2));
+      rootPath = resolveRoot();
+      nodeExe = rootPath + "\\runtime\\node\\node.exe";
+      managerFile = rootPath + "\\setup\\portable-manager.cjs";
+      startUiLease();
+      loadConfiguration();
+    }
+  </script>
+</head>
+<body onload="initializeWindow()" onbeforeunload="closeUiLease()" onunload="closeUiLease()">
+  <div class="shell">
+    <h1>DevSpace Portable 部署与控制</h1>
+    <p class="subtitle">复制整个文件夹到目标 Windows x64 电脑，在稳定位置解压后双击根目录的 DevSpace-Portable.cmd。无需预装 Node、npm、Git Bash、DevSpace、ngrok 或 cloudflared。</p>
+
+    <div class="card">
+      <h2>1. 公网和本地服务</h2>
+      <div class="field">
+        <label for="tunnelProvider">公网隧道提供商</label>
+        <select id="tunnelProvider" onchange="toggleTunnelFields(true)">
+          <option value="ngrok">ngrok 固定域名</option>
+          <option value="cloudflare">Cloudflare Tunnel + 自定义域名</option>
+        </select>
+      </div>
+      <div class="inline">
+        <div class="inline-cell">
+          <div class="field">
+            <label for="publicBaseUrl">公网 HTTPS 根地址</label>
+            <input id="publicBaseUrl" type="text" placeholder="mcp.example.com 或 your-fixed-domain.ngrok-free.app">
+            <div class="hint">填写固定域名或 https:// 根地址；不要填写 /mcp、查询参数或片段。</div>
+          </div>
+        </div>
+        <div class="inline-cell port">
+          <div class="field">
+            <label for="port">本地端口</label>
+            <input id="port" type="text" value="7676">
+            <div class="hint">默认 7676。</div>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label for="toolMode">DevSpace 工具模式</label>
+        <select id="toolMode">
+          <option value="full">full（推荐：完整文件、搜索和目录工具）</option>
+          <option value="codex">codex（实验：多文件 apply_patch + 持久命令会话）</option>
+          <option value="minimal">minimal（精简：基础读写编辑与 bash）</option>
+        </select>
+        <div class="hint">“保存并自动部署”会重启服务并应用新模式；“只保存设置”需稍后手动重启。codex 更适合跨文件补丁；full 兼容性最好；minimal 主要用于缩短工具列表。工具集合改变后，ChatGPT 网页端还需刷新工具；没有刷新入口时重新创建插件连接。</div>
+      </div>
+      <div id="ngrokFields" class="provider-fields">
+        <div class="field">
+          <label for="ngrokToken">ngrok Authtoken</label>
+          <input id="ngrokToken" type="password" autocomplete="off">
+          <div id="tokenHint" class="hint"></div>
+        </div>
+        <div class="field">
+          <label for="ngrokProxyUrl">ngrok 出站代理（可选）</label>
+          <input id="ngrokProxyUrl" type="text" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890">
+          <div class="hint">只有本机无法直连 ngrok 时才填写。不要在 URL 中嵌入代理账号密码。</div>
+        </div>
+        <label><input id="ngrokConnectCasHost" type="checkbox"> 使用 Windows 信任的根证书（企业 HTTPS 检查代理才需要）</label>
+      </div>
+      <div id="cloudflareFields" class="provider-fields">
+        <div class="field">
+          <label for="cloudflareToken">Cloudflare 命名隧道 Token</label>
+          <input id="cloudflareToken" type="password" autocomplete="off" placeholder="从 Networking > Tunnels > Add a replica 获取">
+          <div id="cloudflareTokenHint" class="hint"></div>
+        </div>
+        <div id="cloudflaredHint" class="hint"></div>
+        <div class="warning">必须先在 Cloudflare 控制台为该命名隧道创建 Published application：Hostname 与上方公网域名一致，Service URL 指向 http://127.0.0.1:7676（端口改变时同步修改）。本长期部署不使用随机 trycloudflare.com 地址。</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2. 本地目录与权限</h2>
+      <div class="field">
+        <label for="accessProfile">主机访问权限</label>
+        <select id="accessProfile" onchange="toggleAccessProfile()">
+          <option value="workspace">工作区模式（默认：路径受限、命令说明保守）</option>
+          <option value="full-access">完整主机访问（当前 Windows 用户可做什么，MCP 就可做什么）</option>
+          <option value="custom">自定义权限（逐项授权）</option>
+        </select>
+        <div class="hint">权限模式独立于 full/codex 工具模式。完整主机访问不会提升为管理员或 SYSTEM，只取消 DevSpace 自身的工作区边界和保守命令约束。</div>
+      </div>
+      <div id="fullAccessWarning" class="warning">高风险：允许任意本地命令、Shell 文件修改、SSH/SCP/SFTP、网络访问、Windows 凭据接口、任意当前用户可访问路径，以及交互式和持续进程。只有 Owner Password 和 OAuth 客户端均受控时才应启用。</div>
+      <div id="customPermissionFields" class="permission-fields">
+        <label><input id="allowExternalPaths" type="checkbox"> 允许访问工作区以外的绝对路径</label>
+        <label><input id="allowArbitraryCommands" type="checkbox"> 允许任意主机命令，不限于代码检查、构建和测试</label>
+        <label><input id="allowShellMutation" type="checkbox"> 允许通过 Shell 修改、创建和删除文件</label>
+        <label><input id="allowNetworkAccess" type="checkbox"> 允许网络命令及 SSH/SCP/SFTP</label>
+        <label><input id="allowCredentialAccess" type="checkbox"> 允许调用 Windows Credential Manager 等凭据接口</label>
+        <label><input id="allowComputerUse" type="checkbox"> 允许 Computer Use 截图、鼠标和键盘动作</label>
+        <label><input id="allowInteractiveProcesses" type="checkbox"> 允许真实 PTY 交互进程和密码提示</label>
+        <label><input id="allowPersistentProcesses" type="checkbox"> 允许命令超出首个等待窗口后继续运行并返回 sessionId</label>
+        <div class="hint">路径、PTY 和持续会话由服务端直接执行限制；命令类别授权会写入 MCP 工具说明和服务器指令。Shell 本身不是可可靠拆分的安全沙箱，因此需要严格隔离时应关闭任意命令，而不是依赖字符串黑名单。</div>
+      </div>
+      <div class="field">
+        <label for="allowedRoots">允许的工作目录（每行一个，必须真实存在）</label>
+        <textarea id="allowedRoots" placeholder="E:\program\Python&#13;&#10;D:\RemoteOps"></textarea>
+      </div>
+      <label><input id="allDrives" type="checkbox"> 高风险：忽略上面的列表，开放本机当前可访问的全部磁盘根目录</label>
+      <div class="warning">推荐只填写明确的项目父目录。全部磁盘模式会包含当前存在的本地、可移动或映射盘符，让文件工具访问当前 Windows 用户有权访问的几乎全部文件；bash 工具本身也不是坚固的系统沙箱。</div>
+    </div>
+
+    <div class="card">
+      <h2>3. OAuth Owner Password</h2>
+      <div class="field">
+        <label for="ownerToken">自定义 Owner Password（可选）</label>
+        <input id="ownerToken" type="password" autocomplete="off" placeholder="至少 16 个字符">
+        <div id="ownerHint" class="hint"></div>
+      </div>
+      <div id="ownerBox" class="owner">
+        首次部署已生成 Owner Password。请立即保存到密码管理器；关闭窗口后只能从受限 auth.json 中查看。
+        <code id="ownerValue"></code>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>4. Computer Use、Memories、Hooks 与会话审阅</h2>
+      <div class="feature-grid">
+        <div class="feature-column">
+          <div class="feature-item">
+            <label><input id="featureComputerUse" type="checkbox"> 启用 Computer Use（实验）</label>
+            <div class="hint">使用由本地 UI 启动的常驻桌面 Broker，优先通过 Windows Graphics Capture 获取画面，并提供鼠标、滚轮、有限按键和文本输入。必须同时使用 full-access，或在自定义权限中启用 Computer Use；本地 UI 关闭后立即或在心跳超时后拒绝执行。</div>
+          </div>
+          <div class="feature-item">
+            <label><input id="featureMemories" type="checkbox" checked> 启用显式 Memories</label>
+            <div class="hint">支持全局或工作区级记忆，保存在本地 SQLite 中，可列出、更新和删除。不会自动保存命令输出、浏览历史或凭据。</div>
+          </div>
+        </div>
+        <div class="feature-column">
+          <div class="feature-item">
+            <label><input id="featureHooks" type="checkbox" checked> 启用生命周期 Hooks</label>
+            <div class="hint">覆盖工作区打开、命令、文件修改、审阅和回退阶段。Hook 只接受 executable + argv，不接受 Shell 字符串，并写入审计事件。</div>
+          </div>
+          <div class="feature-item">
+            <label><input id="featureUiSessionReview" type="checkbox" checked> 启用 UI 会话修改统计与回退</label>
+            <div class="hint">UI 打开时创建会话基线，汇总本次会话修改文件及增删行。Git 工作区支持完整回退；非 Git 工作区仅保证结构化工具触及路径可回退。</div>
+          </div>
+        </div>
+      </div>
+      <div id="uiSessionState" class="feature-state">正在建立本地 UI 会话……</div>
+      <div class="warning">Computer Use 会操作当前交互桌面。启用后仍由每次 MCP 工具调用的参数与授权边界控制；关闭本窗口会撤销 UI 租约。会话回退是破坏性操作，必须提交界面返回的精确确认令牌。</div>
+    </div>
+
+    <div class="card">
+      <h2>5. 插件管理与 16 个预留接口</h2>
+      <div class="warning">插件启用、禁用、安装、卸载和槽位绑定均通过统一 PluginManager 完成，不改变 `plugin_query` / `plugin_action` 的网页 Schema。16 个预留接口只执行本机 UI 绑定的 manifest 工具，不接受插件名、工具名、命令、argv 或环境变量；未绑定、已禁用、升级、内容变化或卸载时一律拒绝执行。</div>
+      <div class="field">
+        <label for="pluginSource">安装插件</label>
+        <div class="plugin-path-row">
+          <div class="plugin-path-main"><input id="pluginSource" type="text" placeholder="插件目录、manifest.json 或 .zip 文件"></div>
+          <div class="plugin-path-button"><button onclick="browsePluginFolder()">选择目录</button></div>
+        </div>
+        <input id="pluginZip" type="file" accept=".zip,application/zip" onchange="usePluginZip()" style="margin-top:8px; width:100%;">
+        <label style="margin-top:8px; font-weight:500;"><input id="replacePluginVersion" type="checkbox"> 覆盖完全相同的插件 ID 与版本</label>
+        <div class="hint">安装前会检查 ZIP 路径穿越、符号链接/目录联接、manifest、文件数量和总大小；不会运行 postinstall、安装脚本或插件命令。</div>
+        <div class="plugin-toolbar">
+          <button class="primary" onclick="installPlugin()">安装插件</button>
+          <button onclick="loadPlugins(false)">刷新列表</button>
+        </div>
+      </div>
+      <div class="plugin-grid">
+        <div class="plugin-column">
+          <div class="plugin-panel">
+            <h3>已安装插件</h3>
+            <div class="compact-row">
+              <div class="compact-cell"><label for="pluginSelect">插件</label><select id="pluginSelect" onchange="updatePluginControls()"></select></div>
+              <div class="compact-cell compact-small"><label for="pluginVersionSelect">版本</label><select id="pluginVersionSelect"></select></div>
+            </div>
+            <div id="pluginDetail" class="hint" style="min-height:42px; white-space:pre-wrap;"></div>
+            <div class="plugin-toolbar">
+              <button onclick="enableSelectedPlugin(true)">启用</button>
+              <button onclick="enableSelectedPlugin(false)">禁用</button>
+              <button class="danger" onclick="uninstallSelectedPlugin(false)">卸载此版本</button>
+              <button class="danger" onclick="uninstallSelectedPlugin(true)">卸载全部版本</button>
+            </div>
+            <div class="plugin-table-wrap">
+              <table class="plugin-table">
+                <thead><tr><th>ID</th><th>版本</th><th>状态</th><th>依赖</th><th>成熟度</th><th>工具</th></tr></thead>
+                <tbody id="pluginTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="plugin-column">
+          <div class="plugin-panel">
+            <h3>网页预留槽位</h3>
+            <div class="compact-row">
+              <div class="compact-cell compact-small"><label for="slotSelect">槽位</label><select id="slotSelect"></select></div>
+              <div class="compact-cell"><label for="slotPluginSelect">已启用插件</label><select id="slotPluginSelect" onchange="updateSlotTools()"></select></div>
+            </div>
+            <div class="field"><label for="slotToolSelect">插件工具</label><select id="slotToolSelect"></select></div>
+            <div class="plugin-toolbar">
+              <button class="primary" onclick="bindPluginSlot()">绑定槽位</button>
+              <button class="danger" onclick="unbindPluginSlot()">解除槽位</button>
+            </div>
+            <div class="plugin-table-wrap">
+              <table class="plugin-table">
+                <thead><tr><th style="width:35px;">#</th><th>接口</th><th>绑定</th><th>状态</th></tr></thead>
+                <tbody id="slotTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>6. 部署与控制</h2>
+      <div class="buttons">
+        <button class="primary" onclick="deployAll()">保存并自动部署</button>
+        <button onclick="saveOnly()">只保存设置</button>
+        <button onclick="simpleAction('start', '')">启动服务</button>
+        <button onclick="simpleAction('restart', '确定重启 DevSpace 和当前公网隧道吗？')">重启服务</button>
+        <button onclick="simpleAction('stop', '确定停止 DevSpace 和当前公网隧道吗？')">停止服务</button>
+        <button onclick="simpleAction('disable', '这会停止服务并禁用登录自动启动。确定继续吗？')">停止并禁用</button>
+        <button onclick="simpleAction('enable', '')">恢复并启动</button>
+        <button onclick="simpleAction('status', '')">查看状态</button>
+        <button onclick="simpleAction('test', '')">验证 HTTP</button>
+        <button onclick="simpleAction('diagnose', '')">诊断公网隧道</button>
+        <button onclick="simpleAction('verify-files', '')">验证文件完整性</button>
+        <button onclick="openLogs()">打开日志</button>
+        <button onclick="shell.Run('taskschd.msc', 1, false)">任务计划程序</button>
+        <button class="danger" onclick="simpleAction('uninstall-tasks', '只删除 Portable 计划任务，保留配置、Owner Password 和 OAuth 数据。确定继续吗？')">卸载计划任务</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>操作结果</h2>
+      <pre id="output">正在加载……</pre>
+    </div>
+
+    <p class="footer">Portable 根目录：<span id="rootDisplay"></span><br>域名购买、Cloudflare DNS/Published application 配置和 ChatGPT 网页连接器创建仍需人工完成。安装器不会打印或记录隧道 Token、OAuth Token 或已有 Owner Password。<br><span id="versionDisplay" class="version-line">DevSpace Portable 1.1.8 · Protocol 1.5</span></p>
+  </div>
+</body>
+</html>

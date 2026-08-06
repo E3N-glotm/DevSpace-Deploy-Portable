@@ -1,0 +1,12 @@
+* @E3N-glotm
+
+# Security- and release-sensitive areas require repository-owner review.
+/.github/workflows/ @E3N-glotm
+/setup/ @E3N-glotm
+/scripts/hydrate-runtime-from-release.ps1 @E3N-glotm
+/scripts/pack-devspace-core.mjs @E3N-glotm
+/vendor/waishnav-devspace/dist/computer-use.js @E3N-glotm
+/vendor/waishnav-devspace/dist/oauth-provider.js @E3N-glotm
+/vendor/waishnav-devspace/dist/oauth-store.js @E3N-glotm
+/vendor/waishnav-devspace/dist/review-checkpoints.js @E3N-glotm
+

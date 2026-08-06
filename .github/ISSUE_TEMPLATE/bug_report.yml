@@ -1,0 +1,66 @@
+name: Bug report
+description: 报告可复现的 DevSpace Portable 缺陷
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先确认问题发生在未修改的正式 Release 中。不要粘贴 Owner Password、Tunnel Token、OAuth Token、私钥或完整 `data/` 内容。
+  - type: input
+    id: version
+    attributes:
+      label: Portable 版本
+      placeholder: 1.1.14
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 模块
+      options:
+        - 原生 UI
+        - 服务启停 / 计划任务
+        - ngrok / Cloudflare Tunnel
+        - OAuth / ChatGPT 连接
+        - Computer Use
+        - 会话审阅 / 回退
+        - Memories / Hooks
+        - 插件
+        - 构建 / Release / 更新
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 给出最小、确定、可重复的步骤。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 已脱敏诊断信息
+      description: 可附 Doctor 摘要、错误码和相关日志片段；请删除路径中的个人信息及所有凭据。
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 安全确认
+      options:
+        - label: 我确认没有提交 Token、密码、私钥、OAuth 数据库或完整用户数据。
+          required: true
+

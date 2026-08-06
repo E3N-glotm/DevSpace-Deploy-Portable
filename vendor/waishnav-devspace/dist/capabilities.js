@@ -1,0 +1,112 @@
+export const DEVSPACE_PROTOCOL_VERSION = "1.5";
+export const DEVSPACE_SERVER_VERSION = "1.1.14";
+
+const FEATURE_CATALOG = [
+    { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
+    { id: "windows-pty", maturity: "stable", since: "1.0.6" },
+    { id: "persistent-process-registry", maturity: "stable", since: "1.0.7" },
+    { id: "structured-doctor", maturity: "stable", since: "1.0.7" },
+    { id: "workspace-session-resume", maturity: "stable", since: "1.0.8" },
+    { id: "restart-pid-reconciliation", maturity: "experimental", since: "1.0.8" },
+    { id: "filesystem-watch", maturity: "stable", since: "1.0.9" },
+    { id: "event-cursors", maturity: "stable", since: "1.0.9" },
+    { id: "structured-audit-logs", maturity: "stable", since: "1.0.9" },
+    { id: "permission-rules", maturity: "stable", since: "1.0.9" },
+    { id: "plugin-manifests", maturity: "stable", since: "1.1.0" },
+    { id: "dynamic-plugin-tools", maturity: "experimental", since: "1.1.0" },
+    { id: "plugin-skill-roots", maturity: "stable", since: "1.1.0" },
+    { id: "schema-generation", maturity: "stable", since: "1.1.0" },
+    { id: "hot-plugin-dispatch", maturity: "stable", since: "1.1.1" },
+    { id: "legacy-session-plugin-cli", maturity: "stable", since: "1.1.1" },
+    { id: "codex-runtime-cards", maturity: "stable", since: "1.1.2" },
+    { id: "live-tool-input-display", maturity: "stable", since: "1.1.2" },
+    { id: "workspace-artifact-previews", maturity: "stable", since: "1.1.2" },
+    { id: "mcp-image-result-blocks", maturity: "stable", since: "1.1.2" },
+    { id: "review-operation-timeline", maturity: "stable", since: "1.1.2" },
+    { id: "local-plugin-manager-ui", maturity: "stable", since: "1.1.3" },
+    { id: "safe-plugin-package-install", maturity: "stable", since: "1.1.3" },
+    { id: "reserved-plugin-slots", maturity: "stable", since: "1.1.3" },
+    { id: "version-hash-pinned-slot-bindings", maturity: "stable", since: "1.1.3" },
+    { id: "workspace-app-collapsible-runtime-log", maturity: "stable", since: "1.1.4" },
+    { id: "hot-ui-assets-without-tool-refresh", maturity: "stable", since: "1.1.4" },
+    { id: "decoupled-render-tool", maturity: "stable", since: "1.1.5" },
+    { id: "chatgpt-tool-invocation-status", maturity: "stable", since: "1.1.5" },
+    { id: "compact-native-activity-guidance", maturity: "stable", since: "1.1.5" },
+    { id: "plugin-dependency-contracts", maturity: "stable", since: "1.1.6" },
+    { id: "codex-runtime-bridge", maturity: "stable", since: "1.1.6" },
+    { id: "workspace-checkpoints", maturity: "stable", since: "1.1.6" },
+    { id: "shell-environment-snapshots", maturity: "stable", since: "1.1.6" },
+    { id: "long-task-keep-awake", maturity: "stable", since: "1.1.6" },
+    { id: "codex-skill-root-bridge", maturity: "experimental", since: "1.1.6" },
+    { id: "computer-use", maturity: "experimental", since: "1.1.7" },
+    { id: "workspace-memories", maturity: "stable", since: "1.1.7" },
+    { id: "lifecycle-hooks", maturity: "stable", since: "1.1.7" },
+    { id: "ui-session-review", maturity: "stable", since: "1.1.7" },
+    { id: "ui-session-rollback", maturity: "stable", since: "1.1.7" },
+    { id: "computer-use-persistent-broker", maturity: "stable", since: "1.1.8" },
+    { id: "computer-use-wgc-capture", maturity: "experimental", since: "1.1.8" },
+    { id: "computer-use-low-latency-loop", maturity: "stable", since: "1.1.8" },
+    { id: "native-unified-control-center", maturity: "stable", since: "1.1.9" },
+    { id: "pre-rollback-safety-snapshots", maturity: "stable", since: "1.1.9" },
+    { id: "strict-portable-process-stop", maturity: "stable", since: "1.1.9" },
+    { id: "bounded-sparse-review-journal", maturity: "stable", since: "1.1.11" },
+    { id: "legacy-review-state-gc", maturity: "stable", since: "1.1.11" },
+    { id: "tracked-path-review-rollback", maturity: "stable", since: "1.1.11" },
+    { id: "idempotent-service-lifecycle", maturity: "stable", since: "1.1.11" },
+    { id: "native-ui-computer-use-worker", maturity: "stable", since: "1.1.11" },
+    { id: "computer-use-control-indicator", maturity: "stable", since: "1.1.12" },
+    { id: "computer-use-batched-actions", maturity: "stable", since: "1.1.12" },
+    { id: "computer-use-inprocess-sendinput", maturity: "stable", since: "1.1.12" },
+    { id: "computer-use-session-persistent-indicator", maturity: "stable", since: "1.1.13" },
+    { id: "computer-use-action-without-default-screenshot", maturity: "stable", since: "1.1.13" },
+    { id: "native-ui-nonblocking-action-state", maturity: "stable", since: "1.1.14" },
+    { id: "native-ui-session-review-subpages", maturity: "stable", since: "1.1.14" },
+    { id: "native-ui-explicit-memory-manager", maturity: "stable", since: "1.1.14" },
+];
+
+export function buildCapabilities(config, pluginManager) {
+    const dynamicPluginAliasesEnabled = process.env.DEVSPACE_DYNAMIC_PLUGIN_ALIASES !== "0";
+    return {
+        protocolVersion: DEVSPACE_PROTOCOL_VERSION,
+        serverVersion: DEVSPACE_SERVER_VERSION,
+        toolMode: config.toolMode,
+        permissionProfile: config.permissions.profile,
+        features: FEATURE_CATALOG.map((feature) => {
+            const featureFlags = {
+                "computer-use": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+                "workspace-memories": Boolean(config.features?.memories),
+                "lifecycle-hooks": Boolean(config.features?.hooks),
+                "ui-session-review": Boolean(config.features?.uiSessionReview),
+                "ui-session-rollback": Boolean(config.features?.uiSessionReview),
+                "computer-use-persistent-broker": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+                "computer-use-wgc-capture": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+                "computer-use-low-latency-loop": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+                "computer-use-control-indicator": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+                "computer-use-batched-actions": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+                "computer-use-inprocess-sendinput": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+                "computer-use-session-persistent-indicator": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+                "computer-use-action-without-default-screenshot": Boolean(config.features?.computerUse && config.permissions.allowComputerUse),
+            };
+            return {
+                ...feature,
+                enabled: feature.id === "dynamic-plugin-tools"
+                    ? dynamicPluginAliasesEnabled
+                    : Object.prototype.hasOwnProperty.call(featureFlags, feature.id)
+                        ? featureFlags[feature.id]
+                        : true,
+            };
+        }),
+        featureFlags: { ...config.features },
+        dynamicPluginAliasesEnabled,
+        plugins: pluginManager.list().map((plugin) => ({
+            id: plugin.id,
+            version: plugin.selectedVersion,
+            enabled: plugin.enabled,
+            maturity: plugin.maturity,
+            tools: plugin.tools,
+        })),
+        reservedPluginSlots: pluginManager.slots(),
+    };
+}
+
+export { FEATURE_CATALOG };

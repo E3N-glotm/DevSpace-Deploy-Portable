@@ -1,0 +1,32 @@
+name: Feature request
+description: 提议一个可验证的新功能或架构改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述当前工作流中的具体限制，不要只描述期望按钮。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 说明用户流程、接口、状态、失败模式和兼容性。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案
+      description: 已考虑但不采用的方案及原因。
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 给出可测试、可判定的完成条件。
+    validations:
+      required: true
+
