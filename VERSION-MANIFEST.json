@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.14",
-  "builtAt": "2026-08-06T18:27:27+08:00",
+  "builtAt": "2026-08-06T18:50:29+08:00",
   "platform": "win32-x64",
   "runtime": {
     "node": "24.18.1",
@@ -414,7 +414,7 @@
     "scripts/bootstrap-dev.ps1.sha256": "4261e39f71ed15fe72177a692de4547de1abc3312f4daf6e8a6ed58abe841636",
     "scripts/hydrate-runtime-from-release.ps1.sha256": "87bf3e20d30a82e1e4eab16d0f2d6bf3bee13dd1462e9d60e45173fdee950448",
     "scripts/pack-devspace-core.mjs.sha256": "e774c792c087dab083670dc7c44d854751ce41f9863aa581a133f7e285e25454",
-    "scripts/publish-github-release.ps1.sha256": "f8e18951f0e26cecaf69d2aa4336bbe4e68c05639136a542f5013a3f6aeedfcc",
+    "scripts/publish-github-release.ps1.sha256": "2a116da9e9028139265096abc70d49b903657cef50c325a990d5c296235f29dd",
     "scripts/start-devspace.sh.sha256": "d73d7110d4666a70633192490f649dac6dead8859b90071a6d79ea440d9c8320",
     "scripts/start-tunnel.cmd.sha256": "bbfb67ba23836bd0f8327bef68377bd8c901e995408e0b845cfa1d090eca8ee4",
     "scripts/start-tunnel.sh.sha256": "77b518ef29bc7986e05d9e8cdc6bcea18f8bcace376d3861378cba4bbc30f5d3",

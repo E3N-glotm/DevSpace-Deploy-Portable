@@ -46,6 +46,7 @@ docs/acceptance/            历史验收记录
 - Node.js `>=22.19 <27`；
 - Python 3.11+；
 - Git；
+- 维护 Release 时需要 GitHub CLI，可通过 `winget install --id GitHub.cli --exact --scope user` 安装；
 - 构建原生 UI 时需要 Visual Studio Build Tools 和 .NET Framework 4.8 引用程序集。
 
 首次克隆后执行：
@@ -97,7 +98,7 @@ docs/releases/HOTFIX-<版本>.md
 首次建立 1.1.14 基线 Release，或需要从维护机手工重新上传附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.14
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.14 -BypassProxy
 ```
 
 ## 自动更新规划
