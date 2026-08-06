@@ -39,6 +39,14 @@ The first source-only repository Release cannot hydrate its runtime from an
 older Release. Upload the already validated 1.1.14 ZIP manually. All later
 versions can use 1.1.14 as the runtime bootstrap source.
 
+The repository includes a streaming uploader that reads `GH_TOKEN`,
+`GITHUB_TOKEN`, or the current Git credential store without printing the
+credential:
+
+```powershell
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.14
+```
+
 ## Public-release gate
 
 Before changing repository or Releases from private to public:

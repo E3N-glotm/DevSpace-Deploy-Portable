@@ -92,6 +92,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "scripts/bootstrap-dev.ps1",
             "scripts/test-source.ps1",
             "scripts/hydrate-runtime-from-release.ps1",
+            "scripts/publish-github-release.ps1",
             "app/node_modules/@waishnav/devspace/dist/server.js",
             "app/node_modules/@waishnav/devspace/dist/process-sessions.js",
             "app/node_modules/@waishnav/devspace/dist/process-registry.js",

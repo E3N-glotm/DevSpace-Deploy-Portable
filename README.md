@@ -94,6 +94,12 @@ docs/releases/HOTFIX-<版本>.md
 
 创建并推送 `v<版本>` 标签后，Release workflow 会从上一稳定 Release 恢复运行时，重新安装依赖、执行测试、构建 ZIP、生成更新清单，并上传到 GitHub Release。详细流程见 [docs/RELEASING.md](docs/RELEASING.md)。
 
+首次建立 1.1.14 基线 Release，或需要从维护机手工重新上传附件时，可运行：
+
+```powershell
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.14
+```
+
 ## 自动更新规划
 
 1.1.15 起计划加入应用内更新检查与独立更新器。更新采用“下载到新版本目录、校验、切换指针、健康检查、失败回滚”，而不是覆盖正在运行的 EXE。设计见 [docs/UPDATE-DESIGN.md](docs/UPDATE-DESIGN.md)。

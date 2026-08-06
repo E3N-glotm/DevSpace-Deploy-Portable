@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.14",
-  "builtAt": "2026-08-06T18:19:01+08:00",
+  "builtAt": "2026-08-06T18:27:27+08:00",
   "platform": "win32-x64",
   "runtime": {
     "node": "24.18.1",
@@ -414,6 +414,7 @@
     "scripts/bootstrap-dev.ps1.sha256": "4261e39f71ed15fe72177a692de4547de1abc3312f4daf6e8a6ed58abe841636",
     "scripts/hydrate-runtime-from-release.ps1.sha256": "87bf3e20d30a82e1e4eab16d0f2d6bf3bee13dd1462e9d60e45173fdee950448",
     "scripts/pack-devspace-core.mjs.sha256": "e774c792c087dab083670dc7c44d854751ce41f9863aa581a133f7e285e25454",
+    "scripts/publish-github-release.ps1.sha256": "f8e18951f0e26cecaf69d2aa4336bbe4e68c05639136a542f5013a3f6aeedfcc",
     "scripts/start-devspace.sh.sha256": "d73d7110d4666a70633192490f649dac6dead8859b90071a6d79ea440d9c8320",
     "scripts/start-tunnel.cmd.sha256": "bbfb67ba23836bd0f8327bef68377bd8c901e995408e0b845cfa1d090eca8ee4",
     "scripts/start-tunnel.sh.sha256": "77b518ef29bc7986e05d9e8cdc6bcea18f8bcace376d3861378cba4bbc30f5d3",
@@ -430,7 +431,7 @@
     "setup/bundled-plugins/codex-runtime-bridge/1.1.1/skills/codex-runtime-bridge/SKILL.md.sha256": "9256b3d0783e5c58692be4b8db0d86c42ee7f57cf3b7ae446c3cd8718b0226dc",
     "setup/computer-use-broker.cjs.sha256": "6a886a4f9a0bbc49c17668392ed1ec0322bf76a4f22d1be547ef7f36d7f70d55",
     "setup/create-update-manifest.py.sha256": "8771010d13e6ef0da6522add667f2b72e14b8aa73190dd1d3dc3551fef01e4da",
-    "setup/finalize-release.py.sha256": "3c831c6a80c7c3cc286f659f6d3b8883e2dc877c88aca0bb4b44cbbfa446d9d0",
+    "setup/finalize-release.py.sha256": "10b3dd316abdaa283f5547f8abba1162020de602aab8ee1e09117563b92f406e",
     "setup/harden-nested-dependencies.mjs.sha256": "a76dacad57343055c8e2392b13710f3c43cb11e12bf0bd28075512bb2f0e203a",
     "setup/legacy/Portable-Setup-1.1.8.hta.sha256": "32bcbb26ab133e51afc03f63c3966534244937dceac7a73c146699ffe1b7d16f",
     "setup/logged-launcher.cjs.sha256": "f5831f29ab3b5294fdf0304de1f681e0a1cd57148ebaa79df8a15c3e6ac2db5a",
