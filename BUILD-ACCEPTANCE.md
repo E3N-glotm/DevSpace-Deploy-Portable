@@ -330,7 +330,7 @@
 
 ## 1.1.17 Release 内置 Codex Runtime Bridge
 
-- 完整 ZIP 必须包含 `DevSpacePortable/plugins/installed/codex-runtime-bridge/<版本>/`，不能只依赖首次启动后从 `setup/bundled-plugins` 写入 `data/plugins/installed`。
+- 完整 ZIP 必须包含 `DevSpacePortable/data/plugins/installed/codex-runtime-bridge/<版本>/`，并且不得生成 `DevSpacePortable/plugins/installed/...` 根目录镜像。
 - `setup/build-release.py` 在每次构建时清理并重建发布用 `plugins/installed/` 镜像，来源仍是受版本控制的 `setup/bundled-plugins/`，避免维护两套插件源码。
 - Portable 运行时在 Release 中存在 `plugins/installed/` 时优先把它作为 bundled seed source；用户安装态仍写入并保留在 `data/plugins/installed/`。
 - 构建器和源码回归都会验证 `codex-runtime-bridge` 的 manifest、runtime、keep-awake 与 Skill 实际进入发布 payload；Protocol 仍为 1.5。

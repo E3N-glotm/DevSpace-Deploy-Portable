@@ -1,16 +1,17 @@
 # DevSpace Portable 1.1.17
 
-1.1.17 修复完整发行包缺少显式 `plugins/installed/codex-runtime-bridge` 目录的问题。Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
+1.1.17 修复完整发行包中 `codex-runtime-bridge` 的预置路径：插件必须位于 PluginManager 实际使用的 `data/plugins/installed/codex-runtime-bridge`，而不是 Portable 根目录下的 `plugins/installed`。Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
 
 ## Release 内直接包含 Codex Runtime Bridge
 
 - 完整 ZIP 现在固定包含：
-  - `DevSpacePortable/plugins/installed/codex-runtime-bridge/<版本>/manifest.json`
-  - `DevSpacePortable/plugins/installed/codex-runtime-bridge/<版本>/runtime.mjs`
-  - `DevSpacePortable/plugins/installed/codex-runtime-bridge/<版本>/keep-awake.ps1`
-  - `DevSpacePortable/plugins/installed/codex-runtime-bridge/<版本>/skills/codex-runtime-bridge/SKILL.md`
+  - `DevSpacePortable/data/plugins/installed/codex-runtime-bridge/<版本>/manifest.json`
+  - `DevSpacePortable/data/plugins/installed/codex-runtime-bridge/<版本>/runtime.mjs`
+  - `DevSpacePortable/data/plugins/installed/codex-runtime-bridge/<版本>/keep-awake.ps1`
+  - `DevSpacePortable/data/plugins/installed/codex-runtime-bridge/<版本>/skills/codex-runtime-bridge/SKILL.md`
 - 维护源仍只有 `setup/bundled-plugins/` 一份；`setup/build-release.py` 在构建时自动生成 `plugins/installed/` 发布镜像，避免两套源码发生漂移。
-- 构建器在生成 SHA256SUMS 和 ZIP 之前强制检查 `plugins/installed/codex-runtime-bridge/<版本>/manifest.json` 是否进入 release file set，缺失则直接终止发布。
+- 构建器通过虚拟归档映射把 `setup/bundled-plugins` 中的受控插件文件写入 `data/plugins/installed/...`，不会读取或复制维护机本地 `data/` 中的 OAuth、SQLite、配置和其他运行状态；如果 `data/plugins/installed/codex-runtime-bridge/<版本>/manifest.json` 不能进入 ZIP，则直接终止发布。
+- 完整 ZIP 明确禁止生成错误的 `DevSpacePortable/plugins/installed/...` 根目录镜像。
 
 ## 插件持久化边界
 
