@@ -57,7 +57,19 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/hydrate-runtime-from-release.ps1 -Repository "${{ github.repository }}" -Force
+        run: |
+          $temporaryBase = Join-Path $env:RUNNER_TEMP "devspace-base-release.zip"
+          $baseMeta = Join-Path $env:RUNNER_TEMP "devspace-base-release.json"
+          ./scripts/hydrate-runtime-from-release.ps1 `
+            -Repository "${{ github.repository }}" `
+            -Force `
+            -ArchiveOutput $temporaryBase `
+            -MetadataOutput $baseMeta
+          $metadata = Get-Content -LiteralPath $baseMeta -Raw | ConvertFrom-Json
+          $namedBase = Join-Path $env:RUNNER_TEMP ("DevSpacePortable-Windows-x64-{0}.zip" -f $metadata.version)
+          Move-Item -LiteralPath $temporaryBase -Destination $namedBase -Force
+          "BASE_VERSION=$($metadata.version)" >> $env:GITHUB_ENV
+          "BASE_ZIP=$namedBase" >> $env:GITHUB_ENV
 
       - name: Verify tag and source version
         shell: pwsh
@@ -89,7 +101,10 @@ jobs:
         run: |
           python setup/finalize-release.py $env:VERSION --hotfix "docs/releases/HOTFIX-$env:VERSION.md"
           python setup/build-release.py
-          python setup/create-update-manifest.py --repository "${{ github.repository }}"
+          $targetZip = Join-Path $PWD "DevSpacePortable-Windows-x64-$env:VERSION.zip"
+          $deltaZip = Join-Path $PWD "DevSpacePortable-Update-$env:BASE_VERSION-to-$env:VERSION.zip"
+          python setup/create-incremental-update.py --base-zip "$env:BASE_ZIP" --target-zip "$targetZip" --output "$deltaZip"
+          python setup/create-update-manifest.py --repository "${{ github.repository }}" --incremental "$deltaZip"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -102,6 +117,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             DevSpacePortable-Windows-x64-${{ steps.version.outputs.version }}.zip
+            DevSpacePortable-Update-*-to-${{ steps.version.outputs.version }}.zip
             release-assets/update-manifest.json
             release-assets/SHA256SUMS-release.txt
 

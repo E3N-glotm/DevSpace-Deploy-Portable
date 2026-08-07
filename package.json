@@ -1,6 +1,6 @@
 {
   "name": "devspace-deploy-portable",
-  "version": "1.1.15",
+  "version": "1.1.16",
   "private": true,
   "description": "Source, build, test, and release tooling for DevSpace Deploy Portable on Windows x64.",
   "scripts": {

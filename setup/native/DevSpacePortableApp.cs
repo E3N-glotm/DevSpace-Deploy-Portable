@@ -38,6 +38,44 @@ namespace DevSpacePortable.NativeUI
         public static readonly Color ConsoleText = Color.FromArgb(221, 227, 239);
     }
 
+    internal static class UiTypography
+    {
+        public static readonly string UiFamily = ResolveFamily("Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI");
+        public static readonly string DisplayFamily = ResolveFamily("Segoe UI Variable Display", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI");
+        public static readonly string CodeFamily = ResolveFamily("Cascadia Code", "Cascadia Mono", "Consolas");
+
+        public static Font Ui(float size, FontStyle style = FontStyle.Regular)
+        {
+            return new Font(UiFamily, size, style, GraphicsUnit.Point);
+        }
+
+        public static Font Display(float size, FontStyle style = FontStyle.Regular)
+        {
+            return new Font(DisplayFamily, size, style, GraphicsUnit.Point);
+        }
+
+        public static Font Code(float size, FontStyle style = FontStyle.Regular)
+        {
+            return new Font(CodeFamily, size, style, GraphicsUnit.Point);
+        }
+
+        private static string ResolveFamily(params string[] candidates)
+        {
+            foreach (string candidate in candidates)
+            {
+                try
+                {
+                    using (Font probe = new Font(candidate, 9F, FontStyle.Regular, GraphicsUnit.Point))
+                    {
+                        if (string.Equals(probe.FontFamily.Name, candidate, StringComparison.OrdinalIgnoreCase)) return candidate;
+                    }
+                }
+                catch { }
+            }
+            return FontFamily.GenericSansSerif.Name;
+        }
+    }
+
     internal static class NativeWindowEffects
     {
         [DllImport("dwmapi.dll")]
@@ -144,7 +182,7 @@ namespace DevSpacePortable.NativeUI
             FlatAppearance.BorderSize = 0;
             UseVisualStyleBackColor = false;
             Cursor = Cursors.Hand;
-            Font = new Font("Segoe UI Variable Text", 9.25F, FontStyle.Regular);
+            Font = UiTypography.Ui(9.25F);
             MinimumSize = new Size(104, 42);
             Padding = new Padding(16, 0, 16, 0);
             Margin = new Padding(5, 4, 5, 4);
@@ -216,10 +254,10 @@ namespace DevSpacePortable.NativeUI
             using (SolidBrush iconFill = new SolidBrush(Selected ? Color.FromArgb(42, Color.White) : UiPalette.PrimarySoft))
                 e.Graphics.FillPath(iconFill, iconPath);
             DrawIcon(e.Graphics, iconBounds, Selected ? Color.White : UiPalette.Primary);
-            using (Font titleFont = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold))
+            using (Font titleFont = UiTypography.Ui(9.5F, FontStyle.Bold))
                 TextRenderer.DrawText(e.Graphics, Title ?? Text, titleFont, new Rectangle(60, 10, Math.Max(0, Width - 72), 24), Selected ? Color.White : UiPalette.Text,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            using (Font subtitleFont = new Font("Segoe UI Variable Text", 8.25F))
+            using (Font subtitleFont = UiTypography.Ui(8.25F))
                 TextRenderer.DrawText(e.Graphics, Subtitle ?? "", subtitleFont, new Rectangle(60, 32, Math.Max(0, Width - 72), 18), Selected ? Color.FromArgb(218, 228, 255) : UiPalette.TextMuted,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
@@ -280,7 +318,7 @@ namespace DevSpacePortable.NativeUI
             Height = 36;
             Width = 290;
             Cursor = Cursors.Hand;
-            Font = new Font("Microsoft YaHei UI", 9F);
+            Font = UiTypography.Ui(9F);
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
         }
@@ -323,7 +361,7 @@ namespace DevSpacePortable.NativeUI
             BackColor = Color.Transparent;
             ForeColor = UiPalette.Text;
             Padding = new Padding(18, 52, 18, 18);
-            Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold);
+            Font = UiTypography.Ui(9.5F, FontStyle.Bold);
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
         }
 
@@ -591,7 +629,7 @@ namespace DevSpacePortable.NativeUI
             using (GraphicsPath path = DrawingUtil.Rounded(bounds, 15))
             using (SolidBrush fill = new SolidBrush(UiPalette.Primary))
                 e.Graphics.FillPath(fill, path);
-            using (Font mark = new Font("Segoe UI Variable Display", 19F, FontStyle.Bold))
+            using (Font mark = UiTypography.Display(19F, FontStyle.Bold))
                 TextRenderer.DrawText(e.Graphics, "D", mark, bounds, Color.White,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
         }
@@ -610,7 +648,7 @@ namespace DevSpacePortable.NativeUI
             Height = 0;
             Visible = false;
             Cursor = Cursors.Default;
-            Font = new Font("Microsoft YaHei UI", 9F);
+            Font = UiTypography.Ui(9F);
             Margin = new Padding(0, 0, 0, 8);
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
@@ -733,13 +771,13 @@ namespace DevSpacePortable.NativeUI
             };
             _path.Dock = DockStyle.Top;
             _path.Height = 23;
-            _path.Font = new Font("Cascadia Mono", 9.5F, FontStyle.Bold);
+            _path.Font = UiTypography.Code(9.5F, FontStyle.Bold);
             _path.ForeColor = Color.FromArgb(223, 225, 229);
             _path.AutoEllipsis = true;
             _path.Text = "未选择文件";
             _meta.Dock = DockStyle.Bottom;
             _meta.Height = 18;
-            _meta.Font = new Font("Segoe UI Variable Text", 8.25F);
+            _meta.Font = UiTypography.Ui(8.25F);
             _meta.ForeColor = Color.FromArgb(135, 139, 147);
             _meta.AutoEllipsis = true;
             _meta.Text = "在上方文件列表中选择一项";
@@ -751,7 +789,7 @@ namespace DevSpacePortable.NativeUI
             _content.BorderStyle = BorderStyle.None;
             _content.BackColor = Color.FromArgb(30, 31, 34);
             _content.ForeColor = Color.FromArgb(188, 190, 196);
-            _content.Font = new Font("Cascadia Mono", 9F);
+            _content.Font = UiTypography.Code(9F);
             _content.DetectUrls = false;
             _content.WordWrap = false;
             _content.ScrollBars = RichTextBoxScrollBars.Both;
@@ -768,7 +806,7 @@ namespace DevSpacePortable.NativeUI
             _meta.Text = "仅显示当前选择 · Unified diff";
             _content.Clear();
             _content.SelectionColor = Color.FromArgb(135, 139, 147);
-            using (Font placeholder = new Font("Segoe UI Variable Text", 10F))
+            using (Font placeholder = UiTypography.Ui(10F))
             {
                 _content.SelectionFont = placeholder;
                 _content.AppendText(Environment.NewLine + Environment.NewLine + "  " + (message ?? "没有可显示的差异。"));
@@ -791,9 +829,11 @@ namespace DevSpacePortable.NativeUI
             _meta.Text = "仅显示当前选择  ·  Unified diff  ·  " + lines.Length + " 行";
             _content.SuspendLayout();
             _content.Clear();
-            using (Font regular = new Font("Cascadia Mono", 9F, FontStyle.Regular))
-            using (Font bold = new Font("Cascadia Mono", 9F, FontStyle.Bold))
+            using (Font regular = UiTypography.Code(9F))
+            using (Font bold = UiTypography.Code(9F, FontStyle.Bold))
             {
+                int oldLine = 0;
+                int newLine = 0;
                 for (int index = 0; index < lines.Length; index++)
                 {
                     string line = lines[index];
@@ -805,10 +845,34 @@ namespace DevSpacePortable.NativeUI
                     bool addition = line.StartsWith("+", StringComparison.Ordinal) && !line.StartsWith("+++", StringComparison.Ordinal);
                     bool deletion = line.StartsWith("-", StringComparison.Ordinal) && !line.StartsWith("---", StringComparison.Ordinal);
 
+                    if (hunk) TryParseHunkStart(line, out oldLine, out newLine);
+                    string oldGutter = "";
+                    string newGutter = "";
+                    if (!header && !hunk && !line.StartsWith("\\ No newline", StringComparison.Ordinal))
+                    {
+                        if (addition)
+                        {
+                            newGutter = newLine > 0 ? newLine.ToString() : "";
+                            if (newLine > 0) newLine++;
+                        }
+                        else if (deletion)
+                        {
+                            oldGutter = oldLine > 0 ? oldLine.ToString() : "";
+                            if (oldLine > 0) oldLine++;
+                        }
+                        else
+                        {
+                            oldGutter = oldLine > 0 ? oldLine.ToString() : "";
+                            newGutter = newLine > 0 ? newLine.ToString() : "";
+                            if (oldLine > 0) oldLine++;
+                            if (newLine > 0) newLine++;
+                        }
+                    }
+
                     _content.SelectionColor = Color.FromArgb(91, 95, 103);
-                    _content.SelectionBackColor = Color.FromArgb(30, 31, 34);
+                    _content.SelectionBackColor = Color.FromArgb(27, 28, 31);
                     _content.SelectionFont = regular;
-                    _content.AppendText((index + 1).ToString().PadLeft(5) + "  ");
+                    _content.AppendText(oldGutter.PadLeft(5) + " " + newGutter.PadLeft(5) + "  │  ");
 
                     _content.SelectionFont = header || hunk ? bold : regular;
                     _content.SelectionColor = header
@@ -836,6 +900,27 @@ namespace DevSpacePortable.NativeUI
             _content.SelectionLength = 0;
             _content.ResumeLayout();
         }
+
+        private static bool TryParseHunkStart(string line, out int oldLine, out int newLine)
+        {
+            oldLine = 0;
+            newLine = 0;
+            if (string.IsNullOrWhiteSpace(line)) return false;
+            int minus = line.IndexOf('-', 0);
+            int plus = line.IndexOf('+', Math.Max(0, minus + 1));
+            if (minus < 0 || plus < 0) return false;
+            oldLine = ParseLeadingNumber(line, minus + 1);
+            newLine = ParseLeadingNumber(line, plus + 1);
+            return oldLine >= 0 && newLine >= 0;
+        }
+
+        private static int ParseLeadingNumber(string value, int start)
+        {
+            int end = start;
+            while (end < value.Length && char.IsDigit(value[end])) end++;
+            int parsed;
+            return end > start && int.TryParse(value.Substring(start, end - start), out parsed) ? parsed : 0;
+        }
     }
 
     internal static class Program
@@ -849,6 +934,15 @@ namespace DevSpacePortable.NativeUI
             bool selfTest = args.Length > 0 && string.Equals(args[0], "--self-test", StringComparison.OrdinalIgnoreCase);
             bool structureTest = args.Length > 0 && string.Equals(args[0], "--structure-test", StringComparison.OrdinalIgnoreCase);
             bool tailFileTest = args.Length > 0 && string.Equals(args[0], "--tail-file-test", StringComparison.OrdinalIgnoreCase);
+            bool diffExtractTest = args.Length > 0 && string.Equals(args[0], "--diff-extract-test", StringComparison.OrdinalIgnoreCase);
+            if (diffExtractTest)
+            {
+                if (args.Length < 4) throw new ArgumentException("--diff-extract-test requires a patch file, selected path, and output file.");
+                string patch = File.ReadAllText(Path.GetFullPath(args[1]), Encoding.UTF8);
+                string selected = MainForm.ExtractPatchForFile(patch, args[2]);
+                File.WriteAllText(Path.GetFullPath(args[3]), selected, new UTF8Encoding(false));
+                return;
+            }
             if (tailFileTest)
             {
                 if (args.Length < 3) throw new ArgumentException("--tail-file-test requires an input log and output file.");
@@ -1434,7 +1528,7 @@ namespace DevSpacePortable.NativeUI
             MinimumSize = new Size(1180, 780);
             Size = new Size(1460, 940);
             AutoScaleMode = AutoScaleMode.Dpi;
-            Font = new Font("Segoe UI Variable Text", 9.25F);
+            Font = UiTypography.Ui(9.25F);
             BackColor = UiPalette.Background;
             ForeColor = UiPalette.Text;
             DoubleBuffered = true;
@@ -1521,7 +1615,7 @@ namespace DevSpacePortable.NativeUI
 
         private void InitializeTrayIcon()
         {
-            _trayMenu.Font = new Font("Microsoft YaHei UI", 9F);
+            _trayMenu.Font = UiTypography.Ui(9F);
             _trayMenu.Items.Add("打开控制中心", null, delegate { RestoreFromTray(); });
             _trayMenu.Items.Add("下次关闭时询问", null, delegate
             {
@@ -1605,13 +1699,13 @@ namespace DevSpacePortable.NativeUI
             Label brand = new Label
             {
                 Text = "DevSpace Portable",
-                Font = new Font("Segoe UI Variable Display", 18.5F, FontStyle.Bold),
+                Font = UiTypography.Display(18.5F, FontStyle.Bold),
                 ForeColor = UiPalette.Text,
                 AutoSize = true,
                 Location = new Point(82, 15),
             };
             _pageTitle.Text = "状态与部署";
-            _pageTitle.Font = new Font("Microsoft YaHei UI", 9.5F);
+            _pageTitle.Font = UiTypography.Ui(9.5F);
             _pageTitle.ForeColor = UiPalette.TextMuted;
             _pageTitle.AutoSize = true;
             _pageTitle.Location = new Point(84, 49);
@@ -1679,7 +1773,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.15 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.16 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -1768,7 +1862,7 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 ForeColor = UiPalette.TextMuted,
-                Font = new Font("Microsoft YaHei UI", 9.5F),
+                Font = UiTypography.Ui(9.5F),
                 TextAlign = ContentAlignment.MiddleLeft,
                 Padding = new Padding(10, 4, 10, 4),
                 Text = "停止全部会结束当前 Portable 的服务、隧道和桌面 Broker，并在确认无残留后台进程后退出。",
@@ -1996,7 +2090,7 @@ namespace DevSpacePortable.NativeUI
             Label listTitle = new Label
             {
                 Text = "会话历史",
-                Font = new Font("Microsoft YaHei UI", 16F, FontStyle.Bold),
+                Font = UiTypography.Display(16F, FontStyle.Bold),
                 ForeColor = UiPalette.Text,
                 AutoSize = true,
                 Location = new Point(10, 8),
@@ -2004,7 +2098,7 @@ namespace DevSpacePortable.NativeUI
             Label listHint = new Label
             {
                 Text = "选择一轮会话进入独立审阅页，查看改动文件、逐文件差异并执行回退。",
-                Font = new Font("Microsoft YaHei UI", 9.25F),
+                Font = UiTypography.Ui(9.25F),
                 ForeColor = UiPalette.TextMuted,
                 AutoSize = true,
                 Location = new Point(12, 44),
@@ -2086,7 +2180,7 @@ namespace DevSpacePortable.NativeUI
             _sessionDetailTitle = new Label
             {
                 Text = "本轮修改",
-                Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold),
+                Font = UiTypography.Display(15F, FontStyle.Bold),
                 ForeColor = UiPalette.Text,
                 AutoSize = true,
                 Location = new Point(6, 8),
@@ -2094,7 +2188,7 @@ namespace DevSpacePortable.NativeUI
             _sessionDetailMeta = new Label
             {
                 Text = "正在读取会话详情……",
-                Font = new Font("Microsoft YaHei UI", 9.25F),
+                Font = UiTypography.Ui(9.25F),
                 ForeColor = UiPalette.TextMuted,
                 AutoSize = true,
                 Location = new Point(8, 45),
@@ -2161,7 +2255,7 @@ namespace DevSpacePortable.NativeUI
             intro.Controls.Add(new Label
             {
                 Text = "显式 Memories",
-                Font = new Font("Microsoft YaHei UI", 16F, FontStyle.Bold),
+                Font = UiTypography.Display(16F, FontStyle.Bold),
                 ForeColor = UiPalette.Text,
                 AutoSize = true,
                 Location = new Point(8, 8),
@@ -2169,7 +2263,7 @@ namespace DevSpacePortable.NativeUI
             intro.Controls.Add(new Label
             {
                 Text = "这些记录由用户明确维护，不会从命令输出或浏览历史中自动推断。",
-                Font = new Font("Microsoft YaHei UI", 9.25F),
+                Font = UiTypography.Ui(9.25F),
                 ForeColor = UiPalette.TextMuted,
                 AutoSize = true,
                 Location = new Point(10, 44),
@@ -2206,7 +2300,7 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 Text = "新建或选择一条 Memory。",
-                Font = new Font("Microsoft YaHei UI", 10F),
+                Font = UiTypography.Ui(10F),
                 ForeColor = UiPalette.TextMuted,
                 Padding = new Padding(12, 16, 12, 8),
                 AutoEllipsis = true,
@@ -2379,7 +2473,7 @@ namespace DevSpacePortable.NativeUI
             _allDrives.Checked = GetString(_currentConfig, "permissionMode") == "all-drive-roots";
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.15") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.16") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2496,7 +2590,7 @@ namespace DevSpacePortable.NativeUI
             {
                 SetOutput("正在通过 GitHub Releases 检查稳定版更新……");
                 Dictionary<string, object> status = await _manager.RunJsonAsync("update-check");
-                string current = GetString(status, "currentVersion", "1.1.15");
+                string current = GetString(status, "currentVersion", "1.1.16");
                 string latest = GetString(status, "latestVersion", current);
                 if (!GetBool(status, "updateAvailable"))
                 {
@@ -2510,18 +2604,24 @@ namespace DevSpacePortable.NativeUI
                     MessageBox.Show(this, "检测到当前目录包含 .git。为避免覆盖源码和未提交改动，在线更新仅允许在正式 Release 解压目录中执行。\r\n\r\n最新版本：" + latest, "源码工作区不执行热更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
-                long size = GetLong(status, "assetSize");
+                string preferredMode = GetString(status, "preferredMode", "full");
+                bool incrementalPreferred = string.Equals(preferredMode, "incremental", StringComparison.OrdinalIgnoreCase);
+                long fullSize = GetLong(status, "fullAssetSize", GetLong(status, "assetSize"));
+                long downloadSize = incrementalPreferred ? GetLong(status, "incrementalAssetSize") : fullSize;
+                string packageName = incrementalPreferred ? GetString(status, "incrementalAssetName") : GetString(status, "assetName");
                 string prompt = "发现 DevSpace Portable " + latest + "。\r\n\r\n"
-                    + "安装包：" + GetString(status, "assetName") + "\r\n"
-                    + "大小：" + FormatBytes(size) + "\r\n\r\n"
-                    + "将从公开 GitHub Release 下载并校验 SHA-256；下载完成后会关闭控制中心、停止当前 Portable 服务、替换程序文件、重新启动服务和 UI。data、logs 与 reports 会保留。现在继续吗？";
+                    + "首选更新：" + (incrementalPreferred ? "增量包" : "完整包") + "\r\n"
+                    + "安装包：" + packageName + "\r\n"
+                    + "预计下载：" + FormatBytes(downloadSize) + "\r\n"
+                    + (incrementalPreferred ? "完整包兜底：" + FormatBytes(fullSize) + "\r\n" : "") + "\r\n"
+                    + "更新器会优先使用与当前版本精确匹配的增量包，并校验基础文件、文件大小与 SHA-256；增量包缺失、损坏或检测到基础文件漂移时会自动切换到完整包。data、logs 与 reports 始终保留。现在继续吗？";
                 if (MessageBox.Show(this, prompt, "发现新版本 " + latest, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 {
                     SetOutput("已取消更新。当前版本仍为 " + current + "。");
                     return;
                 }
 
-                SetOutput("正在下载 DevSpace Portable " + latest + "，并验证文件大小、SHA-256 与压缩包路径安全……");
+                SetOutput("正在准备 DevSpace Portable " + latest + "。更新器将优先尝试增量包，并在不可用时自动使用完整包……");
                 Dictionary<string, object> staged = await _manager.RunJsonAsync("update-stage");
                 if (!GetBool(staged, "staged"))
                 {
@@ -2529,7 +2629,12 @@ namespace DevSpacePortable.NativeUI
                     return;
                 }
                 string stagingPath = GetString(staged, "stagingPath");
-                SetOutput("更新包已完成校验并暂存。\r\n目标版本：" + latest + "\r\n暂存目录：" + stagingPath);
+                string stagedMode = GetString(staged, "updateMode", "full");
+                string fallbackReason = GetString(staged, "fallbackReason");
+                SetOutput("更新包已完成校验并暂存。\r\n目标版本：" + latest
+                    + "\r\n更新方式：" + (stagedMode == "incremental" ? "增量更新" : "完整包更新")
+                    + (string.IsNullOrWhiteSpace(fallbackReason) ? "" : "\r\n切换完整包原因：" + fallbackReason)
+                    + "\r\n暂存目录：" + stagingPath);
                 if (MessageBox.Show(this, "更新包已完成下载与校验。现在关闭控制中心并执行受控更新吗？\r\n\r\n如果替换失败，更新器会恢复原版本并重新启动。", "准备安装 " + latest, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                 {
                     SetOutput("更新包已暂存，但尚未安装。再次点击“检查更新”可以重新开始更新流程。 ");
@@ -2803,23 +2908,60 @@ namespace DevSpacePortable.NativeUI
             RenderDiff(ExtractPatchForFile(_fullSessionPatch, path), path);
         }
 
-        private static string ExtractPatchForFile(string patch, string filePath)
+        internal static string ExtractPatchForFile(string patch, string filePath)
         {
-            string text = patch ?? "";
-            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(filePath)) return text;
-            string normalized = filePath.Replace('\\', '/');
-            string marker = "diff --git a/" + normalized + " b/" + normalized;
-            int start = text.IndexOf(marker, StringComparison.Ordinal);
-            if (start < 0)
+            string text = (patch ?? "").Replace("\r\n", "\n").Replace("\r", "\n");
+            if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(filePath)) return "";
+            string normalized = filePath.Replace('\\', '/').TrimStart('/');
+            string[] lines = text.Split('\n');
+            string oldMarker = "--- a/" + normalized;
+            string newMarker = "+++ b/" + normalized;
+
+            for (int index = 0; index < lines.Length; index++)
             {
-                string plusMarker = "+++ b/" + normalized;
-                int plus = text.IndexOf(plusMarker, StringComparison.Ordinal);
-                if (plus < 0) return "";
-                start = text.LastIndexOf("diff --git ", plus, StringComparison.Ordinal);
-                if (start < 0) start = 0;
+                if (!PatchPathLineMatches(lines[index], oldMarker)) continue;
+                if (index + 1 >= lines.Length || !PatchPathLineMatches(lines[index + 1], newMarker)) continue;
+
+                int start = index;
+                if (start > 0 && IsPatchDivider(lines[start - 1])) start--;
+                if (start > 0 && lines[start - 1].StartsWith("diff --git ", StringComparison.Ordinal)) start--;
+
+                int end = lines.Length;
+                for (int cursor = index + 2; cursor < lines.Length; cursor++)
+                {
+                    if (IsPatchDivider(lines[cursor]))
+                    {
+                        end = cursor;
+                        break;
+                    }
+                    if (lines[cursor].StartsWith("diff --git ", StringComparison.Ordinal))
+                    {
+                        end = cursor;
+                        break;
+                    }
+                }
+                return string.Join("\n", lines.Skip(start).Take(end - start)).TrimEnd('\n');
             }
-            int end = text.IndexOf("\ndiff --git ", start + 1, StringComparison.Ordinal);
-            return end < 0 ? text.Substring(start) : text.Substring(start, end - start);
+
+            string binaryMarker = "[Binary, large, or unsupported path changed: " + normalized + "]";
+            foreach (string line in lines)
+            {
+                if (string.Equals(line.Trim(), binaryMarker, StringComparison.Ordinal)) return line.Trim();
+            }
+            return "";
+        }
+
+        private static bool PatchPathLineMatches(string line, string marker)
+        {
+            if (string.Equals(line, marker, StringComparison.Ordinal)) return true;
+            return line.StartsWith(marker + "\t", StringComparison.Ordinal) || line.StartsWith(marker + " ", StringComparison.Ordinal);
+        }
+
+        private static bool IsPatchDivider(string line)
+        {
+            if (string.IsNullOrEmpty(line) || line.Length < 12) return false;
+            for (int index = 0; index < line.Length; index++) if (line[index] != '=') return false;
+            return true;
         }
 
         private void RenderDiff(string patch, string title)
@@ -3496,8 +3638,8 @@ namespace DevSpacePortable.NativeUI
             return button;
         }
         private Button ActionButton(string text, Action action, bool primary = false, bool danger = false) { ModernButton button = new ModernButton { Text = text, AutoSize = true, Primary = primary, Danger = danger }; button.Click += delegate { try { action(); } catch (Exception ex) { ShowError(ex); } }; return button; }
-        private static RichTextBox CreateConsoleBox() { return new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = UiPalette.Console, ForeColor = UiPalette.ConsoleText, Font = new Font("Cascadia Mono", 9.25F), BorderStyle = BorderStyle.None, DetectUrls = false, Margin = new Padding(0) }; }
-        private static RichTextBox CreateLogBox() { return new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = UiPalette.Surface, ForeColor = Color.FromArgb(55, 65, 82), Font = new Font("Cascadia Mono", 9.25F), BorderStyle = BorderStyle.None, DetectUrls = false, Margin = new Padding(4), Padding = new Padding(6) }; }
+        private static RichTextBox CreateConsoleBox() { return new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = UiPalette.Console, ForeColor = UiPalette.ConsoleText, Font = UiTypography.Code(9.25F), BorderStyle = BorderStyle.None, DetectUrls = false, Margin = new Padding(0) }; }
+        private static RichTextBox CreateLogBox() { return new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = UiPalette.Surface, ForeColor = Color.FromArgb(55, 65, 82), Font = UiTypography.Code(9.25F), BorderStyle = BorderStyle.None, DetectUrls = false, Margin = new Padding(4), Padding = new Padding(6) }; }
         private static Control WrapSurface(Control child, bool dark = false)
         {
             SurfacePanel surface = new SurfacePanel { Dock = DockStyle.Fill, Dark = dark, Padding = new Padding(dark ? 14 : 8), Margin = new Padding(4) };
@@ -3527,7 +3669,7 @@ namespace DevSpacePortable.NativeUI
             };
             grid.ColumnHeadersDefaultCellStyle.BackColor = UiPalette.SurfaceMuted;
             grid.ColumnHeadersDefaultCellStyle.ForeColor = UiPalette.TextMuted;
-            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
+            grid.ColumnHeadersDefaultCellStyle.Font = UiTypography.Ui(9F, FontStyle.Bold);
             grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = UiPalette.SurfaceMuted;
             grid.DefaultCellStyle.BackColor = UiPalette.Surface;
             grid.DefaultCellStyle.ForeColor = UiPalette.Text;
@@ -3546,7 +3688,7 @@ namespace DevSpacePortable.NativeUI
             int row = table.RowCount++;
             table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             table.Controls.Add(FormLabel(label), 0, row);
-            control.Font = new Font("Microsoft YaHei UI", 9F);
+            control.Font = UiTypography.Ui(9F);
             StyleField(control);
             Control visual = control is TextBox || control is ComboBox || control is NumericUpDown ? WrapField(control) : control;
             visual.Dock = DockStyle.Fill;
@@ -3651,7 +3793,7 @@ namespace DevSpacePortable.NativeUI
             ClientSize = new Size(560, 290);
             BackColor = UiPalette.Background;
             ForeColor = UiPalette.Text;
-            Font = new Font("Microsoft YaHei UI", 9F);
+            Font = UiTypography.Ui(9F);
 
             TableLayoutPanel layout = new TableLayoutPanel
             {
@@ -3671,7 +3813,7 @@ namespace DevSpacePortable.NativeUI
             {
                 Text = "关闭控制中心后要做什么？",
                 Dock = DockStyle.Fill,
-                Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold),
+                Font = UiTypography.Display(15F, FontStyle.Bold),
                 ForeColor = UiPalette.Text,
                 TextAlign = ContentAlignment.MiddleLeft,
             };

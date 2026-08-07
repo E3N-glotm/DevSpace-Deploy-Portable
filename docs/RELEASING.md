@@ -13,7 +13,8 @@ npm run core:pack
 python setup/finalize-release.py <version> --hotfix docs/releases/HOTFIX-<version>.md
 PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/test-source.ps1
 python setup/build-release.py
-python setup/create-update-manifest.py --repository E3N-glotm/DevSpace-Deploy-Portable
+python setup/create-incremental-update.py --base-zip <previous-full.zip> --target-zip DevSpacePortable-Windows-x64-<version>.zip
+python setup/create-update-manifest.py --repository E3N-glotm/DevSpace-Deploy-Portable --incremental DevSpacePortable-Update-<previous>-to-<version>.zip
 ```
 
 ## Tag release
@@ -30,6 +31,7 @@ from the latest existing stable Release, performs a clean dependency install,
 runs tests, rebuilds the Portable ZIP, and uploads:
 
 - `DevSpacePortable-Windows-x64-<version>.zip`
+- `DevSpacePortable-Update-<previous>-to-<version>.zip`
 - `release-assets/update-manifest.json`
 - `release-assets/SHA256SUMS-release.txt`
 
@@ -45,7 +47,7 @@ writing the credential to a temporary file. Install GitHub CLI first with
 `winget install --id GitHub.cli --exact --scope user`:
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.15 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.16 -BypassProxy
 ```
 
 `-BypassProxy` is optional. Use it when a local HTTP proxy makes large Release

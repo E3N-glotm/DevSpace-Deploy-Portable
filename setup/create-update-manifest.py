@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +24,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository", default="E3N-glotm/DevSpace-Deploy-Portable")
     parser.add_argument("--zip")
+    parser.add_argument("--incremental", action="append", default=[])
     parser.add_argument("--channel", default="stable", choices=("stable", "beta", "nightly"))
     args = parser.parse_args()
 
@@ -38,8 +40,31 @@ def main() -> int:
 
     digest = sha256_file(archive)
     asset_name = archive.name
+    incremental_assets = []
+    delta_pattern = re.compile(r"^DevSpacePortable-Update-(\d+\.\d+\.\d+)-to-(\d+\.\d+\.\d+)\.zip$")
+    for raw in args.incremental:
+        delta = Path(raw).resolve()
+        if not delta.is_file():
+            raise SystemExit(f"Incremental update ZIP not found: {delta}")
+        match = delta_pattern.fullmatch(delta.name)
+        if not match:
+            raise SystemExit(f"Invalid incremental update asset name: {delta.name}")
+        from_version, to_version = match.groups()
+        if to_version != version:
+            raise SystemExit(f"Incremental update target {to_version} does not match release {version}")
+        incremental_assets.append(
+            {
+                "format": "file-delta-v1",
+                "fromVersion": from_version,
+                "toVersion": to_version,
+                "name": delta.name,
+                "size": delta.stat().st_size,
+                "sha256": sha256_file(delta),
+                "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{delta.name}",
+            }
+        )
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "channel": args.channel,
         "version": version,
         "tag": f"v{version}",
@@ -51,12 +76,14 @@ def main() -> int:
         "mandatory": False,
         "restartRequired": True,
         "requiresToolSchemaRefresh": False,
+        "updateStrategy": "incremental-first-full-fallback",
         "asset": {
             "name": asset_name,
             "size": archive.stat().st_size,
             "sha256": digest,
             "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{asset_name}",
         },
+        "incrementalAssets": incremental_assets,
         "releaseNotes": f"docs/releases/HOTFIX-{version}.md",
     }
 
@@ -66,8 +93,10 @@ def main() -> int:
         encoding="utf-8",
         newline="\n",
     )
+    checksum_lines = [f"{digest}  {asset_name}\n"]
+    checksum_lines.extend(f"{item['sha256']}  {item['name']}\n" for item in incremental_assets)
     (OUTPUT_DIRECTORY / "SHA256SUMS-release.txt").write_text(
-        f"{digest}  {asset_name}\n",
+        "".join(checksum_lines),
         encoding="utf-8",
         newline="\n",
     )
