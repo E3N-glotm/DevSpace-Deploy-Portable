@@ -50,12 +50,15 @@ const PLUGIN_ADMIN_FILE = path.join(ROOT, "app", "plugin-admin.mjs");
 const REVIEW_MANAGER_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "review-checkpoints.js");
 const DATABASE_CLIENT_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "db", "client.js");
 const MEMORY_STORE_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "memory-store.js");
+const PORTABLE_UPDATER_FILE = path.join(ROOT, "setup", "portable-updater.ps1");
+const UPDATE_STAGING_ROOT = path.join(ROOT, ".update-staging");
+const UPDATE_REPOSITORY = "E3N-glotm/DevSpace-Deploy-Portable";
 const BUNDLED_PLUGIN_ROOT = path.join(ROOT, "setup", "bundled-plugins");
 const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.14";
+const PORTABLE_VERSION = "1.1.15";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -1091,10 +1094,16 @@ let cachedWindowsTextEncoding = null;
 
 function windowsTextEncoding() {
   if (cachedWindowsTextEncoding) return cachedWindowsTextEncoding;
+  const configured = String(process.env.DEVSPACE_WINDOWS_TEXT_ENCODING || "").trim().toLowerCase();
+  if (configured) {
+    cachedWindowsTextEncoding = configured;
+    return cachedWindowsTextEncoding;
+  }
   const result = childProcess.spawnSync("cmd.exe", ["/d", "/c", "chcp"], {
     cwd: ROOT,
     encoding: null,
     windowsHide: true,
+    timeout: 3000,
   });
   const digits = Buffer.concat([result.stdout || Buffer.alloc(0), result.stderr || Buffer.alloc(0)])
     .toString("latin1")
@@ -1141,6 +1150,76 @@ function runProgram(file, args, options = {}) {
     throw new Error(`${path.basename(file)} ${args.join(" ")} failed (${result.status}): ${output}`);
   }
   return { status: result.status, output };
+}
+
+function runPortableUpdater(action, extraArguments = []) {
+  if (!fs.existsSync(PORTABLE_UPDATER_FILE)) {
+    throw new Error(`Portable updater is missing: ${PORTABLE_UPDATER_FILE}`);
+  }
+  const result = runProgram(POWERSHELL_EXE, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy", "Bypass",
+    "-File", PORTABLE_UPDATER_FILE,
+    "-Action", action,
+    "-Root", ROOT,
+    "-Repository", UPDATE_REPOSITORY,
+    "-CurrentVersion", PORTABLE_VERSION,
+    ...extraArguments,
+  ], {
+    outputEncoding: "utf-8",
+    timeout: action === "Stage" ? 3_900_000 : 120_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const lines = String(result.output || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const jsonLine = [...lines].reverse().find((line) => line.startsWith("{") && line.endsWith("}"));
+  if (!jsonLine) throw new Error(`Portable updater returned invalid output: ${result.output}`);
+  try {
+    return JSON.parse(jsonLine);
+  } catch {
+    throw new Error(`Portable updater returned invalid JSON: ${jsonLine}`);
+  }
+}
+
+function launchPortableUpdate(input = {}) {
+  const stagingPath = path.resolve(String(input.stagingPath || ""));
+  const allowedPrefix = `${path.resolve(UPDATE_STAGING_ROOT)}${path.sep}`;
+  if (!stagingPath.startsWith(allowedPrefix)) {
+    throw new Error("stagingPath is outside the Portable update staging directory.");
+  }
+  const stagedUpdater = path.join(stagingPath, "portable-updater.ps1");
+  const stageInfo = path.join(stagingPath, "stage-info.json");
+  if (!fs.existsSync(stagedUpdater) || !fs.existsSync(stageInfo)) {
+    throw new Error("The staged updater or stage metadata is missing.");
+  }
+  const uiPid = Number(input.uiPid || 0);
+  if (!Number.isInteger(uiPid) || uiPid <= 0) throw new Error("uiPid must be a positive integer.");
+  const child = childProcess.spawn(POWERSHELL_EXE, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy", "Bypass",
+    "-File", stagedUpdater,
+    "-Action", "Apply",
+    "-Root", ROOT,
+    "-Repository", UPDATE_REPOSITORY,
+    "-CurrentVersion", PORTABLE_VERSION,
+    "-StagingPath", stagingPath,
+    "-UiPid", String(uiPid),
+  ], {
+    cwd: ROOT,
+    detached: true,
+    windowsHide: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  return {
+    launched: true,
+    updaterPid: child.pid,
+    stagingPath,
+    uiPid,
+  };
 }
 
 function runPluginAdmin(command, payload = {}) {
@@ -2064,6 +2143,12 @@ async function main() {
       writeOutput(`${await diagnoseText()}\n`);
     } else if (command === "verify-files") {
       writeOutput(`${await verifyFiles()}\n`);
+    } else if (command === "update-check") {
+      stdoutJson(runPortableUpdater("Check"));
+    } else if (command === "update-stage") {
+      stdoutJson(runPortableUpdater("Stage"));
+    } else if (command === "update-launch") {
+      stdoutJson(launchPortableUpdate(await readStdinJson()));
     } else if (command === "install-cloudflared") {
       const installed = await ensureCloudflaredRuntime();
       writeOutput(`${installed ? "Installed" : "Verified"} cloudflared ${CLOUDFLARED_VERSION}.\n`);
@@ -2113,7 +2198,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop restart enable disable uninstall-tasks status test diagnose verify-files install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop restart enable disable uninstall-tasks status test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);

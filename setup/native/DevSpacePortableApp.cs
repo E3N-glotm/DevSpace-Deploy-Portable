@@ -711,6 +711,133 @@ namespace DevSpacePortable.NativeUI
         }
     }
 
+    internal sealed class ModernDiffViewer : UserControl
+    {
+        private readonly Label _path = new Label();
+        private readonly Label _meta = new Label();
+        private readonly RichTextBox _content = new RichTextBox();
+
+        public ModernDiffViewer()
+        {
+            Dock = DockStyle.Fill;
+            BackColor = Color.FromArgb(30, 31, 34);
+            Margin = new Padding(0);
+            Padding = new Padding(0);
+
+            Panel header = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 54,
+                BackColor = Color.FromArgb(39, 40, 44),
+                Padding = new Padding(16, 8, 16, 7),
+            };
+            _path.Dock = DockStyle.Top;
+            _path.Height = 23;
+            _path.Font = new Font("Cascadia Mono", 9.5F, FontStyle.Bold);
+            _path.ForeColor = Color.FromArgb(223, 225, 229);
+            _path.AutoEllipsis = true;
+            _path.Text = "未选择文件";
+            _meta.Dock = DockStyle.Bottom;
+            _meta.Height = 18;
+            _meta.Font = new Font("Segoe UI Variable Text", 8.25F);
+            _meta.ForeColor = Color.FromArgb(135, 139, 147);
+            _meta.AutoEllipsis = true;
+            _meta.Text = "在上方文件列表中选择一项";
+            header.Controls.Add(_path);
+            header.Controls.Add(_meta);
+
+            _content.Dock = DockStyle.Fill;
+            _content.ReadOnly = true;
+            _content.BorderStyle = BorderStyle.None;
+            _content.BackColor = Color.FromArgb(30, 31, 34);
+            _content.ForeColor = Color.FromArgb(188, 190, 196);
+            _content.Font = new Font("Cascadia Mono", 9F);
+            _content.DetectUrls = false;
+            _content.WordWrap = false;
+            _content.ScrollBars = RichTextBoxScrollBars.Both;
+            _content.Margin = new Padding(0);
+
+            Controls.Add(_content);
+            Controls.Add(header);
+            ShowEmpty("选择一个改动文件后，这里只显示该文件的统一差异。");
+        }
+
+        public void ShowEmpty(string message)
+        {
+            _path.Text = "未选择文件";
+            _meta.Text = "仅显示当前选择 · Unified diff";
+            _content.Clear();
+            _content.SelectionColor = Color.FromArgb(135, 139, 147);
+            using (Font placeholder = new Font("Segoe UI Variable Text", 10F))
+            {
+                _content.SelectionFont = placeholder;
+                _content.AppendText(Environment.NewLine + Environment.NewLine + "  " + (message ?? "没有可显示的差异。"));
+            }
+            _content.SelectionStart = 0;
+            _content.SelectionLength = 0;
+        }
+
+        public void Render(string patch, string title)
+        {
+            string text = (patch ?? "").Replace("\r\n", "\n").Replace("\r", "\n").TrimEnd('\n');
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                ShowEmpty("当前选择没有可显示的文本差异。");
+                return;
+            }
+
+            string[] lines = text.Split('\n');
+            _path.Text = string.IsNullOrWhiteSpace(title) ? "选中文件" : title;
+            _meta.Text = "仅显示当前选择  ·  Unified diff  ·  " + lines.Length + " 行";
+            _content.SuspendLayout();
+            _content.Clear();
+            using (Font regular = new Font("Cascadia Mono", 9F, FontStyle.Regular))
+            using (Font bold = new Font("Cascadia Mono", 9F, FontStyle.Bold))
+            {
+                for (int index = 0; index < lines.Length; index++)
+                {
+                    string line = lines[index];
+                    bool header = line.StartsWith("diff --git", StringComparison.Ordinal)
+                        || line.StartsWith("index ", StringComparison.Ordinal)
+                        || line.StartsWith("---", StringComparison.Ordinal)
+                        || line.StartsWith("+++", StringComparison.Ordinal);
+                    bool hunk = line.StartsWith("@@", StringComparison.Ordinal);
+                    bool addition = line.StartsWith("+", StringComparison.Ordinal) && !line.StartsWith("+++", StringComparison.Ordinal);
+                    bool deletion = line.StartsWith("-", StringComparison.Ordinal) && !line.StartsWith("---", StringComparison.Ordinal);
+
+                    _content.SelectionColor = Color.FromArgb(91, 95, 103);
+                    _content.SelectionBackColor = Color.FromArgb(30, 31, 34);
+                    _content.SelectionFont = regular;
+                    _content.AppendText((index + 1).ToString().PadLeft(5) + "  ");
+
+                    _content.SelectionFont = header || hunk ? bold : regular;
+                    _content.SelectionColor = header
+                        ? Color.FromArgb(128, 171, 255)
+                        : hunk
+                            ? Color.FromArgb(196, 162, 255)
+                            : addition
+                                ? Color.FromArgb(138, 209, 149)
+                                : deletion
+                                    ? Color.FromArgb(247, 139, 143)
+                                    : Color.FromArgb(188, 190, 196);
+                    _content.SelectionBackColor = addition
+                        ? Color.FromArgb(35, 65, 45)
+                        : deletion
+                            ? Color.FromArgb(75, 41, 45)
+                            : hunk
+                                ? Color.FromArgb(50, 45, 70)
+                                : header
+                                    ? Color.FromArgb(36, 45, 62)
+                                    : Color.FromArgb(30, 31, 34);
+                    _content.AppendText(line + Environment.NewLine);
+                }
+            }
+            _content.SelectionStart = 0;
+            _content.SelectionLength = 0;
+            _content.ResumeLayout();
+        }
+    }
+
     internal static class Program
     {
         [STAThread]
@@ -1232,7 +1359,7 @@ namespace DevSpacePortable.NativeUI
         private readonly DataGridView _slotGrid = CreateGrid();
         private readonly DataGridView _sessionGrid = CreateGrid();
         private readonly DataGridView _fileGrid = CreateGrid();
-        private readonly RichTextBox _diffBox = CreateConsoleBox();
+        private readonly ModernDiffViewer _diffViewer = new ModernDiffViewer();
         private readonly BorderlessTabControl _sessionPages = new BorderlessTabControl();
         private readonly DataGridView _memoryGrid = CreateGrid();
         private readonly System.Windows.Forms.Timer _heartbeatTimer = new System.Windows.Forms.Timer();
@@ -1242,11 +1369,16 @@ namespace DevSpacePortable.NativeUI
         private readonly System.Windows.Forms.Timer _computerUseIndicatorTimer = new System.Windows.Forms.Timer();
         private readonly ComputerUseIndicator _computerUseIndicator = new ComputerUseIndicator();
         private readonly JavaScriptSerializer _computerUseJson = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+        private readonly NotifyIcon _notifyIcon = new NotifyIcon();
+        private readonly ContextMenuStrip _trayMenu = new ContextMenuStrip();
 
         private string _leaseId = "";
         private bool _heartbeatBusy;
         private bool _computerUseWorkerBusy;
         private bool _closing;
+        private bool _allowUiExit;
+        private bool _closingForUpdate;
+        private bool _trayNoticeShown;
         private bool _sessionListLoading;
         private bool _memoryListLoading;
         private bool _loadingConfiguration;
@@ -1257,6 +1389,7 @@ namespace DevSpacePortable.NativeUI
         private List<Dictionary<string, object>> _allMemories = new List<Dictionary<string, object>>();
         private string _fullSessionPatch = "";
         private string _editingMemoryId = "";
+        private string _closePreference = "";
         private readonly Dictionary<string, string> _providerUrls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private string _selectedProviderName = "";
 
@@ -1305,6 +1438,8 @@ namespace DevSpacePortable.NativeUI
             BackColor = UiPalette.Background;
             ForeColor = UiPalette.Text;
             DoubleBuffered = true;
+            LoadUiPreferences();
+            InitializeTrayIcon();
             BuildUi();
             Shown += async delegate { await RunUiActionAsync(InitializeAsync); };
             FormClosing += MainForm_FormClosing;
@@ -1341,6 +1476,92 @@ namespace DevSpacePortable.NativeUI
                 if (combo != null && combo.DroppedDown) combo.DroppedDown = false;
                 if (child.HasChildren) CloseOpenDropDowns(child);
             }
+        }
+
+        private string UiPreferencesFile
+        {
+            get
+            {
+                string configured = Environment.GetEnvironmentVariable("DEVSPACE_PORTABLE_CONFIG_DIR");
+                string directory = string.IsNullOrWhiteSpace(configured) ? Path.Combine(_root, "data", "config") : Path.GetFullPath(configured);
+                return Path.Combine(directory, "ui-preferences.json");
+            }
+        }
+
+        private void LoadUiPreferences()
+        {
+            try
+            {
+                if (!File.Exists(UiPreferencesFile)) return;
+                Dictionary<string, object> value = _computerUseJson.DeserializeObject(File.ReadAllText(UiPreferencesFile, Encoding.UTF8)) as Dictionary<string, object>;
+                string choice = GetString(value, "closeChoice");
+                if (choice == "exit-ui" || choice == "minimize-tray") _closePreference = choice;
+            }
+            catch { _closePreference = ""; }
+        }
+
+        private void SaveClosePreference(string choice)
+        {
+            _closePreference = choice == "exit-ui" || choice == "minimize-tray" ? choice : "";
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(UiPreferencesFile));
+                string temporary = UiPreferencesFile + ".tmp-" + Process.GetCurrentProcess().Id;
+                File.WriteAllText(temporary, _computerUseJson.Serialize(new Dictionary<string, object>
+                {
+                    ["formatVersion"] = 1,
+                    ["closeChoice"] = _closePreference,
+                    ["updatedAt"] = DateTime.UtcNow.ToString("o"),
+                }), new UTF8Encoding(false));
+                if (File.Exists(UiPreferencesFile)) File.Delete(UiPreferencesFile);
+                File.Move(temporary, UiPreferencesFile);
+            }
+            catch { }
+        }
+
+        private void InitializeTrayIcon()
+        {
+            _trayMenu.Font = new Font("Microsoft YaHei UI", 9F);
+            _trayMenu.Items.Add("打开控制中心", null, delegate { RestoreFromTray(); });
+            _trayMenu.Items.Add("下次关闭时询问", null, delegate
+            {
+                SaveClosePreference("");
+                ShowInlineNotice("已清除关闭窗口的记忆选择；下次点击关闭时会重新询问。", false);
+            });
+            _trayMenu.Items.Add(new ToolStripSeparator());
+            _trayMenu.Items.Add("退出控制中心", null, delegate
+            {
+                _allowUiExit = true;
+                Close();
+            });
+            _notifyIcon.Icon = SystemIcons.Application;
+            _notifyIcon.Text = "DevSpace Portable";
+            _notifyIcon.ContextMenuStrip = _trayMenu;
+            _notifyIcon.Visible = false;
+            _notifyIcon.DoubleClick += delegate { RestoreFromTray(); };
+        }
+
+        private void MinimizeToTray()
+        {
+            ShowInTaskbar = false;
+            _notifyIcon.Visible = true;
+            Hide();
+            if (!_trayNoticeShown)
+            {
+                _trayNoticeShown = true;
+                _notifyIcon.ShowBalloonTip(2500, "DevSpace Portable", "控制中心已最小化到系统托盘，后台服务和本地桌面租约保持运行。", ToolTipIcon.Info);
+            }
+        }
+
+        private void RestoreFromTray()
+        {
+            if (_closing || IsDisposed) return;
+            _notifyIcon.Visible = false;
+            ShowInTaskbar = true;
+            Show();
+            WindowState = FormWindowState.Normal;
+            Activate();
+            BringToFront();
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)
@@ -1458,7 +1679,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.14 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.15 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -1527,6 +1748,12 @@ namespace DevSpacePortable.NativeUI
             buttons.Controls.Add(ActionButton("恢复并启动", async delegate { await RunActionAsync("enable"); }));
             buttons.Controls.Add(ActionButton("卸载计划任务", async delegate { await ConfirmActionAsync("uninstall-tasks", "确定卸载 DevSpace 与隧道计划任务吗？配置和认证数据不会删除。"); }, false, true));
             buttons.Controls.Add(ActionButton("刷新状态", async delegate { await RefreshStatusAsync(true); }));
+            buttons.Controls.Add(ActionButton("检查更新", async delegate { await CheckForUpdatesAsync(); }, true));
+            buttons.Controls.Add(ActionButton("重置关闭选择", delegate
+            {
+                SaveClosePreference("");
+                ShowInlineNotice("已恢复为每次点击关闭按钮时询问。", false);
+            }));
             buttons.Controls.Add(ActionButton("验证 HTTP", async delegate { await RunActionAsync("test"); }));
             buttons.Controls.Add(ActionButton("诊断隧道", async delegate { await RunActionAsync("diagnose"); }));
             buttons.Controls.Add(ActionButton("验证文件", async delegate { await RunActionAsync("verify-files"); }));
@@ -1889,10 +2116,10 @@ namespace DevSpacePortable.NativeUI
             GroupBox filesGroup = NewGroup("本轮改动文件");
             filesGroup.Controls.Add(WrapSurface(_fileGrid));
             details.Controls.Add(filesGroup, 0, 2);
-            _diffBox.Font = new Font("Consolas", 9F);
-            _diffBox.Text = "选择文件后在这里查看本轮差异。";
-            GroupBox diffGroup = NewGroup("文件差异");
-            diffGroup.Controls.Add(WrapSurface(_diffBox, true));
+            GroupBox diffGroup = NewGroup("文件差异 · 仅显示当前选择");
+            SurfacePanel diffSurface = new SurfacePanel { Dock = DockStyle.Fill, Dark = true, Padding = new Padding(1), Margin = new Padding(4) };
+            diffSurface.Controls.Add(_diffViewer);
+            diffGroup.Controls.Add(diffSurface);
             details.Controls.Add(diffGroup, 0, 3);
             detailPage.Controls.Add(details);
 
@@ -2152,7 +2379,7 @@ namespace DevSpacePortable.NativeUI
             _allDrives.Checked = GetString(_currentConfig, "permissionMode") == "all-drive-roots";
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.14") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.15") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2247,6 +2474,7 @@ namespace DevSpacePortable.NativeUI
             {
                 await _manager.RunAsync("stop");
                 _leaseId = "";
+                _allowUiExit = true;
                 Close();
             });
         }
@@ -2260,6 +2488,71 @@ namespace DevSpacePortable.NativeUI
                 if (switchTab) _tabs.SelectedIndex = 0;
             }
             catch (Exception ex) { if (switchTab) ShowError(ex); }
+        }
+
+        private async Task CheckForUpdatesAsync()
+        {
+            await ExecuteBusyAsync(async delegate
+            {
+                SetOutput("正在通过 GitHub Releases 检查稳定版更新……");
+                Dictionary<string, object> status = await _manager.RunJsonAsync("update-check");
+                string current = GetString(status, "currentVersion", "1.1.15");
+                string latest = GetString(status, "latestVersion", current);
+                if (!GetBool(status, "updateAvailable"))
+                {
+                    SetOutput("当前版本 " + current + " 已是 GitHub 最新稳定版。\r\n" + GetString(status, "releaseUrl"));
+                    MessageBox.Show(this, "当前版本 " + current + " 已是最新稳定版。", "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                if (GetBool(status, "sourceCheckout"))
+                {
+                    SetOutput("检测到 Git 源码工作区。在线更新器不会覆盖源码检出目录；请在正式 Release 解压目录中使用更新功能。\r\n最新版本：" + latest);
+                    MessageBox.Show(this, "检测到当前目录包含 .git。为避免覆盖源码和未提交改动，在线更新仅允许在正式 Release 解压目录中执行。\r\n\r\n最新版本：" + latest, "源码工作区不执行热更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                long size = GetLong(status, "assetSize");
+                string prompt = "发现 DevSpace Portable " + latest + "。\r\n\r\n"
+                    + "安装包：" + GetString(status, "assetName") + "\r\n"
+                    + "大小：" + FormatBytes(size) + "\r\n\r\n"
+                    + "将从公开 GitHub Release 下载并校验 SHA-256；下载完成后会关闭控制中心、停止当前 Portable 服务、替换程序文件、重新启动服务和 UI。data、logs 与 reports 会保留。现在继续吗？";
+                if (MessageBox.Show(this, prompt, "发现新版本 " + latest, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                {
+                    SetOutput("已取消更新。当前版本仍为 " + current + "。");
+                    return;
+                }
+
+                SetOutput("正在下载 DevSpace Portable " + latest + "，并验证文件大小、SHA-256 与压缩包路径安全……");
+                Dictionary<string, object> staged = await _manager.RunJsonAsync("update-stage");
+                if (!GetBool(staged, "staged"))
+                {
+                    SetOutput("更新检查完成，但没有需要安装的新版本。");
+                    return;
+                }
+                string stagingPath = GetString(staged, "stagingPath");
+                SetOutput("更新包已完成校验并暂存。\r\n目标版本：" + latest + "\r\n暂存目录：" + stagingPath);
+                if (MessageBox.Show(this, "更新包已完成下载与校验。现在关闭控制中心并执行受控更新吗？\r\n\r\n如果替换失败，更新器会恢复原版本并重新启动。", "准备安装 " + latest, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                {
+                    SetOutput("更新包已暂存，但尚未安装。再次点击“检查更新”可以重新开始更新流程。 ");
+                    return;
+                }
+                Dictionary<string, object> launched = await _manager.RunJsonAsync("update-launch", new
+                {
+                    stagingPath = stagingPath,
+                    uiPid = Process.GetCurrentProcess().Id,
+                });
+                if (!GetBool(launched, "launched")) throw new InvalidOperationException("更新器没有成功启动。 ");
+                _closingForUpdate = true;
+                _allowUiExit = true;
+                Close();
+            });
+        }
+
+        private static string FormatBytes(long value)
+        {
+            if (value < 1024) return value + " B";
+            if (value < 1024L * 1024L) return (value / 1024D).ToString("0.0") + " KiB";
+            if (value < 1024L * 1024L * 1024L) return (value / 1024D / 1024D).ToString("0.0") + " MiB";
+            return (value / 1024D / 1024D / 1024D).ToString("0.00") + " GiB";
         }
 
         private async Task LoadPluginsAsync()
@@ -2384,18 +2677,78 @@ namespace DevSpacePortable.NativeUI
             try
             {
                 _sessionGrid.Rows.Clear();
-                foreach (Dictionary<string, object> session in _allSessions)
+                List<Dictionary<string, object>> visible = _allSessions.Where(session =>
                 {
                     string title = GetString(session, "title");
                     string root = GetString(session, "root");
-                    if (query.Length > 0 && !title.ToLowerInvariant().Contains(query) && !root.ToLowerInvariant().Contains(query)) continue;
-                    Dictionary<string, object> summary = GetDictionary(session, "summary");
-                    int row = _sessionGrid.Rows.Add(GetBool(session, "pinned") ? "★" : "", title, GetString(session, "status"), GetInt(summary, "files"), "+" + GetInt(summary, "additions") + " -" + GetInt(summary, "removals"), FormatLocalTime(GetString(session, "updatedAt")), root);
-                    _sessionGrid.Rows[row].Tag = session;
-                    if (GetString(session, "sessionId") == selectedId) _sessionGrid.Rows[row].Selected = true;
+                    return query.Length == 0 || title.ToLowerInvariant().Contains(query) || root.ToLowerInvariant().Contains(query);
+                }).ToList();
+
+                IEnumerable<IGrouping<string, Dictionary<string, object>>> groups = visible
+                    .GroupBy(session => NormalizeSessionTitle(GetString(session, "title")), StringComparer.OrdinalIgnoreCase)
+                    .OrderByDescending(group => group.Any(session => GetBool(session, "pinned")))
+                    .ThenByDescending(group => group.Max(SessionUpdatedAt));
+
+                foreach (IGrouping<string, Dictionary<string, object>> group in groups)
+                {
+                    List<Dictionary<string, object>> sessions = group
+                        .OrderByDescending(session => GetBool(session, "pinned"))
+                        .ThenByDescending(SessionUpdatedAt)
+                        .ToList();
+                    int groupFiles = sessions.Sum(session => GetInt(GetDictionary(session, "summary"), "files"));
+                    int groupAdditions = sessions.Sum(session => GetInt(GetDictionary(session, "summary"), "additions"));
+                    int groupRemovals = sessions.Sum(session => GetInt(GetDictionary(session, "summary"), "removals"));
+                    int headerIndex = _sessionGrid.Rows.Add(
+                        sessions.Any(session => GetBool(session, "pinned")) ? "★" : "",
+                        group.Key + "  ·  " + sessions.Count + " 轮",
+                        "分组",
+                        groupFiles,
+                        "+" + groupAdditions + " -" + groupRemovals,
+                        FormatLocalTime(GetString(sessions[0], "updatedAt")),
+                        "");
+                    DataGridViewRow header = _sessionGrid.Rows[headerIndex];
+                    header.Tag = null;
+                    header.Height = 42;
+                    header.DefaultCellStyle.BackColor = UiPalette.SurfaceStrong;
+                    header.DefaultCellStyle.SelectionBackColor = UiPalette.SurfaceStrong;
+                    header.DefaultCellStyle.ForeColor = UiPalette.Text;
+                    header.DefaultCellStyle.SelectionForeColor = UiPalette.Text;
+                    header.DefaultCellStyle.Font = _sessionGrid.ColumnHeadersDefaultCellStyle.Font;
+
+                    foreach (Dictionary<string, object> session in sessions)
+                    {
+                        string root = GetString(session, "root");
+                        string folder = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                        folder = Path.GetFileName(folder);
+                        if (string.IsNullOrWhiteSpace(folder)) folder = root;
+                        Dictionary<string, object> summary = GetDictionary(session, "summary");
+                        int row = _sessionGrid.Rows.Add(
+                            GetBool(session, "pinned") ? "★" : "",
+                            "    " + folder,
+                            GetString(session, "status"),
+                            GetInt(summary, "files"),
+                            "+" + GetInt(summary, "additions") + " -" + GetInt(summary, "removals"),
+                            FormatLocalTime(GetString(session, "updatedAt")),
+                            root);
+                        _sessionGrid.Rows[row].Tag = session;
+                        if (GetString(session, "sessionId") == selectedId) _sessionGrid.Rows[row].Selected = true;
+                    }
                 }
+                if (string.IsNullOrWhiteSpace(selectedId)) _sessionGrid.ClearSelection();
             }
             finally { _sessionListLoading = false; }
+        }
+
+        private static string NormalizeSessionTitle(string title)
+        {
+            string value = (title ?? "").Trim();
+            return value.Length == 0 ? "未命名会话" : value;
+        }
+
+        private static DateTime SessionUpdatedAt(Dictionary<string, object> session)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(GetString(session, "updatedAt"), out parsed) ? parsed.ToUniversalTime() : DateTime.MinValue;
         }
 
         private string SelectedSessionId(bool required = true)
@@ -2403,9 +2756,10 @@ namespace DevSpacePortable.NativeUI
             if (_sessionGrid.SelectedRows.Count == 1)
             {
                 Dictionary<string, object> session = _sessionGrid.SelectedRows[0].Tag as Dictionary<string, object>;
-                return GetString(session, "sessionId");
+                string id = GetString(session, "sessionId");
+                if (!string.IsNullOrWhiteSpace(id)) return id;
             }
-            if (required) throw new InvalidOperationException("请先选择一个会话。 ");
+            if (required) throw new InvalidOperationException("请选择会话分组内的一轮具体会话。 ");
             return "";
         }
 
@@ -2432,7 +2786,7 @@ namespace DevSpacePortable.NativeUI
             }
             else
             {
-                RenderDiff("本轮没有已跟踪文件变化。", "");
+                _diffViewer.ShowEmpty("本轮没有已跟踪文件变化。 ");
             }
             _sessionPages.SelectedIndex = 1;
         }
@@ -2441,7 +2795,7 @@ namespace DevSpacePortable.NativeUI
         {
             if (_fileGrid.SelectedRows.Count != 1)
             {
-                RenderDiff(_fullSessionPatch, "全部改动");
+                _diffViewer.ShowEmpty("请在上方选择一个文件；不会在未选择时展示整轮差异。 ");
                 return;
             }
             Dictionary<string, object> file = _fileGrid.SelectedRows[0].Tag as Dictionary<string, object>;
@@ -2460,7 +2814,7 @@ namespace DevSpacePortable.NativeUI
             {
                 string plusMarker = "+++ b/" + normalized;
                 int plus = text.IndexOf(plusMarker, StringComparison.Ordinal);
-                if (plus < 0) return text;
+                if (plus < 0) return "";
                 start = text.LastIndexOf("diff --git ", plus, StringComparison.Ordinal);
                 if (start < 0) start = 0;
             }
@@ -2470,33 +2824,7 @@ namespace DevSpacePortable.NativeUI
 
         private void RenderDiff(string patch, string title)
         {
-            string text = string.IsNullOrWhiteSpace(patch) ? "没有可显示的文本差异。" : patch.Replace("\r\n", "\n").Replace("\r", "\n");
-            _diffBox.SuspendLayout();
-            _diffBox.Clear();
-            using (Font regularFont = new Font("Consolas", 9F, FontStyle.Regular))
-            using (Font boldFont = new Font("Consolas", 9F, FontStyle.Bold))
-            {
-                if (!string.IsNullOrWhiteSpace(title))
-                {
-                    _diffBox.SelectionColor = Color.FromArgb(159, 178, 255);
-                    _diffBox.SelectionFont = boldFont;
-                    _diffBox.AppendText(title + "\r\n\r\n");
-                }
-                foreach (string line in text.Split('\n'))
-                {
-                    Color color = UiPalette.ConsoleText;
-                    if (line.StartsWith("+++", StringComparison.Ordinal) || line.StartsWith("---", StringComparison.Ordinal) || line.StartsWith("diff --git", StringComparison.Ordinal)) color = Color.FromArgb(149, 169, 230);
-                    else if (line.StartsWith("@@", StringComparison.Ordinal)) color = Color.FromArgb(189, 153, 255);
-                    else if (line.StartsWith("+", StringComparison.Ordinal)) color = Color.FromArgb(118, 205, 158);
-                    else if (line.StartsWith("-", StringComparison.Ordinal)) color = Color.FromArgb(242, 126, 132);
-                    _diffBox.SelectionColor = color;
-                    _diffBox.SelectionFont = regularFont;
-                    _diffBox.AppendText(line + "\r\n");
-                }
-            }
-            _diffBox.SelectionStart = 0;
-            _diffBox.SelectionLength = 0;
-            _diffBox.ResumeLayout();
+            _diffViewer.Render(patch, title);
         }
 
         private void PopulateMemoryWorkspaces()
@@ -2687,8 +3015,11 @@ namespace DevSpacePortable.NativeUI
 
         private Dictionary<string, object> SelectedSession()
         {
-            if (_sessionGrid.SelectedRows.Count != 1) throw new InvalidOperationException("请先选择一个会话。 ");
-            return (Dictionary<string, object>)_sessionGrid.SelectedRows[0].Tag;
+            if (_sessionGrid.SelectedRows.Count != 1) throw new InvalidOperationException("请选择会话分组内的一轮具体会话。 ");
+            Dictionary<string, object> session = _sessionGrid.SelectedRows[0].Tag as Dictionary<string, object>;
+            if (session == null || string.IsNullOrWhiteSpace(GetString(session, "sessionId")))
+                throw new InvalidOperationException("当前行是会话分组标题，请选择分组内的一轮具体会话。 ");
+            return session;
         }
 
         private async Task ToggleSessionAsync(string field)
@@ -3015,9 +3346,40 @@ namespace DevSpacePortable.NativeUI
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
             if (_closing) return;
+            bool systemShutdown = e.CloseReason == CloseReason.WindowsShutDown
+                || e.CloseReason == CloseReason.ApplicationExitCall;
+            if (!_allowUiExit && !_closingForUpdate && !systemShutdown)
+            {
+                CloseChoice choice;
+                bool remember = false;
+                if (_closePreference == "minimize-tray") choice = CloseChoice.MinimizeToTray;
+                else if (_closePreference == "exit-ui") choice = CloseChoice.ExitUi;
+                else
+                {
+                    CloseChoiceResult result = CloseChoiceDialog.Show(this);
+                    choice = result.Choice;
+                    remember = result.Remember;
+                }
+                if (choice == CloseChoice.Cancel)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+                if (remember) SaveClosePreference(choice == CloseChoice.MinimizeToTray ? "minimize-tray" : "exit-ui");
+                if (choice == CloseChoice.MinimizeToTray)
+                {
+                    e.Cancel = true;
+                    MinimizeToTray();
+                    return;
+                }
+                _allowUiExit = true;
+            }
             _closing = true;
             _heartbeatTimer.Stop(); _statusTimer.Stop(); _noticeTimer.Stop(); _computerUseTimer.Stop(); _computerUseIndicatorTimer.Stop();
             _computerUseIndicator.Dispose();
+            _notifyIcon.Visible = false;
+            _notifyIcon.Dispose();
+            _trayMenu.Dispose();
             string lease = _leaseId; _leaseId = "";
             if (!string.IsNullOrEmpty(lease))
             {
@@ -3257,6 +3619,138 @@ namespace DevSpacePortable.NativeUI
         private static int GetInt(Dictionary<string, object> source, string key, int fallback = 0) { object value; if (source == null || !source.TryGetValue(key, out value) || value == null) return fallback; try { return Convert.ToInt32(value); } catch { return fallback; } }
         private static List<Dictionary<string, object>> GetDictionaryList(Dictionary<string, object> source, string key) { object value; if (source == null || !source.TryGetValue(key, out value) || value == null) return new List<Dictionary<string, object>>(); IEnumerable sequence = value as IEnumerable; if (sequence == null || value is string) return new List<Dictionary<string, object>>(); List<Dictionary<string, object>> result = new List<Dictionary<string, object>>(); foreach (object item in sequence) { Dictionary<string, object> dictionary = item as Dictionary<string, object>; if (dictionary != null) result.Add(dictionary); } return result; }
         private static List<string> GetStringList(Dictionary<string, object> source, string key) { object value; if (source == null || !source.TryGetValue(key, out value) || value == null) return new List<string>(); IEnumerable sequence = value as IEnumerable; if (sequence == null || value is string) return new List<string>(); List<string> result = new List<string>(); foreach (object item in sequence) result.Add(Convert.ToString(item)); return result; }
+        private static long GetLong(Dictionary<string, object> source, string key, long fallback = 0) { object value; if (source == null || !source.TryGetValue(key, out value) || value == null) return fallback; try { return Convert.ToInt64(value); } catch { return fallback; } }
+    }
+
+    internal enum CloseChoice
+    {
+        Cancel,
+        ExitUi,
+        MinimizeToTray,
+    }
+
+    internal sealed class CloseChoiceResult
+    {
+        public CloseChoice Choice { get; set; }
+        public bool Remember { get; set; }
+    }
+
+    internal sealed class CloseChoiceDialog : Form
+    {
+        private readonly CheckBox _remember = new CheckBox();
+        private CloseChoice _choice = CloseChoice.Cancel;
+
+        private CloseChoiceDialog()
+        {
+            Text = "关闭 DevSpace Portable";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            ClientSize = new Size(560, 290);
+            BackColor = UiPalette.Background;
+            ForeColor = UiPalette.Text;
+            Font = new Font("Microsoft YaHei UI", 9F);
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 5,
+                Padding = new Padding(24, 20, 24, 18),
+                BackColor = UiPalette.Background,
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            Label title = new Label
+            {
+                Text = "关闭控制中心后要做什么？",
+                Dock = DockStyle.Fill,
+                Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                TextAlign = ContentAlignment.MiddleLeft,
+            };
+            Label hint = new Label
+            {
+                Text = "两种选择都不会停止 DevSpace 或公网隧道。最小化会保留本地 UI 与 Computer Use 租约；退出只关闭控制中心。",
+                Dock = DockStyle.Fill,
+                ForeColor = UiPalette.TextMuted,
+                TextAlign = ContentAlignment.TopLeft,
+                Padding = new Padding(0, 4, 0, 0),
+            };
+            FlowLayoutPanel choices = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                BackColor = Color.Transparent,
+                Padding = new Padding(0, 8, 0, 8),
+            };
+            ModernButton minimize = new ModernButton
+            {
+                Text = "最小化到系统托盘",
+                Primary = true,
+                Width = 238,
+                Height = 62,
+                AutoSize = false,
+                Margin = new Padding(0, 0, 10, 0),
+            };
+            ModernButton exit = new ModernButton
+            {
+                Text = "退出控制中心",
+                Width = 238,
+                Height = 62,
+                AutoSize = false,
+                Margin = new Padding(10, 0, 0, 0),
+            };
+            minimize.Click += delegate { _choice = CloseChoice.MinimizeToTray; DialogResult = DialogResult.OK; Close(); };
+            exit.Click += delegate { _choice = CloseChoice.ExitUi; DialogResult = DialogResult.OK; Close(); };
+            choices.Controls.Add(minimize);
+            choices.Controls.Add(exit);
+
+            _remember.Text = "记住我的选择（可从系统托盘菜单恢复为每次询问）";
+            _remember.Dock = DockStyle.Fill;
+            _remember.ForeColor = UiPalette.TextMuted;
+            _remember.BackColor = Color.Transparent;
+            _remember.Padding = new Padding(2, 0, 0, 0);
+
+            FlowLayoutPanel cancelBar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false,
+                BackColor = Color.Transparent,
+            };
+            ModernButton cancel = new ModernButton { Text = "取消", Width = 96, Height = 40, AutoSize = false };
+            cancel.Click += delegate { _choice = CloseChoice.Cancel; DialogResult = DialogResult.Cancel; Close(); };
+            cancelBar.Controls.Add(cancel);
+
+            layout.Controls.Add(title, 0, 0);
+            layout.Controls.Add(hint, 0, 1);
+            layout.Controls.Add(choices, 0, 2);
+            layout.Controls.Add(_remember, 0, 3);
+            layout.Controls.Add(cancelBar, 0, 4);
+            Controls.Add(layout);
+            CancelButton = cancel;
+        }
+
+        public static CloseChoiceResult Show(IWin32Window owner)
+        {
+            using (CloseChoiceDialog dialog = new CloseChoiceDialog())
+            {
+                DialogResult result = dialog.ShowDialog(owner);
+                return new CloseChoiceResult
+                {
+                    Choice = result == DialogResult.OK ? dialog._choice : CloseChoice.Cancel,
+                    Remember = result == DialogResult.OK && dialog._remember.Checked,
+                };
+            }
+        }
     }
 
     internal sealed class ComboItem

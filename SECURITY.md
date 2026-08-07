@@ -6,7 +6,7 @@
 
 ## 私下报告漏洞
 
-不要在公开 Issue 中披露可利用细节、Owner Password、Tunnel Token、OAuth Token、私钥、`devspace.sqlite` 或完整日志。请通过 GitHub Security Advisory 的私密报告入口联系仓库维护者；私有仓库尚未开放该入口时，直接通过仓库所有者的私有联系方式报告。
+不要在公开 Issue 中披露可利用细节、Owner Password、Tunnel Token、OAuth Token、私钥、`devspace.sqlite` 或完整日志。请优先通过 GitHub Security Advisory 的私密报告入口联系仓库维护者；该入口不可用时，再通过仓库所有者的私有联系方式报告。
 
 报告应包含：
 

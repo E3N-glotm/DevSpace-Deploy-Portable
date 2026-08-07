@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.14**  
+当前稳定版本：**1.1.15**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -14,13 +14,13 @@ Portable Protocol：**1.5**
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
-## 1.1.14 主要变化
+## 1.1.15 主要变化
 
-- 原生 UI 执行操作时不再禁用或漂白整个主窗体，只有触发按钮显示“执行中…”；
-- “会话与回退”改为会话列表与独立详情子页面，支持逐文件彩色差异；
-- 新增显式 Memories 独立页面，可查看、搜索、新建、编辑和删除记录；
-- Computer Use 保留会话级金色控制边框、批量动作及默认无截图低延迟路径；
-- 会话审阅使用有界 `sparse-journal-v4`，避免大型工作区产生几十或上百 GB 的审阅副本。
+- “状态与部署”可直接通过公开 GitHub Release 检查、下载并安装更新；更新包验证字节数和 SHA-256，失败时自动恢复旧版本；
+- 会话历史按会话名称分组，分组与组内轮次均按最近更新时间从新到旧排列；
+- 文件差异改为接近 PyCharm/Codex 的现代深色视图，并且只显示上方当前选中的文件；
+- 点击关闭窗口可选择最小化到系统托盘或仅退出控制中心，并可记住选择；
+- `data/`、`logs/`、`reports/`、OAuth 状态、插件、Memories 和会话审阅数据不会被在线更新覆盖。
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
 
@@ -69,8 +69,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-$env:GH_TOKEN = "具有本私有仓库读取权限的 GitHub Token"
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.14
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.15
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -95,15 +94,17 @@ docs/releases/HOTFIX-<版本>.md
 
 创建并推送 `v<版本>` 标签后，Release workflow 会从上一稳定 Release 恢复运行时，重新安装依赖、执行测试、构建 ZIP、生成更新清单，并上传到 GitHub Release。详细流程见 [docs/RELEASING.md](docs/RELEASING.md)。
 
-首次建立 1.1.14 基线 Release，或需要从维护机手工重新上传附件时，可运行：
+需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.14 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.15 -BypassProxy
 ```
 
-## 自动更新规划
+## 在线更新
 
-1.1.15 起计划加入应用内更新检查与独立更新器。更新采用“下载到新版本目录、校验、切换指针、健康检查、失败回滚”，而不是覆盖正在运行的 EXE。设计见 [docs/UPDATE-DESIGN.md](docs/UPDATE-DESIGN.md)。
+正式 Release 解压目录可在原生 UI 的“状态与部署”页面点击“检查更新”。程序会读取公开仓库的最新稳定 Release，校验 `update-manifest.json`、文件大小和 SHA-256，安全解压到暂存目录，然后在用户确认后关闭 UI、停止当前 Portable 服务、替换应用文件并重新启动；替换失败会自动回滚。
+
+源码检出目录包含 `.git` 时，应用级在线更新会拒绝覆盖，请继续使用 Git 分支和 Pull Request 更新源码。当前更新器实现与后续签名、版本目录方案见 [docs/UPDATE-DESIGN.md](docs/UPDATE-DESIGN.md)。
 
 ## 安全与隐私
 
@@ -120,7 +121,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-relea
 
 本仓库原创 Portable 集成代码采用 MIT License。DevSpace 上游代码保留其 MIT License；Node.js、Git for Windows、cloudflared、npm 依赖等保留各自许可证。
 
-**ngrok Agent 为专有软件。** 当前私有 Release 可以作为内部协作基线，但在把仓库和 Release 改为公开之前，应移除随包 `ngrok.exe`，改为用户首次启用时从官方来源下载并校验，或取得明确的再分发授权。详情见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+**ngrok Agent 为专有软件。** 当前公开 Release 仍包含固定版本的内部便携运行时；继续公开分发前应确认具体再分发方式符合 ngrok 当前条款，或改为用户首次启用时从官方来源下载并校验。详情见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 ## 参与维护
 

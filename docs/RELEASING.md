@@ -35,9 +35,9 @@ runs tests, rebuilds the Portable ZIP, and uploads:
 
 ## First bootstrap Release
 
-The first source-only repository Release cannot hydrate its runtime from an
-older Release. Upload the already validated 1.1.14 ZIP manually. All later
-versions can use 1.1.14 as the runtime bootstrap source.
+The first source-only repository Release could not hydrate its runtime from an
+older Release. Version 1.1.14 is the validated bootstrap source; version
+1.1.15 and later may restore the runtime from any compatible stable Release.
 
 The repository includes a GitHub CLI wrapper that reads `GH_TOKEN`,
 `GITHUB_TOKEN`, or the current Git credential store without printing or
@@ -45,15 +45,15 @@ writing the credential to a temporary file. Install GitHub CLI first with
 `winget install --id GitHub.cli --exact --scope user`:
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.14 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.15 -BypassProxy
 ```
 
 `-BypassProxy` is optional. Use it when a local HTTP proxy makes large Release
 uploads substantially slower and the machine can reach GitHub directly.
 
-## Public-release gate
+## Public-release requirements
 
-Before changing repository or Releases from private to public:
+The repository and Releases are public. Before each public binary Release:
 
 1. remove bundled `runtime/ngrok/ngrok.exe` from the public ZIP or obtain
    redistribution permission;

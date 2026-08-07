@@ -51,6 +51,16 @@ try {
   assert.match(nativeSource, /public bool Busy/);
   assert.match(nativeSource, /BusyText = "执行中…"/);
   assert.match(nativeSource, /private readonly BorderlessTabControl _sessionPages/);
+  assert.match(nativeSource, /private readonly ModernDiffViewer _diffViewer/);
+  assert.match(nativeSource, /文件差异 · 仅显示当前选择/);
+  assert.match(nativeSource, /不会在未选择时展示整轮差异/);
+  assert.match(nativeSource, /GroupBy\(session => NormalizeSessionTitle/);
+  assert.match(nativeSource, /ThenByDescending\(SessionUpdatedAt\)/);
+  assert.match(nativeSource, /CloseChoiceDialog\.Show\(this\)/);
+  assert.match(nativeSource, /private readonly NotifyIcon _notifyIcon/);
+  assert.match(nativeSource, /_manager\.RunJsonAsync\("update-check"\)/);
+  assert.match(nativeSource, /_manager\.RunJsonAsync\("update-stage"\)/);
+  assert.match(nativeSource, /_manager\.RunJsonAsync\("update-launch"/);
   assert.match(nativeSource, /BuildMemoriesTab\(\)/);
   const executeBusy = nativeSource.match(/private async Task ExecuteBusyAsync[\s\S]*?\n        }/i)?.[0] || "";
   assert.doesNotMatch(executeBusy, /Enabled\s*=\s*false/);
@@ -96,6 +106,10 @@ try {
   console.log(JSON.stringify({
     nonWhiteningBusyState: true,
     sessionSubpage: true,
+    sessionNameGrouping: true,
+    selectedFileDiffOnly: true,
+    trayCloseChoice: true,
+    onlineUpdateUi: true,
     memoryCrud: true,
     remainingMemories: 1,
   }));

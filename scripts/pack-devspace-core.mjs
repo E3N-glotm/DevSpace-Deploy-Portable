@@ -20,37 +20,36 @@ for (const name of readdirSync(packages)) {
   if (/^waishnav-devspace-.*\.tgz$/i.test(name)) rmSync(join(packages, name), { force: true });
 }
 
+const packer = join(root, "scripts", "pack-devspace-core.py");
+const pythonCandidates = process.platform === "win32"
+  ? [process.env.PYTHON, "python.exe", "python"]
+  : [process.env.PYTHON, "python3", "python"];
 let command;
-let args;
-if (process.env.npm_execpath && existsSync(process.env.npm_execpath)) {
-  command = process.execPath;
-  args = [process.env.npm_execpath, "pack", source, "--pack-destination", packages, "--ignore-scripts"];
-} else {
-  const bundledNpmCli = join(root, "runtime", "node", "node_modules", "npm", "bin", "npm-cli.js");
-  if (existsSync(bundledNpmCli)) {
-    command = process.execPath;
-    args = [bundledNpmCli, "pack", source, "--pack-destination", packages, "--ignore-scripts"];
-  } else {
-    command = process.platform === "win32" ? "npm.cmd" : "npm";
-    args = ["pack", source, "--pack-destination", packages, "--ignore-scripts"];
+for (const candidate of pythonCandidates.filter(Boolean)) {
+  const probe = spawnSync(candidate, ["--version"], { encoding: "utf8", windowsHide: true });
+  if (probe.status === 0) {
+    command = candidate;
+    break;
   }
 }
+if (!command) throw new Error("Python 3 is required to create the deterministic Portable core package.");
+const args = [packer, "--source", source, "--output", expectedPath];
 
 const result = spawnSync(command, args, {
   cwd: root,
   encoding: "utf8",
   windowsHide: true,
-  shell: process.platform === "win32" && /\.cmd$/i.test(command),
+  shell: false,
   stdio: ["ignore", "pipe", "pipe"],
 });
 if (result.error) throw result.error;
 if (result.status !== 0) {
   process.stderr.write(String(result.stdout || ""));
   process.stderr.write(String(result.stderr || ""));
-  throw new Error(`npm pack exited with code ${result.status}`);
+  throw new Error(`Portable core packer exited with code ${result.status}`);
 }
 if (!existsSync(expectedPath)) {
-  throw new Error(`npm pack did not create the expected package: ${expectedPath}`);
+  throw new Error(`Portable core packer did not create the expected package: ${expectedPath}`);
 }
 
 const bytes = readFileSync(expectedPath);

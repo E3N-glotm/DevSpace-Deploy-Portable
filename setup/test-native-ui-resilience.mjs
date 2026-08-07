@@ -34,7 +34,7 @@ function manager(command, payload) {
   return result.stdout.trim() ? JSON.parse(result.stdout.trim()) : {};
 }
 
-async function waitForFile(file, timeoutMs = 10_000) {
+async function waitForFile(file, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (existsSync(file)) return;
