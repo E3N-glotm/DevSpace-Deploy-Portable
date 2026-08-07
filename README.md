@@ -19,6 +19,7 @@ Portable Protocol：**1.5**
 - 完整 Release ZIP 在首次启动前就直接包含 `plugins/installed/codex-runtime-bridge/<版本>/`，包括 `manifest.json`、`runtime.mjs`、`keep-awake.ps1` 和 Skill；
 - 构建时从维护源 `setup/bundled-plugins/` 自动生成 `plugins/installed/` 发布镜像，并在打包前强制验证 `codex-runtime-bridge` 是否进入最终 payload；
 - 正式 Release 优先以 `plugins/installed/` 作为内置插件 seed source；真正的用户安装/启用状态仍保存在 `data/plugins/installed/`，因此在线升级不会覆盖用户自己的插件状态；
+- 修复 Windows PowerShell 5.1 经本地代理访问 GitHub 时偶发“基础连接已经关闭”的问题：显式启用 TLS 1.2，PowerShell 网络请求最多重试 3 次，仍失败则自动切换 `curl.exe`；Release API、更新清单、增量包和完整包下载都使用同一套有界 fallback；
 - 继续继承 1.1.16 的“增量优先、完整包兜底”、严格逐文件 Diff 与现代字体行为，Portable Protocol 仍为 1.5。
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。

@@ -17,6 +17,19 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
+# Windows PowerShell 5.1 can negotiate an older/default Schannel protocol set
+# through local HTTP proxies and intermittently fail GitHub requests with
+# "The underlying connection was closed: An error occurred on a send." GitHub
+# supports TLS 1.2, so pin that capability for this updater process only.
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::Expect100Continue = $false
+} catch {
+    # Keep startup compatible with future PowerShell/.NET runtimes where these
+    # legacy ServicePointManager knobs may no longer be writable.
+}
+
 $Root = [IO.Path]::GetFullPath($Root).TrimEnd('\')
 $UpdateRoot = Join-Path $Root ".update-staging"
 $StateDirectory = Join-Path $Root "data\state"
@@ -39,6 +52,163 @@ function Write-UpdateResult([object]$Value) {
     $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
 }
 
+function Invoke-WithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Operation,
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+        [int]$Attempts = 3
+    )
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            return & $Operation
+        } catch {
+            $lastError = $_
+            if ($attempt -ge $Attempts) { break }
+            $delayMs = 500 * [Math]::Pow(2, $attempt - 1)
+            Write-UpdateLog "$Description failed on attempt $attempt/${Attempts}: $($_.Exception.Message). Retrying."
+            Start-Sleep -Milliseconds ([int]$delayMs)
+        }
+    }
+    if ($lastError) { throw $lastError }
+    throw "$Description failed without an exception."
+}
+
+function Get-CurlExecutable {
+    $bundledCandidates = @(
+        (Join-Path $Root "runtime\git\mingw64\bin\curl.exe"),
+        (Join-Path $Root "runtime\git\usr\bin\curl.exe")
+    )
+    foreach ($candidate in $bundledCandidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    $command = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $command) { return $null }
+    return [string]$command.Source
+}
+
+function Invoke-CurlJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSec = 60
+    )
+    $curl = Get-CurlExecutable
+    if (-not $curl) { throw "curl.exe is not available for the GitHub fallback transport." }
+    $arguments = @(
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--location",
+        "--connect-timeout", "20",
+        "--max-time", [string]$TimeoutSec
+    )
+    foreach ($key in $Headers.Keys) {
+        $arguments += @("--header", "${key}: $($Headers[$key])")
+    }
+    $arguments += $Uri
+    $output = & $curl @arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "curl.exe GitHub request failed with exit code $exitCode." }
+    $json = ($output -join "`n")
+    if ([string]::IsNullOrWhiteSpace($json)) { throw "curl.exe GitHub request returned an empty response." }
+    try {
+        return $json | ConvertFrom-Json
+    } catch {
+        throw "curl.exe GitHub response was not valid JSON: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-GitHubJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSec = 60,
+        [string]$Description = "GitHub request"
+    )
+    try {
+        return Invoke-WithRetry -Description $Description -Attempts 3 -Operation {
+            Invoke-RestMethod -Uri $Uri -Headers $Headers -Method Get -TimeoutSec $TimeoutSec
+        }
+    } catch {
+        $powerShellError = $_.Exception.Message
+        Write-UpdateLog "$Description failed through Windows PowerShell after bounded retries: $powerShellError. Trying curl.exe fallback."
+        try {
+            return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec
+        } catch {
+            throw "$Description failed through both Windows PowerShell and curl.exe fallback. PowerShell: $powerShellError; curl.exe: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Invoke-CurlDownload {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [Parameter(Mandatory = $true)]
+        [string]$OutFile,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSec = 3600
+    )
+    $curl = Get-CurlExecutable
+    if (-not $curl) { throw "curl.exe is not available for the GitHub fallback transport." }
+    if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+    $arguments = @(
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--location",
+        "--connect-timeout", "30",
+        "--max-time", [string]$TimeoutSec,
+        "--output", $OutFile
+    )
+    foreach ($key in $Headers.Keys) {
+        $arguments += @("--header", "${key}: $($Headers[$key])")
+    }
+    $arguments += $Uri
+    & $curl @arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        throw "curl.exe GitHub download failed with exit code $exitCode."
+    }
+    if (-not (Test-Path -LiteralPath $OutFile -PathType Leaf)) {
+        throw "curl.exe GitHub download completed without creating the output file."
+    }
+}
+
+function Invoke-GitHubDownload {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [Parameter(Mandatory = $true)]
+        [string]$OutFile,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSec = 3600,
+        [string]$Description = "GitHub download"
+    )
+    try {
+        Invoke-WithRetry -Description $Description -Attempts 3 -Operation {
+            if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+            Invoke-WebRequest -Uri $Uri -Headers $Headers -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec
+        } | Out-Null
+        return
+    } catch {
+        $powerShellError = $_.Exception.Message
+        Write-UpdateLog "$Description failed through Windows PowerShell after bounded retries: $powerShellError. Trying curl.exe fallback."
+        try {
+            Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec
+            return
+        } catch {
+            throw "$Description failed through both Windows PowerShell and curl.exe fallback. PowerShell: $powerShellError; curl.exe: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Assert-Version([string]$Value, [string]$Name) {
     if ($Value -notmatch '^\d+\.\d+\.\d+$') {
         throw "$Name is not a supported semantic version: $Value"
@@ -57,7 +227,7 @@ function Get-LatestRelease {
         "X-GitHub-Api-Version" = "2022-11-28"
         "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion"
     }
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -Headers $headers -Method Get -TimeoutSec 60
+    $release = Invoke-GitHubJson -Uri "https://api.github.com/repos/$Repository/releases/latest" -Headers $headers -TimeoutSec 60 -Description "GitHub latest-release metadata request"
     $version = ([string]$release.tag_name).TrimStart('v')
     Assert-Version $version "Release version"
     $manifestAsset = @($release.assets) | Where-Object { $_.name -eq "update-manifest.json" } | Select-Object -First 1
@@ -65,7 +235,7 @@ function Get-LatestRelease {
     $zipAsset = @($release.assets) | Where-Object { $_.name -eq $zipName } | Select-Object -First 1
     if (-not $manifestAsset) { throw "Latest Release has no update-manifest.json asset." }
     if (-not $zipAsset) { throw "Latest Release has no $zipName asset." }
-    $manifest = Invoke-RestMethod -Uri $manifestAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -Method Get -TimeoutSec 60
+    $manifest = Invoke-GitHubJson -Uri $manifestAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -TimeoutSec 60 -Description "GitHub update-manifest request"
     if ([string]$manifest.version -ne $version) { throw "Release tag and update manifest version do not match." }
     if ([string]$manifest.asset.name -ne $zipName) { throw "Update manifest references an unexpected ZIP name." }
     if ([string]$manifest.repository -ne $Repository) { throw "Update manifest repository does not match the configured repository." }
@@ -155,7 +325,7 @@ function Stage-FullUpdate([object]$Latest, [string]$FallbackReason = "") {
     try {
         if ($FallbackReason) { Write-UpdateLog "Using full update fallback: $FallbackReason" }
         Write-UpdateLog "Downloading full package $($Latest.zipName) from GitHub Release $($Latest.version)."
-        Invoke-WebRequest -Uri $Latest.zipAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -OutFile $zip -UseBasicParsing -TimeoutSec 3600
+        Invoke-GitHubDownload -Uri $Latest.zipAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -OutFile $zip -TimeoutSec 3600 -Description "Full update package download"
         $actualSize = (Get-Item -LiteralPath $zip).Length
         $expectedSize = [int64]$Latest.manifest.asset.size
         if ($actualSize -ne $expectedSize) { throw "Downloaded ZIP size mismatch: expected $expectedSize, received $actualSize." }
@@ -224,7 +394,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
     New-Item -ItemType Directory -Force -Path $stage,$payload | Out-Null
     try {
         Write-UpdateLog "Downloading incremental package $($Incremental.manifest.name) for $CurrentVersion -> $($Latest.version)."
-        Invoke-WebRequest -Uri $Incremental.asset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -OutFile $zip -UseBasicParsing -TimeoutSec 1800
+        Invoke-GitHubDownload -Uri $Incremental.asset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -OutFile $zip -TimeoutSec 1800 -Description "Incremental update package download"
         $actualSize = (Get-Item -LiteralPath $zip).Length
         $expectedSize = [int64]$Incremental.manifest.size
         if ($actualSize -ne $expectedSize) { throw "Downloaded incremental ZIP size mismatch: expected $expectedSize, received $actualSize." }

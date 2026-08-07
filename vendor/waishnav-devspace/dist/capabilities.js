@@ -71,6 +71,8 @@ const FEATURE_CATALOG = [
     { id: "native-ui-exact-selected-file-diff", maturity: "stable", since: "1.1.16" },
     { id: "native-ui-modern-typography", maturity: "stable", since: "1.1.16" },
     { id: "bundled-plugin-release-layout", maturity: "stable", since: "1.1.17" },
+    { id: "github-updater-bounded-network-retry", maturity: "stable", since: "1.1.17" },
+    { id: "github-updater-curl-fallback", maturity: "stable", since: "1.1.17" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

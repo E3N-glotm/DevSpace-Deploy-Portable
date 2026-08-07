@@ -11,6 +11,12 @@ const deltaBuilder = readFileSync(join(root, "setup", "create-incremental-update
 
 assert.match(updater, /repos\/\$Repository\/releases\/latest/);
 assert.match(updater, /update-manifest\.json/);
+assert.match(updater, /SecurityProtocolType\]::Tls12/);
+assert.match(updater, /Invoke-WithRetry/);
+assert.match(updater, /Invoke-GitHubJson/);
+assert.match(updater, /Invoke-GitHubDownload/);
+assert.match(updater, /curl\.exe fallback/);
+assert.match(updater, /runtime\\git\\mingw64\\bin\\curl\.exe/);
 assert.match(updater, /Get-FileHash[^\n]+SHA256/);
 assert.match(updater, /Get-IncrementalCandidate/);
 assert.match(updater, /Stage-IncrementalUpdate/);
@@ -33,6 +39,9 @@ assert.match(deltaBuilder, /baseSha256/);
 
 console.log(JSON.stringify({
   publicGitHubReleaseCheck: true,
+  tls12Compatibility: true,
+  boundedNetworkRetry: true,
+  curlFallbackTransport: true,
   incrementalFirst: true,
   automaticFullFallback: true,
   baseFileDriftProtection: true,

@@ -7,6 +7,7 @@
 - 完整 Portable ZIP 新增 `plugins/installed/codex-runtime-bridge/<版本>/` 预置目录；
 - 发布构建自动把 `setup/bundled-plugins/` 镜像到 `plugins/installed/`，并在打包前校验 Codex Runtime Bridge 的 manifest、runtime 和 Skill；
 - 正式部署优先从 Release 内 `plugins/installed/` 向持久化的 `data/plugins/installed/` 做非破坏性 seed，用户插件状态仍由 `data/` 持久化；
+- GitHub updater 增加 TLS 1.2、最多 3 次有界重试和 `curl.exe` fallback，覆盖 Release metadata、manifest、增量包及完整包下载；
 - Portable 与服务端版本统一为 1.1.17，Protocol 保持 1.5。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.17.md)
