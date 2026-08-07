@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.16**
+当前稳定版本：**1.1.17**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -14,15 +14,12 @@ Portable Protocol：**1.5**
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
-## 1.1.16 主要变化
+## 1.1.17 主要变化
 
-- GitHub 在线更新改为“**增量优先、完整包兜底**”：与当前版本精确匹配时优先下载文件级增量包，增量缺失、损坏、基础文件漂移或校验失败时自动回退到完整 Portable ZIP；
-- Release 同时发布完整 ZIP 和 `DevSpacePortable-Update-<旧版>-to-<新版>.zip`，增量包只携带变更文件与删除清单，并对基础文件和目标文件执行 SHA-256 校验；
-- 修复会话详情中选择不同文件后仍显示整轮所有文件 patch 的问题；现在按 `jsdiff` 实际分隔格式精确提取当前文件，不再发生跨文件差异泄漏；
-- 差异视图增加旧/新双行号 gutter，整体字体改为 Segoe UI Variable + Cascadia Code，并保留 Windows 字体回退；
-- `data/`、`logs/`、`reports/`、OAuth 状态、插件、Memories 和会话审阅数据仍不会被在线更新覆盖。
-
-> 兼容说明：已经安装的 1.1.15 更新器只认识完整 `asset`，因此 **1.1.15 → 1.1.16 对现有用户仍会下载一次完整 ZIP**。升级到 1.1.16 后，后续 1.1.17+ 才会由新更新器优先选择精确匹配的增量包；发布 1.1.15→1.1.16 delta 主要用于协议验收、镜像维护和新更新器回归。
+- 完整 Release ZIP 在首次启动前就直接包含 `plugins/installed/codex-runtime-bridge/<版本>/`，包括 `manifest.json`、`runtime.mjs`、`keep-awake.ps1` 和 Skill；
+- 构建时从维护源 `setup/bundled-plugins/` 自动生成 `plugins/installed/` 发布镜像，并在打包前强制验证 `codex-runtime-bridge` 是否进入最终 payload；
+- 正式 Release 优先以 `plugins/installed/` 作为内置插件 seed source；真正的用户安装/启用状态仍保存在 `data/plugins/installed/`，因此在线升级不会覆盖用户自己的插件状态；
+- 继续继承 1.1.16 的“增量优先、完整包兜底”、严格逐文件 Diff 与现代字体行为，Portable Protocol 仍为 1.5。
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
 
@@ -71,7 +68,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.16
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.17
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -99,7 +96,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.16 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.17 -BypassProxy
 ```
 
 ## 在线更新

@@ -1773,7 +1773,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.16 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.17 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2473,7 +2473,7 @@ namespace DevSpacePortable.NativeUI
             _allDrives.Checked = GetString(_currentConfig, "permissionMode") == "all-drive-roots";
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.16") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.17") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2590,7 +2590,7 @@ namespace DevSpacePortable.NativeUI
             {
                 SetOutput("正在通过 GitHub Releases 检查稳定版更新……");
                 Dictionary<string, object> status = await _manager.RunJsonAsync("update-check");
-                string current = GetString(status, "currentVersion", "1.1.16");
+                string current = GetString(status, "currentVersion", "1.1.17");
                 string latest = GetString(status, "latestVersion", current);
                 if (!GetBool(status, "updateAvailable"))
                 {

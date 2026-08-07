@@ -91,6 +91,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "setup/test-selected-file-diff.mjs",
             "setup/test-online-updater-contract.mjs",
             "setup/test-incremental-update.py",
+            "setup/test-release-plugin-layout.py",
             "setup/test-strict-stop.mjs",
             "setup/build-computer-use-helper.cmd",
             "setup/native/computer-use-capture.cpp",
