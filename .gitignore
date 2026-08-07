@@ -37,6 +37,9 @@ setup/native/lib/webview2/*
 /Microsoft.Web.WebView2.WinForms.dll
 /WebView2Loader.dll
 
+# Generated documentation (kept locally for reference, not tracked).
+docs/CODE-WIKI.md
+
 # Update/build staging directories.
 .hotupdate-*/
 .live-upgrade-*/
