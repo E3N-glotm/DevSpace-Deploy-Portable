@@ -29,6 +29,14 @@ release-assets/*
 /DevSpace-Portable.exe
 /*_DevSpace-Portable.exe
 
+# WebView2 runtime artifacts (restored from NuGet; see setup/native/lib/webview2/README.md).
+setup/native/lib/webview2/*
+!setup/native/lib/webview2/README.md
+# WebView2 managed DLLs copied next to the exe by build-native-ui.cjs
+/Microsoft.Web.WebView2.Core.dll
+/Microsoft.Web.WebView2.WinForms.dll
+/WebView2Loader.dll
+
 # Update/build staging directories.
 .hotupdate-*/
 .live-upgrade-*/

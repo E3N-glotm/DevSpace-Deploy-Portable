@@ -13,6 +13,20 @@ const REFERENCE_ROOT_CANDIDATES = [
 ];
 const SOURCE = path.join(ROOT, "setup", "native", "DevSpacePortableApp.cs");
 const OUTPUT = path.join(ROOT, "DevSpace-Portable.exe");
+const WEBVIEW2_LIB = path.join(ROOT, "setup", "native", "lib", "webview2", "lib", "net462");
+const WEBVIEW2_WINFORMS_DLL = path.join(WEBVIEW2_LIB, "Microsoft.Web.WebView2.WinForms.dll");
+const WEBVIEW2_CORE_DLL = path.join(WEBVIEW2_LIB, "Microsoft.Web.WebView2.Core.dll");
+const WEBVIEW2_LOADER_X64 = path.join(
+  ROOT,
+  "setup",
+  "native",
+  "lib",
+  "webview2",
+  "runtimes",
+  "win-x64",
+  "native",
+  "WebView2Loader.dll",
+);
 
 function run(file, args) {
   const result = childProcess.spawnSync(file, args, {
@@ -30,19 +44,42 @@ function run(file, args) {
   return String(result.stdout || "").trim();
 }
 
-if (!fs.existsSync(VSWHERE)) throw new Error(`vswhere.exe was not found: ${VSWHERE}`);
 if (!fs.existsSync(SOURCE)) throw new Error(`Native UI source was not found: ${SOURCE}`);
+if (!fs.existsSync(WEBVIEW2_WINFORMS_DLL)) {
+  throw new Error(
+    `Microsoft.Web.WebView2.WinForms.dll was not found at ${WEBVIEW2_WINFORMS_DLL}. ` +
+    `Download the NuGet package (see setup/native/lib/webview2/README).`,
+  );
+}
+if (!fs.existsSync(WEBVIEW2_LOADER_X64)) {
+  throw new Error(`WebView2Loader.dll (win-x64) was not found at ${WEBVIEW2_LOADER_X64}.`);
+}
 
-const vsRoot = run(VSWHERE, [
-  "-latest",
-  "-products", "*",
-  "-requires", "Microsoft.Component.MSBuild",
-  "-property", "installationPath",
-]).split(/\r?\n/).filter(Boolean)[0];
-if (!vsRoot) throw new Error("Visual Studio Build Tools were not found.");
-
-const compiler = path.join(vsRoot, "MSBuild", "Current", "Bin", "Roslyn", "csc.exe");
-if (!fs.existsSync(compiler)) throw new Error(`Roslyn compiler was not found: ${compiler}`);
+// 编译器选择：优先 VS Roslyn（支持最新 C# 语法），fallback 到 .NET Framework 自带 csc.exe（C# 5）
+let compiler = null;
+let langVersion = "latest";
+if (fs.existsSync(VSWHERE)) {
+  const vsRoot = run(VSWHERE, [
+    "-latest",
+    "-products", "*",
+    "-requires", "Microsoft.Component.MSBuild",
+    "-property", "installationPath",
+  ]).split(/\r?\n/).filter(Boolean)[0];
+  if (vsRoot) {
+    const roslynCsc = path.join(vsRoot, "MSBuild", "Current", "Bin", "Roslyn", "csc.exe");
+    if (fs.existsSync(roslynCsc)) compiler = roslynCsc;
+  }
+}
+if (!compiler) {
+  const frameworkCsc = "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe";
+  if (fs.existsSync(frameworkCsc)) {
+    compiler = frameworkCsc;
+    langVersion = "5"; // .NET Framework 4 csc.exe 最高支持 C# 5（async/await）
+  }
+}
+if (!compiler) {
+  throw new Error("C# compiler was not found. Install Visual Studio Build Tools or ensure .NET Framework csc.exe exists.");
+}
 
 const referenceRoot = REFERENCE_ROOT_CANDIDATES.find((candidate) =>
   fs.existsSync(path.join(candidate, "System.Windows.Forms.dll")),
@@ -62,19 +99,32 @@ const references = [
 for (const reference of references) {
   if (!fs.existsSync(reference)) throw new Error(`.NET Framework 4.8 reference was not found: ${reference}`);
 }
+// WebView2 托管程序集（Core + WinForms 适配器）
+references.push(WEBVIEW2_CORE_DLL, WEBVIEW2_WINFORMS_DLL);
 
-run(compiler, [
+const compilerArgs = [
   "/nologo",
   "/target:winexe",
   "/platform:x64",
   "/optimize+",
-  "/deterministic+",
   "/debug-",
-  "/langversion:latest",
-  `/out:${OUTPUT}`,
-  ...references.map((reference) => `/reference:${reference}`),
-  SOURCE,
-]);
+  `/langversion:${langVersion}`,
+];
+// /deterministic+ 仅 Roslyn 支持，.NET Framework 4 自带 csc.exe 不识别
+if (langVersion === "latest") compilerArgs.push("/deterministic+");
+compilerArgs.push(`/out:${OUTPUT}`, ...references.map((reference) => `/reference:${reference}`), SOURCE);
+
+run(compiler, compilerArgs);
+
+// 把 WebView2Loader.dll (本机) 复制到输出目录，否则 WebView2 运行时初始化失败。
+fs.copyFileSync(WEBVIEW2_LOADER_X64, path.join(ROOT, "WebView2Loader.dll"));
+// 把 WebView2 托管程序集复制到输出目录，运行时需要与 exe 同目录。
+fs.copyFileSync(WEBVIEW2_CORE_DLL, path.join(ROOT, "Microsoft.Web.WebView2.Core.dll"));
+fs.copyFileSync(WEBVIEW2_WINFORMS_DLL, path.join(ROOT, "Microsoft.Web.WebView2.WinForms.dll"));
 
 const stat = fs.statSync(OUTPUT);
 console.log(`Created ${OUTPUT} (${stat.size} bytes)`);
+console.log(`Copied WebView2Loader.dll -> ${path.join(ROOT, "WebView2Loader.dll")}`);
+console.log(`Copied Microsoft.Web.WebView2.Core.dll -> ${path.join(ROOT, "Microsoft.Web.WebView2.Core.dll")}`);
+console.log(`Copied Microsoft.Web.WebView2.WinForms.dll -> ${path.join(ROOT, "Microsoft.Web.WebView2.WinForms.dll")}`);
+

@@ -21,6 +21,7 @@ const required = [
   "setup/console-ui/vite.config.ts",
   "setup/console-ui/src/App.tsx",
   "setup/console-ui/src/api.ts",
+  "setup/native/lib/webview2/README.md",
 ];
 
 const forbiddenTrackedPatterns = [
@@ -28,6 +29,9 @@ const forbiddenTrackedPatterns = [
   /^app\/node_modules\//,
   /^setup\/console-ui\/node_modules\//,
   /^setup\/console-ui\/dist\//,
+  /^setup\/native\/lib\/webview2\/(?!README\.md$)/,
+  /^Microsoft\.Web\.WebView2\.(Core|WinForms)\.dll$/i,
+  /^WebView2Loader\.dll$/i,
   /^data\//,
   /^logs\//,
   /^reports\//,
