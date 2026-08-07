@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.17",
-  "builtAt": "2026-08-07T16:54:46+08:00",
+  "builtAt": "2026-08-07T17:32:09+08:00",
   "platform": "win32-x64",
   "runtime": {
     "node": "24.18.1",
@@ -361,7 +361,7 @@
       "no top-level MCP schema or protocol change"
     ],
     "1.1.17": [
-      "release ZIPs contain bundled plugins under plugins/installed/<plugin>/<version>",
+      "release ZIPs contain bundled plugins under data/plugins/installed/<plugin>/<version>",
       "codex-runtime-bridge is present in the extracted package before first launch",
       "the release plugin tree is used as the preferred seed source while user-managed plugin state remains under data/plugins/installed",
       "release construction validates that the codex-runtime-bridge manifest and runtime payload are present",
@@ -441,7 +441,7 @@
     "docs/releases/HOTFIX-1.1.14.md.sha256": "cf57670c147337efbeac1c25c60a03e02be7e5dc701edcfeb46e7297ab526ff6",
     "docs/releases/HOTFIX-1.1.15.md.sha256": "7bf2e23bf4263da03f90132a6c0073ac18a2e5afe6abde96fe1c4600657cc3e1",
     "docs/releases/HOTFIX-1.1.16.md.sha256": "a0f532755f47a6a4970176baba3eb8179cbe0abf76109f67aa125d2f342db5c8",
-    "docs/releases/HOTFIX-1.1.17.md.sha256": "59aa24ad43a47bbebbc380415babe32b14cdda39f6d8ced1634196e6c4d7f58c",
+    "docs/releases/HOTFIX-1.1.17.md.sha256": "4d74bfb0fa63d97c538cf9a053d870d15c843be00cf6e4986b0751564a269fbb",
     "docs/releases/HOTFIX-1.1.2.md.sha256": "249e541198ccdd954611cd8e48d5d19bebeaafb3a6518b5f26ca477f13aba549",
     "docs/releases/HOTFIX-1.1.3.md.sha256": "38c5697992c37d0dc150b0a25bf089876d7bb632951f7b6128f5560c4d6c76ba",
     "docs/releases/HOTFIX-1.1.4.md.sha256": "deafbd8723a67d5161598264416b2331eb7b27383a579de44e1023fdf89a74f4",
@@ -470,7 +470,7 @@
     "setup/build-computer-use-helper.cmd.sha256": "e2659c97418635e167754109fe121e4f7468ee67bfe47e97e15b2c72938f5df1",
     "setup/build-native-ui.cjs.sha256": "4c6718af3f2e95efec10203a6dbb2de8f433381c794bdc1da927fe578c83d494",
     "setup/build-native-ui.cmd.sha256": "9b0aa37b75594c44479f7c885e8b4b6ba61a5f136e3021b9be5202b13b1e3beb",
-    "setup/build-release.py.sha256": "f5f3dad3728689015ad53ce1f3c3bda404d053e82d4dc25dd61697ba300312f9",
+    "setup/build-release.py.sha256": "2d798236db292fd2502119de28fc10351a87a8b23416e493b1076402ed4c0f3c",
     "setup/bundled-plugins/codex-runtime-bridge/1.1.1/keep-awake.ps1.sha256": "3cbf1e30d4ba1b47a337251fd641ba971070972620099680c0f7df89649a563f",
     "setup/bundled-plugins/codex-runtime-bridge/1.1.1/manifest.json.sha256": "3165051a937cdf826daae464528c4e6dd2bc44088c0cbd581559c21d3d875f4f",
     "setup/bundled-plugins/codex-runtime-bridge/1.1.1/runtime.mjs.sha256": "91633d2cc2abdd3086780f314de1bb500f16b3b8e7d03be1f83e27ce3c2a231a",
@@ -488,7 +488,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "5c5a749eb8cc4a76be474a470c3df6814acd9e134e9d6f70a13085a13ca59c7f",
+    "setup/portable-manager.cjs.sha256": "554a7b93aa755e79b19906ecd400d6fe56d010358ac2fd93d423b5b3879059b0",
     "setup/portable-updater.ps1.sha256": "359c881ea778b32e04aa29ffefa35b222eef606470813030e50e993ce9dea39f",
     "setup/test-codex-runtime-bridge.mjs.sha256": "e9b7985d7eff121d7725460a273d9b956e740bb418b518dcb9657e292e489d11",
     "setup/test-computer-use-batch.mjs.sha256": "39d152f15e33736603bc5693794151c017c6f2ebf9722b1f86bc8f625f65d73b",
@@ -501,7 +501,7 @@
     "setup/test-plugin-manager.mjs.sha256": "f849cc5f4b00bee6a67526414a19785e1dbbf99c52f3d5d8d051baf09eceec70",
     "setup/test-portable-ui-heartbeat.mjs.sha256": "ece17ca02e1a9e9e5a61560076f5848889275d943ccd003c89140f6422de4b04",
     "setup/test-portable-ui-workflows.mjs.sha256": "00596c9c3c8162741e4a6e8dd07a706baf66ddf66801182e1081fdcd1bec6118",
-    "setup/test-release-plugin-layout.py.sha256": "88dde420b54d92ac2dfa348dd75e178253f532d2d33127265a9999ac45ea9929",
+    "setup/test-release-plugin-layout.py.sha256": "647a58a238cc7bd35ffdaae01d2b91c99bb2dc9cd36770609ca951dc96c48457",
     "setup/test-runtime-cards.mjs.sha256": "012ed0421e5f46995995b5085d42d6908ee7fe4de40c4c1a0b3ebecad59d9afc",
     "setup/test-runtime-log-ui.mjs.sha256": "a653dd2f3d50c4bb43b64038ca9356bdced38e198ac8c2fe58847db2a222f8ac",
     "setup/test-selected-file-diff.mjs.sha256": "1ed95d7171abcf933f33012eb09ff5fed043390311a3a62e83b13e1ee3a888d0",
