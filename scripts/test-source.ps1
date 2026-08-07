@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
+$env:DEVSPACE_WINDOWS_TEXT_ENCODING = "utf-8"
 
 $Node = Join-Path $Root "runtime\node\node.exe"
 if (-not (Test-Path $Node)) {
@@ -40,7 +41,9 @@ $Tests = @(
     "setup/test-runtime-cards.mjs",
     "setup/test-runtime-log-ui.mjs",
     "setup/test-portable-ui-workflows.mjs",
+    "setup/test-online-updater-contract.mjs",
     "setup/test-native-ui-resilience.mjs",
+    "setup/test-native-close-tray.mjs",
     "setup/test-session-capabilities.mjs",
     "setup/test-portable-ui-heartbeat.mjs",
     "setup/test-plugin-manager.mjs",

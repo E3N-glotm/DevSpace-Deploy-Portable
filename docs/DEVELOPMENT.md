@@ -27,8 +27,7 @@ To build a complete Release, restore the pinned runtime from a previous
 Release first:
 
 ```powershell
-$env:GH_TOKEN = "token with repository read access"
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.14
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.15
 ```
 
 ## Core development loop

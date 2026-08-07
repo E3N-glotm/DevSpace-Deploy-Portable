@@ -307,3 +307,15 @@
 - `setup/test-portable-ui-workflows.mjs` 对非整窗禁用、会话子页面以及真实 SQLite Memory CRUD 进行隔离回归，结果为 `nonWhiteningBusyState=true`、`sessionSubpage=true`、`memoryCrud=true`；
 - 原生 WinForms 编译通过，Portable 与服务端版本统一为 1.1.14，协议仍为 1.5，未新增或修改 MCP 顶层工具 Schema；
 - 所有源码修改和测试均在 `E:\program\Python\DevSpaceDeploy` 完成，未覆盖或停止 `D:\DevSpacePortable` 正式部署。
+
+## 1.1.15 GitHub 在线更新、会话分组、现代逐文件差异与托盘关闭行为
+
+- 原生“状态与部署”新增公开 GitHub Release 更新入口；`update-check` 无 Token 读取最新稳定 Release，`update-stage` 下载并核对字节数、SHA-256、仓库、标签、文件名和压缩包路径安全；
+- 独立 `portable-updater.ps1` 在 UI 退出后运行，停止当前 Portable 服务、建立同盘备份、替换应用文件并重新启动；`data`、`logs`、`reports` 不参与替换，失败会恢复旧应用文件并重新启动旧版本；
+- 源码目录包含 `.git` 时更新器拒绝覆盖，避免在线更新破坏 Git 分支或未提交修改；
+- 会话历史按规范化会话名分组，分组按最新修改时间倒序，组内轮次同样按更新时间倒序；分组标题不可直接执行回退、归档或重命名；
+- 差异区域改为 `ModernDiffViewer`，使用深色编辑器背景、行号栏、文件标题、hunk/新增/删除/文件头分色；未选择文件时只显示空状态，提取失败也不会退回展示整轮 patch；
+- 点击右上角关闭按钮会显示最小化到系统托盘、仅退出控制中心和取消；最小化保留 UI 租约和后台服务，退出只关闭 UI；选择可写入隔离的 `ui-preferences.json`，并可从托盘菜单或“重置关闭选择”恢复为每次询问；
+- 修复 Windows 文本编码探测没有超时的问题，并把核心 TGZ 改为 Python 生成的确定性归档，避免本机 npm CLI 异常阻塞发行流程；
+- 原生 WinForms 编译通过，公开 Release 检查实测成功；源码边界、Runtime Cards、现代日志、UI 工作流、更新器安全契约、原生 UI 韧性、稀疏会话、插件、Computer Use 批量和 Broker 回归全部通过；
+- Portable 与服务端版本统一为 1.1.15，Protocol 保持 1.5，未新增或修改 MCP 顶层工具 Schema。

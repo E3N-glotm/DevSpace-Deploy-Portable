@@ -1,14 +1,33 @@
-# Application update design for 1.1.15+
+# Application update design and 1.1.15 implementation
 
 ## Goal
 
-Provide a user-visible “检查更新” function backed by GitHub Releases while
-preserving configuration, OAuth state, plugins, sessions, and rollback safety.
+Version 1.1.15 provides a user-visible “检查更新” function backed by public
+GitHub Releases while preserving configuration, OAuth state, plugins,
+sessions, and rollback safety.
 
-The feature is an application update with a controlled restart, not in-place
-replacement of files held open by the running process.
+The first implementation uses a detached updater, a staging directory and a
+same-volume backup around a controlled restart. It never replaces files while
+the native UI is still running.
 
-## Target layout
+## Implemented in 1.1.15
+
+1. Query the public repository's latest stable Release without requiring a
+   GitHub token.
+2. Download `update-manifest.json` and the versioned Windows ZIP.
+3. Verify Release/tag consistency, archive name, expected size and SHA-256.
+4. Reject archive entries outside the `DevSpacePortable/` root or containing
+   traversal components.
+5. Extract to `.update-staging/<version>-<id>` and start a detached updater.
+6. Stop the current Portable services while excluding the detached controller.
+7. Back up the current application payload, replace it, verify the embedded
+   version, restart services and reopen the UI.
+8. Preserve `data/`, `logs/` and `reports/`; restore the previous application
+   payload automatically if any apply or restart step fails.
+9. Refuse application-level overwrite when the current directory contains
+   `.git`, so source checkouts continue to use normal Git workflows.
+
+## Future target layout
 
 ```text
 DevSpacePortable/
@@ -26,7 +45,7 @@ DevSpacePortable/
 `data/` and `logs/` remain outside versioned application directories. The
 launcher reads `current.json` and starts the selected version.
 
-## Update protocol
+## Future version-directory protocol
 
 1. Read the latest stable GitHub Release and `update-manifest.json`.
 2. Compare semantic versions and updater compatibility.

@@ -12,17 +12,13 @@ if ((Test-Path $Runtime) -and -not $Force) {
     throw "runtime already exists. Use -Force to replace it from a Release."
 }
 
-$Token = if ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { "" }
-if (-not $Token) {
-    throw "Set GH_TOKEN or GITHUB_TOKEN to a token with read access to the private repository."
-}
-
 $Headers = @{
-    Authorization = "Bearer $Token"
     Accept = "application/vnd.github+json"
     "X-GitHub-Api-Version" = "2022-11-28"
     "User-Agent" = "DevSpace-Deploy-Portable-Updater"
 }
+$Token = if ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { "" }
+if ($Token) { $Headers.Authorization = "Bearer $Token" }
 $ReleaseUri = if ($Version) {
     "https://api.github.com/repos/$Repository/releases/tags/v$Version"
 } else {
@@ -41,11 +37,11 @@ New-Item -ItemType Directory -Force -Path $Temporary,$Extracted | Out-Null
 
 try {
     $DownloadHeaders = @{
-        Authorization = "Bearer $Token"
         Accept = "application/octet-stream"
         "X-GitHub-Api-Version" = "2022-11-28"
         "User-Agent" = "DevSpace-Deploy-Portable-Updater"
     }
+    if ($Token) { $DownloadHeaders.Authorization = "Bearer $Token" }
     Invoke-WebRequest -Uri $ZipAsset.url -Headers $DownloadHeaders -OutFile $ZipPath -UseBasicParsing
 
     $ChecksumAsset = $Release.assets | Where-Object { $_.name -eq "SHA256SUMS-release.txt" } | Select-Object -First 1

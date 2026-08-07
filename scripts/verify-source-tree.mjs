@@ -13,7 +13,9 @@ const required = [
   "vendor/waishnav-devspace/package.json",
   "vendor/waishnav-devspace/dist/server.js",
   "setup/native/DevSpacePortableApp.cs",
+  "setup/portable-updater.ps1",
   "scripts/pack-devspace-core.mjs",
+  "scripts/pack-devspace-core.py",
 ];
 
 const forbiddenTrackedPatterns = [
