@@ -53,12 +53,15 @@ const MEMORY_STORE_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "d
 const PORTABLE_UPDATER_FILE = path.join(ROOT, "setup", "portable-updater.ps1");
 const UPDATE_STAGING_ROOT = path.join(ROOT, ".update-staging");
 const UPDATE_REPOSITORY = "E3N-glotm/DevSpace-Deploy-Portable";
-const BUNDLED_PLUGIN_ROOT = path.join(ROOT, "setup", "bundled-plugins");
+const RELEASE_PLUGIN_ROOT = path.join(ROOT, "plugins", "installed");
+const BUNDLED_PLUGIN_ROOT = fs.existsSync(RELEASE_PLUGIN_ROOT)
+  ? RELEASE_PLUGIN_ROOT
+  : path.join(ROOT, "setup", "bundled-plugins");
 const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.16";
+const PORTABLE_VERSION = "1.1.17";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;

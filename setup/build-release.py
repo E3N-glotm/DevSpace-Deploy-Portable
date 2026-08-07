@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -11,6 +12,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKSUM_FILE = ROOT / "SHA256SUMS.txt"
+BUNDLED_PLUGIN_SOURCE = ROOT / "setup" / "bundled-plugins"
+RELEASE_PLUGIN_ROOT = ROOT / "plugins" / "installed"
 EMPTY_RELEASE_DIRS = ("data/", "data/run/", "logs/", "reports/")
 EXCLUDED_TOP_LEVEL_DIRS = {
     "data",
@@ -42,6 +45,52 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def prepare_release_plugins() -> list[Path]:
+    """Mirror bundled plugins into the user-visible release plugin layout.
+
+    The maintained source of truth remains setup/bundled-plugins.  Release ZIPs
+    additionally expose the same versioned plugin trees at
+    plugins/installed/<plugin>/<version>/ so a freshly extracted Portable
+    distribution visibly contains its bundled plugins before first launch.
+    Runtime-installed/user-managed plugin state remains under data/plugins and
+    is still preserved across updates.
+    """
+    if RELEASE_PLUGIN_ROOT.exists():
+        shutil.rmtree(RELEASE_PLUGIN_ROOT)
+    RELEASE_PLUGIN_ROOT.mkdir(parents=True, exist_ok=True)
+
+    mirrored: list[Path] = []
+    if not BUNDLED_PLUGIN_SOURCE.is_dir():
+        return mirrored
+
+    for source in sorted(BUNDLED_PLUGIN_SOURCE.rglob("*")):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(BUNDLED_PLUGIN_SOURCE)
+        destination = RELEASE_PLUGIN_ROOT / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        mirrored.append(destination.relative_to(ROOT))
+    return mirrored
+
+
+def validate_release_plugins(files: list[Path], mirrored: list[Path]) -> None:
+    release_set = {item.as_posix() for item in files}
+    missing = [item.as_posix() for item in mirrored if item.as_posix() not in release_set]
+    if missing:
+        raise RuntimeError(f"Bundled plugin mirror is missing from release payload: {missing[:10]}")
+
+    codex_root = Path("plugins/installed/codex-runtime-bridge")
+    codex_manifests = [
+        item for item in mirrored
+        if codex_root in item.parents and item.name == "manifest.json"
+    ]
+    if not codex_manifests:
+        raise RuntimeError(
+            "Release payload must contain plugins/installed/codex-runtime-bridge/<version>/manifest.json"
+        )
 
 
 def release_files() -> list[Path]:
@@ -134,7 +183,9 @@ def main() -> int:
         raise RuntimeError(f"Native UI builder is missing: {native_ui_builder}")
     subprocess.run([str(node), str(native_ui_builder)], cwd=ROOT, check=True)
     version = release_version()
+    mirrored_plugins = prepare_release_plugins()
     files = release_files()
+    validate_release_plugins(files, mirrored_plugins)
     print(f"Release {version}: {len(files)} payload files", flush=True)
     write_checksums(files)
     output = write_zip(files, version)
