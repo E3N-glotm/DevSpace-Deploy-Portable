@@ -54,7 +54,8 @@ $ReleaseNotes = Join-Path $Root "docs\releases\HOTFIX-$Version.md"
 $Zip = Join-Path $Root "DevSpacePortable-Windows-x64-$Version.zip"
 $UpdateManifest = Join-Path $Root "release-assets\update-manifest.json"
 $ReleaseChecksums = Join-Path $Root "release-assets\SHA256SUMS-release.txt"
-$Assets = @($Zip, $UpdateManifest, $ReleaseChecksums)
+$IncrementalAssets = @(Get-ChildItem -LiteralPath $Root -Filter "DevSpacePortable-Update-*-to-$Version.zip" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+$Assets = @($Zip) + $IncrementalAssets + @($UpdateManifest, $ReleaseChecksums)
 
 foreach ($Required in @($ReleaseNotes) + $Assets) {
     if (-not (Test-Path $Required)) { throw "Required release file is missing: $Required" }

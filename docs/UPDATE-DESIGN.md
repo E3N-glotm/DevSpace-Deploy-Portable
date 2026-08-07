@@ -1,14 +1,42 @@
-# Application update design and 1.1.15 implementation
+# Application update design and 1.1.16 implementation
 
 ## Goal
 
-Version 1.1.15 provides a user-visible “检查更新” function backed by public
-GitHub Releases while preserving configuration, OAuth state, plugins,
-sessions, and rollback safety.
+Version 1.1.16 keeps the public GitHub Releases update flow introduced in
+1.1.15 and adds file-level incremental packages with automatic full-package
+fallback while preserving configuration, OAuth state, plugins, sessions, and
+rollback safety.
 
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.16: incremental first, full fallback
+
+1. Each Release still contains the complete `DevSpacePortable-Windows-x64-<version>.zip`.
+2. The release workflow additionally compares the new full ZIP with the latest
+   stable full ZIP and generates
+   `DevSpacePortable-Update-<from>-to-<to>.zip`.
+3. The incremental package uses `file-delta-v1`: only changed/new files are
+   included, while deleted paths are listed explicitly in `delta-manifest.json`.
+4. `update-manifest.json` schema 2 advertises both the complete asset and one or
+   more `incrementalAssets` keyed by exact `fromVersion`.
+5. The updater first selects a delta whose `fromVersion` exactly equals the
+   installed version. Before staging it verifies asset size/SHA-256, archive
+   paths, every changed target file, and the installed SHA-256 of every file
+   the delta will replace or delete.
+6. Missing delta assets, malformed packages, SHA-256 mismatches, unsafe paths,
+   or local drift in a touched base file automatically switch the same update
+   attempt to the complete ZIP.
+7. Incremental apply backs up and replaces only touched paths; complete apply
+   retains the 1.1.15 top-level payload replacement behavior. Both modes share
+   the same rollback, service restart, and persistent-data exclusions.
+8. Users several versions behind can update without a chain of intermediate
+   deltas: if no exact delta exists, the updater downloads the current full ZIP.
+9. The updater shipped in 1.1.15 predates schema-2 `incrementalAssets`, so an
+   already-installed 1.1.15 client still performs one complete-package update
+   to 1.1.16. Incremental-first selection becomes effective for subsequent
+   releases once the installed updater is 1.1.16 or newer.
 
 ## Implemented in 1.1.15
 

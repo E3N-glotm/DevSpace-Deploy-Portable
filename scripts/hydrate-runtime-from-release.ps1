@@ -2,7 +2,9 @@
 param(
     [string]$Version = "",
     [string]$Repository = "E3N-glotm/DevSpace-Deploy-Portable",
-    [switch]$Force
+    [switch]$Force,
+    [string]$ArchiveOutput = "",
+    [string]$MetadataOutput = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +57,25 @@ try {
         if ($Actual -ne $Expected) { throw "Release ZIP SHA-256 mismatch." }
     } else {
         Write-Warning "Release has no SHA256SUMS-release.txt; relying on the authenticated GitHub asset response."
+    }
+
+    if ($ArchiveOutput) {
+        $ResolvedArchiveOutput = [IO.Path]::GetFullPath($ArchiveOutput)
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ResolvedArchiveOutput) | Out-Null
+        Copy-Item -LiteralPath $ZipPath -Destination $ResolvedArchiveOutput -Force
+    }
+    if ($MetadataOutput) {
+        $ResolvedMetadataOutput = [IO.Path]::GetFullPath($MetadataOutput)
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ResolvedMetadataOutput) | Out-Null
+        [ordered]@{
+            version = $ResolvedVersion
+            tag = [string]$Release.tag_name
+            releaseUrl = [string]$Release.html_url
+            zipName = $ZipName
+            zipSize = (Get-Item -LiteralPath $ZipPath).Length
+            zipSha256 = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            archiveOutput = if ($ArchiveOutput) { [IO.Path]::GetFullPath($ArchiveOutput) } else { "" }
+        } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ResolvedMetadataOutput -Encoding UTF8
     }
 
     Expand-Archive -LiteralPath $ZipPath -DestinationPath $Extracted -Force
