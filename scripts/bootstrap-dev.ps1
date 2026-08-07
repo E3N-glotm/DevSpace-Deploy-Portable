@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipInstall,
-    [switch]$SkipNativeBuild
+    [switch]$SkipNativeBuild,
+    [switch]$SkipConsoleUiBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +42,16 @@ if ($LASTEXITCODE -ne 0) { throw "Dependency hardening failed." }
 
 & $Node scripts\verify-source-tree.mjs
 if ($LASTEXITCODE -ne 0) { throw "Source-tree verification failed." }
+
+# 构建 console-ui（React + Vite 前端，由 console-server.cjs 静态 serve）
+if (-not $SkipConsoleUiBuild) {
+    if (-not (Test-Path "setup\console-ui\node_modules")) {
+        & $Npm install --prefix setup\console-ui --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw "console-ui npm install failed." }
+    }
+    & $Npm run build --prefix setup\console-ui
+    if ($LASTEXITCODE -ne 0) { throw "console-ui build failed." }
+}
 
 if (-not $SkipNativeBuild) {
     $VsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"

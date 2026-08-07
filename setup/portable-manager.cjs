@@ -2187,12 +2187,7 @@ async function main() {
     } else if (command === "memory-delete") {
       stdoutJson(await runMemoryAdmin("delete", await readStdinJson()));
     } else if (command === "log-paths") {
-      const provider = selectedTunnelProvider();
-      stdoutJson({
-        devspace: path.join(ROOT, "logs", "devspace.log"),
-        tunnel: path.join(ROOT, "logs", provider === "cloudflare" ? "cloudflared.log" : "ngrok.log"),
-        directory: path.join(ROOT, "logs"),
-      });
+      stdoutJson(logPaths());
     } else if (command === "portable-processes") {
       stdoutJson({ processes: portableProcessSnapshot() });
     } else if (command === "get") {
@@ -2205,13 +2200,73 @@ async function main() {
   }
 }
 
+function logPaths() {
+  const provider = selectedTunnelProvider();
+  return {
+    devspace: path.join(ROOT, "logs", "devspace.log"),
+    tunnel: path.join(ROOT, "logs", provider === "cloudflare" ? "cloudflared.log" : "ngrok.log"),
+    directory: path.join(ROOT, "logs"),
+  };
+}
+
 module.exports = {
-  COMPUTER_USE_BROKER_FILE,
+  // 路径与常量（供 console-server 复用）
+  ROOT,
+  DATA_DIR,
+  CONFIG_DIR,
+  CONFIG_FILE,
+  RUN_DIR,
   UI_LEASE_FILE,
-  processComputerUseRequests,
-  readJson,
+  UI_LEASE_TTL_MS,
+  COMPUTER_USE_BROKER_FILE,
+  PORTABLE_VERSION,
+  // 配置与状态
+  configure,
+  setComputerUse,
+  showConfig,
+  selectedTunnelProvider,
+  selectedToolMode,
+  selectedPermissions,
+  selectedFeatures,
+  computerUseRuntimeEnabled,
+  // UI 租约
+  openUiLease,
+  heartbeatUiLease,
+  closeUiLease,
   uiLeaseStatus,
+  // 驱动器
+  fixedDrives,
+  // 计划任务与服务
+  installTasks,
+  uninstallTasks,
+  taskExists,
+  startServices,
+  stopServices,
+  enableServices,
+  disableServices,
+  // 诊断
+  statusText,
+  testEndpoints,
+  diagnoseText,
+  verifyFiles,
+  ensureCloudflaredRuntime,
+  // 更新
+  runPortableUpdater,
+  launchPortableUpdate,
+  // 插件
+  runPluginAdmin,
+  seedBundledPlugins,
+  // 审阅
+  runReviewAdmin,
+  // Memory
+  runMemoryAdmin,
+  // 进程与日志
+  portableProcessSnapshot,
+  logPaths,
+  // 基础工具
+  readJson,
   writeJson,
+  processComputerUseRequests,
 };
 
 if (require.main === module) {

@@ -16,11 +16,18 @@ const required = [
   "setup/portable-updater.ps1",
   "scripts/pack-devspace-core.mjs",
   "scripts/pack-devspace-core.py",
+  "setup/console-server.cjs",
+  "setup/console-ui/package.json",
+  "setup/console-ui/vite.config.ts",
+  "setup/console-ui/src/App.tsx",
+  "setup/console-ui/src/api.ts",
 ];
 
 const forbiddenTrackedPatterns = [
   /^runtime\//,
   /^app\/node_modules\//,
+  /^setup\/console-ui\/node_modules\//,
+  /^setup\/console-ui\/dist\//,
   /^data\//,
   /^logs\//,
   /^reports\//,
@@ -42,7 +49,7 @@ function gitFiles() {
 }
 
 function sourceFiles() {
-  const excluded = new Set([".git", ".idea", ".vs", ".vscode", "runtime", "data", "logs", "reports", "node_modules"]);
+  const excluded = new Set([".git", ".idea", ".vs", ".vscode", "runtime", "data", "logs", "reports", "node_modules", "dist"]);
   const files = [];
   const stack = [root];
   while (stack.length) {
