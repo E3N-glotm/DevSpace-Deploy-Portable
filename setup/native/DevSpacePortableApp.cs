@@ -6,6 +6,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -1512,11 +1513,14 @@ namespace DevSpacePortable.NativeUI
         private Label _sessionDetailTitle;
         private Label _sessionDetailMeta;
         private TextBox _memorySearch;
+        private ComboBox _memoryViewWorkspace;
+        private CheckBox _showOtherWorkspaceMemories;
         private ComboBox _memoryScope;
         private ComboBox _memoryWorkspace;
         private TextBox _memoryTitle;
         private TextBox _memoryTags;
         private TextBox _memoryContent;
+        private RichTextBox _memoryPreview;
         private Label _memoryStatus;
 
         public MainForm(string root)
@@ -1773,7 +1777,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.17 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.18 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2231,9 +2235,9 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 Size = new Size(1080, 680),
-                SplitterDistance = 470,
-                Panel1MinSize = 390,
-                Panel2MinSize = 460,
+                SplitterDistance = 560,
+                Panel1MinSize = 500,
+                Panel2MinSize = 500,
                 SplitterWidth = 14,
                 BorderStyle = BorderStyle.None,
                 BackColor = UiPalette.Background,
@@ -2242,12 +2246,13 @@ namespace DevSpacePortable.NativeUI
             {
                 int available = Math.Max(0, split.ClientSize.Width - split.SplitterWidth);
                 if (available < split.Panel1MinSize + split.Panel2MinSize) return;
-                split.SplitterDistance = Math.Max(split.Panel1MinSize, Math.Min((int)(available * 0.43), available - split.Panel2MinSize));
+                split.SplitterDistance = Math.Max(split.Panel1MinSize, Math.Min((int)(available * 0.48), available - split.Panel2MinSize));
             };
 
-            TableLayoutPanel list = NewTable(1, 4);
+            TableLayoutPanel list = NewTable(1, 5);
             list.AutoScroll = false;
             list.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+            list.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             list.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             list.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             list.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -2270,6 +2275,32 @@ namespace DevSpacePortable.NativeUI
             });
             list.Controls.Add(intro, 0, 0);
 
+            TableLayoutPanel scopeBar = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4, BackColor = Color.Transparent, Padding = new Padding(3) };
+            scopeBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            scopeBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            scopeBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            scopeBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            _memoryViewWorkspace = new ModernComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+            StyleField(_memoryViewWorkspace);
+            _memoryViewWorkspace.SelectedIndexChanged += delegate { if (!_memoryListLoading) RenderMemoryList(); };
+            Control memoryWorkspaceHost = WrapField(_memoryViewWorkspace);
+            memoryWorkspaceHost.Dock = DockStyle.Fill;
+            _showOtherWorkspaceMemories = new CheckBox
+            {
+                Text = "显示其他工作区",
+                AutoSize = true,
+                Font = UiTypography.Ui(9F),
+                ForeColor = UiPalette.TextMuted,
+                BackColor = Color.Transparent,
+                Padding = new Padding(6, 7, 4, 4),
+            };
+            _showOtherWorkspaceMemories.CheckedChanged += delegate { if (!_memoryListLoading) RenderMemoryList(); };
+            scopeBar.Controls.Add(ToolbarLabel("查看工作区"), 0, 0);
+            scopeBar.Controls.Add(memoryWorkspaceHost, 1, 0);
+            scopeBar.Controls.Add(_showOtherWorkspaceMemories, 2, 0);
+            scopeBar.Controls.Add(new Label { AutoSize = true, Text = "默认仅显示：当前工作区 + 全局", Font = UiTypography.Ui(8.5F), ForeColor = UiPalette.TextMuted, BackColor = Color.Transparent, Padding = new Padding(8, 9, 0, 0) }, 3, 0);
+            list.Controls.Add(scopeBar, 0, 1);
+
             TableLayoutPanel search = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, BackColor = Color.Transparent, Padding = new Padding(3) };
             search.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             search.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -2282,18 +2313,19 @@ namespace DevSpacePortable.NativeUI
             search.Controls.Add(ToolbarLabel("搜索"), 0, 0);
             search.Controls.Add(memorySearchHost, 1, 0);
             search.Controls.Add(ActionButton("刷新", async delegate { await LoadMemoriesAsync(); }, true), 2, 0);
-            list.Controls.Add(search, 0, 1);
+            list.Controls.Add(search, 0, 2);
             ConfigureMemoryGrid();
-            list.Controls.Add(WrapSurface(_memoryGrid), 0, 2);
+            list.Controls.Add(WrapSurface(_memoryGrid), 0, 3);
             FlowLayoutPanel memoryListActions = NewButtonBar();
             memoryListActions.Controls.Add(ActionButton("新建 Memory", delegate { BeginNewMemory(); }, true));
             memoryListActions.Controls.Add(ActionButton("删除所选", async delegate { await DeleteSelectedMemoryAsync(); }, false, true));
-            list.Controls.Add(memoryListActions, 0, 3);
+            list.Controls.Add(memoryListActions, 0, 4);
             split.Panel1.Controls.Add(list);
 
-            TableLayoutPanel editorLayout = NewTable(1, 3);
+            TableLayoutPanel editorLayout = NewTable(1, 4);
             editorLayout.AutoScroll = false;
             editorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+            editorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 170));
             editorLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             editorLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             _memoryStatus = new Label
@@ -2306,6 +2338,13 @@ namespace DevSpacePortable.NativeUI
                 AutoEllipsis = true,
             };
             editorLayout.Controls.Add(_memoryStatus, 0, 0);
+
+            GroupBox preview = NewGroup("完整内容预览");
+            _memoryPreview = CreateMemoryPreviewBox();
+            _memoryPreview.Text = "选择左侧 Memory 后，这里会显示完整内容、作用域、工作区与标签。";
+            preview.Controls.Add(_memoryPreview);
+            editorLayout.Controls.Add(preview, 0, 1);
+
             GroupBox editor = NewGroup("Memory 内容");
             TableLayoutPanel form = NewFormTable();
             _memoryScope = AddCombo(form, "作用域", new[] { "workspace", "global" });
@@ -2315,11 +2354,11 @@ namespace DevSpacePortable.NativeUI
             _memoryTags = AddText(form, "标签（逗号分隔）");
             _memoryContent = AddMultiline(form, "内容", 260);
             editor.Controls.Add(form);
-            editorLayout.Controls.Add(editor, 0, 1);
+            editorLayout.Controls.Add(editor, 0, 2);
             FlowLayoutPanel editorActions = NewButtonBar();
             editorActions.Controls.Add(ActionButton("保存 Memory", async delegate { await SaveMemoryAsync(); }, true));
             editorActions.Controls.Add(ActionButton("清空编辑器", delegate { BeginNewMemory(); }));
-            editorLayout.Controls.Add(editorActions, 0, 2);
+            editorLayout.Controls.Add(editorActions, 0, 3);
             split.Panel2.Controls.Add(editorLayout);
 
             page.Controls.Add(split);
@@ -2473,7 +2512,7 @@ namespace DevSpacePortable.NativeUI
             _allDrives.Checked = GetString(_currentConfig, "permissionMode") == "all-drive-roots";
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.17") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.18") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2590,7 +2629,7 @@ namespace DevSpacePortable.NativeUI
             {
                 SetOutput("正在通过 GitHub Releases 检查稳定版更新……");
                 Dictionary<string, object> status = await _manager.RunJsonAsync("update-check");
-                string current = GetString(status, "currentVersion", "1.1.17");
+                string current = GetString(status, "currentVersion", "1.1.18");
                 string latest = GetString(status, "latestVersion", current);
                 if (!GetBool(status, "updateAvailable"))
                 {
@@ -2973,20 +3012,47 @@ namespace DevSpacePortable.NativeUI
         {
             if (_memoryWorkspace == null) return;
             string selected = Convert.ToString(_memoryWorkspace.SelectedItem ?? "");
-            _memoryWorkspace.Items.Clear();
-            foreach (string root in GetStringList(_currentConfig, "allowedRoots")) _memoryWorkspace.Items.Add(root);
-            if (!string.IsNullOrWhiteSpace(selected))
+            string selectedView = _memoryViewWorkspace == null ? "" : Convert.ToString(_memoryViewWorkspace.SelectedItem ?? "");
+            bool priorLoading = _memoryListLoading;
+            _memoryListLoading = true;
+            try
             {
-                for (int index = 0; index < _memoryWorkspace.Items.Count; index++)
+                _memoryWorkspace.Items.Clear();
+                if (_memoryViewWorkspace != null) _memoryViewWorkspace.Items.Clear();
+                foreach (string root in GetStringList(_currentConfig, "allowedRoots"))
                 {
-                    if (string.Equals(Convert.ToString(_memoryWorkspace.Items[index]), selected, StringComparison.OrdinalIgnoreCase))
+                    _memoryWorkspace.Items.Add(root);
+                    if (_memoryViewWorkspace != null) _memoryViewWorkspace.Items.Add(root);
+                }
+                if (!string.IsNullOrWhiteSpace(selected))
+                {
+                    for (int index = 0; index < _memoryWorkspace.Items.Count; index++)
                     {
-                        _memoryWorkspace.SelectedIndex = index;
-                        break;
+                        if (string.Equals(Convert.ToString(_memoryWorkspace.Items[index]), selected, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _memoryWorkspace.SelectedIndex = index;
+                            break;
+                        }
                     }
                 }
+                if (_memoryWorkspace.SelectedIndex < 0 && _memoryWorkspace.Items.Count > 0) _memoryWorkspace.SelectedIndex = 0;
+                if (_memoryViewWorkspace != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(selectedView))
+                    {
+                        for (int index = 0; index < _memoryViewWorkspace.Items.Count; index++)
+                        {
+                            if (string.Equals(Convert.ToString(_memoryViewWorkspace.Items[index]), selectedView, StringComparison.OrdinalIgnoreCase))
+                            {
+                                _memoryViewWorkspace.SelectedIndex = index;
+                                break;
+                            }
+                        }
+                    }
+                    if (_memoryViewWorkspace.SelectedIndex < 0 && _memoryViewWorkspace.Items.Count > 0) _memoryViewWorkspace.SelectedIndex = 0;
+                }
             }
-            if (_memoryWorkspace.SelectedIndex < 0 && _memoryWorkspace.Items.Count > 0) _memoryWorkspace.SelectedIndex = 0;
+            finally { _memoryListLoading = priorLoading; }
             UpdateMemoryWorkspaceState();
         }
 
@@ -3008,23 +3074,74 @@ namespace DevSpacePortable.NativeUI
         {
             if (_memoryGrid == null) return;
             string query = (_memorySearch == null ? "" : _memorySearch.Text).Trim().ToLowerInvariant();
+            string viewWorkspace = _memoryViewWorkspace == null ? "" : Convert.ToString(_memoryViewWorkspace.SelectedItem ?? "");
+            bool showOtherWorkspaces = _showOtherWorkspaceMemories != null && _showOtherWorkspaceMemories.Checked;
             string selectedId = SelectedMemoryId(false);
             _memoryListLoading = true;
             try
             {
                 _memoryGrid.Rows.Clear();
-                foreach (Dictionary<string, object> memory in _allMemories)
+                IEnumerable<Dictionary<string, object>> visible = _allMemories
+                    .Where(memory => showOtherWorkspaces || MemoryVisibleForWorkspace(memory, viewWorkspace))
+                    .OrderBy(memory => MemoryCategoryRank(memory, viewWorkspace))
+                    .ThenByDescending(memory => MemoryUpdatedAt(memory));
+                foreach (Dictionary<string, object> memory in visible)
                 {
                     string title = GetString(memory, "title");
                     string content = GetString(memory, "content");
                     string tags = string.Join(", ", GetStringList(memory, "tags"));
-                    if (query.Length > 0 && !title.ToLowerInvariant().Contains(query) && !content.ToLowerInvariant().Contains(query) && !tags.ToLowerInvariant().Contains(query)) continue;
-                    int row = _memoryGrid.Rows.Add(GetString(memory, "scope"), title, tags, FormatLocalTime(GetString(memory, "updatedAt")));
+                    string workspaceRoot = GetString(memory, "workspaceRoot");
+                    if (query.Length > 0 && !title.ToLowerInvariant().Contains(query) && !content.ToLowerInvariant().Contains(query) && !tags.ToLowerInvariant().Contains(query) && !workspaceRoot.ToLowerInvariant().Contains(query)) continue;
+                    string category = MemoryCategory(memory, viewWorkspace);
+                    int row = _memoryGrid.Rows.Add(category, title, MemoryWorkspaceLabel(memory), tags, FormatLocalTime(GetString(memory, "updatedAt")));
                     _memoryGrid.Rows[row].Tag = memory;
+                    if (category == "当前工作区") _memoryGrid.Rows[row].DefaultCellStyle.BackColor = UiPalette.PrimarySoft;
+                    else if (category == "全局") _memoryGrid.Rows[row].DefaultCellStyle.BackColor = UiPalette.SurfaceMuted;
                     if (GetString(memory, "id") == selectedId) _memoryGrid.Rows[row].Selected = true;
                 }
             }
             finally { _memoryListLoading = false; }
+            if (_memoryGrid.SelectedRows.Count == 1) PopulateMemoryEditor(SelectedMemory());
+            else if (_memoryPreview != null && string.IsNullOrWhiteSpace(_editingMemoryId)) _memoryPreview.Text = "选择左侧 Memory 后，这里会显示完整内容、作用域、工作区与标签。";
+        }
+
+        private static bool MemoryVisibleForWorkspace(Dictionary<string, object> memory, string workspaceRoot)
+        {
+            if (string.Equals(GetString(memory, "scope"), "global", StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.IsNullOrWhiteSpace(workspaceRoot)) return false;
+            return string.Equals(NormalizeMemoryPath(GetString(memory, "workspaceRoot")), NormalizeMemoryPath(workspaceRoot), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string MemoryCategory(Dictionary<string, object> memory, string workspaceRoot)
+        {
+            if (string.Equals(GetString(memory, "scope"), "global", StringComparison.OrdinalIgnoreCase)) return "全局";
+            return MemoryVisibleForWorkspace(memory, workspaceRoot) ? "当前工作区" : "其他工作区";
+        }
+
+        private static int MemoryCategoryRank(Dictionary<string, object> memory, string workspaceRoot)
+        {
+            string category = MemoryCategory(memory, workspaceRoot);
+            if (category == "当前工作区") return 0;
+            if (category == "全局") return 1;
+            return 2;
+        }
+
+        private static DateTime MemoryUpdatedAt(Dictionary<string, object> memory)
+        {
+            DateTime parsed;
+            return DateTime.TryParse(GetString(memory, "updatedAt"), null, DateTimeStyles.RoundtripKind, out parsed) ? parsed : DateTime.MinValue;
+        }
+
+        private static string NormalizeMemoryPath(string value)
+        {
+            return (value ?? "").Trim().TrimEnd('\\', '/').Replace('\\', '/').ToLowerInvariant();
+        }
+
+        private static string MemoryWorkspaceLabel(Dictionary<string, object> memory)
+        {
+            if (string.Equals(GetString(memory, "scope"), "global", StringComparison.OrdinalIgnoreCase)) return "所有工作区";
+            string root = GetString(memory, "workspaceRoot");
+            return string.IsNullOrWhiteSpace(root) ? "（未绑定）" : root;
         }
 
         private string SelectedMemoryId(bool required = true)
@@ -3058,6 +3175,7 @@ namespace DevSpacePortable.NativeUI
             _memoryContent.Text = "";
             _memoryScope.SelectedItem = "workspace";
             PopulateMemoryWorkspaces();
+            if (_memoryPreview != null) _memoryPreview.Text = "正在新建 Memory；保存前不会写入本地 SQLite。";
             _memoryStatus.Text = "正在新建 Memory；保存后才会写入本地 SQLite。";
             _memoryGrid.ClearSelection();
             _memoryTitle.Focus();
@@ -3087,7 +3205,27 @@ namespace DevSpacePortable.NativeUI
                 if (!matched) _memoryWorkspace.SelectedItem = workspaceRoot;
             }
             UpdateMemoryWorkspaceState();
+            RenderMemoryPreview(memory);
             _memoryStatus.Text = "正在编辑：" + GetString(memory, "title") + "  ·  " + GetString(memory, "scope") + "  ·  更新于 " + FormatLocalTime(GetString(memory, "updatedAt"));
+        }
+
+        private void RenderMemoryPreview(Dictionary<string, object> memory)
+        {
+            if (_memoryPreview == null) return;
+            string scope = GetString(memory, "scope", "workspace");
+            string workspace = string.Equals(scope, "global", StringComparison.OrdinalIgnoreCase) ? "所有工作区" : GetString(memory, "workspaceRoot", "（未绑定）");
+            string tags = string.Join(", ", GetStringList(memory, "tags"));
+            _memoryPreview.Text =
+                "标题：" + GetString(memory, "title") + Environment.NewLine +
+                "作用域：" + (string.Equals(scope, "global", StringComparison.OrdinalIgnoreCase) ? "全局" : "工作区") + Environment.NewLine +
+                "工作区：" + workspace + Environment.NewLine +
+                "标签：" + (string.IsNullOrWhiteSpace(tags) ? "（无）" : tags) + Environment.NewLine +
+                "更新：" + FormatLocalTime(GetString(memory, "updatedAt")) + Environment.NewLine +
+                Environment.NewLine +
+                GetString(memory, "content");
+            _memoryPreview.SelectionStart = 0;
+            _memoryPreview.SelectionLength = 0;
+            _memoryPreview.ScrollToCaret();
         }
 
         private async Task SaveMemoryAsync()
@@ -3608,14 +3746,16 @@ namespace DevSpacePortable.NativeUI
         {
             _memoryGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
             _memoryGrid.RowTemplate.Height = 48;
-            _memoryGrid.Columns.Add("memoryScope", "作用域");
+            _memoryGrid.Columns.Add("memoryScope", "范围");
             _memoryGrid.Columns.Add("memoryTitle", "标题");
+            _memoryGrid.Columns.Add("memoryWorkspace", "工作区");
             _memoryGrid.Columns.Add("memoryTags", "标签");
             _memoryGrid.Columns.Add("memoryUpdated", "更新");
-            _memoryGrid.Columns["memoryScope"].Width = 86;
+            _memoryGrid.Columns["memoryScope"].Width = 96;
             _memoryGrid.Columns["memoryTitle"].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
             _memoryGrid.Columns["memoryTitle"].MinimumWidth = 120;
-            _memoryGrid.Columns["memoryTags"].Width = 140;
+            _memoryGrid.Columns["memoryWorkspace"].Width = 180;
+            _memoryGrid.Columns["memoryTags"].Width = 120;
             _memoryGrid.Columns["memoryUpdated"].Width = 128;
             _memoryGrid.SelectionChanged += MemorySelectionChanged;
         }
@@ -3640,6 +3780,7 @@ namespace DevSpacePortable.NativeUI
         private Button ActionButton(string text, Action action, bool primary = false, bool danger = false) { ModernButton button = new ModernButton { Text = text, AutoSize = true, Primary = primary, Danger = danger }; button.Click += delegate { try { action(); } catch (Exception ex) { ShowError(ex); } }; return button; }
         private static RichTextBox CreateConsoleBox() { return new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = UiPalette.Console, ForeColor = UiPalette.ConsoleText, Font = UiTypography.Code(9.25F), BorderStyle = BorderStyle.None, DetectUrls = false, Margin = new Padding(0) }; }
         private static RichTextBox CreateLogBox() { return new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = UiPalette.Surface, ForeColor = Color.FromArgb(55, 65, 82), Font = UiTypography.Code(9.25F), BorderStyle = BorderStyle.None, DetectUrls = false, Margin = new Padding(4), Padding = new Padding(6) }; }
+        private static RichTextBox CreateMemoryPreviewBox() { return new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, BackColor = UiPalette.SurfaceMuted, ForeColor = UiPalette.Text, Font = UiTypography.Ui(9.25F), BorderStyle = BorderStyle.None, DetectUrls = false, Margin = new Padding(4), Padding = new Padding(8), WordWrap = true }; }
         private static Control WrapSurface(Control child, bool dark = false)
         {
             SurfacePanel surface = new SurfacePanel { Dock = DockStyle.Fill, Dark = dark, Padding = new Padding(dark ? 14 : 8), Margin = new Padding(4) };

@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.17";
+export const DEVSPACE_SERVER_VERSION = "1.1.18";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -73,6 +73,8 @@ const FEATURE_CATALOG = [
     { id: "bundled-plugin-release-layout", maturity: "stable", since: "1.1.17" },
     { id: "github-updater-bounded-network-retry", maturity: "stable", since: "1.1.17" },
     { id: "github-updater-curl-fallback", maturity: "stable", since: "1.1.17" },
+    { id: "native-ui-memory-scope-filter", maturity: "stable", since: "1.1.18" },
+    { id: "native-ui-memory-content-preview", maturity: "stable", since: "1.1.18" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

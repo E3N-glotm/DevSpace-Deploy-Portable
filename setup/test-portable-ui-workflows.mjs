@@ -15,6 +15,7 @@ const configDir = join(temporary, "config");
 const stateDir = join(temporary, "state");
 const runDir = join(temporary, "run");
 const workspaceRoot = join(temporary, "workspace");
+const otherWorkspaceRoot = join(temporary, "other-workspace");
 const env = {
   ...process.env,
   DEVSPACE_PORTABLE_CONFIG_DIR: configDir,
@@ -38,10 +39,11 @@ function manager(command, payload = {}) {
 try {
   mkdirSync(configDir, { recursive: true });
   mkdirSync(workspaceRoot, { recursive: true });
+  mkdirSync(otherWorkspaceRoot, { recursive: true });
   writeFileSync(join(configDir, "config.json"), JSON.stringify({
     host: "127.0.0.1",
     port: 7676,
-    allowedRoots: [workspaceRoot],
+    allowedRoots: [workspaceRoot, otherWorkspaceRoot],
     stateDir,
     subagents: false,
     permissions: { profile: "workspace" },
@@ -62,6 +64,11 @@ try {
   assert.match(nativeSource, /_manager\.RunJsonAsync\("update-stage"\)/);
   assert.match(nativeSource, /_manager\.RunJsonAsync\("update-launch"/);
   assert.match(nativeSource, /BuildMemoriesTab\(\)/);
+  assert.match(nativeSource, /完整内容预览/);
+  assert.match(nativeSource, /显示其他工作区/);
+  assert.match(nativeSource, /默认仅显示：当前工作区 \+ 全局/);
+  assert.match(nativeSource, /MemoryVisibleForWorkspace/);
+  assert.match(nativeSource, /RenderMemoryPreview/);
   const executeBusy = nativeSource.match(/private async Task ExecuteBusyAsync[\s\S]*?\n        }/i)?.[0] || "";
   assert.doesNotMatch(executeBusy, /Enabled\s*=\s*false/);
 
@@ -84,10 +91,26 @@ try {
   }).memory;
   assert.equal(createdGlobal.scope, "global");
 
+  const createdOtherWorkspace = manager("memory-upsert", {
+    scope: "workspace",
+    workspaceRoot: otherWorkspaceRoot,
+    title: "Other workspace preference",
+    content: "This record must stay out of the default current-workspace view.",
+    tags: ["memory", "scope"],
+  }).memory;
+  assert.equal(createdOtherWorkspace.scope, "workspace");
+
   const listed = manager("memory-list").memories;
-  assert.equal(listed.length, 2);
+  assert.equal(listed.length, 3);
   assert.ok(listed.some((memory) => memory.id === createdWorkspace.id));
   assert.ok(listed.some((memory) => memory.id === createdGlobal.id));
+  assert.ok(listed.some((memory) => memory.id === createdOtherWorkspace.id));
+
+  const scoped = manager("memory-list", { workspaceRoot, includeGlobal: true }).memories;
+  assert.equal(scoped.length, 2);
+  assert.ok(scoped.some((memory) => memory.id === createdWorkspace.id));
+  assert.ok(scoped.some((memory) => memory.id === createdGlobal.id));
+  assert.ok(!scoped.some((memory) => memory.id === createdOtherWorkspace.id));
 
   const updated = manager("memory-upsert", {
     id: createdWorkspace.id,
@@ -101,7 +124,7 @@ try {
   assert.equal(updated.title, "Workspace preference updated");
 
   assert.equal(manager("memory-delete", { id: createdGlobal.id }).memory.id, createdGlobal.id);
-  assert.equal(manager("memory-list").memories.length, 1);
+  assert.equal(manager("memory-list").memories.length, 2);
 
   console.log(JSON.stringify({
     nonWhiteningBusyState: true,
@@ -111,7 +134,9 @@ try {
     trayCloseChoice: true,
     onlineUpdateUi: true,
     memoryCrud: true,
-    remainingMemories: 1,
+    memoryScopeFiltering: true,
+    memoryContentPreview: true,
+    remainingMemories: 2,
   }));
 } finally {
   rmSync(temporary, { recursive: true, force: true });
