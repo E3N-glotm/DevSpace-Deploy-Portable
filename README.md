@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.18**
+当前稳定版本：**1.1.19**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.18.zip
+DevSpacePortable-Windows-x64-1.1.19.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -190,7 +190,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。普通插件的启停和当前 1.1.18 的 Memories UI 改动不要求重复 OAuth。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.19 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.18 升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -267,7 +267,9 @@ ChatGPT 会通过这些 metadata 自动发现 OAuth 流程。
 
 ### 4. `基础连接已经关闭: 发送时发生错误`
 
-1.1.17 已强化 GitHub 在线更新网络链路：Windows PowerShell 5.1 显式启用 TLS 1.2，进行有限重试，仍失败时自动切换 Portable Git 自带的 `curl.exe`。如果仍然失败，再检查系统代理、VPN、防火墙和 GitHub 可达性。
+1.1.19 将更新下载改为 **curl 优先、代理异常自动直连、断点续传和实时进度**。UI 会持续显示已下载字节、百分比、速度、预计剩余时间和当前网络路径；连接长时间没有有效数据会有界失败并切换路径，不再让 PowerShell 网络请求长时间无反馈等待。
+
+更新器只读取当前进程继承的网络环境，**不会启动、停止、重启或修改 EasyConnect、v2rayN、Windows WinINET/WinHTTP 代理设置**。如果代理不可用，会只对当前 GitHub 请求使用 `curl --noproxy '*'` 直连重试。
 
 ### 5. 使用本地代理
 
@@ -294,6 +296,17 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.19 主要变化
+
+- GitHub 在线更新改为 `curl.exe` 优先，先使用当前网络/代理环境，连接失败后对该请求自动使用 `--noproxy '*'` 直连；仅保留一次短时 PowerShell 兼容回退，不再执行多轮长超时 PowerShell 下载；
+- 下载支持 partial file 断点续传、低速超时检测和实时 `update-progress.json`；原生 UI 每 500 ms 展示进度、下载量、速度、ETA 与当前网络路径；
+- 更新器明确不控制 EasyConnect、v2rayN 或 Windows 系统代理，网络 fallback 只作用于更新器自己的 GitHub 请求；
+- 修复 Portable 停止流程递归 `taskkill /T` 可能误杀由 DevSpace 启动、但并不属于 Portable 的第三方子进程的问题；现在只终止自身可执行路径或命令行明确属于当前 Portable 根目录的 PID，并按自身进程层级从叶到根清理；
+- “停止全部并退出”改用终止态 `shutdown`，现有计划任务保持禁用；“卸载计划任务”删除任务后再做一次严格的 Portable 自有 PID 清理，如果仍有后台进程则直接报错，不再错误声称已经退出；
+- 保持 `file-delta-v1` 增量优先、完整 ZIP 自动兜底和事务回滚，Portable Protocol 仍为 1.5。
+
+完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
 
 ## 1.1.18 主要变化
 
@@ -360,7 +373,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.18
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.19
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -388,12 +401,12 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.18 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.19 -BypassProxy
 ```
 
 ## 在线更新
 
-正式 Release 解压目录可在原生 UI 的“状态与部署”页面点击“检查更新”。从 1.1.16 开始，程序先寻找 `fromVersion` 与当前安装版本完全一致的 `file-delta-v1` 增量包；增量包会先验证下载大小、SHA-256、压缩路径、变更文件目标哈希以及当前基础文件哈希。只要增量路径不适用或任一预检失败，就自动改用完整 Portable ZIP。安装阶段继续使用同盘备份和事务回滚，`data/`、`logs/`、`reports/` 始终保留。
+正式 Release 解压目录可在原生 UI 的“状态与部署”页面点击“检查更新”。从 1.1.16 开始，程序先寻找 `fromVersion` 与当前安装版本完全一致的 `file-delta-v1` 增量包；增量包会先验证下载大小、SHA-256、压缩路径、变更文件目标哈希以及当前基础文件哈希。只要增量路径不适用或任一预检失败，就自动改用完整 Portable ZIP。1.1.19 进一步加入实时下载进度、速度/ETA、断点续传、低速失败检测和 per-request 直连 fallback；这些网络策略不会修改系统代理或第三方 VPN/代理软件。安装阶段继续使用同盘备份和事务回滚，`data/`、`logs/`、`reports/` 始终保留。
 
 源码检出目录包含 `.git` 时，应用级在线更新会拒绝覆盖，请继续使用 Git 分支和 Pull Request 更新源码。当前更新器实现与后续签名、版本目录方案见 [docs/UPDATE-DESIGN.md](docs/UPDATE-DESIGN.md)。
 

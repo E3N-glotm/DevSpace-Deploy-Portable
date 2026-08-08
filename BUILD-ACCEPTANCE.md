@@ -343,3 +343,13 @@
 - `devspace_memories` SQLite 表、MCP `memory_list/memory_upsert/memory_delete` Schema 和 `open_workspace` 的既有相关性过滤均不改变。
 - 1.1.18 延续 `file-delta-v1` 增量优先、完整 ZIP 自动兜底；从 1.1.17 生成精确增量包，Protocol 仍为 1.5。
 - 构建和测试仅允许作用于源码根目录或临时目录，不得停止、重启或覆盖其他 Portable 根目录中的运行服务。
+
+## 1.1.19 更新可观测性、网络隔离与严格退出
+
+- updater 的 metadata 与文件下载改为 bundled curl 优先；当前代理路径失败时仅对该 GitHub 请求使用 `--noproxy '*'` 直连，不修改 Windows 系统代理，也不启动、停止或重启 EasyConnect/v2rayN。
+- 下载输出原子 `data/state/update-progress.json`，包含 phase、bytes、percent、speed、ETA 和 transport；原生 UI 500 ms 轮询并展示实时进度，不允许长时间只有“执行中”而没有可观察状态。
+- 增量/完整包下载支持 partial file `--continue-at -`；使用连接超时和 low-speed cutoff 避免无数据挂死，失败后仍保持增量优先、完整 ZIP 兜底和 SHA-256/基础哈希安全验证。
+- Portable 进程归属不再递归继承到所有后代；停止流程禁止使用 `taskkill /T` 清理普通服务树，避免误杀由 DevSpace 启动但自身不属于 Portable 根目录的 VPN、代理或其他第三方应用。
+- 新增终止态 `shutdown`，供“停止全部并退出”使用，停止后不重新启用计划任务；`uninstall-tasks` 删除任务后再次清理并验证自有 PID，残留时 fail-closed。
+- 严格停止回归使用 Portable 自有 Node 启动一个系统 `PING.EXE` 外部后代，验证 stop 会结束自有 Node、但不会递归结束外部后代；生产 D 盘实例不得参与该测试。
+- Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。

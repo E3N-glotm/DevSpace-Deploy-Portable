@@ -1,4 +1,4 @@
-# Application update design and 1.1.16 implementation
+# Application update design through 1.1.19
 
 ## Goal
 
@@ -10,6 +10,35 @@ rollback safety.
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.19: observable and network-isolated downloads
+
+1. GitHub metadata, manifests and ZIP assets use the bundled Git `curl.exe` as
+   the primary transport instead of waiting on multiple long Windows
+   PowerShell web-request attempts.
+2. The first request respects the process's current proxy environment. A
+   failed proxy-aware request is retried directly with `--noproxy '*'`; this is
+   a per-request decision and never changes WinINET, WinHTTP, EasyConnect,
+   v2rayN, or another system/network application.
+3. Downloads use bounded connect timeouts plus curl low-speed detection so a
+   connected but stalled transfer fails visibly instead of waiting for the
+   overall hour-scale timeout.
+4. Partial ZIPs are resumed with `--continue-at -`. If the CDN rejects the
+   Range resume, the updater performs one clean direct retry from zero.
+5. `data/state/update-progress.json` is atomically refreshed during the update
+   with phase, byte counts, percent, speed, ETA, transport, and timestamp.
+6. The native UI polls this state every 500 ms and shows download speed and
+   phase transitions while `update-stage` is still running.
+7. Incremental/full selection, size/SHA-256 checks, base-hash drift detection,
+   archive traversal protection, persistent-data exclusions and transactional
+   rollback are unchanged.
+
+1.1.19 also narrows process ownership during update/shutdown. Portable stop no
+longer recursively inherits ownership into every child of the MCP process and
+no longer uses `taskkill /T` for the normal owned-process cleanup. This keeps
+third-party applications launched through DevSpace outside the Portable
+shutdown boundary unless their own executable/launcher command is actually
+part of the current Portable root.
 
 ## Implemented in 1.1.16: incremental first, full fallback
 

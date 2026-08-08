@@ -13,7 +13,15 @@ const temporary = await mkdtemp(join(tmpdir(), "devspace-strict-stop-"));
 const configDir = join(temporary, "config");
 const stateDir = join(temporary, "state");
 const pidFile = join(temporary, "orphan.pid");
-const childCode = "setInterval(()=>{},1000)";
+const externalPidFile = join(temporary, "external.pid");
+const pingExe = join(process.env.SystemRoot || "C:\\Windows", "System32", "PING.EXE");
+const childCode = [
+  "const cp=require('child_process'),fs=require('fs');",
+  `const external=cp.spawn(${JSON.stringify(pingExe)},['-t','127.0.0.1'],{detached:true,windowsHide:true,stdio:'ignore'});`,
+  `fs.writeFileSync(${JSON.stringify(externalPidFile)},String(external.pid));`,
+  "external.unref();",
+  "setInterval(()=>{},1000);",
+].join("");
 const launcherCode = [
   "const cp=require('child_process'),fs=require('fs');",
   `const child=cp.spawn(process.execPath,['-e',${JSON.stringify(childCode)},${JSON.stringify(root)}],{cwd:${JSON.stringify(root)},detached:true,windowsHide:true,stdio:'ignore'});`,
@@ -41,8 +49,14 @@ try {
   assert.equal(launched.status, 0, launched.stderr);
   const pid = Number((await readFile(pidFile, "utf8")).trim());
   assert.ok(Number.isInteger(pid) && pid > 0);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+  for (let attempt = 0; attempt < 30 && !existsSync(externalPidFile); attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  }
+  assert.equal(existsSync(externalPidFile), true, "owned test process did not start its external descendant");
+  const externalPid = Number((await readFile(externalPidFile, "utf8")).trim());
+  assert.ok(Number.isInteger(externalPid) && externalPid > 0);
   assert.equal(processExists(pid), true, `orphan test process ${pid} did not start`);
+  assert.equal(processExists(externalPid), true, `external descendant ${externalPid} did not start`);
 
   const stopped = spawnSync(process.execPath, [manager, "stop"], {
     cwd: root,
@@ -60,13 +74,30 @@ try {
   assert.match(stopped.stdout, /No background service PID remains/);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
   assert.equal(processExists(pid), false, `Portable-owned orphan process ${pid} survived stop`);
-  console.log(JSON.stringify({ strictStop: true, orphanPid: pid, output: stopped.stdout.trim() }));
+  assert.equal(
+    processExists(externalPid),
+    true,
+    `Unrelated external descendant ${externalPid} was recursively terminated by Portable stop`,
+  );
+  console.log(JSON.stringify({
+    strictStop: true,
+    orphanPid: pid,
+    unrelatedDescendantPreserved: true,
+    externalPid,
+    output: stopped.stdout.trim(),
+  }));
 }
 finally {
   if (existsSync(pidFile)) {
     const pid = Number((await readFile(pidFile, "utf8").catch(() => "0")).trim());
     if (Number.isInteger(pid) && pid > 0 && processExists(pid)) {
       spawnSync("taskkill.exe", ["/pid", String(pid), "/t", "/f"], { windowsHide: true });
+    }
+  }
+  if (existsSync(externalPidFile)) {
+    const externalPid = Number((await readFile(externalPidFile, "utf8").catch(() => "0")).trim());
+    if (Number.isInteger(externalPid) && externalPid > 0 && processExists(externalPid)) {
+      spawnSync("taskkill.exe", ["/pid", String(externalPid), "/f"], { windowsHide: true });
     }
   }
   await rm(temporary, { recursive: true, force: true });

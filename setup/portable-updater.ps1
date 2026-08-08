@@ -35,6 +35,7 @@ $UpdateRoot = Join-Path $Root ".update-staging"
 $StateDirectory = Join-Path $Root "data\state"
 $LogDirectory = Join-Path $Root "logs"
 $ResultFile = Join-Path $StateDirectory "update-result.json"
+$ProgressFile = Join-Path $StateDirectory "update-progress.json"
 $UpdateLog = Join-Path $LogDirectory "update.log"
 
 function Write-JsonResult([object]$Value) {
@@ -50,6 +51,42 @@ function Write-UpdateLog([string]$Message) {
 function Write-UpdateResult([object]$Value) {
     New-Item -ItemType Directory -Force -Path $StateDirectory | Out-Null
     $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
+}
+
+function Write-UpdateProgress {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Phase,
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+        [int64]$BytesReceived = 0,
+        [int64]$BytesTotal = 0,
+        [double]$SpeedBytesPerSecond = 0,
+        [string]$Transport = ""
+    )
+    New-Item -ItemType Directory -Force -Path $StateDirectory | Out-Null
+    $percent = 0.0
+    if ($BytesTotal -gt 0) {
+        $percent = [Math]::Min(100.0, [Math]::Max(0.0, ($BytesReceived * 100.0 / $BytesTotal)))
+    }
+    $eta = -1
+    if ($SpeedBytesPerSecond -gt 1 -and $BytesTotal -gt $BytesReceived) {
+        $eta = [int][Math]::Ceiling(($BytesTotal - $BytesReceived) / $SpeedBytesPerSecond)
+    }
+    $value = [ordered]@{
+        phase = $Phase
+        message = $Message
+        bytesReceived = $BytesReceived
+        bytesTotal = $BytesTotal
+        percent = [Math]::Round($percent, 1)
+        speedBytesPerSecond = [Math]::Round($SpeedBytesPerSecond, 0)
+        etaSeconds = $eta
+        transport = $Transport
+        updatedAt = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    $temporary = "$ProgressFile.tmp-$PID"
+    $value | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $ProgressFile -Force
 }
 
 function Invoke-WithRetry {
@@ -94,7 +131,8 @@ function Invoke-CurlJson {
         [Parameter(Mandatory = $true)]
         [string]$Uri,
         [hashtable]$Headers = @{},
-        [int]$TimeoutSec = 60
+        [int]$TimeoutSec = 30,
+        [switch]$Direct
     )
     $curl = Get-CurlExecutable
     if (-not $curl) { throw "curl.exe is not available for the GitHub fallback transport." }
@@ -103,9 +141,10 @@ function Invoke-CurlJson {
         "--show-error",
         "--fail",
         "--location",
-        "--connect-timeout", "20",
+        "--connect-timeout", "8",
         "--max-time", [string]$TimeoutSec
     )
+    if ($Direct) { $arguments += @("--noproxy", "*") }
     foreach ($key in $Headers.Keys) {
         $arguments += @("--header", "${key}: $($Headers[$key])")
     }
@@ -127,20 +166,32 @@ function Invoke-GitHubJson {
         [Parameter(Mandatory = $true)]
         [string]$Uri,
         [hashtable]$Headers = @{},
-        [int]$TimeoutSec = 60,
+        [int]$TimeoutSec = 30,
         [string]$Description = "GitHub request"
     )
+    Write-UpdateProgress -Phase "metadata" -Message $Description -Transport "curl"
+    $proxyAwareError = ""
     try {
-        return Invoke-WithRetry -Description $Description -Attempts 3 -Operation {
-            Invoke-RestMethod -Uri $Uri -Headers $Headers -Method Get -TimeoutSec $TimeoutSec
-        }
+        return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 20))
     } catch {
-        $powerShellError = $_.Exception.Message
-        Write-UpdateLog "$Description failed through Windows PowerShell after bounded retries: $powerShellError. Trying curl.exe fallback."
+        $proxyAwareError = $_.Exception.Message
+        Write-UpdateLog "$Description failed through proxy-aware curl: $proxyAwareError. Trying direct curl without proxy."
+    }
+    try {
+        Write-UpdateProgress -Phase "metadata" -Message "$Description - direct retry" -Transport "curl-direct"
+        return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 25)) -Direct
+    } catch {
+        $directError = $_.Exception.Message
+        Write-UpdateLog "$Description failed through direct curl: $directError."
+        # The Portable package always ships curl, but keep one short PowerShell
+        # compatibility fallback in case the bundled runtime is damaged. This
+        # is intentionally a single bounded attempt rather than the previous
+        # 3 x long-timeout chain that could make the UI appear frozen.
         try {
-            return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec
+            Write-UpdateProgress -Phase "metadata" -Message "$Description - PowerShell compatibility fallback" -Transport "powershell"
+            return Invoke-RestMethod -Uri $Uri -Headers $Headers -Method Get -TimeoutSec ([Math]::Min($TimeoutSec, 20))
         } catch {
-            throw "$Description failed through both Windows PowerShell and curl.exe fallback. PowerShell: $powerShellError; curl.exe: $($_.Exception.Message)"
+            throw "$Description failed through proxy-aware curl, direct curl, and the bounded PowerShell fallback. curl: $proxyAwareError; direct: $directError; PowerShell: $($_.Exception.Message)"
         }
     }
 }
@@ -152,33 +203,75 @@ function Invoke-CurlDownload {
         [Parameter(Mandatory = $true)]
         [string]$OutFile,
         [hashtable]$Headers = @{},
-        [int]$TimeoutSec = 3600
+        [int]$TimeoutSec = 1800,
+        [int64]$ExpectedBytes = 0,
+        [string]$Description = "GitHub download",
+        [switch]$Direct
     )
     $curl = Get-CurlExecutable
     if (-not $curl) { throw "curl.exe is not available for the GitHub fallback transport." }
-    if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutFile) | Out-Null
     $arguments = @(
         "--silent",
         "--show-error",
         "--fail",
         "--location",
-        "--connect-timeout", "30",
+        "--retry", "2",
+        "--retry-delay", "1",
+        "--retry-all-errors",
+        "--connect-timeout", "8",
+        "--speed-limit", "2048",
+        "--speed-time", "20",
         "--max-time", [string]$TimeoutSec,
         "--output", $OutFile
     )
+    if ($Direct) { $arguments += @("--noproxy", "*") }
+    if ((Test-Path -LiteralPath $OutFile -PathType Leaf) -and (Get-Item -LiteralPath $OutFile).Length -gt 0) {
+        $arguments += @("--continue-at", "-")
+    }
     foreach ($key in $Headers.Keys) {
         $arguments += @("--header", "${key}: $($Headers[$key])")
     }
     $arguments += $Uri
-    & $curl @arguments
-    $exitCode = $LASTEXITCODE
+    $quoted = $arguments | ForEach-Object {
+        ([char]34) + ([string]$_) + ([char]34)
+    }
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $curl
+    $info.Arguments = ($quoted -join ' ')
+    $info.WorkingDirectory = $Root
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardError = $true
+    $info.RedirectStandardOutput = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $info
+    if (-not $process.Start()) { throw "Unable to start curl.exe for $Description." }
+    $transport = if ($Direct) { "curl-direct" } else { "curl" }
+    $lastAt = Get-Date
+    $lastBytes = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+    Write-UpdateProgress -Phase "downloading" -Message $Description -BytesReceived $lastBytes -BytesTotal $ExpectedBytes -Transport $transport
+    while (-not $process.WaitForExit(500)) {
+        $now = Get-Date
+        $bytes = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+        $seconds = [Math]::Max(0.001, ($now - $lastAt).TotalSeconds)
+        $speed = [Math]::Max(0, ($bytes - $lastBytes) / $seconds)
+        Write-UpdateProgress -Phase "downloading" -Message $Description -BytesReceived $bytes -BytesTotal $ExpectedBytes -SpeedBytesPerSecond $speed -Transport $transport
+        $lastAt = $now
+        $lastBytes = $bytes
+    }
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    $stderr = $process.StandardError.ReadToEnd().Trim()
+    $process.Dispose()
     if ($exitCode -ne 0) {
-        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
-        throw "curl.exe GitHub download failed with exit code $exitCode."
+        throw "curl.exe GitHub download failed with exit code $exitCode$(if ($stderr) { ': ' + $stderr } else { '' })."
     }
     if (-not (Test-Path -LiteralPath $OutFile -PathType Leaf)) {
         throw "curl.exe GitHub download completed without creating the output file."
     }
+    $finalBytes = (Get-Item -LiteralPath $OutFile).Length
+    Write-UpdateProgress -Phase "downloaded" -Message "$Description completed" -BytesReceived $finalBytes -BytesTotal $ExpectedBytes -Transport $transport
 }
 
 function Invoke-GitHubDownload {
@@ -188,24 +281,34 @@ function Invoke-GitHubDownload {
         [Parameter(Mandatory = $true)]
         [string]$OutFile,
         [hashtable]$Headers = @{},
-        [int]$TimeoutSec = 3600,
-        [string]$Description = "GitHub download"
+        [int]$TimeoutSec = 1800,
+        [string]$Description = "GitHub download",
+        [int64]$ExpectedBytes = 0
     )
+    $proxyAwareError = ""
     try {
-        Invoke-WithRetry -Description $Description -Attempts 3 -Operation {
-            if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
-            Invoke-WebRequest -Uri $Uri -Headers $Headers -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec
-        } | Out-Null
+        Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $Description
         return
     } catch {
-        $powerShellError = $_.Exception.Message
-        Write-UpdateLog "$Description failed through Windows PowerShell after bounded retries: $powerShellError. Trying curl.exe fallback."
-        try {
-            Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec
-            return
-        } catch {
-            throw "$Description failed through both Windows PowerShell and curl.exe fallback. PowerShell: $powerShellError; curl.exe: $($_.Exception.Message)"
-        }
+        $proxyAwareError = $_.Exception.Message
+        Write-UpdateLog "$Description failed through proxy-aware curl: $proxyAwareError. Retrying the same partial file through direct curl."
+    }
+    try {
+        Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description "$Description - direct" -Direct
+        return
+    } catch {
+        $directError = $_.Exception.Message
+        Write-UpdateLog "$Description direct curl retry failed: $directError."
+    }
+    # Range resume can fail if a CDN edge rejects the existing partial file.
+    # Retry direct once from zero before giving up; still never alter Windows,
+    # EasyConnect, v2rayN, WinINET, or WinHTTP proxy settings.
+    if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+    try {
+        Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description "$Description - clean direct retry" -Direct
+        return
+    } catch {
+        throw "$Description failed after proxy-aware curl, direct resume, and direct clean retry. Proxy-aware: $proxyAwareError; direct: $directError; clean direct: $($_.Exception.Message)"
     }
 }
 
@@ -323,16 +426,21 @@ function Stage-FullUpdate([object]$Latest, [string]$FallbackReason = "") {
     $zip = Join-Path $stage $Latest.zipName
     New-Item -ItemType Directory -Force -Path $stage,$payload | Out-Null
     try {
-        if ($FallbackReason) { Write-UpdateLog "Using full update fallback: $FallbackReason" }
+        if ($FallbackReason) {
+            Write-UpdateLog "Using full update fallback: $FallbackReason"
+            Write-UpdateProgress -Phase "fallback" -Message "Incremental update unavailable; switching to the full package: $FallbackReason" -BytesTotal ([int64]$Latest.manifest.asset.size)
+        }
         Write-UpdateLog "Downloading full package $($Latest.zipName) from GitHub Release $($Latest.version)."
-        Invoke-GitHubDownload -Uri $Latest.zipAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -OutFile $zip -TimeoutSec 3600 -Description "Full update package download"
+        Invoke-GitHubDownload -Uri $Latest.zipAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -OutFile $zip -TimeoutSec 3600 -Description "Full update package $($Latest.zipName)" -ExpectedBytes ([int64]$Latest.manifest.asset.size)
         $actualSize = (Get-Item -LiteralPath $zip).Length
         $expectedSize = [int64]$Latest.manifest.asset.size
         if ($actualSize -ne $expectedSize) { throw "Downloaded ZIP size mismatch: expected $expectedSize, received $actualSize." }
+        Write-UpdateProgress -Phase "verifying" -Message "Verifying full update package SHA-256" -BytesReceived $actualSize -BytesTotal $expectedSize
         $actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
         $expectedHash = ([string]$Latest.manifest.asset.sha256).ToLowerInvariant()
         if ($actualHash -ne $expectedHash) { throw "Downloaded ZIP SHA-256 mismatch." }
 
+        Write-UpdateProgress -Phase "extracting" -Message "Safely extracting full update package" -BytesReceived $actualSize -BytesTotal $expectedSize
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
         try {
@@ -367,6 +475,7 @@ function Stage-FullUpdate([object]$Latest, [string]$FallbackReason = "") {
         }
         $stageInfo | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stage "stage-info.json") -Encoding UTF8
         Write-UpdateLog "Update $($latest.version) staged successfully at $stage."
+        Write-UpdateProgress -Phase "staged" -Message "Full update package downloaded, verified, and staged" -BytesReceived $actualSize -BytesTotal $expectedSize
         return [pscustomobject]@{
             currentVersion = $CurrentVersion
             latestVersion = $Latest.version
@@ -381,6 +490,7 @@ function Stage-FullUpdate([object]$Latest, [string]$FallbackReason = "") {
         }
     } catch {
         Write-UpdateLog "Update staging failed: $($_.Exception.Message)"
+        Write-UpdateProgress -Phase "error" -Message "Full update staging failed: $($_.Exception.Message)"
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         throw
     }
@@ -394,14 +504,16 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
     New-Item -ItemType Directory -Force -Path $stage,$payload | Out-Null
     try {
         Write-UpdateLog "Downloading incremental package $($Incremental.manifest.name) for $CurrentVersion -> $($Latest.version)."
-        Invoke-GitHubDownload -Uri $Incremental.asset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -OutFile $zip -TimeoutSec 1800 -Description "Incremental update package download"
+        Invoke-GitHubDownload -Uri $Incremental.asset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -OutFile $zip -TimeoutSec 1800 -Description "Incremental update package $($Incremental.manifest.name)" -ExpectedBytes ([int64]$Incremental.manifest.size)
         $actualSize = (Get-Item -LiteralPath $zip).Length
         $expectedSize = [int64]$Incremental.manifest.size
         if ($actualSize -ne $expectedSize) { throw "Downloaded incremental ZIP size mismatch: expected $expectedSize, received $actualSize." }
+        Write-UpdateProgress -Phase "verifying" -Message "Verifying incremental update package SHA-256" -BytesReceived $actualSize -BytesTotal $expectedSize
         $actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
         $expectedHash = ([string]$Incremental.manifest.sha256).ToLowerInvariant()
         if ($actualHash -ne $expectedHash) { throw "Downloaded incremental ZIP SHA-256 mismatch." }
 
+        Write-UpdateProgress -Phase "extracting" -Message "Safely extracting and validating incremental files" -BytesReceived $actualSize -BytesTotal $expectedSize
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
         try {
@@ -472,6 +584,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
         }
         $stageInfo | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $stage "stage-info.json") -Encoding UTF8
         Write-UpdateLog "Incremental update $CurrentVersion -> $($Latest.version) staged successfully at $stage."
+        Write-UpdateProgress -Phase "staged" -Message "Incremental update package downloaded, verified, and staged" -BytesReceived $actualSize -BytesTotal $expectedSize
         return [pscustomobject]@{
             currentVersion = $CurrentVersion
             latestVersion = $Latest.version
@@ -486,12 +599,14 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
         }
     } catch {
         Write-UpdateLog "Incremental staging failed: $($_.Exception.Message)"
+        Write-UpdateProgress -Phase "fallback" -Message "Incremental staging failed; preparing full-package fallback: $($_.Exception.Message)"
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         throw
     }
 }
 
 function Stage-Update {
+    Write-UpdateProgress -Phase "metadata" -Message "Reading GitHub Release metadata and update manifest"
     $latest = Get-LatestRelease
     if ((Compare-Version $latest.version $CurrentVersion) -le 0) {
         return [pscustomobject]@{
@@ -579,6 +694,7 @@ function Apply-StagedUpdate {
     $movedOld = New-Object System.Collections.Generic.List[string]
     $movedNew = New-Object System.Collections.Generic.List[string]
     try {
+        Write-UpdateProgress -Phase "applying" -Message "Stopping Portable-owned processes and applying $targetVersion"
         Write-UpdateLog "Stopping Portable services before applying $targetVersion."
         Invoke-Manager "stop" -IgnoreFailure | Out-Null
 
@@ -644,12 +760,14 @@ function Apply-StagedUpdate {
         }
         Write-UpdateResult $result
         Write-UpdateLog "Update $targetVersion applied successfully."
+        Write-UpdateProgress -Phase "completed" -Message "DevSpace Portable $targetVersion update completed"
         Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         return $result
     } catch {
         $message = $_.Exception.Message
         Write-UpdateLog "Update apply failed; restoring previous version: $message"
+        Write-UpdateProgress -Phase "rollback" -Message "Update failed; restoring the previous version: $message"
         Invoke-Manager "stop" -IgnoreFailure | Out-Null
         foreach ($name in $movedNew) {
             Remove-Item -LiteralPath (Join-Path $Root $name) -Recurse -Force -ErrorAction SilentlyContinue
@@ -688,6 +806,7 @@ try {
     }
 } catch {
     Write-UpdateLog "$Action failed: $($_.Exception.Message)"
+    Write-UpdateProgress -Phase "error" -Message "$Action failed: $($_.Exception.Message)"
     Write-Error $_
     exit 1
 }
