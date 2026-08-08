@@ -58,7 +58,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.18";
+const PORTABLE_VERSION = "1.1.19";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -927,7 +927,7 @@ function stopComputerUseBroker(leaseId = null) {
   }
   const pid = Number(state.pid);
   if (processExists(pid)) {
-    childProcess.spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+    childProcess.spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], {
       encoding: "utf8",
       windowsHide: true,
       timeout: 10_000,
@@ -1403,11 +1403,14 @@ function stopRecordedProcess(pidFile, expectedImage, requiredListenerPort = null
   const owned = portableProcessSnapshot().some((item) => item.pid === pid);
   const expectedImageMatches = image === expectedImage.toLowerCase();
   const listenerMatches = requiredListenerPort === null || listenerPids(requiredListenerPort).includes(pid);
-  if ((!expectedImageMatches || !listenerMatches) && !owned) {
+  // PID files can survive crashes and Windows can later reuse the numeric PID.
+  // Never terminate a merely same-named process unless it is still directly
+  // attributable to this Portable root.
+  if (!owned || !expectedImageMatches || !listenerMatches) {
     fs.rmSync(pidFile, { force: true });
     return;
   }
-  runProgram("taskkill.exe", ["/pid", String(pid), "/t", "/f"], { ignoreExitCode: true });
+  runProgram("taskkill.exe", ["/pid", String(pid), "/f"], { ignoreExitCode: true });
   fs.rmSync(pidFile, { force: true });
 }
 
@@ -1431,11 +1434,11 @@ function stopRecordedTunnelProcess() {
       continue;
     }
     const owned = portableProcessSnapshot().some((item) => item.pid === pid);
-    if (!new Set(["ngrok.exe", "cloudflared.exe"]).has(image) && !owned) {
+    if (!owned || !new Set(["ngrok.exe", "cloudflared.exe"]).has(image)) {
       fs.rmSync(pidFile, { force: true });
       continue;
     }
-    runProgram("taskkill.exe", ["/pid", String(pid), "/t", "/f"], { ignoreExitCode: true });
+    runProgram("taskkill.exe", ["/pid", String(pid), "/f"], { ignoreExitCode: true });
     fs.rmSync(pidFile, { force: true });
   }
 }
@@ -1449,10 +1452,9 @@ function portableProcessSnapshot() {
     "$ErrorActionPreference='Stop'",
     `$root=[IO.Path]::GetFullPath(${powershellLiteral(ROOT)}).TrimEnd('\\')`,
     "$all=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine)",
-    "$owned=New-Object 'System.Collections.Generic.HashSet[int]'",
-    "foreach($p in $all){$exe=[string]$p.ExecutablePath;$cmd=[string]$p.CommandLine;if(($exe -and $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or ($cmd -and $cmd.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0)){[void]$owned.Add([int]$p.ProcessId)}}",
-    "$changed=$true;while($changed){$changed=$false;foreach($p in $all){if($owned.Contains([int]$p.ParentProcessId) -and -not $owned.Contains([int]$p.ProcessId)){[void]$owned.Add([int]$p.ProcessId);$changed=$true}}}",
-    "$all | Where-Object {$owned.Contains([int]$_.ProcessId)} | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress",
+    "$wrappers=@('cmd.exe','wscript.exe','cscript.exe','powershell.exe','pwsh.exe','bash.exe','sh.exe')",
+    "$owned=@($all | Where-Object {$exe=[string]$_.ExecutablePath;$cmd=[string]$_.CommandLine;$name=([string]$_.Name).ToLowerInvariant();($exe -and $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or (($wrappers -contains $name) -and $cmd -and $cmd.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0)})",
+    "$owned | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress",
   ].join(";");
   const result = childProcess.spawnSync(POWERSHELL_EXE, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
@@ -1524,11 +1526,30 @@ function stopPortableOwnedProcesses(excludePids = []) {
   };
   const deadline = Date.now() + PORTABLE_STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const processes = eligible(portableProcessSnapshot())
-      .sort((left, right) => right.parentPid - left.parentPid);
+    const snapshot = portableProcessSnapshot();
+    const byPid = new Map(snapshot.map((item) => [item.pid, item]));
+    const depth = (item) => {
+      let value = 0;
+      let current = item;
+      const visited = new Set();
+      while (current && byPid.has(current.parentPid) && !visited.has(current.pid)) {
+        visited.add(current.pid);
+        value += 1;
+        current = byPid.get(current.parentPid);
+      }
+      return value;
+    };
+    const processes = eligible(snapshot)
+      .sort((left, right) => depth(right) - depth(left));
     if (!processes.length) break;
     for (const item of processes) {
-      runProgram("taskkill.exe", ["/pid", String(item.pid), "/t", "/f"], { ignoreExitCode: true });
+      // Do not use taskkill /T here. DevSpace can launch arbitrary user tools
+      // as children of the MCP server; recursively killing the process tree can
+      // terminate unrelated applications such as VPN/proxy clients. Every
+      // Portable wrapper/runtime process is identified by its own executable or
+      // command line referencing ROOT, so terminate those owned PIDs directly
+      // and leave unrelated descendants alone.
+      runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
       killed.push({ pid: item.pid, name: item.name, executablePath: item.executablePath });
     }
     sleepSync(400);
@@ -1542,7 +1563,7 @@ function stopOrphanedComputerUseBrokers() {
   for (const item of portableProcessSnapshot()) {
     if (!/computer-use-broker\.cjs/i.test(item.commandLine)) continue;
     if (item.pid === process.pid || item.pid === process.ppid) continue;
-    runProgram("taskkill.exe", ["/pid", String(item.pid), "/t", "/f"], { ignoreExitCode: true });
+    runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
     stopped.push(item.pid);
   }
   return stopped;
@@ -1577,6 +1598,19 @@ function stopServices(options = {}) {
     }
   }
   return `Portable DevSpace, tunnel, Computer Use Broker, and ${processResult.killed.length} Portable-owned process(es) were stopped. No background service PID remains.`;
+}
+
+function shutdownServices() {
+  // "Stop all and exit" is a terminal user action. Keep any existing tasks
+  // disabled so they cannot race the UI shutdown or immediately recreate
+  // background processes while the user is trying to remove the Portable
+  // directory. Unlike disableServices(), this also works after tasks were
+  // already uninstalled.
+  const message = stopServices({ leaveDisabled: true });
+  for (const task of [TASK_TUNNEL, TASK_MCP]) {
+    if (taskOwnedByRoot(task)) setOwnedTaskEnabled(task, false);
+  }
+  return `${message}\nPortable scheduled tasks, when present, remain disabled after the control center exits.`;
 }
 
 function delay(milliseconds) {
@@ -1738,7 +1772,18 @@ function uninstallTasks() {
       runProgram("schtasks.exe", ["/delete", "/tn", task, "/f"], { ignoreExitCode: true });
     }
   }
-  return "Portable scheduled tasks were removed. Configuration and OAuth data were preserved.";
+  // A task host may outlive schtasks /delete briefly. Run one more direct-PID
+  // cleanup pass after deletion and fail closed if a Portable-owned process is
+  // still alive. This guarantees that, after the UI/manager processes exit,
+  // the installation directory is not held open by a hidden launcher chain.
+  sleepSync(300);
+  const finalProcesses = stopPortableOwnedProcesses();
+  cleanupRunState();
+  if (finalProcesses.remaining.length) {
+    const details = finalProcesses.remaining.map((item) => `${item.pid} ${item.name} ${item.executablePath}`);
+    throw new Error(`Portable scheduled tasks were deleted but background processes remain:\n${details.join("\n")}`);
+  }
+  return "Portable scheduled tasks were removed. No Portable background process remains; configuration and OAuth data were preserved.";
 }
 
 function taskExists(task) {
@@ -2126,6 +2171,8 @@ async function main() {
       writeOutput(`${await startServices()}\n`);
     } else if (command === "stop") {
       writeOutput(stopServices() + "\n");
+    } else if (command === "shutdown") {
+      writeOutput(shutdownServices() + "\n");
     } else if (command === "restart") {
       stopServices();
       writeOutput(`${await startServices()}\n`);
@@ -2198,7 +2245,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop restart enable disable uninstall-tasks status test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop shutdown restart enable disable uninstall-tasks status test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);

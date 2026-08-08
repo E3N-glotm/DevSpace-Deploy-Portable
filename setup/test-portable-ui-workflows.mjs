@@ -61,8 +61,14 @@ try {
   assert.match(nativeSource, /CloseChoiceDialog\.Show\(this\)/);
   assert.match(nativeSource, /private readonly NotifyIcon _notifyIcon/);
   assert.match(nativeSource, /_manager\.RunJsonAsync\("update-check"\)/);
-  assert.match(nativeSource, /_manager\.RunJsonAsync\("update-stage"\)/);
+  assert.match(nativeSource, /StageUpdateWithProgressAsync\(latest\)/);
+  assert.match(nativeSource, /update-progress\.json/);
+  assert.match(nativeSource, /speedBytesPerSecond/);
+  assert.match(nativeSource, /预计剩余/);
+  assert.match(nativeSource, /GitHub 直连/);
   assert.match(nativeSource, /_manager\.RunJsonAsync\("update-launch"/);
+  assert.match(nativeSource, /_manager\.RunAsync\("shutdown"\)/);
+  assert.match(nativeSource, /不会递归终止 DevSpace 启动的第三方应用/);
   assert.match(nativeSource, /BuildMemoriesTab\(\)/);
   assert.match(nativeSource, /完整内容预览/);
   assert.match(nativeSource, /显示其他工作区/);
@@ -136,6 +142,8 @@ try {
     memoryCrud: true,
     memoryScopeFiltering: true,
     memoryContentPreview: true,
+    liveUpdateProgress: true,
+    shutdownLeavesTasksDisabled: true,
     remainingMemories: 2,
   }));
 } finally {
