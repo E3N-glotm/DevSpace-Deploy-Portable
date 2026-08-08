@@ -334,3 +334,12 @@
 - `setup/build-release.py` 在每次构建时清理并重建发布用 `plugins/installed/` 镜像，来源仍是受版本控制的 `setup/bundled-plugins/`，避免维护两套插件源码。
 - Portable 运行时在 Release 中存在 `plugins/installed/` 时优先把它作为 bundled seed source；用户安装态仍写入并保留在 `data/plugins/installed/`。
 - 构建器和源码回归都会验证 `codex-runtime-bridge` 的 manifest、runtime、keep-awake 与 Skill 实际进入发布 payload；Protocol 仍为 1.5。
+
+## 1.1.18 显式 Memories 作用域与内容预览
+
+- 原生 Memories 页面增加“查看工作区”选择器，默认仅展示该工作区的 workspace Memory 与 global Memory；其他工作区记录默认隐藏。
+- “显示其他工作区”是显式开关，开启后才允许跨项目查看 workspace Memory；列表以“当前工作区 / 全局 / 其他工作区”标识作用域并展示绑定路径。
+- 选择任意 Memory 后，右侧只读“完整内容预览”显示标题、作用域、工作区、标签、更新时间和完整正文；原编辑器继续负责修改和保存。
+- `devspace_memories` SQLite 表、MCP `memory_list/memory_upsert/memory_delete` Schema 和 `open_workspace` 的既有相关性过滤均不改变。
+- 1.1.18 延续 `file-delta-v1` 增量优先、完整 ZIP 自动兜底；从 1.1.17 生成精确增量包，Protocol 仍为 1.5。
+- 构建和测试仅允许作用于源码根目录或临时目录，不得停止、重启或覆盖其他 Portable 根目录中的运行服务。
