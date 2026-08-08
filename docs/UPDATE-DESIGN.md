@@ -1,4 +1,4 @@
-# Application update design through 1.1.19
+# Application update design through 1.1.20
 
 ## Goal
 
@@ -10,6 +10,34 @@ rollback safety.
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.20: startup PID identity safety
+
+Opening the native control center creates or refreshes a UI lease. That path
+also retires any compatibility Computer Use Broker left by an older UI lease.
+Prior to 1.1.20 the broker state contained a numeric PID and the retirement
+path treated a currently-live process with that PID as the broker without
+revalidating its identity. Because Windows reuses PIDs, a stale broker record
+could therefore point at an unrelated application by the time the next UI was
+opened.
+
+1. Broker retirement now resolves the PID through the same direct Portable
+   process inventory used by strict shutdown.
+2. The process executable must exactly equal the current Portable bundled
+   `runtime/node/node.exe`.
+3. Its command line must contain the current root's
+   `setup/computer-use-broker.cjs` path.
+4. If the broker state contains a lease id, the same lease id must appear in
+   the live broker command line.
+5. If any check cannot be proven, only the stale state record is deleted; the
+   live PID is left untouched.
+6. A dedicated regression writes an unrelated live `PING.EXE` PID into a
+   stale broker record and verifies both `ui-open` and `ui-close` preserve that
+   process.
+
+This startup rule is intentionally stricter than name-only process matching:
+opening the DevSpace UI must never terminate VPN, proxy, IDE, shell, or other
+third-party software solely because Windows reused an old broker PID.
 
 ## Implemented in 1.1.19: observable and network-isolated downloads
 
