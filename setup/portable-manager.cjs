@@ -58,7 +58,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.19";
+const PORTABLE_VERSION = "1.1.20";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -920,13 +920,35 @@ function sleepSync(milliseconds) {
   Atomics.wait(signal, 0, 0, milliseconds);
 }
 
+function recordedComputerUseBrokerProcess(state) {
+  const pid = Number(state?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  let processInfo = null;
+  try {
+    processInfo = portableProcessSnapshot().find((item) => item.pid === pid) || null;
+  } catch {
+    return null;
+  }
+  if (!processInfo) return null;
+  const normalizedExecutable = String(processInfo.executablePath || "").replace(/\\/g, "/").toLowerCase();
+  const normalizedNode = NODE_EXE.replace(/\\/g, "/").toLowerCase();
+  const normalizedCommand = String(processInfo.commandLine || "").replace(/\\/g, "/").toLowerCase();
+  const normalizedBrokerScript = COMPUTER_USE_BROKER_SCRIPT.replace(/\\/g, "/").toLowerCase();
+  const leaseId = String(state?.leaseId || "").trim().toLowerCase();
+  if (normalizedExecutable !== normalizedNode) return null;
+  if (!normalizedCommand.includes(normalizedBrokerScript)) return null;
+  if (leaseId && !normalizedCommand.includes(leaseId)) return null;
+  return processInfo;
+}
+
 function stopComputerUseBroker(leaseId = null) {
   const state = readJson(COMPUTER_USE_BROKER_FILE, null);
   if (!state || (leaseId && state.leaseId !== leaseId)) {
     return { stopped: false, reason: state ? "lease-mismatch" : "not-started" };
   }
   const pid = Number(state.pid);
-  if (processExists(pid)) {
+  const brokerProcess = processExists(pid) ? recordedComputerUseBrokerProcess(state) : null;
+  if (brokerProcess) {
     childProcess.spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], {
       encoding: "utf8",
       windowsHide: true,
@@ -934,6 +956,14 @@ function stopComputerUseBroker(leaseId = null) {
     });
   }
   fs.rmSync(COMPUTER_USE_BROKER_FILE, { force: true });
+  if (!brokerProcess && processExists(pid)) {
+    return {
+      stopped: false,
+      pid: Number.isInteger(pid) ? pid : null,
+      staleRecordRemoved: true,
+      reason: "pid-identity-mismatch",
+    };
+  }
   return { stopped: true, pid: Number.isInteger(pid) ? pid : null };
 }
 

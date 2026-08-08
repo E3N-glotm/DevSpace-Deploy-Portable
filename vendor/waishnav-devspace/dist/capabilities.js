@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.19";
+export const DEVSPACE_SERVER_VERSION = "1.1.20";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -79,6 +79,7 @@ const FEATURE_CATALOG = [
     { id: "github-updater-resumable-curl", maturity: "stable", since: "1.1.19" },
     { id: "portable-nonrecursive-owned-process-stop", maturity: "stable", since: "1.1.19" },
     { id: "portable-terminal-shutdown", maturity: "stable", since: "1.1.19" },
+    { id: "native-ui-stale-broker-pid-safety", maturity: "stable", since: "1.1.20" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

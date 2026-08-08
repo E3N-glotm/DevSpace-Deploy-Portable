@@ -353,3 +353,11 @@
 - 新增终止态 `shutdown`，供“停止全部并退出”使用，停止后不重新启用计划任务；`uninstall-tasks` 删除任务后再次清理并验证自有 PID，残留时 fail-closed。
 - 严格停止回归使用 Portable 自有 Node 启动一个系统 `PING.EXE` 外部后代，验证 stop 会结束自有 Node、但不会递归结束外部后代；生产 D 盘实例不得参与该测试。
 - Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
+
+## 1.1.20 UI 打开阶段第三方进程隔离
+
+- 根因补充：1.1.19 已修复普通 stop/shutdown 的递归进程树误杀，但 `openUiLease()` 在打开原生控制中心时仍会清理旧 Computer Use Broker；旧 `stopComputerUseBroker()` 只检查状态文件里的数字 PID 是否存在，没有验证该 PID 当前仍是不是原 broker，因此 Windows PID 复用后存在启动 UI 时误杀 EasyConnect、v2rayN 或任意第三方进程的风险。
+- Broker 清理现在 fail-safe：只有当前 PID 的 `ExecutablePath` 精确等于当前 Portable 的 bundled `node.exe`、命令行包含当前根目录 `setup/computer-use-broker.cjs` 且包含状态文件 leaseId 时才允许结束该进程；否则仅删除陈旧 `broker.json`。
+- 新增 `setup/test-ui-open-process-safety.mjs`，将一个真实运行的系统 `PING.EXE` PID 写入陈旧 broker 状态，再调用 `ui-open`/`ui-close`；外部 PID 必须保持存活，broker 状态必须被清除。
+- 实机只读检查期间 DevSpace MCP `127.0.0.1:7676`、ngrok `127.0.0.1:4040`、sing-box `0.0.0.0:10809/127.0.0.1:10815`、Sangfor Promote Service `127.0.0.1:10000` 同时存在，没有直接端口重叠；WinINET 代理仍由 v2rayN 指向 `127.0.0.1:10809`，本次代码不改变该配置。
+- Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。

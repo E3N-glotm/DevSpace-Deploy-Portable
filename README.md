@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.19**
+当前稳定版本：**1.1.20**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.19.zip
+DevSpacePortable-Windows-x64-1.1.20.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -190,7 +190,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.19 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.18 升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.20 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.19 升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -297,6 +297,16 @@ https://你的域名/mcp
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
+## 1.1.20 主要变化
+
+- 修复一个发生在**打开原生控制中心**时的高风险 PID 复用问题：旧的 Computer Use Broker 状态文件可能保存已经退出的 broker PID，而 Windows 后续可能把同一个 PID 分配给 EasyConnect、v2rayN 或其他程序；旧代码在打开 UI、切换租约或确认 Computer Use 使用原生队列时会直接按记录 PID 执行 `taskkill`，因此存在打开 DevSpace 就误终止第三方程序的可能；
+- `stopComputerUseBroker()` 现在必须同时验证 PID、Portable 自有 `node.exe` 路径、`computer-use-broker.cjs` 完整脚本路径和对应 leaseId，四项身份不能同时确认时只删除陈旧 broker 记录，绝不结束该 PID；
+- 新增 `test-ui-open-process-safety.mjs`：人为把一个仍在运行的系统 `PING.EXE` PID 写入陈旧 broker 状态，再执行 `ui-open` 和 `ui-close`，验收条件是外部进程必须全过程存活而陈旧状态被清理；
+- 实机只读检查显示当前 DevSpace/ngrok、v2rayN/sing-box 与 Sangfor ECAgent 可以同时存在，监听端口分别为 `7676/4040`、`10809/10815` 和 `10000`，没有发现直接端口占用重叠；因此本次修复重点是启动期陈旧 PID 误杀，而不是修改 Windows 路由、系统代理或 EasyConnect/v2rayN 配置；
+- 继承 1.1.19 的 curl-first 更新、非递归 Portable 停止、严格 shutdown 与事务回滚，Portable Protocol 仍为 1.5。
+
+完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
+
 ## 1.1.19 主要变化
 
 - GitHub 在线更新改为 `curl.exe` 优先，先使用当前网络/代理环境，连接失败后对该请求自动使用 `--noproxy '*'` 直连；仅保留一次短时 PowerShell 兼容回退，不再执行多轮长超时 PowerShell 下载；
@@ -373,7 +383,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.19
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.20
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -401,7 +411,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.19 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.20 -BypassProxy
 ```
 
 ## 在线更新
