@@ -17,34 +17,23 @@ const pidFile = process.env.TUNNEL_PID_FILE || path.join(runDir, "tunnel.pid");
 const supervisorPidFile = path.join(runDir, "tunnel-supervisor.pid");
 const networkStateFile = path.join(runDir, "tunnel-network.json");
 const stopFile = path.join(runDir, "tunnel.stop");
-const powershellExe = path.join(
-  process.env.SystemRoot || "C:\\Windows",
-  "System32",
-  "WindowsPowerShell",
-  "v1.0",
-  "powershell.exe",
-);
 const requestedExecutable = path.resolve(String(process.argv[2] || ""));
 const allowedExecutables = new Set([
   path.join(root, "runtime", "ngrok", "ngrok.exe").toLowerCase(),
   path.join(root, "runtime", "cloudflared", "cloudflared.exe").toLowerCase(),
 ]);
 const isNetworkSelfTest = process.argv.includes("--network-self-test");
-const NETWORK_POLL_MS = 2_000;
-const VPN_SETTLE_MS = 6_000;
+const STOP_POLL_MS = 750;
+const RESTART_MIN_MS = 1_500;
+const RESTART_MAX_MS = 15_000;
 let child = null;
 let stopping = false;
 let restartTimer = null;
-let pollTimer = null;
-let connectedSince = 0;
-let lastSignature = "";
+let stopPollTimer = null;
+let restartDelayMs = RESTART_MIN_MS;
 
 function readJson(file, fallback = {}) {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return fallback;
-  }
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
 }
 
 function writeJson(file, value) {
@@ -76,16 +65,6 @@ function commandOutput(executable, args, timeout = 3_000) {
   return result.status === 0 ? String(result.stdout || "") : "";
 }
 
-function configuredNgrokProxy() {
-  try {
-    const text = fs.readFileSync(ngrokConfigFile, "utf8");
-    const match = text.match(/^\s*proxy_url:\s*["']?([^"'\r\n]+)["']?\s*$/m);
-    return match ? normalizeProxyUrl(match[1]) : "";
-  } catch {
-    return "";
-  }
-}
-
 function normalizeProxyUrl(value) {
   let raw = String(value || "").trim();
   if (!raw) return "";
@@ -93,8 +72,7 @@ function normalizeProxyUrl(value) {
   try {
     const url = new URL(raw);
     if (!["http:", "https:", "socks5:"].includes(url.protocol)) return "";
-    if (!url.hostname || !url.port) return "";
-    if (url.username || url.password) return "";
+    if (!url.hostname || !url.port || url.username || url.password) return "";
     return url.href.replace(/\/$/, "");
   } catch {
     return "";
@@ -113,58 +91,21 @@ function parseWindowsProxyServer(value) {
   }
   for (const key of ["https", "http", "socks", "socks5"]) {
     if (!entries.has(key)) continue;
-    const candidate = normalizeProxyUrl(`${key.startsWith("socks") ? "socks5" : "http"}://${entries.get(key)}`);
+    const protocol = key.startsWith("socks") ? "socks5" : "http";
+    const candidate = normalizeProxyUrl(`${protocol}://${entries.get(key)}`);
     if (candidate) return candidate;
   }
   return "";
 }
 
-function registryProxy() {
-  if (process.env.DEVSPACE_TEST_SYSTEM_PROXY) {
-    return {
-      enabled: true,
-      url: normalizeProxyUrl(process.env.DEVSPACE_TEST_SYSTEM_PROXY),
-      source: "test-system-proxy",
-    };
+function configuredNgrokProxy() {
+  try {
+    const text = fs.readFileSync(ngrokConfigFile, "utf8");
+    const match = text.match(/^\s*proxy_url:\s*["']?([^"'\r\n]+)["']?\s*$/m);
+    return match ? normalizeProxyUrl(match[1]) : "";
+  } catch {
+    return "";
   }
-  const enabledOutput = commandOutput("reg.exe", [
-    "query",
-    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-    "/v",
-    "ProxyEnable",
-  ]);
-  const serverOutput = commandOutput("reg.exe", [
-    "query",
-    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-    "/v",
-    "ProxyServer",
-  ]);
-  const enabledMatch = enabledOutput.match(/ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i);
-  const serverMatch = serverOutput.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
-  const enabled = Boolean(enabledMatch && Number.parseInt(enabledMatch[1], 16) !== 0);
-  return {
-    enabled,
-    url: enabled && serverMatch ? parseWindowsProxyServer(serverMatch[1]) : "",
-    source: "wininet",
-  };
-}
-
-function inheritedProxy() {
-  for (const name of [
-    "DEVSPACE_INHERITED_HTTPS_PROXY",
-    "DEVSPACE_INHERITED_HTTP_PROXY",
-    "DEVSPACE_INHERITED_ALL_PROXY",
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "ALL_PROXY",
-    "https_proxy",
-    "http_proxy",
-    "all_proxy",
-  ]) {
-    const candidate = normalizeProxyUrl(process.env[name]);
-    if (candidate) return { enabled: true, url: candidate, source: `env:${name}` };
-  }
-  return { enabled: false, url: "", source: "none" };
 }
 
 function localProxyHealthy(proxyUrl) {
@@ -181,37 +122,6 @@ function localProxyHealthy(proxyUrl) {
   return new RegExp(`(?:127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::\\]|\\[::1\\]|::):${escaped}\\s+\\S+\\s+LISTENING`, "i").test(output);
 }
 
-function sangforState() {
-  const testValue = String(process.env.DEVSPACE_TEST_SANGFOR_STATE || "").trim().toLowerCase();
-  if (["absent", "negotiating", "connected"].includes(testValue)) {
-    return {
-      clientActive: testValue !== "absent",
-      connected: testValue === "connected",
-      source: "test",
-    };
-  }
-  const taskOutput = commandOutput("tasklist.exe", ["/fo", "csv", "/nh"]);
-  const clientActive = /"(?:EasyConnect|SangforCSClient)\.exe"/i.test(taskOutput);
-  if (!clientActive) return { clientActive: false, connected: false, source: "process" };
-  const script = [
-    "$a=Get-CimInstance Win32_NetworkAdapter | Where-Object {$_.ServiceName -eq 'SangforVnic'} | Select-Object -First 1 NetEnabled,NetConnectionStatus",
-    "if($null -eq $a){'{\"present\":false}'}else{$a | Add-Member -NotePropertyName present -NotePropertyValue $true -PassThru | ConvertTo-Json -Compress}",
-  ].join(";");
-  const output = commandOutput(powershellExe, [
-    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
-  ], 4_000).trim();
-  try {
-    const adapter = JSON.parse(output || "{}");
-    return {
-      clientActive: true,
-      connected: Boolean(adapter.present && adapter.NetEnabled && Number(adapter.NetConnectionStatus) === 2),
-      source: "sangfor-vnic",
-    };
-  } catch {
-    return { clientActive: true, connected: false, source: "sangfor-vnic-unreadable" };
-  }
-}
-
 function compatibilityEnabled() {
   const deployment = readJson(deploymentFile, {});
   return deployment.tunnelNetworkCompatibility !== false;
@@ -220,61 +130,16 @@ function compatibilityEnabled() {
 function resolveNetworkState() {
   const compatibility = compatibilityEnabled();
   const manualProxy = configuredNgrokProxy();
-  const vpn = sangforState();
-  const now = Date.now();
-  if (vpn.clientActive && vpn.connected) {
-    if (process.env.DEVSPACE_TEST_SANGFOR_SETTLED === "1") connectedSince = now - VPN_SETTLE_MS - 1;
-    else if (!connectedSince) connectedSince = now;
-  } else {
-    connectedSince = 0;
-  }
-
-  if (!compatibility) {
-    return {
-      compatibility,
-      paused: false,
-      mode: manualProxy ? "manual-proxy" : "direct",
-      proxyUrl: manualProxy,
-      proxySource: manualProxy ? "ngrok-config" : "none",
-      vpnState: vpn.clientActive ? (vpn.connected ? "connected" : "negotiating") : "absent",
-      reason: "compatibility-disabled",
-    };
-  }
-
-  if (vpn.clientActive && !vpn.connected) {
-    return {
-      compatibility,
-      paused: true,
-      mode: "paused",
-      proxyUrl: "",
-      proxySource: "none",
-      vpnState: "negotiating",
-      reason: "sangfor-vpn-negotiating",
-    };
-  }
-  if (vpn.clientActive && vpn.connected && now - connectedSince < VPN_SETTLE_MS) {
-    return {
-      compatibility,
-      paused: true,
-      mode: "paused",
-      proxyUrl: "",
-      proxySource: "none",
-      vpnState: "settling",
-      reason: "sangfor-vpn-route-settling",
-    };
-  }
-
   if (manualProxy) {
-    const healthy = localProxyHealthy(manualProxy);
-    return healthy
+    return localProxyHealthy(manualProxy)
       ? {
           compatibility,
           paused: false,
           mode: "manual-proxy",
           proxyUrl: manualProxy,
           proxySource: "ngrok-config",
-          vpnState: vpn.clientActive ? "connected" : "absent",
-          reason: "manual-proxy",
+          vpnState: "unmanaged",
+          reason: "explicit-proxy",
         }
       : {
           compatibility,
@@ -282,23 +147,9 @@ function resolveNetworkState() {
           mode: "paused",
           proxyUrl: manualProxy,
           proxySource: "ngrok-config",
-          vpnState: vpn.clientActive ? "connected" : "absent",
-          reason: "manual-proxy-unavailable",
-        };
-  }
-
-  const candidates = [registryProxy(), inheritedProxy()];
-  for (const candidate of candidates) {
-    if (!candidate.enabled || !candidate.url || !localProxyHealthy(candidate.url)) continue;
-    return {
-      compatibility,
-      paused: false,
-      mode: "auto-proxy",
-      proxyUrl: candidate.url,
-      proxySource: candidate.source,
-      vpnState: vpn.clientActive ? "connected" : "absent",
-      reason: "healthy-proxy-detected",
-    };
+          vpnState: "unmanaged",
+          reason: "explicit-local-proxy-unavailable",
+      };
   }
   return {
     compatibility,
@@ -306,24 +157,22 @@ function resolveNetworkState() {
     mode: "direct",
     proxyUrl: "",
     proxySource: "none",
-    vpnState: vpn.clientActive ? "connected" : "absent",
-    reason: vpn.clientActive ? "vpn-connected-direct" : "no-active-proxy-or-vpn",
+    vpnState: "unmanaged",
+    reason: compatibility ? "ambient-proxy-isolated-direct-or-transparent-tun" : "compatibility-disabled",
   };
 }
 
 function childEnvironment(network) {
   const env = { ...process.env };
-  for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NGROK_PROXY"]) {
-    delete env[name];
-  }
+  for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NGROK_PROXY"]) delete env[name];
   if (network.proxyUrl) {
-    env.http_proxy = network.proxyUrl;
     env.HTTP_PROXY = network.proxyUrl;
-    env.https_proxy = network.proxyUrl;
     env.HTTPS_PROXY = network.proxyUrl;
+    env.http_proxy = network.proxyUrl;
+    env.https_proxy = network.proxyUrl;
     if (network.proxyUrl.toLowerCase().startsWith("socks5://")) {
-      env.all_proxy = network.proxyUrl;
       env.ALL_PROXY = network.proxyUrl;
+      env.all_proxy = network.proxyUrl;
     }
   }
   return env;
@@ -331,17 +180,18 @@ function childEnvironment(network) {
 
 function writeNetworkState(network, extra = {}) {
   writeJson(networkStateFile, {
-    formatVersion: 1,
+    formatVersion: 2,
     provider: requestedExecutable.toLowerCase().endsWith("ngrok.exe") ? "ngrok" : "cloudflare",
     supervisorPid: process.pid,
     childPid: child?.pid || null,
+    policy: "non-invasive",
     ...network,
     ...extra,
     updatedAt: new Date().toISOString(),
   });
 }
 
-function terminateChild(reason = "network-transition") {
+function terminateChild(reason = "supervisor-shutdown") {
   if (!child?.pid) return;
   const pid = child.pid;
   child = null;
@@ -354,8 +204,24 @@ function terminateChild(reason = "network-transition") {
   process.stderr.write(`Tunnel child ${pid} stopped for ${reason}.\n`);
 }
 
-function launchChild(network) {
-  if (stopping || network.paused || fs.existsSync(stopFile)) return;
+function launchChild() {
+  if (stopping || fs.existsSync(stopFile)) return;
+  const network = requestedExecutable.toLowerCase().endsWith("ngrok.exe")
+    ? resolveNetworkState()
+    : {
+        compatibility: compatibilityEnabled(),
+        paused: false,
+        mode: "provider-managed",
+        proxyUrl: "",
+        proxySource: "none",
+        vpnState: "not-applicable",
+        reason: "non-ngrok-provider",
+      };
+  if (network.paused) {
+    writeNetworkState(network, { status: "paused" });
+    scheduleRestart(Math.min(restartDelayMs, 5_000));
+    return;
+  }
   child = childProcess.spawn(requestedExecutable, process.argv.slice(3), {
     cwd: root,
     stdio: "inherit",
@@ -369,70 +235,47 @@ function launchChild(network) {
     removeOwnPidFile(pidFile, ownChild.pid);
     if (child === ownChild) child = null;
     process.stderr.write(`${error.stack || error}\n`);
-    scheduleReconcile();
+    scheduleRestart();
   });
   ownChild.once("exit", (code, signal) => {
     removeOwnPidFile(pidFile, ownChild.pid);
     if (child === ownChild) child = null;
     if (!stopping) {
-      process.stderr.write(`Tunnel child exited code=${code ?? "none"} signal=${signal || "none"}; re-evaluating network path.\n`);
-      scheduleReconcile();
+      process.stderr.write(`Tunnel child exited code=${code ?? "none"} signal=${signal || "none"}; retrying with a freshly selected outbound path.\n`);
+      scheduleRestart();
     }
   });
+  restartDelayMs = RESTART_MIN_MS;
 }
 
-function scheduleReconcile(delay = 1_500) {
+function scheduleRestart(delay = restartDelayMs) {
   if (stopping || restartTimer) return;
   restartTimer = setTimeout(() => {
     restartTimer = null;
-    reconcile();
+    launchChild();
   }, delay);
+  restartDelayMs = Math.min(RESTART_MAX_MS, Math.max(RESTART_MIN_MS, restartDelayMs * 2));
 }
 
-function networkSignature(network) {
-  return JSON.stringify({
-    paused: Boolean(network.paused),
-    mode: network.mode,
-    proxyUrl: network.proxyUrl,
-    vpnState: network.vpnState,
-    reason: network.reason,
-  });
-}
-
-function reconcile() {
-  if (stopping) return;
-  if (fs.existsSync(stopFile)) {
-    terminateChild("stop-request");
-    writeNetworkState({
-      compatibility: compatibilityEnabled(),
-      paused: true,
-      mode: "paused",
-      proxyUrl: "",
-      proxySource: "none",
-      vpnState: "unknown",
-      reason: "stop-request",
-    }, { status: "stopped" });
-    return;
-  }
-  const network = resolveNetworkState();
-  const signature = networkSignature(network);
-  if (signature !== lastSignature) {
-    if (child) terminateChild(`network-state:${network.reason}`);
-    lastSignature = signature;
-  }
-  if (network.paused) {
-    writeNetworkState(network, { status: "paused" });
-    return;
-  }
-  if (!child) launchChild(network);
-  else writeNetworkState(network, { childPid: child.pid, status: "running" });
+function checkStopRequest() {
+  if (!fs.existsSync(stopFile)) return;
+  writeNetworkState({
+    compatibility: compatibilityEnabled(),
+    paused: true,
+    mode: "paused",
+    proxyUrl: "",
+    proxySource: "none",
+    vpnState: "unmanaged",
+    reason: "stop-request",
+  }, { status: "stopped" });
+  shutdown();
 }
 
 function shutdown() {
   if (stopping) return;
   stopping = true;
   if (restartTimer) clearTimeout(restartTimer);
-  if (pollTimer) clearInterval(pollTimer);
+  if (stopPollTimer) clearInterval(stopPollTimer);
   terminateChild("supervisor-shutdown");
   removeOwnPidFile(supervisorPidFile, process.pid);
   process.exitCode = 0;
@@ -443,31 +286,13 @@ if (isNetworkSelfTest) {
   process.exit(0);
 }
 
-if (!allowedExecutables.has(requestedExecutable.toLowerCase())) {
-  throw new Error(`Refusing unapproved tunnel executable: ${requestedExecutable}`);
-}
-if (!fs.existsSync(requestedExecutable)) {
-  throw new Error(`Tunnel executable is missing: ${requestedExecutable}`);
-}
+if (!allowedExecutables.has(requestedExecutable.toLowerCase())) throw new Error(`Refusing unapproved tunnel executable: ${requestedExecutable}`);
+if (!fs.existsSync(requestedExecutable)) throw new Error(`Tunnel executable is missing: ${requestedExecutable}`);
 
 fs.mkdirSync(runDir, { recursive: true });
 writePid(supervisorPidFile, process.pid);
-
-if (!requestedExecutable.toLowerCase().endsWith("ngrok.exe")) {
-  const network = {
-    compatibility: compatibilityEnabled(),
-    paused: false,
-    mode: "provider-managed",
-    proxyUrl: "",
-    proxySource: "none",
-    vpnState: "not-applicable",
-    reason: "non-ngrok-provider",
-  };
-  launchChild(network);
-} else {
-  reconcile();
-  pollTimer = setInterval(reconcile, NETWORK_POLL_MS);
-}
+launchChild();
+stopPollTimer = setInterval(checkStopRequest, STOP_POLL_MS);
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

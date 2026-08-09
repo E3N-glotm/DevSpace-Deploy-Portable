@@ -362,6 +362,19 @@
 - 实机只读检查期间 DevSpace MCP `127.0.0.1:7676`、ngrok `127.0.0.1:4040`、sing-box `0.0.0.0:10809/127.0.0.1:10815`、Sangfor Promote Service `127.0.0.1:10000` 同时存在，没有直接端口重叠；WinINET 代理仍由 v2rayN 指向 `127.0.0.1:10809`，本次代码不改变该配置。
 - Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
 
+## 1.1.22 非侵入式网络、更新 ACK 与实时主页
+
+- [ ] tunnel supervisor 不包含 EasyConnect/Sangfor/VNIC 进程或网卡轮询；
+- [ ] ngrok tunnel 默认隔离 WinINET/环境代理；先打开 v2rayN 系统代理不会把 ngrok 强制送入代理链；仅显式 `proxy_url` 可启用 ngrok 自身代理；
+- [ ] TUN 模式使用 direct socket 并可被透明接管，不修改 WinINET/WinHTTP/路由/网卡；
+- [ ] GitHub Check 在故障注入的死 `127.0.0.1` 代理下仍能跳过代理并完成 direct/TUN 检查；
+- [ ] 增量包对普通程序文件继续严格 base SHA-256，对限定的 Release 构建生成物允许整文件替换；
+- [ ] Apply 使用一次性用户级 Task Scheduler 控制器，UI 只在 `apply-launch-ack.json` 成功后关闭；
+- [ ] updater 在 ACK 前退出会被拒绝，控制中心保持打开；
+- [ ] 首页每约 7 秒自动刷新活动状态，不再提供手动“刷新状态”；
+- [ ] “详细信息”对话框保留 status、HTTP、tunnel、文件验证与三类日志；
+- [ ] Portable Protocol 保持 1.5。
+
 ## 1.1.21 VPN / Proxy 共存
 
 - 实机只读日志确认：Sangfor VPN 可先正常登录并建立长连接，随后在网络变化后收到服务端被动注销；同时 ngrok 控制连接也会被本机网络变化打断，说明问题不是 TCP 监听端口重叠或单纯 PID 误杀。

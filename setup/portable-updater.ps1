@@ -10,7 +10,9 @@ param(
     [string]$Repository = "E3N-glotm/DevSpace-Deploy-Portable",
     [string]$CurrentVersion = "0.0.0",
     [string]$StagingPath = "",
-    [int]$UiPid = 0
+    [int]$UiPid = 0,
+    [string]$LaunchAckPath = "",
+    [string]$UpdateTaskName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -89,6 +91,21 @@ function Write-UpdateProgress {
     Move-Item -LiteralPath $temporary -Destination $ProgressFile -Force
 }
 
+function Remove-TransientUpdateTask {
+    if ([string]::IsNullOrWhiteSpace($UpdateTaskName)) { return }
+    if ($UpdateTaskName -notmatch '^DevSpace Portable Update [0-9a-fA-F]{32}$') {
+        Write-UpdateLog "Refusing to delete unexpected update task name: $UpdateTaskName"
+        return
+    }
+    $schtasks = Join-Path $env:SystemRoot "System32\schtasks.exe"
+    try {
+        & $schtasks /delete /tn $UpdateTaskName /f 2>$null | Out-Null
+        Write-UpdateLog "Transient update task removed: $UpdateTaskName"
+    } catch {
+        Write-UpdateLog "Unable to remove transient update task ${UpdateTaskName}: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-WithRetry {
     param(
         [Parameter(Mandatory = $true)]
@@ -126,13 +143,86 @@ function Get-CurlExecutable {
     return [string]$command.Source
 }
 
+function ConvertTo-ProxyUrl([string]$Value) {
+    $raw = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($raw)) { return "" }
+    if ($raw -notmatch '^[A-Za-z][A-Za-z0-9+.-]*://') { $raw = "http://$raw" }
+    try {
+        $uri = [Uri]$raw
+        if (@("http", "https", "socks5") -notcontains $uri.Scheme.ToLowerInvariant()) { return "" }
+        if ([string]::IsNullOrWhiteSpace($uri.Host) -or $uri.Port -le 0 -or -not [string]::IsNullOrWhiteSpace($uri.UserInfo)) { return "" }
+        return $uri.AbsoluteUri.TrimEnd('/')
+    } catch {
+        return ""
+    }
+}
+
+function ConvertFrom-WindowsProxyServer([string]$Value) {
+    $raw = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($raw)) { return "" }
+    if ($raw -notmatch '[=;]') { return ConvertTo-ProxyUrl $raw }
+    $values = @{}
+    foreach ($piece in ($raw -split ';')) {
+        $parts = $piece -split '=', 2
+        if ($parts.Count -ne 2) { continue }
+        $values[$parts[0].Trim().ToLowerInvariant()] = $parts[1].Trim()
+    }
+    foreach ($key in @("https", "http", "socks", "socks5")) {
+        if (-not $values.ContainsKey($key)) { continue }
+        $scheme = if ($key.StartsWith("socks")) { "socks5" } else { "http" }
+        $candidate = ConvertTo-ProxyUrl "${scheme}://$($values[$key])"
+        if ($candidate) { return $candidate }
+    }
+    return ""
+}
+
+function Test-LocalProxyHealthy([string]$ProxyUrl) {
+    if ([string]::IsNullOrWhiteSpace($ProxyUrl)) { return $false }
+    try { $uri = [Uri]$ProxyUrl } catch { return $false }
+    if (@("127.0.0.1", "localhost", "::1", "[::1]") -notcontains $uri.Host.ToLowerInvariant()) { return $true }
+    if ($uri.Port -le 0) { return $false }
+    $pattern = "(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]|\[::1\]|::):$([Regex]::Escape([string]$uri.Port))\s+\S+\s+LISTENING"
+    $netstat = & "$env:SystemRoot\System32\netstat.exe" -ano -p TCP 2>$null | Out-String
+    return [Regex]::IsMatch($netstat, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+}
+
+function Get-GitHubTransportCandidates {
+    $items = New-Object System.Collections.ArrayList
+    $seen = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+    $addProxy = {
+        param([string]$ProxyUrl, [string]$Name)
+        $normalized = ConvertTo-ProxyUrl $ProxyUrl
+        if ([string]::IsNullOrWhiteSpace($normalized) -or $seen.Contains($normalized)) { return }
+        [void]$seen.Add($normalized)
+        if (-not (Test-LocalProxyHealthy $normalized)) {
+            Write-UpdateLog "Skipping unavailable local proxy $normalized from $Name."
+            return
+        }
+        [void]$items.Add([pscustomobject]@{ proxyUrl = $normalized; transport = "curl-proxy"; source = $Name })
+    }
+
+    try {
+        $internetSettings = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction Stop
+        if ([int]$internetSettings.ProxyEnable -ne 0) {
+            & $addProxy (ConvertFrom-WindowsProxyServer ([string]$internetSettings.ProxyServer)) "wininet"
+        }
+    } catch {}
+    foreach ($name in @("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($value) { & $addProxy $value "env:$name" }
+    }
+    [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "curl-direct"; source = "direct-or-transparent-tun" })
+    return $items.ToArray()
+}
+
 function Invoke-CurlJson {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Uri,
         [hashtable]$Headers = @{},
         [int]$TimeoutSec = 30,
-        [switch]$Direct
+        [string]$ProxyUrl = "",
+        [string]$Transport = "curl-direct"
     )
     $curl = Get-CurlExecutable
     if (-not $curl) { throw "curl.exe is not available for the GitHub fallback transport." }
@@ -144,14 +234,27 @@ function Invoke-CurlJson {
         "--connect-timeout", "8",
         "--max-time", [string]$TimeoutSec
     )
-    if ($Direct) { $arguments += @("--noproxy", "*") }
+    if ($ProxyUrl) { $arguments += @("--proxy", $ProxyUrl) }
+    else { $arguments += @("--noproxy", "*") }
     foreach ($key in $Headers.Keys) {
         $arguments += @("--header", "${key}: $($Headers[$key])")
     }
     $arguments += $Uri
-    $output = & $curl @arguments
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) { throw "curl.exe GitHub request failed with exit code $exitCode." }
+    $proxyNames = @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+    $savedProxyEnvironment = @{}
+    foreach ($name in $proxyNames) {
+        $savedProxyEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+        [Environment]::SetEnvironmentVariable($name, $null, "Process")
+    }
+    try {
+        $output = & $curl @arguments
+        $exitCode = $LASTEXITCODE
+    } finally {
+        foreach ($name in $proxyNames) {
+            [Environment]::SetEnvironmentVariable($name, $savedProxyEnvironment[$name], "Process")
+        }
+    }
+    if ($exitCode -ne 0) { throw "$Transport GitHub request failed with exit code $exitCode." }
     $json = ($output -join "`n")
     if ([string]::IsNullOrWhiteSpace($json)) { throw "curl.exe GitHub request returned an empty response." }
     try {
@@ -169,31 +272,19 @@ function Invoke-GitHubJson {
         [int]$TimeoutSec = 30,
         [string]$Description = "GitHub request"
     )
-    Write-UpdateProgress -Phase "metadata" -Message $Description -Transport "curl"
-    $proxyAwareError = ""
-    try {
-        return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 20))
-    } catch {
-        $proxyAwareError = $_.Exception.Message
-        Write-UpdateLog "$Description failed through proxy-aware curl: $proxyAwareError. Trying direct curl without proxy."
-    }
-    try {
-        Write-UpdateProgress -Phase "metadata" -Message "$Description - direct retry" -Transport "curl-direct"
-        return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 25)) -Direct
-    } catch {
-        $directError = $_.Exception.Message
-        Write-UpdateLog "$Description failed through direct curl: $directError."
-        # The Portable package always ships curl, but keep one short PowerShell
-        # compatibility fallback in case the bundled runtime is damaged. This
-        # is intentionally a single bounded attempt rather than the previous
-        # 3 x long-timeout chain that could make the UI appear frozen.
+    $errors = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @(Get-GitHubTransportCandidates)) {
         try {
-            Write-UpdateProgress -Phase "metadata" -Message "$Description - PowerShell compatibility fallback" -Transport "powershell"
-            return Invoke-RestMethod -Uri $Uri -Headers $Headers -Method Get -TimeoutSec ([Math]::Min($TimeoutSec, 20))
+            $label = if ($candidate.proxyUrl) { "$Description - $($candidate.source)" } else { "$Description - direct/TUN" }
+            Write-UpdateProgress -Phase "metadata" -Message $label -Transport ([string]$candidate.transport)
+            return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 25)) -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
         } catch {
-            throw "$Description failed through proxy-aware curl, direct curl, and the bounded PowerShell fallback. curl: $proxyAwareError; direct: $directError; PowerShell: $($_.Exception.Message)"
+            $message = $_.Exception.Message
+            [void]$errors.Add("$($candidate.source): $message")
+            Write-UpdateLog "$Description failed through $($candidate.source): $message"
         }
     }
+    throw "$Description failed through all healthy proxy candidates and the direct/TUN path. $($errors -join '; ')"
 }
 
 function Invoke-CurlDownload {
@@ -206,7 +297,8 @@ function Invoke-CurlDownload {
         [int]$TimeoutSec = 1800,
         [int64]$ExpectedBytes = 0,
         [string]$Description = "GitHub download",
-        [switch]$Direct
+        [string]$ProxyUrl = "",
+        [string]$Transport = "curl-direct"
     )
     $curl = Get-CurlExecutable
     if (-not $curl) { throw "curl.exe is not available for the GitHub fallback transport." }
@@ -225,7 +317,8 @@ function Invoke-CurlDownload {
         "--max-time", [string]$TimeoutSec,
         "--output", $OutFile
     )
-    if ($Direct) { $arguments += @("--noproxy", "*") }
+    if ($ProxyUrl) { $arguments += @("--proxy", $ProxyUrl) }
+    else { $arguments += @("--noproxy", "*") }
     if ((Test-Path -LiteralPath $OutFile -PathType Leaf) -and (Get-Item -LiteralPath $OutFile).Length -gt 0) {
         $arguments += @("--continue-at", "-")
     }
@@ -244,10 +337,13 @@ function Invoke-CurlDownload {
     $info.CreateNoWindow = $true
     $info.RedirectStandardError = $true
     $info.RedirectStandardOutput = $true
+    foreach ($name in @("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")) {
+        if ($info.EnvironmentVariables.ContainsKey($name)) { $info.EnvironmentVariables.Remove($name) }
+    }
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $info
     if (-not $process.Start()) { throw "Unable to start curl.exe for $Description." }
-    $transport = if ($Direct) { "curl-direct" } else { "curl" }
+    $transport = $Transport
     $lastAt = Get-Date
     $lastBytes = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
     Write-UpdateProgress -Phase "downloading" -Message $Description -BytesReceived $lastBytes -BytesTotal $ExpectedBytes -Transport $transport
@@ -285,30 +381,28 @@ function Invoke-GitHubDownload {
         [string]$Description = "GitHub download",
         [int64]$ExpectedBytes = 0
     )
-    $proxyAwareError = ""
-    try {
-        Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $Description
-        return
-    } catch {
-        $proxyAwareError = $_.Exception.Message
-        Write-UpdateLog "$Description failed through proxy-aware curl: $proxyAwareError. Retrying the same partial file through direct curl."
+    $errors = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @(Get-GitHubTransportCandidates)) {
+        try {
+            $label = if ($candidate.proxyUrl) { "$Description - $($candidate.source)" } else { "$Description - direct/TUN" }
+            Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $label -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
+            return
+        } catch {
+            $message = $_.Exception.Message
+            [void]$errors.Add("$($candidate.source): $message")
+            Write-UpdateLog "$Description failed through $($candidate.source): $message"
+        }
     }
-    try {
-        Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description "$Description - direct" -Direct
-        return
-    } catch {
-        $directError = $_.Exception.Message
-        Write-UpdateLog "$Description direct curl retry failed: $directError."
-    }
-    # Range resume can fail if a CDN edge rejects the existing partial file.
-    # Retry direct once from zero before giving up; still never alter Windows,
-    # EasyConnect, v2rayN, WinINET, or WinHTTP proxy settings.
+    # A CDN may reject resuming a partial file after the outbound path changes.
+    # One last clean direct/TUN retry avoids getting stuck on a poisoned partial
+    # file while still keeping the entire update bounded and visible in the UI.
     if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
     try {
-        Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description "$Description - clean direct retry" -Direct
+        Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description "$Description - clean direct/TUN retry" -Transport "curl-direct"
         return
     } catch {
-        throw "$Description failed after proxy-aware curl, direct resume, and direct clean retry. Proxy-aware: $proxyAwareError; direct: $directError; clean direct: $($_.Exception.Message)"
+        [void]$errors.Add("clean-direct: $($_.Exception.Message)")
+        throw "$Description failed through all healthy proxy candidates, direct/TUN, and a clean direct/TUN retry. $($errors -join '; ')"
     }
 }
 
@@ -363,6 +457,17 @@ function ConvertTo-SafeRelativePath([string]$Value) {
         throw "Incremental updates may not modify persistent path: $normalized"
     }
     return $normalized
+}
+
+function Test-ReplaceSafeDriftPath([string]$RelativePath) {
+    $normalized = ([string]$RelativePath).Replace('\','/').ToLowerInvariant()
+    if (@(
+        "sha256sums.txt",
+        "version-manifest.json",
+        "app/package-lock.json",
+        "app/node_modules/.package-lock.json"
+    ) -contains $normalized) { return $true }
+    return $normalized -match '^packages/waishnav-devspace-[^/]+\.tgz$'
 }
 
 function Get-IncrementalCandidate([object]$Latest) {
@@ -538,6 +643,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
         }
         $filesRoot = Join-Path $deltaRoot "files"
         $changedPaths = New-Object System.Collections.Generic.List[string]
+        $acceptedBaseDrift = New-Object System.Collections.Generic.List[string]
         foreach ($entry in @($delta.changedFiles)) {
             $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
             $source = Join-Path $filesRoot ($relative.Replace('/','\'))
@@ -550,7 +656,14 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
             if ($baseHash) {
                 if (-not (Test-Path $currentTarget -PathType Leaf)) { throw "Incremental base file is missing: $relative" }
                 $installedHash = (Get-FileHash -LiteralPath $currentTarget -Algorithm SHA256).Hash.ToLowerInvariant()
-                if ($installedHash -ne $baseHash) { throw "Incremental base file has local drift: $relative" }
+                if ($installedHash -ne $baseHash) {
+                    if (Test-ReplaceSafeDriftPath $relative) {
+                        Write-UpdateLog "Accepting release-generated base drift for $relative. The delta carries the complete replacement file and persistent/user data is not affected."
+                        [void]$acceptedBaseDrift.Add($relative)
+                    } else {
+                        throw "Incremental base file has local drift: $relative"
+                    }
+                }
             } elseif (Test-Path $currentTarget) {
                 throw "Incremental package expected a new path but it already exists: $relative"
             }
@@ -581,6 +694,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
             deltaManifestPath = $deltaManifestFile
             changedFiles = @($changedPaths)
             deletedFiles = @($deletedPaths)
+            acceptedBaseDrift = @($acceptedBaseDrift)
         }
         $stageInfo | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $stage "stage-info.json") -Encoding UTF8
         Write-UpdateLog "Incremental update $CurrentVersion -> $($Latest.version) staged successfully at $stage."
@@ -595,6 +709,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
             assetSize = $actualSize
             assetSha256 = $actualHash
             fullFallbackSize = [int64]$Latest.manifest.asset.size
+            acceptedBaseDrift = @($acceptedBaseDrift)
             releaseUrl = [string]$Latest.release.html_url
         }
     } catch {
@@ -683,6 +798,27 @@ function Apply-StagedUpdate {
     # finish after stopping every other Portable-owned process.
     $env:DEVSPACE_STOP_EXCLUDE_PID = [string]$PID
 
+    if (-not [string]::IsNullOrWhiteSpace($LaunchAckPath)) {
+        $ack = [IO.Path]::GetFullPath($LaunchAckPath)
+        if (-not $ack.StartsWith(($stage + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "LaunchAckPath is outside the staged update directory."
+        }
+        $ackValue = [ordered]@{
+            acknowledged = $true
+            updaterPid = $PID
+            currentVersion = $CurrentVersion
+            targetVersion = $targetVersion
+            updateMode = $updateMode
+            stagingPath = $stage
+            acknowledgedAt = (Get-Date).ToUniversalTime().ToString("o")
+        }
+        $ackTemp = "$ack.tmp-$PID"
+        $ackValue | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ackTemp -Encoding UTF8
+        Move-Item -LiteralPath $ackTemp -Destination $ack -Force
+        Write-UpdateLog "Detached updater launch acknowledged by PID $PID for $CurrentVersion -> $targetVersion."
+        Write-UpdateProgress -Phase "apply-started" -Message "Detached updater is running and waiting for the control center to close"
+    }
+
     if ($UiPid -gt 0) {
         Write-UpdateLog "Waiting for native UI PID $UiPid to exit before applying $targetVersion."
         Wait-Process -Id $UiPid -Timeout 90 -ErrorAction SilentlyContinue
@@ -761,6 +897,7 @@ function Apply-StagedUpdate {
         Write-UpdateResult $result
         Write-UpdateLog "Update $targetVersion applied successfully."
         Write-UpdateProgress -Phase "completed" -Message "DevSpace Portable $targetVersion update completed"
+        Remove-TransientUpdateTask
         Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         return $result
@@ -806,7 +943,9 @@ try {
     }
 } catch {
     Write-UpdateLog "$Action failed: $($_.Exception.Message)"
+    if ($_.ScriptStackTrace) { Write-UpdateLog "Updater stack: $($_.ScriptStackTrace)" }
     Write-UpdateProgress -Phase "error" -Message "$Action failed: $($_.Exception.Message)"
+    if ($Action -eq "Apply") { Remove-TransientUpdateTask }
     Write-Error $_
     exit 1
 }

@@ -65,8 +65,15 @@ try {
   assert.match(nativeSource, /update-progress\.json/);
   assert.match(nativeSource, /speedBytesPerSecond/);
   assert.match(nativeSource, /预计剩余/);
-  assert.match(nativeSource, /GitHub 直连/);
+  assert.match(nativeSource, /直连 \/ 透明 TUN/);
+  assert.match(nativeSource, /健康的本地\/系统代理/);
   assert.match(nativeSource, /_manager\.RunJsonAsync\("update-launch"/);
+  assert.match(nativeSource, /acknowledged/);
+  assert.match(nativeSource, /独立更新器没有完成启动确认/);
+  assert.match(nativeSource, /StatusIndicatorCard/);
+  assert.match(nativeSource, /DiagnosticsDetailsDialog/);
+  assert.match(nativeSource, /RunJsonAsync\("dashboard-status"\)/);
+  assert.match(nativeSource, /ActionButton\("详细信息"/);
   assert.match(nativeSource, /_manager\.RunAsync\("shutdown"\)/);
   assert.match(nativeSource, /不会递归终止 DevSpace 启动的第三方应用/);
   assert.match(nativeSource, /BuildMemoriesTab\(\)/);
