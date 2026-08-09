@@ -1748,7 +1748,6 @@ namespace DevSpacePortable.NativeUI
         private readonly System.Windows.Forms.Timer _computerUseIndicatorTimer = new System.Windows.Forms.Timer();
         private readonly ComputerUseIndicator _computerUseIndicator = new ComputerUseIndicator();
         private readonly JavaScriptSerializer _computerUseJson = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-        private readonly JavaScriptSerializer _updateJson = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         private readonly NotifyIcon _notifyIcon = new NotifyIcon();
         private readonly ContextMenuStrip _trayMenu = new ContextMenuStrip();
 
@@ -2065,7 +2064,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.23 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.24 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2826,7 +2825,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.23") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.24") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2978,176 +2977,31 @@ namespace DevSpacePortable.NativeUI
 
         private async Task CheckForUpdatesAsync()
         {
-            await ExecuteBusyAsync(async delegate
+            await Task.Yield();
+            string updater = Path.Combine(_root, "Update.exe");
+            if (!File.Exists(updater))
+                throw new FileNotFoundException("独立更新程序不存在。请重新解压完整 Release。", updater);
+            if (Directory.Exists(Path.Combine(_root, ".git")))
             {
-                SetOutput("正在通过 GitHub Releases 检查稳定版更新……");
-                Dictionary<string, object> status = await _manager.RunJsonAsync("update-check");
-                string current = GetString(status, "currentVersion", "1.1.23");
-                string latest = GetString(status, "latestVersion", current);
-                if (!GetBool(status, "updateAvailable"))
-                {
-                    SetOutput("当前版本 " + current + " 已是 GitHub 最新稳定版。\r\n" + GetString(status, "releaseUrl"));
-                    MessageBox.Show(this, "当前版本 " + current + " 已是最新稳定版。", "检查更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-                if (GetBool(status, "sourceCheckout"))
-                {
-                    SetOutput("检测到 Git 源码工作区。在线更新器不会覆盖源码检出目录；请在正式 Release 解压目录中使用更新功能。\r\n最新版本：" + latest);
-                    MessageBox.Show(this, "检测到当前目录包含 .git。为避免覆盖源码和未提交改动，在线更新仅允许在正式 Release 解压目录中执行。\r\n\r\n最新版本：" + latest, "源码工作区不执行热更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-                string preferredMode = GetString(status, "preferredMode", "full");
-                bool incrementalPreferred = string.Equals(preferredMode, "incremental", StringComparison.OrdinalIgnoreCase);
-                long fullSize = GetLong(status, "fullAssetSize", GetLong(status, "assetSize"));
-                long downloadSize = incrementalPreferred ? GetLong(status, "incrementalAssetSize") : fullSize;
-                string packageName = incrementalPreferred ? GetString(status, "incrementalAssetName") : GetString(status, "assetName");
-                string prompt = "发现 DevSpace Portable " + latest + "。\r\n\r\n"
-                    + "首选更新：" + (incrementalPreferred ? "增量包" : "完整包") + "\r\n"
-                    + "安装包：" + packageName + "\r\n"
-                    + "预计下载：" + FormatBytes(downloadSize) + "\r\n"
-                    + (incrementalPreferred ? "完整包兜底：" + FormatBytes(fullSize) + "\r\n" : "") + "\r\n"
-                    + "更新器会优先使用与当前版本精确匹配的增量包，并校验文件大小与 SHA-256。仅允许 Release 构建生成物的已知差异直接整文件替换；普通程序文件出现本地漂移、增量包缺失或损坏时仍会自动切换完整包。data、logs 与 reports 始终保留。现在继续吗？";
-                if (MessageBox.Show(this, prompt, "发现新版本 " + latest, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
-                {
-                    SetOutput("已取消更新。当前版本仍为 " + current + "。");
-                    return;
-                }
-
-                SetOutput("正在准备 DevSpace Portable " + latest + "。更新器会跳过未监听的本地代理，优先使用可用的系统/环境代理，再尝试直连或透明 TUN；全程显示实时下载进度和速度，不会修改、启动或停止 EasyConnect、v2rayN、系统代理、WinHTTP 或 VPN 网卡。\r\n\r\n等待 GitHub 返回更新数据……");
-                Dictionary<string, object> staged = await StageUpdateWithProgressAsync(latest);
-                if (!GetBool(staged, "staged"))
-                {
-                    SetOutput("更新检查完成，但没有需要安装的新版本。");
-                    return;
-                }
-                string stagingPath = GetString(staged, "stagingPath");
-                string stagedMode = GetString(staged, "updateMode", "full");
-                string fallbackReason = GetString(staged, "fallbackReason");
-                SetOutput("更新包已完成校验并暂存。\r\n目标版本：" + latest
-                    + "\r\n更新方式：" + (stagedMode == "incremental" ? "增量更新" : "完整包更新")
-                    + (string.IsNullOrWhiteSpace(fallbackReason) ? "" : "\r\n切换完整包原因：" + fallbackReason)
-                    + "\r\n暂存目录：" + stagingPath);
-                if (MessageBox.Show(this, "更新包已完成下载与校验。现在关闭控制中心并执行受控更新吗？\r\n\r\n如果替换失败，更新器会恢复原版本并重新启动。", "准备安装 " + latest, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
-                {
-                    SetOutput("更新包已暂存，但尚未安装。再次点击“检查更新”可以重新开始更新流程。 ");
-                    return;
-                }
-                Dictionary<string, object> launched = await _manager.RunJsonAsync("update-launch", new
-                {
-                    stagingPath = stagingPath,
-                    uiPid = Process.GetCurrentProcess().Id,
-                });
-                if (!GetBool(launched, "launched") || !GetBool(launched, "acknowledged"))
-                    throw new InvalidOperationException("独立更新器没有完成启动确认。控制中心将保持打开，当前版本不会被替换。");
-                SetOutput("独立更新器已完成启动确认 · PID " + GetInt(launched, "updaterPid") + "。\r\n正在关闭控制中心并执行受控更新……");
-                _closingForUpdate = true;
-                _allowUiExit = true;
-                Close();
+                MessageBox.Show(this,
+                    "检测到当前目录是 Git 源码工作区。独立 Update.exe 不会覆盖源码检出目录，请在正式 Release 解压目录中使用在线更新。",
+                    "源码工作区不执行热更新",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+            string current = GetString(_currentConfig, "portableVersion", "1.1.24");
+            string arguments = "--root \"" + _root.Replace("\"", "\\\"") + "\""
+                + " --current \"" + current.Replace("\"", "\\\"") + "\""
+                + " --parent-ui " + Process.GetCurrentProcess().Id;
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = updater,
+                Arguments = arguments,
+                WorkingDirectory = _root,
+                UseShellExecute = false,
             });
-        }
-
-        private async Task<Dictionary<string, object>> StageUpdateWithProgressAsync(string latest)
-        {
-            string progressFile = Path.Combine(_root, "data", "state", "update-progress.json");
-            try { if (File.Exists(progressFile)) File.Delete(progressFile); } catch { }
-            Task<Dictionary<string, object>> stageTask = _manager.RunJsonAsync("update-stage");
-            string lastRendered = "";
-            while (!stageTask.IsCompleted)
-            {
-                await Task.Delay(500);
-                Dictionary<string, object> progress = ReadUpdateProgress(progressFile);
-                if (progress.Count == 0) continue;
-                string rendered = FormatUpdateProgress(progress, latest);
-                if (!string.Equals(rendered, lastRendered, StringComparison.Ordinal))
-                {
-                    SetOutput(rendered);
-                    lastRendered = rendered;
-                }
-            }
-            return await stageTask;
-        }
-
-        private Dictionary<string, object> ReadUpdateProgress(string file)
-        {
-            try
-            {
-                if (!File.Exists(file)) return new Dictionary<string, object>();
-                string text = File.ReadAllText(file, Encoding.UTF8);
-                object value = _updateJson.DeserializeObject(text);
-                return value as Dictionary<string, object> ?? new Dictionary<string, object>();
-            }
-            catch
-            {
-                // The updater atomically replaces this file. A transient read
-                // race must never abort an otherwise healthy download.
-                return new Dictionary<string, object>();
-            }
-        }
-
-        private static string FormatUpdateProgress(Dictionary<string, object> progress, string latest)
-        {
-            string phase = GetString(progress, "phase", "working");
-            string message = GetString(progress, "message", "正在更新");
-            string transport = GetString(progress, "transport");
-            long received = GetLong(progress, "bytesReceived");
-            long total = GetLong(progress, "bytesTotal");
-            long speed = GetLong(progress, "speedBytesPerSecond");
-            int eta = GetInt(progress, "etaSeconds", -1);
-            double percent = 0;
-            object percentValue;
-            if (progress.TryGetValue("percent", out percentValue) && percentValue != null)
-            {
-                try { percent = Convert.ToDouble(percentValue); } catch { percent = 0; }
-            }
-            StringBuilder text = new StringBuilder();
-            text.Append("DevSpace Portable ").Append(latest).Append(" 在线更新\r\n\r\n");
-            string phaseText = "正在处理更新";
-            if (string.Equals(phase, "metadata", StringComparison.OrdinalIgnoreCase)) phaseText = "正在读取 GitHub Release 与更新清单";
-            else if (string.Equals(phase, "downloading", StringComparison.OrdinalIgnoreCase)) phaseText = "正在下载更新包";
-            else if (string.Equals(phase, "downloaded", StringComparison.OrdinalIgnoreCase)) phaseText = "更新包下载完成";
-            else if (string.Equals(phase, "verifying", StringComparison.OrdinalIgnoreCase)) phaseText = "正在校验文件大小与 SHA-256";
-            else if (string.Equals(phase, "extracting", StringComparison.OrdinalIgnoreCase)) phaseText = "正在安全解压并验证更新内容";
-            else if (string.Equals(phase, "fallback", StringComparison.OrdinalIgnoreCase)) phaseText = "增量更新不可用，正在切换完整包兜底";
-            else if (string.Equals(phase, "staged", StringComparison.OrdinalIgnoreCase)) phaseText = "更新包已经下载、校验并暂存";
-            else if (string.Equals(phase, "apply-started", StringComparison.OrdinalIgnoreCase)) phaseText = "独立更新器已接管，正在等待控制中心关闭";
-            else if (string.Equals(phase, "applying", StringComparison.OrdinalIgnoreCase)) phaseText = "正在应用更新";
-            else if (string.Equals(phase, "rollback", StringComparison.OrdinalIgnoreCase)) phaseText = "更新失败，正在恢复原版本";
-            else if (string.Equals(phase, "completed", StringComparison.OrdinalIgnoreCase)) phaseText = "更新完成";
-            else if (string.Equals(phase, "error", StringComparison.OrdinalIgnoreCase)) phaseText = "更新失败";
-            text.Append(phaseText).Append("\r\n");
-            if ((phase == "error" || phase == "fallback" || phase == "rollback") && !string.IsNullOrWhiteSpace(message))
-                text.Append("详情：").Append(message).Append("\r\n");
-            if (total > 0)
-            {
-                text.Append("进度：").Append(percent.ToString("0.0")).Append("%  ·  ")
-                    .Append(FormatBytes(received)).Append(" / ").Append(FormatBytes(total)).Append("\r\n");
-            }
-            if (string.Equals(phase, "downloading", StringComparison.OrdinalIgnoreCase))
-            {
-                text.Append("速度：").Append(speed > 0 ? FormatBytes(speed) + "/s" : "等待数据……");
-                if (eta >= 0) text.Append("  ·  预计剩余 ").Append(FormatDuration(eta));
-                text.Append("\r\n");
-            }
-            if (!string.IsNullOrWhiteSpace(transport))
-                text.Append("网络路径：").Append(transport == "curl-direct" ? "直连 / 透明 TUN" : transport == "curl-proxy" ? "健康的本地/系统代理" : transport).Append("\r\n");
-            text.Append("\r\n更新器不会启动、停止或修改 EasyConnect、v2rayN 以及 Windows 系统代理设置。");
-            return text.ToString();
-        }
-
-        private static string FormatDuration(int seconds)
-        {
-            if (seconds < 60) return Math.Max(0, seconds) + " 秒";
-            int minutes = seconds / 60;
-            int remainder = seconds % 60;
-            return minutes + " 分 " + remainder + " 秒";
-        }
-
-        private static string FormatBytes(long value)
-        {
-            if (value < 1024) return value + " B";
-            if (value < 1024L * 1024L) return (value / 1024D).ToString("0.0") + " KiB";
-            if (value < 1024L * 1024L * 1024L) return (value / 1024D / 1024D).ToString("0.0") + " MiB";
-            return (value / 1024D / 1024D / 1024D).ToString("0.00") + " GiB";
+            SetOutput("已启动独立 Update.exe。\r\n\r\n检查、下载、校验和安装进度都会在独立更新窗口中显示；主控制中心在下载阶段保持运行，只有真正开始替换文件时才会关闭。");
         }
 
         private async Task LoadPluginsAsync()

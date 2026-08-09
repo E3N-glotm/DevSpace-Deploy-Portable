@@ -459,17 +459,6 @@ function ConvertTo-SafeRelativePath([string]$Value) {
     return $normalized
 }
 
-function Test-ReplaceSafeDriftPath([string]$RelativePath) {
-    $normalized = ([string]$RelativePath).Replace('\','/').ToLowerInvariant()
-    if (@(
-        "sha256sums.txt",
-        "version-manifest.json",
-        "app/package-lock.json",
-        "app/node_modules/.package-lock.json"
-    ) -contains $normalized) { return $true }
-    return $normalized -match '^packages/waishnav-devspace-[^/]+\.tgz$'
-}
-
 function Get-IncrementalCandidate([object]$Latest) {
     $entries = @($Latest.manifest.incrementalAssets)
     $candidate = $entries | Where-Object {
@@ -654,18 +643,19 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
             $currentTarget = Join-Path $Root ($relative.Replace('/','\'))
             $baseHash = ([string]$entry.baseSha256).ToLowerInvariant()
             if ($baseHash) {
-                if (-not (Test-Path $currentTarget -PathType Leaf)) { throw "Incremental base file is missing: $relative" }
-                $installedHash = (Get-FileHash -LiteralPath $currentTarget -Algorithm SHA256).Hash.ToLowerInvariant()
-                if ($installedHash -ne $baseHash) {
-                    if (Test-ReplaceSafeDriftPath $relative) {
-                        Write-UpdateLog "Accepting release-generated base drift for $relative. The delta carries the complete replacement file and persistent/user data is not affected."
+                if (-not (Test-Path $currentTarget -PathType Leaf)) {
+                    Write-UpdateLog "Accepting missing changed-file base for $relative. file-delta-v1 carries the complete target file and final SHA-256 is verified after apply."
+                    [void]$acceptedBaseDrift.Add($relative)
+                } else {
+                    $installedHash = (Get-FileHash -LiteralPath $currentTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($installedHash -ne $baseHash) {
+                        Write-UpdateLog "Accepting changed-file base drift for $relative. file-delta-v1 carries the complete target file; persistent roots are excluded and the final target hash is verified."
                         [void]$acceptedBaseDrift.Add($relative)
-                    } else {
-                        throw "Incremental base file has local drift: $relative"
                     }
                 }
             } elseif (Test-Path $currentTarget) {
-                throw "Incremental package expected a new path but it already exists: $relative"
+                Write-UpdateLog "Accepting pre-existing changed-file target for $relative. file-delta-v1 will transactionally replace it with the manifest-pinned target file."
+                [void]$acceptedBaseDrift.Add($relative)
             }
             [void]$changedPaths.Add($relative)
         }

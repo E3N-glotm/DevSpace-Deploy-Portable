@@ -28,6 +28,7 @@ release-assets/*
 
 # Native build output and temporary replacement executables.
 /DevSpace-Portable.exe
+/Update.exe
 /*_DevSpace-Portable.exe
 
 # Update/build staging directories.

@@ -386,6 +386,19 @@
 - [ ] Owner Password 与 `auth.json` 路径分别具有一键复制按钮，复制使用 Windows Clipboard；
 - [ ] Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
 
+## 1.1.24 独立 Update.exe 与增量替换语义
+
+- [ ] Release 根目录包含可独立运行的 `Update.exe`；
+- [ ] 主控制中心“检查更新”只启动 `Update.exe`，不直接调用 `update-check`、`update-stage` 或 `update-launch`；
+- [ ] `Update.exe --self-test` 验证独立检查/暂存、实时进度、临时目录 Apply controller、主 UI PID 身份校验；
+- [ ] 下载/校验阶段主 UI 与 MCP/tunnel 服务保持运行，只有 Apply 阶段才关闭主 UI并停止 Portable 自有服务；
+- [ ] Apply controller 从 `%TEMP%/DevSpacePortableUpdater/<guid>/Update.exe` 运行，因此根目录 `Update.exe` 可随版本正常替换；
+- [ ] 新正常更新路径不依赖一次性 Task Scheduler 任务；旧 manager launcher 只作为兼容路径保留；
+- [ ] `file-delta-v1` changed file 的 base SHA 漂移/缺失不会触发完整包兜底，目标 payload SHA 与最终落盘 SHA 必须严格一致；
+- [ ] deleted file 仍要求 base SHA 一致，`data/logs/reports` 仍禁止增量修改；
+- [ ] 1.1.23 -> 1.1.24 增量包可由 1.1.23 旧 updater 正常识别，以完成独立更新器的 bootstrap；
+- [ ] Portable Protocol 保持 1.5。
+
 ## 1.1.21 VPN / Proxy 共存
 
 - 实机只读日志确认：Sangfor VPN 可先正常登录并建立长连接，随后在网络变化后收到服务端被动注销；同时 ngrok 控制连接也会被本机网络变化打断，说明问题不是 TCP 监听端口重叠或单纯 PID 误杀。

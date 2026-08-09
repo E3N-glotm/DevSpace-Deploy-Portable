@@ -66,22 +66,15 @@ try {
   assert.match(nativeSource, /query\.Length > 0 \|\| _expandedSessionGroups\.Contains/);
   assert.match(nativeSource, /CloseChoiceDialog\.Show\(this\)/);
   assert.match(nativeSource, /private readonly NotifyIcon _notifyIcon/);
-  assert.match(nativeSource, /_manager\.RunJsonAsync\("update-check"\)/);
-  assert.match(nativeSource, /StageUpdateWithProgressAsync\(latest\)/);
-  assert.match(nativeSource, /update-progress\.json/);
-  assert.match(nativeSource, /speedBytesPerSecond/);
-  assert.match(nativeSource, /预计剩余/);
+  assert.match(nativeSource, /Path\.Combine\(_root, "Update\.exe"\)/);
+  assert.match(nativeSource, /已启动独立 Update\.exe/);
+  assert.match(nativeSource, /只有真正开始替换文件时才会关闭/);
   assert.match(nativeSource, /OwnerPasswordDialog\.Show/);
   assert.match(nativeSource, /auth\.json 位置/);
   assert.match(nativeSource, /复制 Owner Password/);
   assert.match(nativeSource, /复制 auth\.json 路径/);
   assert.match(nativeSource, /密码已同时写入下方 auth\.json/);
   assert.match(nativeSource, /Clipboard\.SetText\(box\.Text\)/);
-  assert.match(nativeSource, /直连 \/ 透明 TUN/);
-  assert.match(nativeSource, /健康的本地\/系统代理/);
-  assert.match(nativeSource, /_manager\.RunJsonAsync\("update-launch"/);
-  assert.match(nativeSource, /acknowledged/);
-  assert.match(nativeSource, /独立更新器没有完成启动确认/);
   assert.match(nativeSource, /StatusIndicatorCard/);
   assert.match(nativeSource, /DiagnosticsDetailsDialog/);
   assert.match(nativeSource, /RunJsonAsync\("dashboard-status"\)/);
@@ -158,11 +151,11 @@ try {
     collapsibleSessionGroups: true,
     selectedFileDiffOnly: true,
     trayCloseChoice: true,
-    onlineUpdateUi: true,
+    standaloneUpdateLauncher: true,
     memoryCrud: true,
     memoryScopeFiltering: true,
     memoryContentPreview: true,
-    liveUpdateProgress: true,
+    updateProgressMovedToStandaloneUpdater: true,
     firstDeployOwnerPasswordCopy: true,
     authFileLocationShown: true,
     authFilePathCopy: true,
