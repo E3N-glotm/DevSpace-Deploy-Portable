@@ -1,4 +1,4 @@
-# Application update design through 1.1.22
+# Application update design through 1.1.23
 
 ## Goal
 
@@ -10,6 +10,20 @@ rollback safety.
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.23: review density and first-run credential usability
+
+1. Session-title groups are collapsed by default, with explicit per-group
+   `▶/▼` state and global expand/collapse controls. Search temporarily reveals
+   matching child sessions without permanently rewriting the user's expanded
+   group state.
+2. Group header rows are not valid review-session selections, so expanding a
+   group cannot accidentally enter the review/rollback workflow.
+3. The first-run Owner Password dialog shows both the generated secret and the
+   exact `auth.json` path. Each value has its own clipboard action.
+4. The network ownership boundary from 1.1.22 remains unchanged: these UI
+   changes do not inspect, start, stop, reconfigure, or repair third-party VPN
+   clients.
 
 ## Implemented in 1.1.22: non-invasive networking and acknowledged apply
 

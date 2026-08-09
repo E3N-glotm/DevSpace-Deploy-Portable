@@ -1768,6 +1768,7 @@ namespace DevSpacePortable.NativeUI
         private Dictionary<string, object> _selectedSessionDetails = new Dictionary<string, object>();
         private List<Dictionary<string, object>> _allSessions = new List<Dictionary<string, object>>();
         private List<Dictionary<string, object>> _allMemories = new List<Dictionary<string, object>>();
+        private readonly HashSet<string> _expandedSessionGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string _fullSessionPatch = "";
         private string _editingMemoryId = "";
         private string _closePreference = "";
@@ -2064,7 +2065,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.22 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.23 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2451,6 +2452,8 @@ namespace DevSpacePortable.NativeUI
             searchRow.Controls.Add(ActionButton("刷新", async delegate { await LoadSessionsAsync(); }, true), 2, 0);
             optionRow.Controls.Add(_showHidden);
             optionRow.Controls.Add(_showArchived);
+            optionRow.Controls.Add(ActionButton("全部折叠", CollapseAllSessionGroups));
+            optionRow.Controls.Add(ActionButton("全部展开", ExpandAllSessionGroups));
             filterBlock.Controls.Add(searchRow, 0, 0);
             filterBlock.Controls.Add(optionRow, 0, 1);
             listLayout.Controls.Add(filterBlock, 0, 1);
@@ -2823,7 +2826,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.22") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.23") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2869,7 +2872,10 @@ namespace DevSpacePortable.NativeUI
             Dictionary<string, object> result = await _manager.RunJsonAsync("configure", CollectConfiguration());
             _ngrokToken.Clear(); _cloudflareToken.Clear(); _ownerToken.Clear();
             if (GetBool(result, "generatedOwnerToken") && !string.IsNullOrEmpty(GetString(result, "ownerToken")))
-                MessageBox.Show(this, "首次生成的 Owner Password：\r\n\r\n" + GetString(result, "ownerToken") + "\r\n\r\n请立即保存到密码管理器。", "Owner Password", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                OwnerPasswordDialog.Show(
+                    this,
+                    GetString(result, "ownerToken"),
+                    GetString(result, "authFile"));
             if (!silent) SetOutput("配置已保存。\r\nMCP URL: " + GetString(result, "mcpUrl"));
         }
 
@@ -2976,7 +2982,7 @@ namespace DevSpacePortable.NativeUI
             {
                 SetOutput("正在通过 GitHub Releases 检查稳定版更新……");
                 Dictionary<string, object> status = await _manager.RunJsonAsync("update-check");
-                string current = GetString(status, "currentVersion", "1.1.22");
+                string current = GetString(status, "currentVersion", "1.1.23");
                 string latest = GetString(status, "latestVersion", current);
                 if (!GetBool(status, "updateAvailable"))
                 {
@@ -3284,19 +3290,20 @@ namespace DevSpacePortable.NativeUI
                         .OrderByDescending(session => GetBool(session, "pinned"))
                         .ThenByDescending(SessionUpdatedAt)
                         .ToList();
+                    bool expanded = query.Length > 0 || _expandedSessionGroups.Contains(group.Key);
                     int groupFiles = sessions.Sum(session => GetInt(GetDictionary(session, "summary"), "files"));
                     int groupAdditions = sessions.Sum(session => GetInt(GetDictionary(session, "summary"), "additions"));
                     int groupRemovals = sessions.Sum(session => GetInt(GetDictionary(session, "summary"), "removals"));
                     int headerIndex = _sessionGrid.Rows.Add(
                         sessions.Any(session => GetBool(session, "pinned")) ? "★" : "",
-                        group.Key + "  ·  " + sessions.Count + " 轮",
-                        "分组",
+                        (expanded ? "▼ " : "▶ ") + group.Key + "  ·  " + sessions.Count + " 轮",
+                        expanded ? "已展开" : "已折叠",
                         groupFiles,
                         "+" + groupAdditions + " -" + groupRemovals,
                         FormatLocalTime(GetString(sessions[0], "updatedAt")),
                         "");
                     DataGridViewRow header = _sessionGrid.Rows[headerIndex];
-                    header.Tag = null;
+                    header.Tag = group.Key;
                     header.Height = 42;
                     header.DefaultCellStyle.BackColor = UiPalette.SurfaceStrong;
                     header.DefaultCellStyle.SelectionBackColor = UiPalette.SurfaceStrong;
@@ -3304,6 +3311,7 @@ namespace DevSpacePortable.NativeUI
                     header.DefaultCellStyle.SelectionForeColor = UiPalette.Text;
                     header.DefaultCellStyle.Font = _sessionGrid.ColumnHeadersDefaultCellStyle.Font;
 
+                    if (!expanded) continue;
                     foreach (Dictionary<string, object> session in sessions)
                     {
                         string root = GetString(session, "root");
@@ -3326,6 +3334,26 @@ namespace DevSpacePortable.NativeUI
                 if (string.IsNullOrWhiteSpace(selectedId)) _sessionGrid.ClearSelection();
             }
             finally { _sessionListLoading = false; }
+        }
+
+        private void ToggleSessionGroup(string groupKey)
+        {
+            if (string.IsNullOrWhiteSpace(groupKey)) return;
+            if (!_expandedSessionGroups.Add(groupKey)) _expandedSessionGroups.Remove(groupKey);
+            RenderSessionList();
+        }
+
+        private void CollapseAllSessionGroups()
+        {
+            _expandedSessionGroups.Clear();
+            RenderSessionList();
+        }
+
+        private void ExpandAllSessionGroups()
+        {
+            foreach (Dictionary<string, object> session in _allSessions)
+                _expandedSessionGroups.Add(NormalizeSessionTitle(GetString(session, "title")));
+            RenderSessionList();
         }
 
         private static string NormalizeSessionTitle(string title)
@@ -4172,7 +4200,18 @@ namespace DevSpacePortable.NativeUI
             _sessionGrid.Columns["lines"].Width = 92;
             _sessionGrid.Columns["updated"].Width = 132;
             _sessionGrid.Columns["root"].Visible = false;
-            _sessionGrid.CellDoubleClick += async delegate { if (!_sessionListLoading && _sessionGrid.SelectedRows.Count == 1) await RunUiActionAsync(OpenSelectedSessionAsync); };
+            _sessionGrid.CellMouseClick += delegate(object sender, DataGridViewCellMouseEventArgs e)
+            {
+                if (_sessionListLoading || e.RowIndex < 0 || e.Clicks != 1) return;
+                string groupKey = _sessionGrid.Rows[e.RowIndex].Tag as string;
+                if (!string.IsNullOrWhiteSpace(groupKey)) ToggleSessionGroup(groupKey);
+            };
+            _sessionGrid.CellDoubleClick += async delegate
+            {
+                if (_sessionListLoading || _sessionGrid.SelectedRows.Count != 1) return;
+                if (!(_sessionGrid.SelectedRows[0].Tag is Dictionary<string, object>)) return;
+                await RunUiActionAsync(OpenSelectedSessionAsync);
+            };
         }
         private void ConfigureFileGrid()
         {
@@ -4504,5 +4543,160 @@ namespace DevSpacePortable.NativeUI
             buttons.Controls.Add(ok); buttons.Controls.Add(cancel); Controls.Add(buttons); Controls.Add(_value); Controls.Add(label); AcceptButton = ok; CancelButton = cancel;
         }
         public static string Show(IWin32Window owner, string title, string message, string initial) { using (PromptDialog dialog = new PromptDialog(title, message, initial)) return dialog.ShowDialog(owner) == DialogResult.OK ? dialog._value.Text : null; }
+    }
+
+    internal sealed class OwnerPasswordDialog : Form
+    {
+        private readonly TextBox _token = new TextBox();
+        private readonly TextBox _authFile = new TextBox();
+
+        private OwnerPasswordDialog(string token, string authFile)
+        {
+            Text = "首次部署 · Owner Password";
+            StartPosition = FormStartPosition.CenterParent;
+            ClientSize = new Size(720, 330);
+            MinimumSize = new Size(720, 330);
+            MaximumSize = new Size(920, 430);
+            MinimizeBox = false;
+            MaximizeBox = false;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            BackColor = UiPalette.Background;
+            Font = UiTypography.Ui(9.5F);
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 7,
+                Padding = new Padding(24, 20, 24, 18),
+                BackColor = UiPalette.Background,
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+
+            Label title = new Label
+            {
+                Text = "首次生成的 Owner Password",
+                Dock = DockStyle.Fill,
+                Font = UiTypography.Display(15F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                TextAlign = ContentAlignment.MiddleLeft,
+            };
+            Label hint = new Label
+            {
+                Text = "这是 DevSpace Owner approval 使用的凭据。密码已同时写入下方 auth.json；可分别一键复制密码和 auth.json 路径。关闭窗口后不会再次主动展示明文。",
+                Dock = DockStyle.Fill,
+                ForeColor = UiPalette.TextMuted,
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true,
+            };
+            Label tokenLabel = new Label
+            {
+                Text = "Owner Password",
+                Dock = DockStyle.Fill,
+                ForeColor = UiPalette.TextMuted,
+                TextAlign = ContentAlignment.BottomLeft,
+            };
+            Label pathLabel = new Label
+            {
+                Text = "auth.json 位置（Owner Password 已写入此文件）",
+                Dock = DockStyle.Fill,
+                ForeColor = UiPalette.TextMuted,
+                TextAlign = ContentAlignment.BottomLeft,
+            };
+
+            TableLayoutPanel tokenRow = BuildValueRow(_token, token ?? "", "复制 Owner Password");
+            TableLayoutPanel pathRow = BuildValueRow(_authFile, authFile ?? "", "复制 auth.json 路径");
+
+            FlowLayoutPanel buttons = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.RightToLeft,
+                WrapContents = false,
+                Padding = new Padding(0, 12, 0, 0),
+                BackColor = Color.Transparent,
+            };
+            ModernButton close = new ModernButton
+            {
+                Text = "我已保存",
+                Primary = true,
+                Width = 122,
+                Height = 42,
+                AutoSize = false,
+                DialogResult = DialogResult.OK,
+            };
+            buttons.Controls.Add(close);
+
+            layout.Controls.Add(title, 0, 0);
+            layout.Controls.Add(hint, 0, 1);
+            layout.Controls.Add(tokenLabel, 0, 2);
+            layout.Controls.Add(tokenRow, 0, 3);
+            layout.Controls.Add(pathLabel, 0, 4);
+            layout.Controls.Add(pathRow, 0, 5);
+            layout.Controls.Add(buttons, 0, 6);
+            Controls.Add(layout);
+            AcceptButton = close;
+            CancelButton = close;
+        }
+
+        private TableLayoutPanel BuildValueRow(TextBox box, string value, string copyText)
+        {
+            TableLayoutPanel row = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+            };
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 166));
+
+            box.Text = value;
+            box.ReadOnly = true;
+            box.Dock = DockStyle.Fill;
+            box.Font = UiTypography.Code(9.25F);
+            box.BackColor = Color.White;
+            box.ForeColor = UiPalette.Text;
+            box.BorderStyle = BorderStyle.FixedSingle;
+            box.Margin = new Padding(0, 4, 10, 4);
+
+            ModernButton copy = new ModernButton
+            {
+                Text = copyText,
+                Width = 156,
+                Height = 42,
+                AutoSize = false,
+                Margin = new Padding(0, 4, 0, 4),
+            };
+            copy.Click += delegate
+            {
+                if (string.IsNullOrEmpty(box.Text)) return;
+                try
+                {
+                    Clipboard.SetText(box.Text);
+                    copy.Text = "已复制";
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "复制失败：" + ex.Message, "复制", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            };
+
+            row.Controls.Add(box, 0, 0);
+            row.Controls.Add(copy, 1, 0);
+            return row;
+        }
+
+        public static void Show(IWin32Window owner, string token, string authFile)
+        {
+            using (OwnerPasswordDialog dialog = new OwnerPasswordDialog(token, authFile))
+                dialog.ShowDialog(owner);
+        }
     }
 }
