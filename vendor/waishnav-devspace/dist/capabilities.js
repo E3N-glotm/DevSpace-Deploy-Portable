@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.20";
+export const DEVSPACE_SERVER_VERSION = "1.1.21";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -80,6 +80,7 @@ const FEATURE_CATALOG = [
     { id: "portable-nonrecursive-owned-process-stop", maturity: "stable", since: "1.1.19" },
     { id: "portable-terminal-shutdown", maturity: "stable", since: "1.1.19" },
     { id: "native-ui-stale-broker-pid-safety", maturity: "stable", since: "1.1.20" },
+    { id: "vpn-proxy-tunnel-coexistence", maturity: "stable", since: "1.1.21" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

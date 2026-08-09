@@ -26,6 +26,9 @@ const RUN_DIR = process.env.DEVSPACE_PORTABLE_RUN_DIR
 const MCP_PID_FILE = path.join(RUN_DIR, "devspace.pid");
 const TUNNEL_PID_FILE = path.join(RUN_DIR, "tunnel.pid");
 const NGROK_PID_FILE = path.join(RUN_DIR, "ngrok.pid");
+const TUNNEL_SUPERVISOR_PID_FILE = path.join(RUN_DIR, "tunnel-supervisor.pid");
+const TUNNEL_NETWORK_STATE_FILE = path.join(RUN_DIR, "tunnel-network.json");
+const TUNNEL_STOP_FILE = path.join(RUN_DIR, "tunnel.stop");
 const UI_LEASE_FILE = path.join(RUN_DIR, "ui-session.json");
 const COMPUTER_USE_DIR = path.join(RUN_DIR, "computer-use");
 const COMPUTER_USE_REQUESTS = path.join(COMPUTER_USE_DIR, "requests");
@@ -58,7 +61,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.20";
+const PORTABLE_VERSION = "1.1.21";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -511,6 +514,7 @@ async function configure(input) {
   if (!ngrokToken) ngrokToken = existingNgrokToken();
   const ngrokProxyUrl = normalizeNgrokProxyUrl(input.ngrokProxyUrl);
   const ngrokConnectCasHost = Boolean(input.ngrokConnectCasHost);
+  const tunnelNetworkCompatibility = input.tunnelNetworkCompatibility !== false;
   if (tunnelProvider === "ngrok" && !ngrokToken) {
     throw new Error("Enter an ngrok Authtoken for the first ngrok deployment.");
   }
@@ -562,6 +566,7 @@ async function configure(input) {
     port,
     permissionMode,
     ngrokProxyConfigured: Boolean(ngrokProxyUrl),
+    tunnelNetworkCompatibility,
     ngrokConnectCasHost,
     cloudflaredVersion: tunnelProvider === "cloudflare" ? CLOUDFLARED_VERSION : null,
     taskNames: { mcp: TASK_MCP, tunnel: TASK_TUNNEL },
@@ -583,6 +588,7 @@ async function configure(input) {
     allowedRoots,
     permissionMode,
     ngrokProxyUrl,
+    tunnelNetworkCompatibility,
     ngrokConnectCasHost,
     cloudflaredVersion: tunnelProvider === "cloudflare" ? CLOUDFLARED_VERSION : null,
     configDir: CONFIG_DIR,
@@ -1510,7 +1516,16 @@ function portableProcessSnapshot() {
 }
 
 function cleanupRunState() {
-  for (const file of [MCP_PID_FILE, TUNNEL_PID_FILE, NGROK_PID_FILE, UI_LEASE_FILE, COMPUTER_USE_BROKER_FILE]) {
+  for (const file of [
+    MCP_PID_FILE,
+    TUNNEL_PID_FILE,
+    NGROK_PID_FILE,
+    TUNNEL_SUPERVISOR_PID_FILE,
+    TUNNEL_NETWORK_STATE_FILE,
+    TUNNEL_STOP_FILE,
+    UI_LEASE_FILE,
+    COMPUTER_USE_BROKER_FILE,
+  ]) {
     fs.rmSync(file, { force: true });
   }
   fs.rmSync(COMPUTER_USE_REQUESTS, { recursive: true, force: true });
@@ -1601,6 +1616,8 @@ function stopOrphanedComputerUseBrokers() {
 
 function stopServices(options = {}) {
   const deployment = readJson(DEPLOYMENT_FILE, { port: 7676 });
+  fs.mkdirSync(RUN_DIR, { recursive: true });
+  writeAtomic(TUNNEL_STOP_FILE, "stop\n");
   const managedTasks = [TASK_TUNNEL, TASK_MCP].filter((task) => taskOwnedByRoot(task));
   const enabledBeforeStop = new Map(managedTasks.map((task) => [task, taskEnabled(task)]));
   for (const task of managedTasks) setOwnedTaskEnabled(task, false);
@@ -1713,8 +1730,21 @@ async function startPublicTunnel(provider, publicBaseUrl, port) {
   for (let attempt = 1; attempt <= SERVICE_START_ATTEMPTS; attempt += 1) {
     endOwnedTask(TASK_TUNNEL);
     stopRecordedTunnelProcess();
+    fs.rmSync(TUNNEL_STOP_FILE, { force: true });
     taskCommand("run", TASK_TUNNEL);
     last = await waitForCondition(TUNNEL_START_TIMEOUT_MS, async () => {
+      const network = readJson(TUNNEL_NETWORK_STATE_FILE, null);
+      if (provider === "ngrok" && network?.paused && /^sangfor-vpn-/.test(String(network.reason || ""))) {
+        return {
+          ready: true,
+          deferred: true,
+          attempt,
+          publicReady: false,
+          networkMode: network.mode || "paused",
+          vpnState: network.vpnState || "negotiating",
+          reason: network.reason,
+        };
+      }
       const publicReady = await publicServiceReady(publicBaseUrl);
       if (provider === "ngrok") {
         const agent = await ngrokAgentState(publicBaseUrl);
@@ -1769,7 +1799,11 @@ async function startServices() {
   stopServices();
   try {
     await startLocalService(expected.port);
-    await startPublicTunnel(provider, expected.publicBaseUrl, expected.port);
+    const tunnelStart = await startPublicTunnel(provider, expected.publicBaseUrl, expected.port);
+    if (tunnelStart?.deferred) {
+      return `Portable DevSpace local MCP started successfully. Public ${provider} tunnel is intentionally paused while Sangfor VPN is negotiating and will resume automatically after the VPN route stabilizes.\n` +
+        `Owner Password file (auth.json): ${AUTH_FILE}`;
+    }
     return `Portable DevSpace and ${provider} started successfully on the first requested operation; local and public OAuth metadata are healthy.\n` +
       `Owner Password file (auth.json): ${AUTH_FILE}`;
   } catch (error) {
@@ -1931,6 +1965,7 @@ async function statusText() {
   const mcp = recordedProcessStatus(MCP_PID_FILE, "node.exe", port);
   let tunnel = recordedProcessStatus(TUNNEL_PID_FILE, spec.image);
   if (!tunnel.pid && provider === "ngrok") tunnel = recordedProcessStatus(NGROK_PID_FILE, spec.image);
+  const tunnelNetwork = readJson(TUNNEL_NETWORK_STATE_FILE, null);
   const publicUrl = String(config.publicBaseUrl || "").replace(/\/$/, "");
   const publicProbe = publicUrl
     ? await probeUrl(`${publicUrl}/.well-known/oauth-protected-resource/mcp`, 5000)
@@ -1961,6 +1996,15 @@ async function statusText() {
       `\nAgent API: ${agent.reachable ? `reachable on ${agent.apiPorts.join(", ")}` : "unreachable on 4040-4049"}` +
       `\nConfigured public tunnel active: ${agent.matchingTunnel ? "yes" : "no"}` +
       `\nObserved tunnels: ${agent.tunnels.length ? agent.tunnels.map((item) => `${item.publicUrl} -> ${item.target}`).join("; ") : "none"}`;
+    if (tunnelNetwork) {
+      tunnelDetails +=
+        `\nNetwork compatibility: ${tunnelNetwork.compatibility === false ? "disabled" : "enabled"}` +
+        `\nNetwork mode: ${tunnelNetwork.mode || "unknown"}` +
+        `\nVPN state: ${tunnelNetwork.vpnState || "unknown"}` +
+        `\nNetwork reason: ${tunnelNetwork.reason || "unknown"}` +
+        `\nProxy source: ${tunnelNetwork.proxySource || "none"}` +
+        `\nTunnel supervisor PID: ${tunnelNetwork.supervisorPid || "none"}`;
+    }
   } else {
     tunnelDetails += `\nPinned cloudflared: ${CLOUDFLARED_VERSION}`;
   }
@@ -2130,6 +2174,7 @@ function showConfig() {
     hasNgrokToken: Boolean(existingNgrokToken()),
     hasCloudflareToken: Boolean(existingCloudflareToken()),
     ngrokProxyUrl: ngrokNetwork.proxyUrl,
+    tunnelNetworkCompatibility: deployment.tunnelNetworkCompatibility !== false,
     ngrokConnectCasHost: ngrokNetwork.connectCasHost,
     cloudflaredInstalled: fs.existsSync(CLOUDFLARED_EXE),
     cloudflaredVersion: CLOUDFLARED_VERSION,

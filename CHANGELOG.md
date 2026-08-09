@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.21
+
+- 修复 DevSpace 公网 tunnel 与 EasyConnect/Sangfor、v2rayN 等本机网络软件共存时可能造成 VPN 会话失效或代理不可用的问题；
+- 新增 tunnel 网络监督器：Sangfor VPN 正在协商时暂停 ngrok，虚拟网卡稳定后再恢复，避免在 VPN 登录和路由切换窗口维持竞争性的公网长连接；
+- 自动检测已启用且可用的本地 WinINET HTTP/SOCKS 代理，并让 DevSpace tunnel 跟随该代理出站；网络路径变化时只重建 DevSpace 自己的 tunnel 子进程；
+- 默认启用“VPN/代理兼容模式（推荐）”，但不修改 WinINET/WinHTTP、路由表、网卡或 EasyConnect/v2rayN 自身配置和进程；
+- 状态输出增加 tunnel 网络模式、VPN 状态、代理来源和 supervisor PID；新增网络共存回归并验证 WinINET 注册表前后完全不变；
+- 保持 `file-delta-v1` 增量优先、完整 ZIP 自动兜底、Protocol 1.5 与现有 OAuth/MCP Schema。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.21.md)
+
 ## 1.1.20
 
 - 修复打开原生 UI 时可能依据陈旧 Computer Use Broker PID 误终止第三方进程的问题；

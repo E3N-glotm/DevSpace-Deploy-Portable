@@ -361,3 +361,12 @@
 - 新增 `setup/test-ui-open-process-safety.mjs`，将一个真实运行的系统 `PING.EXE` PID 写入陈旧 broker 状态，再调用 `ui-open`/`ui-close`；外部 PID 必须保持存活，broker 状态必须被清除。
 - 实机只读检查期间 DevSpace MCP `127.0.0.1:7676`、ngrok `127.0.0.1:4040`、sing-box `0.0.0.0:10809/127.0.0.1:10815`、Sangfor Promote Service `127.0.0.1:10000` 同时存在，没有直接端口重叠；WinINET 代理仍由 v2rayN 指向 `127.0.0.1:10809`，本次代码不改变该配置。
 - Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
+
+## 1.1.21 VPN / Proxy 共存
+
+- 实机只读日志确认：Sangfor VPN 可先正常登录并建立长连接，随后在网络变化后收到服务端被动注销；同时 ngrok 控制连接也会被本机网络变化打断，说明问题不是 TCP 监听端口重叠或单纯 PID 误杀。
+- tunnel 改由独立 supervisor 管理：Sangfor 协商期暂停公网 tunnel，VNIC 连通并稳定后恢复；健康 WinINET 本地代理存在时，tunnel 跟随代理出站。
+- supervisor 网络切换只允许重建当前 Portable 自己的 tunnel child；禁止修改 WinINET/WinHTTP、路由、网卡和第三方进程。
+- 新增 `setup/test-tunnel-network-coexistence.mjs`，覆盖本地代理跟随、Sangfor 协商暂停、稳定恢复，并断言测试前后 WinINET 注册表查询结果完全一致。
+- `tunnel.stop` 用于防止显式 stop/shutdown 与 supervisor 自动重启发生竞争；状态输出包含 network mode、VPN state、reason、proxy source 和 supervisor PID。
+- Portable Protocol 保持 1.5，现有 OAuth、MCP Schema 和增量更新格式不变。
