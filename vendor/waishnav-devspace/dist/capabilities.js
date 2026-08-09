@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.21";
+export const DEVSPACE_SERVER_VERSION = "1.1.22";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -81,6 +81,13 @@ const FEATURE_CATALOG = [
     { id: "portable-terminal-shutdown", maturity: "stable", since: "1.1.19" },
     { id: "native-ui-stale-broker-pid-safety", maturity: "stable", since: "1.1.20" },
     { id: "vpn-proxy-tunnel-coexistence", maturity: "stable", since: "1.1.21" },
+    { id: "non-invasive-vpn-proxy-network-policy", maturity: "stable", since: "1.1.22" },
+    { id: "proxy-aware-service-readiness", maturity: "stable", since: "1.1.22" },
+    { id: "github-updater-dead-proxy-skip", maturity: "stable", since: "1.1.22" },
+    { id: "github-updater-generated-drift-tolerance", maturity: "stable", since: "1.1.22" },
+    { id: "github-updater-launch-acknowledgement", maturity: "stable", since: "1.1.22" },
+    { id: "native-ui-live-status-indicators", maturity: "stable", since: "1.1.22" },
+    { id: "native-ui-diagnostics-details", maturity: "stable", since: "1.1.22" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

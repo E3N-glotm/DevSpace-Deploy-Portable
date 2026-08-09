@@ -51,6 +51,8 @@ $Tests = @(
     "setup/test-portable-ui-workflows.mjs",
     "setup/test-selected-file-diff.mjs",
     "setup/test-online-updater-contract.mjs",
+    "setup/test-update-launch-ack.mjs",
+    "setup/test-dashboard-live-status.mjs",
     "setup/test-strict-stop.mjs",
     "setup/test-ui-open-process-safety.mjs",
     "setup/test-tunnel-network-coexistence.mjs",

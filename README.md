@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.21**
+当前稳定版本：**1.1.22**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.21.zip
+DevSpacePortable-Windows-x64-1.1.22.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.21 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.20 升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.22 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.21 升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -298,6 +298,19 @@ https://你的域名/mcp
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
+## 1.1.22 主要变化
+
+- 公网 tunnel 改为**非侵入式网络策略**：DevSpace 不再扫描 EasyConnect/Sangfor 进程、不再轮询 Sangfor/VPN 网卡，也不会因为 VPN 登录状态变化主动停止或重启健康的 ngrok。它只管理 DevSpace 自己的 tunnel 子进程。
+- ngrok tunnel 与环境中的 v2rayN/系统代理彻底解耦：除非用户在 ngrok 配置中**显式**填写 `proxy_url`，DevSpace 会清除 tunnel 子进程继承的 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` 并直接连接；这样先打开 v2rayN“系统代理”不会把 ngrok 强行送入其代理链。v2rayN 使用透明 TUN 时，ngrok 的 direct socket 仍可由 TUN 层自然接管。GitHub 更新和公网 HTTP/OAuth 探测则独立使用健康代理候选，并会跳过未监听的 `127.0.0.1:<port>`。
+- 本地服务和公网 OAuth/HTTP 就绪检查改为代理感知：公网探测使用 bundled curl，并明确选择“健康代理”或“直连/透明 TUN”，不再依赖 Node `fetch()` 强制直连。
+- GitHub 更新器继续使用“增量优先、完整包兜底”，但会容忍 `SHA256SUMS.txt`、`VERSION-MANIFEST.json`、lockfile 和打包 TGZ 等 Release 构建生成物在本地构建与 GitHub Actions canonical 构建之间的合法差异；普通程序文件和删除文件仍保持严格 base SHA-256 防漂移检查。
+- 更新 Apply 改为**一次性 Task Scheduler 独立控制器 + 启动 ACK**。只有独立更新器实际启动、写入 ACK 并返回自己的 PID 后，原生 UI 才允许关闭；如果 ACK 没出现，UI 保持打开并报告任务状态，不再出现“提示重启后没有任何反应、版本仍未更新”的静默失败。
+- 首页改为自动刷新活动指示器：总状态、MCP 服务、公网隧道、HTTP/OAuth、核心文件、网络共存和 Computer Use 都以彩色圆点卡片持续更新，不再需要手动点击“刷新状态”。
+- 首页新增 **“详细信息”**：完整状态、HTTP 验证、隧道诊断、文件验证、DevSpace/tunnel/update 日志、任务计划程序和日志目录入口统一放入独立对话框，主页保持简洁但不丢失诊断能力。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+> 1.1.21 中基于 Sangfor 进程/网卡状态主动暂停、恢复 tunnel 的策略在 1.1.22 中已被替换。1.1.22 不再把 EasyConnect 的生命周期当作 DevSpace tunnel 生命周期的一部分。
+
 ## 1.1.21 主要变化
 
 - 新增默认开启的 **“VPN/代理兼容模式（推荐）”**。它只管理 DevSpace 自己的公网 tunnel，不修改 Windows 系统代理、WinHTTP、路由表、网卡或第三方 VPN/代理进程；
@@ -397,7 +410,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.21
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.22
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -425,7 +438,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.21 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.22 -BypassProxy
 ```
 
 ## 在线更新

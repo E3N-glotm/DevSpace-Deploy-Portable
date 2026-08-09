@@ -35,10 +35,13 @@ function resolveNetwork(overrides = {}) {
     ...process.env,
     DEVSPACE_PORTABLE_CONFIG_DIR: configDir,
     DEVSPACE_PORTABLE_RUN_DIR: runDir,
-    DEVSPACE_TEST_SYSTEM_PROXY: "",
     DEVSPACE_TEST_PROXY_HEALTHY: "",
-    DEVSPACE_TEST_SANGFOR_STATE: "absent",
-    DEVSPACE_TEST_SANGFOR_SETTLED: "",
+    HTTP_PROXY: "",
+    HTTPS_PROXY: "",
+    ALL_PROXY: "",
+    http_proxy: "",
+    https_proxy: "",
+    all_proxy: "",
     ...overrides,
   };
   const result = spawnSync(NODE, [LAUNCHER, "--network-self-test"], {
@@ -55,48 +58,48 @@ function resolveNetwork(overrides = {}) {
 try {
   const registryBefore = registrySnapshot();
 
-  const proxy = resolveNetwork({
-    DEVSPACE_TEST_SYSTEM_PROXY: "http://127.0.0.1:10809",
+  const isolatedFromAmbientProxy = resolveNetwork({
+    HTTP_PROXY: "http://127.0.0.1:10809",
+    HTTPS_PROXY: "http://127.0.0.1:10809",
     DEVSPACE_TEST_PROXY_HEALTHY: "1",
   });
-  assert.equal(proxy.paused, false);
-  assert.equal(proxy.mode, "auto-proxy");
-  assert.equal(proxy.proxyUrl, "http://127.0.0.1:10809");
-  assert.equal(proxy.proxySource, "test-system-proxy");
+  assert.equal(isolatedFromAmbientProxy.paused, false);
+  assert.equal(isolatedFromAmbientProxy.mode, "direct");
+  assert.equal(isolatedFromAmbientProxy.proxyUrl, "");
+  assert.equal(isolatedFromAmbientProxy.reason, "ambient-proxy-isolated-direct-or-transparent-tun");
+  assert.equal(isolatedFromAmbientProxy.vpnState, "unmanaged");
 
-  const negotiating = resolveNetwork({
-    DEVSPACE_TEST_SYSTEM_PROXY: "http://127.0.0.1:10809",
-    DEVSPACE_TEST_PROXY_HEALTHY: "1",
-    DEVSPACE_TEST_SANGFOR_STATE: "negotiating",
-  });
-  assert.equal(negotiating.paused, true);
-  assert.equal(negotiating.mode, "paused");
-  assert.equal(negotiating.reason, "sangfor-vpn-negotiating");
+  writeFileSync(join(configDir, "ngrok.yml"), 'version: "3"\nagent:\n  authtoken: "test-token-value"\n  proxy_url: "http://127.0.0.1:10809"\n');
+  const explicitProxy = resolveNetwork({ DEVSPACE_TEST_PROXY_HEALTHY: "1" });
+  assert.equal(explicitProxy.paused, false);
+  assert.equal(explicitProxy.mode, "manual-proxy");
+  assert.equal(explicitProxy.proxyUrl, "http://127.0.0.1:10809");
+  assert.equal(explicitProxy.proxySource, "ngrok-config");
+  writeFileSync(join(configDir, "ngrok.yml"), 'version: "3"\nagent:\n  authtoken: "test-token-value"\n');
 
-  const connected = resolveNetwork({
-    DEVSPACE_TEST_SYSTEM_PROXY: "http://127.0.0.1:10809",
-    DEVSPACE_TEST_PROXY_HEALTHY: "1",
-    DEVSPACE_TEST_SANGFOR_STATE: "connected",
-    DEVSPACE_TEST_SANGFOR_SETTLED: "1",
-  });
-  assert.equal(connected.paused, false);
-  assert.equal(connected.mode, "auto-proxy");
-  assert.equal(connected.vpnState, "connected");
+  const tun = resolveNetwork();
+  assert.equal(tun.paused, false);
+  assert.equal(tun.mode, "direct");
+  assert.equal(tun.reason, "ambient-proxy-isolated-direct-or-transparent-tun");
+  assert.equal(tun.vpnState, "unmanaged");
 
-  const direct = resolveNetwork({ DEVSPACE_TEST_SANGFOR_STATE: "absent" });
-  assert.equal(direct.paused, false);
-  assert.ok(["direct", "auto-proxy"].includes(direct.mode));
+  const launcherSource = await import("node:fs/promises").then(({ readFile }) => readFile(LAUNCHER, "utf8"));
+  assert.doesNotMatch(launcherSource, /EasyConnect|SangforCSClient|SangforVnic|Win32_NetworkAdapter/i,
+    "the tunnel supervisor must not inspect or control third-party VPN clients or adapters");
+  assert.doesNotMatch(launcherSource, /setInterval\(reconcile|network-state:sangfor/i,
+    "the tunnel supervisor must not restart a healthy tunnel on VPN state transitions");
 
   const registryAfter = registrySnapshot();
-  assert.equal(registryAfter, registryBefore, "tunnel compatibility self-test modified WinINET proxy settings");
+  assert.equal(registryAfter, registryBefore, "tunnel self-test modified WinINET proxy settings");
 
   console.log(JSON.stringify({
-    autoProxyFollow: true,
-    sangforNegotiationPause: true,
-    sangforSettledResume: true,
+    ambientSystemProxyIsolatedFromNgrok: true,
+    explicitNgrokProxyStillSupported: true,
+    transparentTunUsesDirectPath: true,
+    thirdPartyVpnInspection: false,
+    healthyTunnelNetworkChurn: false,
     registryMutation: false,
   }));
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
-

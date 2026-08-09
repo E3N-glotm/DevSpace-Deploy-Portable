@@ -1,4 +1,4 @@
-# Application update design through 1.1.21
+# Application update design through 1.1.22
 
 ## Goal
 
@@ -11,7 +11,51 @@ The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
 
+## Implemented in 1.1.22: non-invasive networking and acknowledged apply
+
+1. Public health probes and GitHub update requests now enumerate explicit
+   outbound paths instead of inheriting an arbitrary stale proxy. A local
+   WinINET/environment proxy is used only when its loopback listener is
+   actually reachable; otherwise it is skipped and curl uses an explicit
+   direct/TUN path with inherited proxy variables removed.
+2. The ngrok supervisor no longer observes EasyConnect/Sangfor processes,
+   Sangfor VNIC state, or other third-party VPN adapters. A healthy tunnel is
+   never stopped merely because a VPN client is logging in or changing state.
+   Network-path selection happens when the Portable-owned tunnel child starts
+   or must naturally reconnect.
+3. The ngrok child is isolated from ambient WinINET and inherited
+   `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` settings. Only a user-explicit ngrok
+   `proxy_url` is forwarded to the agent. This prevents "v2rayN system proxy
+   started first" from silently forcing the ngrok agent through an outbound
+   proxy path. With transparent TUN active, the direct ngrok socket can still
+   be routed by the TUN layer naturally. No WinINET, WinHTTP, route, adapter,
+   EasyConnect, or v2rayN setting is changed by DevSpace.
+4. `file-delta-v1` still rejects arbitrary local drift, but a small allowlist
+   of deterministic Release build products (`SHA256SUMS.txt`,
+   `VERSION-MANIFEST.json`, lockfiles and the packed core TGZ) may differ
+   between a local build and the GitHub Actions canonical build because the
+   delta contains the complete replacement file. Persistent paths and normal
+   program/source files remain strictly base-hash checked; deletes remain
+   strict as well.
+5. Apply launch no longer means "spawn requested". The manager creates a
+   one-shot, least-privilege Task Scheduler controller and waits for the
+   independent updater to write `apply-launch-ack.json` with its PID and target
+   version. The UI closes only after that ACK. Missing ACK leaves the current
+   UI/version running and reports Task Scheduler/updater diagnostics.
+6. The native dashboard reads a structured, lightweight `dashboard-status`
+   command every seven seconds. Destructive/expensive checks stay out of this
+   poll; full `status`, HTTP validation, tunnel diagnosis, checksum validation
+   and log tails are available from the separate Details dialog.
+
+The one-shot update task deletes itself after successful apply or rollback.
+The Portable Protocol remains 1.5.
+
 ## Implemented in 1.1.21: VPN/proxy tunnel coexistence
+
+> Superseded in 1.1.22: the Sangfor/EasyConnect process/VNIC negotiation
+> observer described below was removed after it proved too coupled to a
+> third-party VPN lifecycle. It is retained here only as historical design
+> documentation for the 1.1.21 release.
 
 The local MCP listener and the public tunnel now have deliberately separate
 network lifecycles. A lightweight tunnel supervisor owns only the bundled

@@ -412,6 +412,65 @@ namespace DevSpacePortable.NativeUI
         }
     }
 
+    internal sealed class StatusIndicatorCard : Panel
+    {
+        private string _state = "working";
+        private string _title = "正在检查状态";
+        private string _detail = "正在读取本地服务与公网连接状态……";
+
+        public StatusIndicatorCard()
+        {
+            Height = 92;
+            MinimumSize = new Size(220, 92);
+            Margin = new Padding(6);
+            Padding = new Padding(0);
+            BackColor = Color.Transparent;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
+        }
+
+        public void SetStatus(string state, string title, string detail)
+        {
+            _state = string.IsNullOrWhiteSpace(state) ? "working" : state.Trim().ToLowerInvariant();
+            _title = string.IsNullOrWhiteSpace(title) ? "状态未知" : title.Trim();
+            _detail = string.IsNullOrWhiteSpace(detail) ? "暂无详细信息。" : detail.Trim();
+            Invalidate();
+        }
+
+        private Color IndicatorColor
+        {
+            get
+            {
+                if (_state == "ready") return UiPalette.Success;
+                if (_state == "warning") return Color.FromArgb(222, 157, 30);
+                if (_state == "error") return UiPalette.Danger;
+                if (_state == "stopped") return Color.FromArgb(150, 159, 178);
+                return UiPalette.Primary;
+            }
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.Clear(DrawingUtil.BackgroundFor(this, UiPalette.Background));
+            Rectangle bounds = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
+            using (GraphicsPath path = DrawingUtil.Rounded(bounds, 18))
+            using (SolidBrush fill = new SolidBrush(UiPalette.Surface))
+            using (Pen border = new Pen(UiPalette.Border))
+            {
+                e.Graphics.FillPath(fill, path);
+                e.Graphics.DrawPath(border, path);
+            }
+            using (SolidBrush dot = new SolidBrush(IndicatorColor))
+                e.Graphics.FillEllipse(dot, 22, 27, 14, 14);
+            using (Font titleFont = UiTypography.Ui(11.2F, FontStyle.Bold))
+                TextRenderer.DrawText(e.Graphics, _title, titleFont, new Rectangle(50, 17, Math.Max(0, Width - 68), 28), UiPalette.Text,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            using (Font detailFont = UiTypography.Ui(9.2F))
+                TextRenderer.DrawText(e.Graphics, _detail, detailFont, new Rectangle(50, 48, Math.Max(0, Width - 68), 27), UiPalette.TextMuted,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+    }
+
     internal sealed class SurfacePanel : Panel
     {
         public bool Dark { get; set; }
@@ -1085,6 +1144,224 @@ namespace DevSpacePortable.NativeUI
         private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
     }
 
+    internal sealed class DiagnosticsDetailsDialog : Form
+    {
+        private readonly ManagerClient _manager;
+        private readonly string _root;
+        private readonly TabControl _pages = new TabControl();
+        private readonly RichTextBox _summary = CreateOutputBox();
+        private readonly RichTextBox _http = CreateOutputBox();
+        private readonly RichTextBox _tunnel = CreateOutputBox();
+        private readonly RichTextBox _files = CreateOutputBox();
+        private readonly RichTextBox _logs = CreateOutputBox();
+        private readonly Label _activity = new Label();
+        private bool _busy;
+
+        public DiagnosticsDetailsDialog(string root, ManagerClient manager)
+        {
+            _root = root;
+            _manager = manager;
+            Text = "DevSpace 详细信息";
+            StartPosition = FormStartPosition.CenterParent;
+            MinimumSize = new Size(920, 620);
+            Size = new Size(1120, 760);
+            BackColor = UiPalette.Background;
+            Font = UiTypography.Ui(9F);
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                Padding = new Padding(18),
+                BackColor = UiPalette.Background,
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            Panel header = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+            Label title = new Label
+            {
+                Text = "运行状态与诊断详情",
+                Font = UiTypography.Display(17F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                AutoSize = true,
+                Location = new Point(4, 5),
+            };
+            Label subtitle = new Label
+            {
+                Text = "这里保留完整状态、HTTP/OAuth、隧道、文件校验和运行日志；主页只显示自动更新的活动指示器。",
+                Font = UiTypography.Ui(9.2F),
+                ForeColor = UiPalette.TextMuted,
+                AutoSize = true,
+                Location = new Point(5, 40),
+            };
+            header.Controls.Add(title);
+            header.Controls.Add(subtitle);
+            layout.Controls.Add(header, 0, 0);
+
+            FlowLayoutPanel actions = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                BackColor = Color.Transparent,
+                Padding = new Padding(0, 4, 0, 4),
+            };
+            actions.Controls.Add(ActionButton("刷新概览", async delegate { await RefreshSummaryAsync(); }));
+            actions.Controls.Add(ActionButton("验证 HTTP", async delegate { await RunDiagnosticAsync("test", _http, 1); }));
+            actions.Controls.Add(ActionButton("诊断隧道", async delegate { await RunDiagnosticAsync("diagnose", _tunnel, 2); }));
+            actions.Controls.Add(ActionButton("验证文件", async delegate { await RunDiagnosticAsync("verify-files", _files, 3); }));
+            actions.Controls.Add(ActionButton("刷新日志", async delegate { await RefreshLogsAsync(); }));
+            actions.Controls.Add(ActionButton("任务计划程序", delegate { OpenExternal("taskschd.msc"); }));
+            actions.Controls.Add(ActionButton("日志目录", delegate { OpenExternal(Path.Combine(_root, "logs")); }));
+            _activity.Text = "等待操作";
+            _activity.AutoSize = false;
+            _activity.Width = 180;
+            _activity.Height = 42;
+            _activity.TextAlign = ContentAlignment.MiddleLeft;
+            _activity.ForeColor = UiPalette.TextMuted;
+            _activity.Margin = new Padding(12, 4, 0, 4);
+            actions.Controls.Add(_activity);
+            layout.Controls.Add(actions, 0, 1);
+
+            _pages.Dock = DockStyle.Fill;
+            _pages.Font = UiTypography.Ui(9.2F);
+            AddPage("状态概览", _summary);
+            AddPage("HTTP / OAuth", _http);
+            AddPage("公网隧道", _tunnel);
+            AddPage("文件验证", _files);
+            AddPage("日志", _logs);
+            layout.Controls.Add(_pages, 0, 2);
+            Controls.Add(layout);
+            Shown += async delegate
+            {
+                NativeWindowEffects.Apply(Handle);
+                await RefreshSummaryAsync();
+                await RefreshLogsAsync(false);
+            };
+        }
+
+        private static RichTextBox CreateOutputBox()
+        {
+            return new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                BorderStyle = BorderStyle.None,
+                BackColor = UiPalette.Console,
+                ForeColor = UiPalette.ConsoleText,
+                Font = UiTypography.Code(9F),
+                WordWrap = false,
+                DetectUrls = false,
+                Padding = new Padding(12),
+            };
+        }
+
+        private static ModernButton ActionButton(string text, Func<Task> action)
+        {
+            ModernButton button = new ModernButton { Text = text, Height = 40, AutoSize = true };
+            button.Click += async delegate { await action(); };
+            return button;
+        }
+
+        private static ModernButton ActionButton(string text, Action action)
+        {
+            ModernButton button = new ModernButton { Text = text, Height = 40, AutoSize = true };
+            button.Click += delegate { action(); };
+            return button;
+        }
+
+        private void AddPage(string title, Control content)
+        {
+            TabPage page = new TabPage(title) { BackColor = UiPalette.Background, Padding = new Padding(8) };
+            SurfacePanel surface = new SurfacePanel { Dock = DockStyle.Fill, Dark = true, Padding = new Padding(12) };
+            surface.Controls.Add(content);
+            page.Controls.Add(surface);
+            _pages.TabPages.Add(page);
+        }
+
+        private async Task RefreshSummaryAsync()
+        {
+            await RunDiagnosticAsync("status", _summary, 0);
+        }
+
+        private async Task RunDiagnosticAsync(string action, RichTextBox target, int pageIndex)
+        {
+            if (_busy) return;
+            _busy = true;
+            _activity.Text = "正在执行 " + action + "…";
+            target.Text = "正在执行，请稍候……";
+            _pages.SelectedIndex = pageIndex;
+            try
+            {
+                target.Text = await _manager.RunAsync(action);
+                _activity.Text = "完成 · " + DateTime.Now.ToString("HH:mm:ss");
+            }
+            catch (Exception ex)
+            {
+                target.Text = "错误：\r\n" + ex.Message;
+                _activity.Text = "执行失败";
+            }
+            finally { _busy = false; }
+        }
+
+        private async Task RefreshLogsAsync(bool selectPage = true)
+        {
+            if (_busy) return;
+            _busy = true;
+            _activity.Text = "正在读取日志…";
+            if (selectPage) _pages.SelectedIndex = 4;
+            try
+            {
+                Dictionary<string, object> paths = await _manager.RunJsonAsync("log-paths");
+                string devspace = GetString(paths, "devspace");
+                string tunnel = GetString(paths, "tunnel");
+                string update = Path.Combine(_root, "logs", "update.log");
+                StringBuilder text = new StringBuilder();
+                text.AppendLine("=== DevSpace ===");
+                text.AppendLine(TailFile(devspace, 180));
+                text.AppendLine();
+                text.AppendLine("=== Tunnel ===");
+                text.AppendLine(TailFile(tunnel, 180));
+                text.AppendLine();
+                text.AppendLine("=== Update ===");
+                text.AppendLine(TailFile(update, 180));
+                _logs.Text = text.ToString().Trim();
+                _activity.Text = "日志已刷新 · " + DateTime.Now.ToString("HH:mm:ss");
+            }
+            catch (Exception ex)
+            {
+                _logs.Text = "错误：\r\n" + ex.Message;
+                _activity.Text = "日志读取失败";
+            }
+            finally { _busy = false; }
+        }
+
+        private static string TailFile(string file, int lines)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(file) || !File.Exists(file)) return "(文件不存在)";
+                string[] values = File.ReadAllLines(file, Encoding.UTF8);
+                return string.Join(Environment.NewLine, values.Skip(Math.Max(0, values.Length - lines)));
+            }
+            catch (Exception ex) { return "(读取失败: " + ex.Message + ")"; }
+        }
+
+        private static string GetString(Dictionary<string, object> value, string key)
+        {
+            object item;
+            return value != null && value.TryGetValue(key, out item) && item != null ? Convert.ToString(item) : "";
+        }
+
+        private static void OpenExternal(string target)
+        {
+            try { Process.Start(new ProcessStartInfo { FileName = target, UseShellExecute = true }); } catch { }
+        }
+    }
+
     internal sealed class ComputerUseOverlayForm : Form
     {
         private const int WsExTransparent = 0x00000020;
@@ -1445,6 +1722,13 @@ namespace DevSpacePortable.NativeUI
         private readonly Label _pageTitle = new Label();
         private readonly List<ModernNavButton> _navButtons = new List<ModernNavButton>();
         private readonly ModernToggle _computerUseToggle = new ModernToggle();
+        private readonly StatusIndicatorCard _overallStatus = new StatusIndicatorCard();
+        private readonly StatusIndicatorCard _serviceStatus = new StatusIndicatorCard();
+        private readonly StatusIndicatorCard _tunnelStatus = new StatusIndicatorCard();
+        private readonly StatusIndicatorCard _httpStatus = new StatusIndicatorCard();
+        private readonly StatusIndicatorCard _filesStatus = new StatusIndicatorCard();
+        private readonly StatusIndicatorCard _networkStatus = new StatusIndicatorCard();
+        private readonly StatusIndicatorCard _computerUseStatus = new StatusIndicatorCard();
         private readonly InlineNotice _inlineNotice = new InlineNotice();
         private readonly TableLayoutPanel _contentLayout = new TableLayoutPanel();
         private readonly RichTextBox _operationOutput = CreateConsoleBox();
@@ -1478,6 +1762,7 @@ namespace DevSpacePortable.NativeUI
         private bool _sessionListLoading;
         private bool _memoryListLoading;
         private bool _loadingConfiguration;
+        private bool _dashboardStatusBusy;
         private int _busyOperationCount;
         private Dictionary<string, object> _currentConfig = new Dictionary<string, object>();
         private Dictionary<string, object> _selectedSessionDetails = new Dictionary<string, object>();
@@ -1545,8 +1830,8 @@ namespace DevSpacePortable.NativeUI
             FormClosing += MainForm_FormClosing;
             _heartbeatTimer.Interval = 1500;
             _heartbeatTimer.Tick += async delegate { await HeartbeatAsync(); };
-            _statusTimer.Interval = 15000;
-            _statusTimer.Tick += async delegate { await RefreshStatusAsync(false); };
+            _statusTimer.Interval = 7000;
+            _statusTimer.Tick += async delegate { await RefreshDashboardStatusAsync(); };
             _noticeTimer.Interval = 9000;
             _noticeTimer.Tick += delegate { _noticeTimer.Stop(); _inlineNotice.Dismiss(); };
             _computerUseTimer.Interval = 15;
@@ -1779,7 +2064,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.21 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.22 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -1835,10 +2120,11 @@ namespace DevSpacePortable.NativeUI
         private TabPage BuildDashboardTab()
         {
             TabPage page = new TabPage("状态与部署");
-            TableLayoutPanel layout = NewTable(1, 3);
+            TableLayoutPanel layout = NewTable(1, 4);
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 116));
             FlowLayoutPanel buttons = NewButtonBar();
             buttons.Controls.Add(ActionButton("保存并自动部署", async delegate { await DeployAsync(); }, true));
             buttons.Controls.Add(ActionButton("启动服务", async delegate { await RunActionAsync("start"); }));
@@ -1847,34 +2133,52 @@ namespace DevSpacePortable.NativeUI
             buttons.Controls.Add(ActionButton("停止并禁用", async delegate { await ConfirmActionAsync("disable", "确定停止并禁用 DevSpace 与隧道计划任务吗？"); }, false, true));
             buttons.Controls.Add(ActionButton("恢复并启动", async delegate { await RunActionAsync("enable"); }));
             buttons.Controls.Add(ActionButton("卸载计划任务", async delegate { await ConfirmActionAsync("uninstall-tasks", "确定卸载 DevSpace 与隧道计划任务吗？配置和认证数据不会删除。"); }, false, true));
-            buttons.Controls.Add(ActionButton("刷新状态", async delegate { await RefreshStatusAsync(true); }));
             buttons.Controls.Add(ActionButton("检查更新", async delegate { await CheckForUpdatesAsync(); }, true));
+            buttons.Controls.Add(ActionButton("详细信息", delegate { ShowDiagnosticsDetails(); }, true));
             buttons.Controls.Add(ActionButton("重置关闭选择", delegate
             {
                 SaveClosePreference("");
                 ShowInlineNotice("已恢复为每次点击关闭按钮时询问。", false);
             }));
-            buttons.Controls.Add(ActionButton("验证 HTTP", async delegate { await RunActionAsync("test"); }));
-            buttons.Controls.Add(ActionButton("诊断隧道", async delegate { await RunActionAsync("diagnose"); }));
-            buttons.Controls.Add(ActionButton("验证文件", async delegate { await RunActionAsync("verify-files"); }));
-            buttons.Controls.Add(ActionButton("任务计划程序", delegate { OpenExternal("taskschd.msc"); }));
-            buttons.Controls.Add(ActionButton("打开日志目录", delegate { OpenExternal(Path.Combine(_root, "logs")); }));
             layout.Controls.Add(buttons, 0, 0);
-            GroupBox statusGroup = NewGroup("服务状态");
-            statusGroup.Controls.Add(WrapSurface(_operationOutput, true));
-            layout.Controls.Add(statusGroup, 0, 1);
-            GroupBox help = NewGroup("运行说明");
-            Label helpText = new Label
+
+            _overallStatus.Dock = DockStyle.Fill;
+            _overallStatus.Margin = new Padding(4, 4, 4, 8);
+            _overallStatus.SetStatus("working", "正在检查 DevSpace 状态", "主页会自动刷新，不需要手动点击“刷新状态”。");
+            layout.Controls.Add(_overallStatus, 0, 1);
+
+            TableLayoutPanel indicators = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ForeColor = UiPalette.TextMuted,
-                Font = UiTypography.Ui(9.5F),
-                TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(10, 4, 10, 4),
-                Text = "停止全部会结束当前 Portable 的服务、隧道和桌面 Broker，并在确认无残留后台进程后退出。",
+                ColumnCount = 2,
+                RowCount = 3,
+                BackColor = UiPalette.Background,
+                Padding = new Padding(0),
+                Margin = new Padding(0),
             };
-            help.Controls.Add(helpText);
-            layout.Controls.Add(help, 0, 2);
+            indicators.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            indicators.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            indicators.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
+            indicators.RowStyles.Add(new RowStyle(SizeType.Percent, 33.33F));
+            indicators.RowStyles.Add(new RowStyle(SizeType.Percent, 33.34F));
+            _serviceStatus.Dock = DockStyle.Fill;
+            _tunnelStatus.Dock = DockStyle.Fill;
+            _httpStatus.Dock = DockStyle.Fill;
+            _filesStatus.Dock = DockStyle.Fill;
+            _networkStatus.Dock = DockStyle.Fill;
+            _computerUseStatus.Dock = DockStyle.Fill;
+            _computerUseStatus.SetStatus("stopped", "Computer Use 未启用", "可通过右上角开关启用交互式桌面控制。");
+            indicators.Controls.Add(_serviceStatus, 0, 0);
+            indicators.Controls.Add(_tunnelStatus, 1, 0);
+            indicators.Controls.Add(_httpStatus, 0, 1);
+            indicators.Controls.Add(_filesStatus, 1, 1);
+            indicators.Controls.Add(_networkStatus, 0, 2);
+            indicators.Controls.Add(_computerUseStatus, 1, 2);
+            layout.Controls.Add(indicators, 0, 2);
+
+            GroupBox recent = NewGroup("最近操作");
+            recent.Controls.Add(WrapSurface(_operationOutput, true));
+            layout.Controls.Add(recent, 0, 3);
             page.Controls.Add(layout);
             return page;
         }
@@ -1907,7 +2211,7 @@ namespace DevSpacePortable.NativeUI
             _toolMode = AddCombo(networkForm, "工具模式", new[] { "full", "codex", "minimal" });
             _ngrokToken = AddPassword(networkForm, "ngrok Authtoken（留空保留）");
             _ngrokProxy = AddText(networkForm, "ngrok 出站代理（可选）");
-            _tunnelNetworkCompatibility = AddCheck(networkForm, "VPN/代理兼容模式（推荐）", "tunnelNetworkCompatibility");
+            _tunnelNetworkCompatibility = AddCheck(networkForm, "非侵入式网络隔离（推荐）", "tunnelNetworkCompatibility");
             _ngrokCas = AddCheck(networkForm, "使用 Windows 根证书", "ngrokConnectCasHost");
             _cloudflareToken = AddPassword(networkForm, "Cloudflare Tunnel Token（留空保留）");
             network.Controls.Add(networkForm);
@@ -2402,7 +2706,7 @@ namespace DevSpacePortable.NativeUI
                 await LoadSessionsAsync();
                 await LoadMemoriesAsync();
                 await LoadLogsAsync();
-                await RefreshStatusAsync(false);
+                await RefreshDashboardStatusAsync();
             }
             catch (Exception ex) { ShowError(ex); }
             finally { UseWaitCursor = false; }
@@ -2450,16 +2754,19 @@ namespace DevSpacePortable.NativeUI
                 _computerUseIndicator.Hide();
                 _leaseLabel.ForeColor = UiPalette.TextMuted;
                 _leaseLabel.Text = "本地桌面服务在线 · Computer Use 已关闭";
+                _computerUseStatus.SetStatus("stopped", "Computer Use 未启用", "可通过右上角开关启用交互式桌面控制。");
             }
             else if (ready)
             {
                 _leaseLabel.ForeColor = UiPalette.Success;
                 _leaseLabel.Text = "Computer Use 在线 · PID " + GetInt(broker, "pid");
+                _computerUseStatus.SetStatus("ready", "Computer Use 已就绪", "本地交互式桌面 Broker 在线 · PID " + GetInt(broker, "pid"));
             }
             else
             {
                 _leaseLabel.ForeColor = Color.FromArgb(210, 132, 30);
                 _leaseLabel.Text = "Computer Use 正在启动 · " + GetString(broker, "reason", "waiting");
+                _computerUseStatus.SetStatus("warning", "Computer Use 正在启动", GetString(broker, "reason", "waiting"));
             }
         }
 
@@ -2516,7 +2823,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.21") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.22") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2596,6 +2903,7 @@ namespace DevSpacePortable.NativeUI
         private async Task RunActionAsync(string action)
         {
             await ExecuteBusyAsync(async delegate { SetOutput(await _manager.RunAsync(action)); });
+            await RefreshDashboardStatusAsync();
         }
 
         private async Task ConfirmActionAsync(string action, string message)
@@ -2628,13 +2936,47 @@ namespace DevSpacePortable.NativeUI
             catch (Exception ex) { if (switchTab) ShowError(ex); }
         }
 
+        private void ShowDiagnosticsDetails()
+        {
+            using (DiagnosticsDetailsDialog dialog = new DiagnosticsDetailsDialog(_root, _manager))
+                dialog.ShowDialog(this);
+        }
+
+        private async Task RefreshDashboardStatusAsync()
+        {
+            if (_closing || _dashboardStatusBusy || _busyOperationCount > 0) return;
+            _dashboardStatusBusy = true;
+            try
+            {
+                Dictionary<string, object> status = await _manager.RunJsonAsync("dashboard-status");
+                ApplyIndicator(_overallStatus, GetDictionary(status, "overall"));
+                Dictionary<string, object> indicators = GetDictionary(status, "indicators");
+                ApplyIndicator(_serviceStatus, GetDictionary(indicators, "service"));
+                ApplyIndicator(_tunnelStatus, GetDictionary(indicators, "tunnel"));
+                ApplyIndicator(_httpStatus, GetDictionary(indicators, "http"));
+                ApplyIndicator(_filesStatus, GetDictionary(indicators, "files"));
+                ApplyIndicator(_networkStatus, GetDictionary(indicators, "network"));
+            }
+            catch (Exception ex)
+            {
+                _overallStatus.SetStatus("warning", "状态自动刷新暂时失败", FirstLine(ex.Message));
+            }
+            finally { _dashboardStatusBusy = false; }
+        }
+
+        private static void ApplyIndicator(StatusIndicatorCard card, Dictionary<string, object> value)
+        {
+            if (card == null) return;
+            card.SetStatus(GetString(value, "state", "working"), GetString(value, "title", "正在检查"), GetString(value, "detail", "正在读取状态……"));
+        }
+
         private async Task CheckForUpdatesAsync()
         {
             await ExecuteBusyAsync(async delegate
             {
                 SetOutput("正在通过 GitHub Releases 检查稳定版更新……");
                 Dictionary<string, object> status = await _manager.RunJsonAsync("update-check");
-                string current = GetString(status, "currentVersion", "1.1.21");
+                string current = GetString(status, "currentVersion", "1.1.22");
                 string latest = GetString(status, "latestVersion", current);
                 if (!GetBool(status, "updateAvailable"))
                 {
@@ -2658,14 +3000,14 @@ namespace DevSpacePortable.NativeUI
                     + "安装包：" + packageName + "\r\n"
                     + "预计下载：" + FormatBytes(downloadSize) + "\r\n"
                     + (incrementalPreferred ? "完整包兜底：" + FormatBytes(fullSize) + "\r\n" : "") + "\r\n"
-                    + "更新器会优先使用与当前版本精确匹配的增量包，并校验基础文件、文件大小与 SHA-256；增量包缺失、损坏或检测到基础文件漂移时会自动切换到完整包。data、logs 与 reports 始终保留。现在继续吗？";
+                    + "更新器会优先使用与当前版本精确匹配的增量包，并校验文件大小与 SHA-256。仅允许 Release 构建生成物的已知差异直接整文件替换；普通程序文件出现本地漂移、增量包缺失或损坏时仍会自动切换完整包。data、logs 与 reports 始终保留。现在继续吗？";
                 if (MessageBox.Show(this, prompt, "发现新版本 " + latest, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 {
                     SetOutput("已取消更新。当前版本仍为 " + current + "。");
                     return;
                 }
 
-                SetOutput("正在准备 DevSpace Portable " + latest + "。更新器将显示实时下载进度和速度；先尝试当前代理环境，异常时自动直连，不会修改或重启 EasyConnect、v2rayN、系统代理或 WinHTTP 设置。\r\n\r\n等待 GitHub 返回更新数据……");
+                SetOutput("正在准备 DevSpace Portable " + latest + "。更新器会跳过未监听的本地代理，优先使用可用的系统/环境代理，再尝试直连或透明 TUN；全程显示实时下载进度和速度，不会修改、启动或停止 EasyConnect、v2rayN、系统代理、WinHTTP 或 VPN 网卡。\r\n\r\n等待 GitHub 返回更新数据……");
                 Dictionary<string, object> staged = await StageUpdateWithProgressAsync(latest);
                 if (!GetBool(staged, "staged"))
                 {
@@ -2689,7 +3031,9 @@ namespace DevSpacePortable.NativeUI
                     stagingPath = stagingPath,
                     uiPid = Process.GetCurrentProcess().Id,
                 });
-                if (!GetBool(launched, "launched")) throw new InvalidOperationException("更新器没有成功启动。 ");
+                if (!GetBool(launched, "launched") || !GetBool(launched, "acknowledged"))
+                    throw new InvalidOperationException("独立更新器没有完成启动确认。控制中心将保持打开，当前版本不会被替换。");
+                SetOutput("独立更新器已完成启动确认 · PID " + GetInt(launched, "updaterPid") + "。\r\n正在关闭控制中心并执行受控更新……");
                 _closingForUpdate = true;
                 _allowUiExit = true;
                 Close();
@@ -2759,6 +3103,7 @@ namespace DevSpacePortable.NativeUI
             else if (string.Equals(phase, "extracting", StringComparison.OrdinalIgnoreCase)) phaseText = "正在安全解压并验证更新内容";
             else if (string.Equals(phase, "fallback", StringComparison.OrdinalIgnoreCase)) phaseText = "增量更新不可用，正在切换完整包兜底";
             else if (string.Equals(phase, "staged", StringComparison.OrdinalIgnoreCase)) phaseText = "更新包已经下载、校验并暂存";
+            else if (string.Equals(phase, "apply-started", StringComparison.OrdinalIgnoreCase)) phaseText = "独立更新器已接管，正在等待控制中心关闭";
             else if (string.Equals(phase, "applying", StringComparison.OrdinalIgnoreCase)) phaseText = "正在应用更新";
             else if (string.Equals(phase, "rollback", StringComparison.OrdinalIgnoreCase)) phaseText = "更新失败，正在恢复原版本";
             else if (string.Equals(phase, "completed", StringComparison.OrdinalIgnoreCase)) phaseText = "更新完成";
@@ -2778,7 +3123,7 @@ namespace DevSpacePortable.NativeUI
                 text.Append("\r\n");
             }
             if (!string.IsNullOrWhiteSpace(transport))
-                text.Append("网络路径：").Append(transport == "curl-direct" ? "GitHub 直连" : transport == "curl" ? "当前代理/网络环境" : transport).Append("\r\n");
+                text.Append("网络路径：").Append(transport == "curl-direct" ? "直连 / 透明 TUN" : transport == "curl-proxy" ? "健康的本地/系统代理" : transport).Append("\r\n");
             text.Append("\r\n更新器不会启动、停止或修改 EasyConnect、v2rayN 以及 Windows 系统代理设置。");
             return text.ToString();
         }

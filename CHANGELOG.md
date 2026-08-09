@@ -2,6 +2,19 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.22
+
+- tunnel supervisor 改为非侵入式网络策略：不再扫描 EasyConnect/Sangfor 进程与 VPN 网卡，不再因为第三方 VPN 状态变化周期性停止/恢复 ngrok；
+- ngrok tunnel 默认隔离环境中的 WinINET/`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`，因此先打开 v2rayN 系统代理不会强制 ngrok 使用该代理；透明 TUN 仍可自然接管 direct socket。GitHub 更新与公网健康检查独立使用健康代理候选并跳过未监听的 `127.0.0.1` 代理；
+- GitHub updater 统一使用健康代理候选 + direct/TUN 路径，避免无效本地代理导致 Check/Stage 长时间失败；
+- `file-delta-v1` 继续严格保护普通程序文件与删除文件，同时允许少量 Release 构建生成物在本地构建与 GitHub Actions canonical 构建之间存在合法 base hash 差异，避免无意义的 500+ MB 完整包回退；
+- Apply 启动改为一次性用户级 Task Scheduler 控制器并增加启动 ACK；UI 只有确认独立更新器已经运行后才关闭，启动失败时保留 UI 并显示诊断信息；
+- 首页改为 7 秒自动刷新活动指示器，总状态、MCP、tunnel、HTTP/OAuth、核心文件、网络策略与 Computer Use 不再依赖手动刷新；
+- 新增“详细信息”对话框，保留完整状态、HTTP 验证、隧道诊断、文件验证、DevSpace/tunnel/update 日志及任务计划程序入口；
+- Portable Protocol 仍为 1.5，不修改顶层 MCP Schema。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.22.md)
+
 ## 1.1.21
 
 - 修复 DevSpace 公网 tunnel 与 EasyConnect/Sangfor、v2rayN 等本机网络软件共存时可能造成 VPN 会话失效或代理不可用的问题；

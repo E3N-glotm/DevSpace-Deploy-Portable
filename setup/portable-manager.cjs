@@ -43,6 +43,7 @@ const REPORTS_DIR = path.join(ROOT, "reports");
 const CHECKSUM_FILE = path.join(ROOT, "SHA256SUMS.txt");
 const NODE_EXE = path.join(ROOT, "runtime", "node", "node.exe");
 const BASH_EXE = path.join(ROOT, "runtime", "git", "bin", "bash.exe");
+const CURL_EXE = path.join(ROOT, "runtime", "git", "mingw64", "bin", "curl.exe");
 const NGROK_EXE = path.join(ROOT, "runtime", "ngrok", "ngrok.exe");
 const CLOUDFLARED_EXE = path.join(ROOT, "runtime", "cloudflared", "cloudflared.exe");
 const CLOUDFLARED_VERSION = "2026.7.3";
@@ -61,7 +62,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.21";
+const PORTABLE_VERSION = "1.1.22";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -324,7 +325,7 @@ async function ensureCloudflaredRuntime() {
 
 function readJson(file, fallback = null) {
   if (!fs.existsSync(file)) return fallback;
-  return JSON.parse(fs.readFileSync(file, "utf8"));
+  return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
 }
 
 function writeAtomic(file, content, encoding = "utf8") {
@@ -1231,7 +1232,11 @@ function launchPortableUpdate(input = {}) {
   }
   const uiPid = Number(input.uiPid || 0);
   if (!Number.isInteger(uiPid) || uiPid <= 0) throw new Error("uiPid must be a positive integer.");
-  const child = childProcess.spawn(POWERSHELL_EXE, [
+  const ackFile = path.join(stagingPath, "apply-launch-ack.json");
+  fs.rmSync(ackFile, { force: true });
+  const updateTaskName = `DevSpace Portable Update ${crypto.randomBytes(16).toString("hex")}`;
+  const taskXmlFile = path.join(stagingPath, "apply-task.xml");
+  const taskArgs = [
     "-NoLogo",
     "-NoProfile",
     "-NonInteractive",
@@ -1243,18 +1248,69 @@ function launchPortableUpdate(input = {}) {
     "-CurrentVersion", PORTABLE_VERSION,
     "-StagingPath", stagingPath,
     "-UiPid", String(uiPid),
-  ], {
-    cwd: ROOT,
-    detached: true,
-    windowsHide: true,
-    stdio: "ignore",
-  });
-  child.unref();
+    "-LaunchAckPath", ackFile,
+    "-UpdateTaskName", updateTaskName,
+  ];
+  const quoteArgument = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
+  const taskArgumentText = taskArgs.map(quoteArgument).join(" ");
+  const sid = currentUserSid();
+  const taskXmlContent = `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Author>${xmlEscape(currentWindowsUser())}</Author><Description>One-shot DevSpace Portable transactional update controller.</Description></RegistrationInfo>
+  <Triggers />
+  <Principals><Principal id="Author"><UserId>${xmlEscape(sid)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <Priority>6</Priority>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>${xmlEscape(POWERSHELL_EXE)}</Command><Arguments>${xmlEscape(taskArgumentText)}</Arguments><WorkingDirectory>${xmlEscape(ROOT)}</WorkingDirectory></Exec></Actions>
+</Task>`;
+  writeAtomic(taskXmlFile, `\uFEFF${taskXmlContent}`, "utf16le");
+  runProgram("schtasks.exe", ["/create", "/tn", updateTaskName, "/xml", taskXmlFile, "/f"]);
+  try {
+    runProgram("schtasks.exe", ["/run", "/tn", updateTaskName]);
+  } catch (error) {
+    runProgram("schtasks.exe", ["/delete", "/tn", updateTaskName, "/f"], { ignoreExitCode: true });
+    throw error;
+  }
+  const deadline = Date.now() + 12_000;
+  let acknowledgement = null;
+  while (Date.now() < deadline) {
+    acknowledgement = readJson(ackFile, null);
+    if (acknowledgement?.acknowledged && Number(acknowledgement.updaterPid) > 0) break;
+    sleepSync(100);
+  }
+  if (!acknowledgement?.acknowledged || Number(acknowledgement.updaterPid) <= 0) {
+    runProgram("schtasks.exe", ["/end", "/tn", updateTaskName], { ignoreExitCode: true });
+    const taskStatus = runProgram("schtasks.exe", ["/query", "/tn", updateTaskName, "/v", "/fo", "list"], { ignoreExitCode: true }).output;
+    runProgram("schtasks.exe", ["/delete", "/tn", updateTaskName, "/f"], { ignoreExitCode: true });
+    const updateLogTail = safeLogTail(path.join(ROOT, "logs", "update.log"), 20);
+    const launchError = [
+      taskStatus ? `Task Scheduler state:\n${taskStatus}` : "",
+      updateLogTail ? `Recent updater log:\n${updateLogTail}` : "",
+    ].filter(Boolean).join("\n\n") || "No updater acknowledgement was written.";
+    throw new Error(`Detached updater failed to acknowledge launch. The control center remains open and the staged update was not applied.\n${launchError}`);
+  }
   return {
     launched: true,
-    updaterPid: child.pid,
+    updaterPid: Number(acknowledgement.updaterPid),
     stagingPath,
     uiPid,
+    acknowledged: true,
+    acknowledgement,
+    updateTaskName,
   };
 }
 
@@ -1734,17 +1790,6 @@ async function startPublicTunnel(provider, publicBaseUrl, port) {
     taskCommand("run", TASK_TUNNEL);
     last = await waitForCondition(TUNNEL_START_TIMEOUT_MS, async () => {
       const network = readJson(TUNNEL_NETWORK_STATE_FILE, null);
-      if (provider === "ngrok" && network?.paused && /^sangfor-vpn-/.test(String(network.reason || ""))) {
-        return {
-          ready: true,
-          deferred: true,
-          attempt,
-          publicReady: false,
-          networkMode: network.mode || "paused",
-          vpnState: network.vpnState || "negotiating",
-          reason: network.reason,
-        };
-      }
       const publicReady = await publicServiceReady(publicBaseUrl);
       if (provider === "ngrok") {
         const agent = await ngrokAgentState(publicBaseUrl);
@@ -1754,6 +1799,8 @@ async function startPublicTunnel(provider, publicBaseUrl, port) {
           publicReady,
           agentReachable: agent.reachable,
           matchingTunnel: agent.matchingTunnel,
+          networkMode: network?.mode || "unknown",
+          proxySource: network?.proxySource || "none",
         };
       }
       return { ready: publicReady, attempt, publicReady };
@@ -1885,7 +1932,187 @@ function safeLogTail(file, count) {
   return redactSecrets(lines.slice(-count).join("\n")).trim();
 }
 
+function normalizeOutboundProxyUrl(value) {
+  let raw = String(value || "").trim();
+  if (!raw) return "";
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) raw = `http://${raw}`;
+  try {
+    const url = new URL(raw);
+    if (!["http:", "https:", "socks5:"].includes(url.protocol)) return "";
+    if (!url.hostname || !url.port || url.username || url.password) return "";
+    return url.href.replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function parseWindowsProxyServer(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (!raw.includes("=") && !raw.includes(";")) return normalizeOutboundProxyUrl(raw);
+  const entries = new Map();
+  for (const item of raw.split(";")) {
+    const [key, ...rest] = item.split("=");
+    if (!key || !rest.length) continue;
+    entries.set(key.trim().toLowerCase(), rest.join("=").trim());
+  }
+  for (const key of ["https", "http", "socks", "socks5"]) {
+    if (!entries.has(key)) continue;
+    const protocol = key.startsWith("socks") ? "socks5" : "http";
+    const candidate = normalizeOutboundProxyUrl(`${protocol}://${entries.get(key)}`);
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+function winInetProxyCandidate() {
+  const result = runProgram("reg.exe", [
+    "query",
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+  ], { ignoreExitCode: true, outputEncoding: "utf-8" });
+  if (result.status !== 0) return null;
+  const enabledMatch = result.output.match(/ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i);
+  const serverMatch = result.output.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
+  if (!enabledMatch || Number.parseInt(enabledMatch[1], 16) === 0 || !serverMatch) return null;
+  const proxyUrl = parseWindowsProxyServer(serverMatch[1]);
+  return proxyUrl ? { url: proxyUrl, source: "wininet" } : null;
+}
+
+function inheritedProxyCandidates() {
+  const values = [];
+  const seen = new Set();
+  for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"]) {
+    const url = normalizeOutboundProxyUrl(process.env[name]);
+    if (!url || seen.has(url.toLowerCase())) continue;
+    seen.add(url.toLowerCase());
+    values.push({ url, source: `env:${name}` });
+  }
+  return values;
+}
+
+function localProxyHealthy(proxyUrl) {
+  if (!proxyUrl) return false;
+  let parsed;
+  try { parsed = new URL(proxyUrl); } catch { return false; }
+  const host = parsed.hostname.toLowerCase();
+  if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(host)) return true;
+  const port = Number(parsed.port);
+  if (!Number.isInteger(port) || port <= 0) return false;
+  const result = runProgram("netstat.exe", ["-ano", "-p", "TCP"], { ignoreExitCode: true });
+  if (result.status !== 0) return false;
+  const escaped = String(port).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::\\]|\\[::1\\]|::):${escaped}\\s+\\S+\\s+LISTENING`, "i").test(result.output);
+}
+
+function outboundProbeCandidates() {
+  const values = [];
+  const seen = new Set();
+  const add = (candidate) => {
+    if (!candidate?.url) return;
+    const key = candidate.url.toLowerCase();
+    if (seen.has(key) || !localProxyHealthy(candidate.url)) return;
+    seen.add(key);
+    values.push(candidate);
+  };
+  const configured = existingNgrokNetworkOptions().proxyUrl;
+  if (configured) add({ url: normalizeOutboundProxyUrl(configured), source: "ngrok-config" });
+  add(winInetProxyCandidate());
+  for (const candidate of inheritedProxyCandidates()) add(candidate);
+  values.push({ url: "", source: "direct" });
+  return values;
+}
+
+function curlProbe(url, timeoutMs, candidate) {
+  if (!fs.existsSync(CURL_EXE)) return null;
+  const timeoutSeconds = Math.max(2, Math.ceil(timeoutMs / 1000));
+  const args = [
+    "--silent",
+    "--show-error",
+    "--location",
+    "--connect-timeout", String(Math.min(6, timeoutSeconds)),
+    "--max-time", String(timeoutSeconds),
+    "--dump-header", "-",
+    "--output", "NUL",
+    "--write-out", "\n__DEVSPACE_HTTP__%{http_code}|%{content_type}\n",
+  ];
+  if (candidate?.url) args.push("--proxy", candidate.url);
+  else args.push("--proxy", "", "--noproxy", "*");
+  args.push(url);
+  const result = childProcess.spawnSync(CURL_EXE, args, {
+    cwd: ROOT,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: timeoutMs + 2_000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: {
+      ...process.env,
+      HTTP_PROXY: "",
+      HTTPS_PROXY: "",
+      ALL_PROXY: "",
+      http_proxy: "",
+      https_proxy: "",
+      all_proxy: "",
+    },
+  });
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "").trim();
+  const marker = stdout.match(/__DEVSPACE_HTTP__(\d{3})\|([^\r\n]*)/);
+  if (result.status !== 0 || !marker) {
+    return {
+      status: 0,
+      error: stderr || `curl exit ${result.status ?? "unknown"}`,
+      contentType: "",
+      server: "",
+      ngrokErrorCode: "",
+      transport: candidate?.source || "direct",
+    };
+  }
+  const headerBlocks = stdout.split(/\r?\n\r?\n/).filter((block) => /^HTTP\//i.test(block.trim()));
+  const headers = headerBlocks.length ? headerBlocks[headerBlocks.length - 1] : "";
+  const header = (name) => {
+    const match = headers.match(new RegExp(`^${name}:\\s*(.+)$`, "im"));
+    return match ? match[1].trim() : "";
+  };
+  return {
+    status: Number(marker[1]),
+    error: "",
+    contentType: marker[2] || header("content-type"),
+    server: header("server"),
+    ngrokErrorCode: header("ngrok-error-code"),
+    transport: candidate?.source || "direct",
+  };
+}
+
 async function probeUrl(url, timeoutMs = 20000) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return { status: 0, error: "invalid URL", contentType: "", server: "", ngrokErrorCode: "", transport: "none" }; }
+  const local = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]).has(parsed.hostname.toLowerCase());
+  if (local) {
+    try {
+      const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+      if (response.body) await response.body.cancel();
+      return {
+        status: response.status,
+        error: "",
+        contentType: response.headers.get("content-type") || "",
+        server: response.headers.get("server") || "",
+        ngrokErrorCode: response.headers.get("ngrok-error-code") || "",
+        transport: "loopback",
+      };
+    } catch (error) {
+      const cause = error?.cause;
+      const code = cause?.code || error?.code || error?.name || "FETCH_ERROR";
+      const message = cause?.message || error?.message || String(error);
+      return { status: 0, error: `${code}: ${message}`, contentType: "", server: "", ngrokErrorCode: "", transport: "loopback" };
+    }
+  }
+  const errors = [];
+  for (const candidate of outboundProbeCandidates()) {
+    const result = curlProbe(url, timeoutMs, candidate);
+    if (!result) break;
+    if (result.status > 0) return result;
+    errors.push(`${candidate.source}: ${result.error}`);
+  }
   try {
     const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
     if (response.body) await response.body.cancel();
@@ -1895,12 +2122,14 @@ async function probeUrl(url, timeoutMs = 20000) {
       contentType: response.headers.get("content-type") || "",
       server: response.headers.get("server") || "",
       ngrokErrorCode: response.headers.get("ngrok-error-code") || "",
+      transport: "node-direct-fallback",
     };
   } catch (error) {
     const cause = error?.cause;
     const code = cause?.code || error?.code || error?.name || "FETCH_ERROR";
     const message = cause?.message || error?.message || String(error);
-    return { status: 0, error: `${code}: ${message}`, contentType: "", server: "", ngrokErrorCode: "" };
+    errors.push(`node-direct: ${code}: ${message}`);
+    return { status: 0, error: errors.join("; "), contentType: "", server: "", ngrokErrorCode: "", transport: "failed" };
   }
 }
 
@@ -1910,6 +2139,7 @@ function formatProbe(probe) {
   if (probe.contentType) details.push(`content-type=${probe.contentType}`);
   if (probe.server) details.push(`server=${probe.server}`);
   if (probe.ngrokErrorCode) details.push(`ngrok-error=${probe.ngrokErrorCode}`);
+  if (probe.transport) details.push(`transport=${probe.transport}`);
   return `HTTP ${probe.status}${details.length ? ` (${details.join(", ")})` : ""}`;
 }
 
@@ -1998,9 +2228,9 @@ async function statusText() {
       `\nObserved tunnels: ${agent.tunnels.length ? agent.tunnels.map((item) => `${item.publicUrl} -> ${item.target}`).join("; ") : "none"}`;
     if (tunnelNetwork) {
       tunnelDetails +=
+        `\nNetwork policy: ${tunnelNetwork.policy || "non-invasive"}` +
         `\nNetwork compatibility: ${tunnelNetwork.compatibility === false ? "disabled" : "enabled"}` +
         `\nNetwork mode: ${tunnelNetwork.mode || "unknown"}` +
-        `\nVPN state: ${tunnelNetwork.vpnState || "unknown"}` +
         `\nNetwork reason: ${tunnelNetwork.reason || "unknown"}` +
         `\nProxy source: ${tunnelNetwork.proxySource || "none"}` +
         `\nTunnel supervisor PID: ${tunnelNetwork.supervisorPid || "none"}`;
@@ -2012,6 +2242,113 @@ async function statusText() {
   const allListeners = listenerPids(port);
   lines.push(`=== TCP :${port} ===\nListener PIDs: ${allListeners.length ? allListeners.join(", ") : "none"}`);
   return lines.join("\n\n");
+}
+
+function dashboardIndicator(state, title, detail, extra = {}) {
+  return { state, title, detail, ...extra };
+}
+
+async function dashboardStatus() {
+  const deployment = readJson(DEPLOYMENT_FILE, { port: 7676, tunnelProvider: "ngrok" });
+  const config = readJson(CONFIG_FILE, {});
+  const provider = normalizeTunnelProvider(deployment.tunnelProvider || "ngrok");
+  const port = Number(deployment.port || config.port || 7676);
+  const publicUrl = String(config.publicBaseUrl || "").replace(/\/$/, "");
+  const spec = tunnelProcessSpec(provider);
+  const mcp = recordedProcessStatus(MCP_PID_FILE, "node.exe", port);
+  let tunnel = recordedProcessStatus(TUNNEL_PID_FILE, spec.image);
+  if (!tunnel.pid && provider === "ngrok") tunnel = recordedProcessStatus(NGROK_PID_FILE, spec.image);
+  const tunnelNetwork = readJson(TUNNEL_NETWORK_STATE_FILE, null);
+  const [localMetadata, localMcp, publicMetadata, publicMcp, agent] = await Promise.all([
+    probeUrl(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, 2500),
+    probeUrl(`http://127.0.0.1:${port}/mcp`, 2500),
+    publicUrl ? probeUrl(`${publicUrl}/.well-known/oauth-protected-resource/mcp`, 4500) : Promise.resolve({ status: 0, error: "public URL not configured", transport: "none" }),
+    publicUrl ? probeUrl(`${publicUrl}/mcp`, 4500) : Promise.resolve({ status: 0, error: "public URL not configured", transport: "none" }),
+    provider === "ngrok" ? ngrokAgentState(publicUrl) : Promise.resolve({ reachable: tunnel.running, matchingTunnel: tunnel.running, tunnels: [], apiPorts: [], errors: [] }),
+  ]);
+
+  const mcpTaskInstalled = taskExists(TASK_MCP);
+  const mcpTaskEnabled = mcpTaskInstalled && taskEnabled(TASK_MCP);
+  const tunnelTaskInstalled = taskExists(TASK_TUNNEL);
+  const tunnelTaskEnabled = tunnelTaskInstalled && taskEnabled(TASK_TUNNEL);
+  const serviceReady = mcp.running && mcp.listenerMatch && localMetadata.status === 200 && localMcp.status === 401;
+  const tunnelReady = tunnel.running && publicMetadata.status === 200 && publicMcp.status === 401 && (provider !== "ngrok" || agent.matchingTunnel);
+  const criticalFiles = [
+    "DevSpace-Portable.exe",
+    "VERSION-MANIFEST.json",
+    "SHA256SUMS.txt",
+    "runtime\\node\\node.exe",
+    "setup\\portable-manager.cjs",
+    "setup\\portable-updater.ps1",
+  ];
+  const missingFiles = criticalFiles.filter((relative) => !fs.existsSync(path.join(ROOT, relative)));
+  let installedVersion = "unknown";
+  try { installedVersion = String(readJson(path.join(ROOT, "VERSION-MANIFEST.json"), {}).runtime?.devspacePortable || "unknown"); } catch {}
+  const filesReady = missingFiles.length === 0 && installedVersion === PORTABLE_VERSION;
+
+  const serviceState = serviceReady ? (mcpTaskEnabled ? "ready" : "warning") : (mcp.running ? "warning" : "stopped");
+  const serviceTitle = serviceReady ? (mcpTaskEnabled ? "服务已就绪" : "服务已运行，计划任务未启用") : (mcp.running ? "服务正在恢复" : "服务未运行");
+  const tunnelState = tunnelReady ? (tunnelTaskEnabled ? "ready" : "warning") : (tunnel.running ? "warning" : "stopped");
+  const tunnelTitle = tunnelReady ? (tunnelTaskEnabled ? "公网隧道已就绪" : "隧道已运行，计划任务未启用") : (tunnel.running ? "公网隧道正在恢复" : "公网隧道未运行");
+  const httpReady = localMetadata.status === 200 && localMcp.status === 401 && publicMetadata.status === 200 && publicMcp.status === 401;
+  const httpState = httpReady ? "ready" : (localMetadata.status === 200 ? "warning" : "error");
+  const httpTitle = httpReady ? "HTTP / OAuth 验证正常" : (localMetadata.status === 200 ? "本地正常，公网验证异常" : "本地 HTTP 验证异常");
+  const networkMode = String(tunnelNetwork?.mode || "unknown");
+  const networkSource = String(tunnelNetwork?.proxySource || "none");
+  const networkState = tunnelNetwork?.paused ? "warning" : "ready";
+  const networkTitle = tunnelNetwork?.paused ? "公网出站正在等待可用代理" : "网络共存策略正常";
+
+  const indicators = {
+    service: dashboardIndicator(
+      serviceState,
+      serviceTitle,
+      serviceReady ? `MCP 监听 127.0.0.1:${port} · PID ${mcp.pid ?? "-"}` : `监听=${mcp.listenerMatch ? "yes" : "no"} · 本地 OAuth=${localMetadata.status || 0}`,
+      { pid: mcp.pid, listener: mcp.listenerMatch, taskInstalled: mcpTaskInstalled, taskEnabled: mcpTaskEnabled },
+    ),
+    tunnel: dashboardIndicator(
+      tunnelState,
+      tunnelTitle,
+      tunnelReady ? `${provider} · 公网 OAuth HTTP 200 · PID ${tunnel.pid ?? "-"}` : `${provider} · 公网 OAuth=${publicMetadata.status || 0} · 进程=${tunnel.running ? "running" : "stopped"}`,
+      { pid: tunnel.pid, taskInstalled: tunnelTaskInstalled, taskEnabled: tunnelTaskEnabled, provider },
+    ),
+    http: dashboardIndicator(
+      httpState,
+      httpTitle,
+      `本地 ${localMetadata.status}/${localMcp.status} · 公网 ${publicMetadata.status}/${publicMcp.status} · ${publicMetadata.transport || "unknown"}`,
+      { localMetadata, localMcp, publicMetadata, publicMcp },
+    ),
+    files: dashboardIndicator(
+      filesReady ? "ready" : "error",
+      filesReady ? "核心文件与版本正常" : "核心文件或版本需要检查",
+      filesReady ? `DevSpace Portable ${installedVersion} · 关键文件齐全` : `版本=${installedVersion} · 缺失=${missingFiles.length ? missingFiles.join(", ") : "none"}`,
+      { installedVersion, missingFiles },
+    ),
+    network: dashboardIndicator(
+      networkState,
+      networkTitle,
+      `非侵入式网络策略 · mode=${networkMode} · proxy=${networkSource}`,
+      { mode: networkMode, proxySource: networkSource, policy: tunnelNetwork?.policy || "non-invasive", reason: tunnelNetwork?.reason || "unknown" },
+    ),
+  };
+  const values = Object.values(indicators);
+  const overallState = values.some((item) => item.state === "error")
+    ? "error"
+    : values.some((item) => item.state === "stopped")
+      ? "stopped"
+      : values.some((item) => item.state === "warning")
+        ? "warning"
+        : "ready";
+  return {
+    portableVersion: PORTABLE_VERSION,
+    protocolVersion: "1.5",
+    refreshedAt: new Date().toISOString(),
+    overall: dashboardIndicator(
+      overallState,
+      overallState === "ready" ? "DevSpace 已就绪" : overallState === "warning" ? "DevSpace 可用，但存在需要关注的状态" : overallState === "stopped" ? "DevSpace 部分服务未运行" : "DevSpace 状态异常",
+      overallState === "ready" ? "本地服务、公网隧道、HTTP/OAuth 与核心文件均通过轻量检查。" : "打开“详细信息”查看验证、隧道、文件和日志。",
+    ),
+    indicators,
+  };
 }
 
 async function testEndpoints() {
@@ -2259,6 +2596,8 @@ async function main() {
       writeOutput(uninstallTasks() + "\n");
     } else if (command === "status") {
       writeOutput(`${await statusText()}\n`);
+    } else if (command === "dashboard-status") {
+      stdoutJson(await dashboardStatus());
     } else if (command === "test") {
       await testEndpoints();
     } else if (command === "diagnose") {
@@ -2320,7 +2659,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop shutdown restart enable disable uninstall-tasks status test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop shutdown restart enable disable uninstall-tasks status dashboard-status test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);
