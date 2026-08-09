@@ -1498,6 +1498,7 @@ namespace DevSpacePortable.NativeUI
         private CheckBox _allDrives;
         private TextBox _ngrokToken;
         private TextBox _ngrokProxy;
+        private CheckBox _tunnelNetworkCompatibility;
         private CheckBox _ngrokCas;
         private TextBox _cloudflareToken;
         private TextBox _ownerToken;
@@ -1778,7 +1779,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.20 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.21 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -1906,6 +1907,7 @@ namespace DevSpacePortable.NativeUI
             _toolMode = AddCombo(networkForm, "工具模式", new[] { "full", "codex", "minimal" });
             _ngrokToken = AddPassword(networkForm, "ngrok Authtoken（留空保留）");
             _ngrokProxy = AddText(networkForm, "ngrok 出站代理（可选）");
+            _tunnelNetworkCompatibility = AddCheck(networkForm, "VPN/代理兼容模式（推荐）", "tunnelNetworkCompatibility");
             _ngrokCas = AddCheck(networkForm, "使用 Windows 根证书", "ngrokConnectCasHost");
             _cloudflareToken = AddPassword(networkForm, "Cloudflare Tunnel Token（留空保留）");
             network.Controls.Add(networkForm);
@@ -2512,8 +2514,9 @@ namespace DevSpacePortable.NativeUI
             _roots.Text = string.Join(Environment.NewLine, GetStringList(_currentConfig, "allowedRoots"));
             _allDrives.Checked = GetString(_currentConfig, "permissionMode") == "all-drive-roots";
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
+            _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.20") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.21") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2547,6 +2550,7 @@ namespace DevSpacePortable.NativeUI
                 allowAllFixedDrives = _allDrives.Checked,
                 ngrokToken = _ngrokToken.Text,
                 ngrokProxyUrl = _ngrokProxy.Text.Trim(),
+                tunnelNetworkCompatibility = _tunnelNetworkCompatibility.Checked,
                 ngrokConnectCasHost = _ngrokCas.Checked,
                 cloudflareToken = _cloudflareToken.Text,
                 ownerToken = _ownerToken.Text,
@@ -2630,7 +2634,7 @@ namespace DevSpacePortable.NativeUI
             {
                 SetOutput("正在通过 GitHub Releases 检查稳定版更新……");
                 Dictionary<string, object> status = await _manager.RunJsonAsync("update-check");
-                string current = GetString(status, "currentVersion", "1.1.20");
+                string current = GetString(status, "currentVersion", "1.1.21");
                 string latest = GetString(status, "latestVersion", current);
                 if (!GetBool(status, "updateAvailable"))
                 {

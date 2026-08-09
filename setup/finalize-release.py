@@ -93,6 +93,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "setup/test-incremental-update.py",
             "setup/test-release-plugin-layout.py",
             "setup/test-strict-stop.mjs",
+            "setup/test-tunnel-network-coexistence.mjs",
             "setup/build-computer-use-helper.cmd",
             "setup/native/computer-use-capture.cpp",
             "setup/native/computer-use-input.cpp",

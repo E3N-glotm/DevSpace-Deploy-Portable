@@ -69,7 +69,7 @@ try {
     openedAt: new Date().toISOString(),
     lastHeartbeatAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    portableVersion: "1.1.20",
+    portableVersion: "1.1.21",
   }, null, 2));
   writeFileSync(brokerFile, JSON.stringify({
     formatVersion: 1,

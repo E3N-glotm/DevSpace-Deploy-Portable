@@ -1,4 +1,4 @@
-# Application update design through 1.1.20
+# Application update design through 1.1.21
 
 ## Goal
 
@@ -10,6 +10,30 @@ rollback safety.
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.21: VPN/proxy tunnel coexistence
+
+The local MCP listener and the public tunnel now have deliberately separate
+network lifecycles. A lightweight tunnel supervisor owns only the bundled
+ngrok/cloudflared child and observes network state without changing Windows
+network configuration.
+
+For ngrok, the default compatibility mode follows these rules:
+
+1. If Sangfor/EasyConnect is present but its Sangfor VNIC is not connected,
+   keep the public tunnel paused while VPN login is negotiating.
+2. After the VNIC reports connected, wait for a short route-settling window
+   before launching the tunnel.
+3. Prefer an explicit ngrok `proxy_url` when configured.
+4. Otherwise, if WinINET currently exposes a healthy local proxy endpoint,
+   launch the tunnel through that proxy rather than forcing direct egress.
+5. On a VPN/proxy state transition, restart only the Portable-owned tunnel
+   child. The MCP server and unrelated software are untouched.
+6. Never mutate WinINET, WinHTTP, routes, adapters, or third-party processes.
+
+The supervisor publishes `tunnel-network.json` so the UI/status path can
+distinguish an intentional compatibility pause from a tunnel failure. A stop
+sentinel prevents the supervisor from racing an explicit DevSpace shutdown.
 
 ## Implemented in 1.1.20: startup PID identity safety
 

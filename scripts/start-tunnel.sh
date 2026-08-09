@@ -12,6 +12,9 @@ PORT="$("$NODE_EXE" "$MANAGER" get port)"
 PUBLIC_URL="$("$NODE_EXE" "$MANAGER" get publicBaseUrl)"
 
 export PATH="$ROOT/runtime/git/cmd:/usr/bin:/bin:$PATH"
+export DEVSPACE_INHERITED_HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}"
+export DEVSPACE_INHERITED_HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}"
+export DEVSPACE_INHERITED_ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}"
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
 unset http_proxy https_proxy all_proxy no_proxy NGROK_PROXY
 export TUNNEL_PID_FILE="$PID_FILE_WIN"
