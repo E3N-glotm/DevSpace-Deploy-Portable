@@ -1,4 +1,4 @@
-# Application update design through 1.1.23
+# Application update design through 1.1.24
 
 ## Goal
 
@@ -10,6 +10,29 @@ rollback safety.
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.24: standalone Update.exe and target-file delta semantics
+
+1. The main control center no longer owns the long-running update workflow.
+   `Check for updates` starts root-level `Update.exe`, which performs check,
+   stage, progress display, confirmation, and installation independently.
+2. Before replacement begins, `Update.exe` copies itself outside the Portable
+   root into `%TEMP%/DevSpacePortableUpdater/<guid>/Update.exe`. The temporary
+   controller verifies that the supplied UI PID still resolves to this
+   installation's `DevSpace-Portable.exe`, closes that UI, and then invokes the
+   transactional PowerShell Apply backend directly. The normal 1.1.24 path
+   does not require Task Scheduler.
+3. `file-delta-v1` changed entries contain complete target files, not binary
+   patches. A changed file's base SHA-256 is therefore diagnostic only in
+   1.1.24: local drift or a missing old file no longer forces a full package.
+   The downloaded target file and the final installed file are still verified
+   against the release-pinned SHA-256.
+4. Deletions remain strict because deleting a locally modified file is not
+   equivalent to replacing it with a manifest-pinned target. `data`, `logs`,
+   and `reports` remain excluded from incremental mutation.
+5. The older manager `update-check`, `update-stage`, and `update-launch`
+   commands remain available for backwards compatibility and bootstrap from
+   pre-1.1.24 installations.
 
 ## Implemented in 1.1.23: review density and first-run credential usability
 

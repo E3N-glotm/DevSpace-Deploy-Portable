@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.23**
+当前稳定版本：**1.1.24**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.23.zip
+DevSpacePortable-Windows-x64-1.1.24.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.23 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.22 升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.24 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.23 升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -297,6 +297,16 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.24 主要变化
+
+- 新增根目录独立 **`Update.exe`**。主控制中心中的“检查更新”不再自己执行 GitHub Check、下载、暂存和 Apply，而只负责启动独立更新程序；更新窗口可单独运行，也可以直接双击 `Update.exe` 使用。
+- `Update.exe` 在下载和校验阶段与主控制中心完全分离，持续展示检查结果、实际采用的增量/完整方式、百分比、下载量、速度和当前网络路径。主程序和 MCP 服务只有在真正开始替换文件时才会关闭/停止。
+- 安装阶段不再依赖主程序中的 Task Scheduler 启动链。`Update.exe` 会把自身复制到系统临时目录，由临时控制器验证主 UI PID 身份后关闭控制中心，再直接调用事务 Apply；这样根目录中的 `Update.exe` 本身也可以被安全替换。
+- `file-delta-v1` 的 changed file 本来就携带**完整目标文件**，因此 1.1.24 不再因为 changed file 的本地 base SHA-256 漂移直接退回 500+ MB 完整包。更新器仍验证增量 ZIP 的 Release SHA-256、每个目标文件 SHA-256、最终落盘 SHA-256，并继续禁止增量修改 `data/`、`logs/`、`reports/`；删除文件仍保持严格 base hash 保护。
+- 这项策略专门解决“同版本不同构建产物、依赖包文本文件或构建生成文件发生无害漂移，却导致增量包下载后又改下完整包”的问题。1.1.23 本机实际更新日志曾因 `@types/node/README.md` base drift 从增量自动回退完整包，1.1.24 以后这种 changed-file drift 不再触发全量下载。
+- 旧的 `portable-updater.ps1`、`update-check/update-stage/update-launch` 接口继续保留作为兼容后端和旧版本升级路径，但 1.1.24 原生主 UI 的正常更新入口已经切换到 `Update.exe`。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
 
 ## 1.1.23 主要变化
 
@@ -418,7 +428,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.23
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.24
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -446,7 +456,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.23 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.24 -BypassProxy
 ```
 
 ## 在线更新

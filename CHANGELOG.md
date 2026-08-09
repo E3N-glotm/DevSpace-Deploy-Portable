@@ -2,6 +2,16 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.24
+
+- 新增独立 `Update.exe`，主控制中心“检查更新”只负责启动更新程序，不再在主 UI 进程中执行 Check/Stage/Apply；
+- `Update.exe` 独立显示 GitHub 检查、实际更新方式、实时下载百分比/速度/网络路径，并允许直接双击运行；
+- Apply 前将更新器自身复制到系统临时目录，由临时控制器验证并关闭 DevSpace 主 UI 后执行事务替换；正常更新链不再依赖 Task Scheduler；
+- `file-delta-v1` changed file 改为完整目标文件替换语义：changed file 的 base hash 漂移只记录诊断，不再触发完整包兜底；目标 SHA-256、ZIP SHA-256、持久化目录隔离和删除文件 base hash 校验仍严格执行；
+- 保留旧 updater/manager 更新命令用于从旧版本升级和故障兼容；Portable Protocol 仍为 1.5。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.24.md)
+
 ## 1.1.23
 
 - “会话与回退”同名会话分组默认折叠，分组标题以 `▶/▼` 显示状态并支持单击展开/折叠；搜索命中时临时展开匹配分组；

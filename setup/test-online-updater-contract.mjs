@@ -32,10 +32,10 @@ assert.match(updater, /Get-FileHash[^\n]+SHA256/);
 assert.match(updater, /Get-IncrementalCandidate/);
 assert.match(updater, /Stage-IncrementalUpdate/);
 assert.match(updater, /automatically falling back to the full package/);
-assert.match(updater, /Incremental base file has local drift/);
-assert.match(updater, /Test-ReplaceSafeDriftPath/);
 assert.match(updater, /acceptedBaseDrift/);
-assert.match(updater, /packages\/waishnav-devspace-\[\^\/\]\+\\\.tgz/);
+assert.match(updater, /Accepting changed-file base drift/);
+assert.match(updater, /file-delta-v1 carries the complete target file/);
+assert.match(updater, /Incremental deleted file has local drift/);
 assert.match(updater, /updateMode = "incremental"/);
 assert.match(updater, /Unsafe archive entry/);
 assert.match(updater, /Online application update is disabled inside a Git source checkout/);
@@ -69,8 +69,8 @@ console.log(JSON.stringify({
   explicitDirectTunFallback: true,
   incrementalFirst: true,
   automaticFullFallback: true,
-  baseFileDriftProtection: true,
-  generatedBuildDriftTolerance: true,
+  changedFileFullReplacementDriftTolerance: true,
+  deletionDriftProtection: true,
   updateLaunchAcknowledgement: true,
   deltaManifestGeneration: true,
   sizeAndSha256Validation: true,

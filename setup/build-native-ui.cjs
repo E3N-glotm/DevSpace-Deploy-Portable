@@ -11,8 +11,16 @@ const REFERENCE_ROOT_CANDIDATES = [
   "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319",
   "C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319",
 ];
-const SOURCE = path.join(ROOT, "setup", "native", "DevSpacePortableApp.cs");
-const OUTPUT = path.join(ROOT, "DevSpace-Portable.exe");
+const TARGETS = [
+  {
+    source: path.join(ROOT, "setup", "native", "DevSpacePortableApp.cs"),
+    output: path.join(ROOT, "DevSpace-Portable.exe"),
+  },
+  {
+    source: path.join(ROOT, "setup", "native", "DevSpaceUpdaterApp.cs"),
+    output: path.join(ROOT, "Update.exe"),
+  },
+];
 
 function run(file, args) {
   const result = childProcess.spawnSync(file, args, {
@@ -31,7 +39,9 @@ function run(file, args) {
 }
 
 if (!fs.existsSync(VSWHERE)) throw new Error(`vswhere.exe was not found: ${VSWHERE}`);
-if (!fs.existsSync(SOURCE)) throw new Error(`Native UI source was not found: ${SOURCE}`);
+for (const target of TARGETS) {
+  if (!fs.existsSync(target.source)) throw new Error(`Native UI source was not found: ${target.source}`);
+}
 
 const vsRoot = run(VSWHERE, [
   "-latest",
@@ -63,18 +73,20 @@ for (const reference of references) {
   if (!fs.existsSync(reference)) throw new Error(`.NET Framework 4.8 reference was not found: ${reference}`);
 }
 
-run(compiler, [
-  "/nologo",
-  "/target:winexe",
-  "/platform:x64",
-  "/optimize+",
-  "/deterministic+",
-  "/debug-",
-  "/langversion:latest",
-  `/out:${OUTPUT}`,
-  ...references.map((reference) => `/reference:${reference}`),
-  SOURCE,
-]);
+for (const target of TARGETS) {
+  run(compiler, [
+    "/nologo",
+    "/target:winexe",
+    "/platform:x64",
+    "/optimize+",
+    "/deterministic+",
+    "/debug-",
+    "/langversion:latest",
+    `/out:${target.output}`,
+    ...references.map((reference) => `/reference:${reference}`),
+    target.source,
+  ]);
 
-const stat = fs.statSync(OUTPUT);
-console.log(`Created ${OUTPUT} (${stat.size} bytes)`);
+  const stat = fs.statSync(target.output);
+  console.log(`Created ${target.output} (${stat.size} bytes)`);
+}
