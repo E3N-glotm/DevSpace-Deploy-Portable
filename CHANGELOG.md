@@ -2,6 +2,16 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.23
+
+- “会话与回退”同名会话分组默认折叠，分组标题以 `▶/▼` 显示状态并支持单击展开/折叠；搜索命中时临时展开匹配分组；
+- 新增“全部折叠 / 全部展开”，大量历史轮次不再一次性占满会话列表；分组标题不会被误当作具体会话打开；
+- 首次生成 Owner Password 的窗口明确展示 `auth.json` 完整路径，并分别提供“复制 Owner Password”和“复制 auth.json 路径”按钮；
+- 保持 1.1.22 非侵入式网络策略，不把 EasyConnect/Sangfor 或 v2rayN 生命周期纳入 DevSpace 管理；
+- Portable Protocol 仍为 1.5，不修改顶层 MCP Schema。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.23.md)
+
 ## 1.1.22
 
 - tunnel supervisor 改为非侵入式网络策略：不再扫描 EasyConnect/Sangfor 进程与 VPN 网卡，不再因为第三方 VPN 状态变化周期性停止/恢复 ngrok；

@@ -58,6 +58,12 @@ try {
   assert.match(nativeSource, /不会在未选择时展示整轮差异/);
   assert.match(nativeSource, /GroupBy\(session => NormalizeSessionTitle/);
   assert.match(nativeSource, /ThenByDescending\(SessionUpdatedAt\)/);
+  assert.match(nativeSource, /_expandedSessionGroups/);
+  assert.match(nativeSource, /ActionButton\("全部折叠"/);
+  assert.match(nativeSource, /ActionButton\("全部展开"/);
+  assert.match(nativeSource, /\(expanded \? "▼ " : "▶ "\)/);
+  assert.match(nativeSource, /if \(!expanded\) continue/);
+  assert.match(nativeSource, /query\.Length > 0 \|\| _expandedSessionGroups\.Contains/);
   assert.match(nativeSource, /CloseChoiceDialog\.Show\(this\)/);
   assert.match(nativeSource, /private readonly NotifyIcon _notifyIcon/);
   assert.match(nativeSource, /_manager\.RunJsonAsync\("update-check"\)/);
@@ -65,6 +71,12 @@ try {
   assert.match(nativeSource, /update-progress\.json/);
   assert.match(nativeSource, /speedBytesPerSecond/);
   assert.match(nativeSource, /预计剩余/);
+  assert.match(nativeSource, /OwnerPasswordDialog\.Show/);
+  assert.match(nativeSource, /auth\.json 位置/);
+  assert.match(nativeSource, /复制 Owner Password/);
+  assert.match(nativeSource, /复制 auth\.json 路径/);
+  assert.match(nativeSource, /密码已同时写入下方 auth\.json/);
+  assert.match(nativeSource, /Clipboard\.SetText\(box\.Text\)/);
   assert.match(nativeSource, /直连 \/ 透明 TUN/);
   assert.match(nativeSource, /健康的本地\/系统代理/);
   assert.match(nativeSource, /_manager\.RunJsonAsync\("update-launch"/);
@@ -143,6 +155,7 @@ try {
     nonWhiteningBusyState: true,
     sessionSubpage: true,
     sessionNameGrouping: true,
+    collapsibleSessionGroups: true,
     selectedFileDiffOnly: true,
     trayCloseChoice: true,
     onlineUpdateUi: true,
@@ -150,6 +163,9 @@ try {
     memoryScopeFiltering: true,
     memoryContentPreview: true,
     liveUpdateProgress: true,
+    firstDeployOwnerPasswordCopy: true,
+    authFileLocationShown: true,
+    authFilePathCopy: true,
     shutdownLeavesTasksDisabled: true,
     remainingMemories: 2,
   }));

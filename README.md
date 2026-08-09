@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.22**
+当前稳定版本：**1.1.23**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.22.zip
+DevSpacePortable-Windows-x64-1.1.23.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.22 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.21 升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.23 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.22 升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -297,6 +297,14 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.23 主要变化
+
+- “会话与回退”中的同名会话分组改为**默认折叠**。分组标题显示 `▶/▼` 状态，单击分组标题即可展开或折叠；搜索时会临时展开匹配分组，避免搜索结果被折叠状态隐藏。
+- 会话页新增 **“全部折叠”** 与 **“全部展开”**，大量历史轮次不再一次性铺满列表；具体会话仍保持双击进入独立审阅页、逐文件 diff 与回退能力。
+- 首次自动生成 Owner Password 时使用专用提示窗口，同时显示 Owner Password 和 `auth.json` 的完整位置；两项都提供独立复制按钮，避免用户关闭窗口后不知道凭据保存在哪里。
+- 继续沿用 1.1.22 的非侵入式网络策略：DevSpace 不读取或操纵 EasyConnect/Sangfor 生命周期，不修改第三方 VPN、系统代理、WinHTTP、路由或网卡。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
 
 ## 1.1.22 主要变化
 
@@ -410,7 +418,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.22
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.23
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -438,7 +446,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.22 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.23 -BypassProxy
 ```
 
 ## 在线更新
