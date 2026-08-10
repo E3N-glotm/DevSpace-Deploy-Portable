@@ -59,6 +59,7 @@ $Tests = @(
     "setup/test-strict-stop.mjs",
     "setup/test-ui-open-process-safety.mjs",
     "setup/test-tunnel-network-coexistence.mjs",
+    "setup/test-network-isolation-contract.mjs",
     "setup/test-native-ui-resilience.mjs",
     "setup/test-native-close-tray.mjs",
     "setup/test-session-capabilities.mjs",

@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.29
+
+- 本地 MCP 与公网 tunnel 拆成真正独立的生命周期：保存/部署默认只安装并启动 `127.0.0.1` MCP，公网 tunnel 任务默认保持禁用，只有用户明确点击“启动公网隧道”才启用；本地启动不再要求 ngrok/cloudflared runtime 或 tunnel Token；更新/任务修复会保留已有 tunnel 的 enabled/disabled 状态，不会把用户关闭的 tunnel 自动重新打开。
+- 首页自动刷新彻底取消主动公网回打，只做本地回环、任务、PID 和 tunnel agent 的被动检查；公网 OAuth/HTTP 验证仅在用户进入“详细信息”并明确执行验证/诊断时发起，避免企业 VPN 会话中每 3 秒产生额外公网连接。
+- tunnel supervisor 不再因为第三方网卡、地址或路由拓扑变化主动停止/重连 ngrok/cloudflared；这些变化仅只读记录。只有 DevSpace 自己的显式代理配置变化、显式本地代理失效或 tunnel 子进程真实退出时才管理自己的子进程。
+- tunnel 子进程继续清空继承的 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 等环境变量；只有用户显式配置的 DevSpace tunnel 代理才会注入，因此 v2ray/Clash/sing-box 的系统代理开关不会自动成为 DevSpace tunnel 的依赖。
+- 新增只读 Windows 系统代理诊断，可识别“ProxyEnable 仍开启但 `127.0.0.1` 代理端口无人监听”的失效代理状态；只有用户明确点击修复时才关闭该系统代理，并保存可恢复备份。正常启动、状态刷新、tunnel 运行均不写系统代理、DNS、路由、网卡或第三方进程。
+- 新增网络隔离契约回归，覆盖本地/tunnel 分离、默认 tunnel opt-in、首页零主动公网探测、拓扑变化不重启 tunnel、环境代理隔离和厂商无关性；Portable Protocol 仍为 1.5。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.29.md)
+
 ## 1.1.28
 
 - 修复首页探测器用同步公网 curl 阻塞 Node 事件循环，导致健康本地 MCP 偶发显示 `0/0` 并标红的问题；回环探测改为独立直连，公网探测异步并发；
