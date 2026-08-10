@@ -1287,6 +1287,7 @@ namespace DevSpacePortable.NativeUI
         private readonly RichTextBox _logs = CreateOutputBox();
         private readonly Label _activity = new Label();
         private bool _busy;
+        public event EventHandler StatusChanged;
 
         public DiagnosticsDetailsDialog(string root, ManagerClient manager)
         {
@@ -1429,6 +1430,8 @@ namespace DevSpacePortable.NativeUI
             {
                 target.Text = await _manager.RunAsync(action);
                 _activity.Text = "完成 · " + DateTime.Now.ToString("HH:mm:ss");
+                EventHandler handler = StatusChanged;
+                if (handler != null) handler(this, EventArgs.Empty);
             }
             catch (Exception ex)
             {
@@ -1963,7 +1966,7 @@ namespace DevSpacePortable.NativeUI
             FormClosing += MainForm_FormClosing;
             _heartbeatTimer.Interval = 1500;
             _heartbeatTimer.Tick += async delegate { await HeartbeatAsync(); };
-            _statusTimer.Interval = 7000;
+            _statusTimer.Interval = 3000;
             _statusTimer.Tick += async delegate { await RefreshDashboardStatusAsync(); };
             _noticeTimer.Interval = 9000;
             _noticeTimer.Tick += delegate { _noticeTimer.Stop(); _inlineNotice.Dismiss(); };
@@ -2197,7 +2200,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.27 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.28 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2266,7 +2269,7 @@ namespace DevSpacePortable.NativeUI
             buttons.Controls.Add(ActionButton("恢复并启动", async delegate { await RunActionAsync("enable"); }));
             buttons.Controls.Add(ActionButton("卸载计划任务", async delegate { await ConfirmActionAsync("uninstall-tasks", "确定卸载 DevSpace 与隧道计划任务吗？配置和认证数据不会删除。"); }, false, true));
             buttons.Controls.Add(ActionButton("检查更新", async delegate { await CheckForUpdatesAsync(); }, true));
-            buttons.Controls.Add(ActionButton("详细信息", delegate { ShowDiagnosticsDetails(); }, true));
+            buttons.Controls.Add(ActionButton("详细信息", async delegate { await ShowDiagnosticsDetailsAsync(); }, true));
             buttons.Controls.Add(ActionButton("重置关闭选择", delegate
             {
                 SaveClosePreference("");
@@ -2970,7 +2973,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.27") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.28") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -3048,6 +3051,7 @@ namespace DevSpacePortable.NativeUI
                 SetOutput(install + Environment.NewLine + start + Environment.NewLine + test);
                 await RefreshStatusAsync(false);
             });
+            await RefreshDashboardStatusAsync();
         }
 
         private async Task RunActionAsync(string action)
@@ -3086,10 +3090,14 @@ namespace DevSpacePortable.NativeUI
             catch (Exception ex) { if (switchTab) ShowError(ex); }
         }
 
-        private void ShowDiagnosticsDetails()
+        private async Task ShowDiagnosticsDetailsAsync()
         {
             using (DiagnosticsDetailsDialog dialog = new DiagnosticsDetailsDialog(_root, _manager))
+            {
+                dialog.StatusChanged += async delegate { await RefreshDashboardStatusAsync(); };
                 dialog.ShowDialog(this);
+            }
+            await RefreshDashboardStatusAsync();
         }
 
         private async Task RefreshDashboardStatusAsync()
@@ -3164,7 +3172,7 @@ namespace DevSpacePortable.NativeUI
                     MessageBoxIcon.Information);
                 return;
             }
-            string current = GetString(_currentConfig, "portableVersion", "1.1.27");
+            string current = GetString(_currentConfig, "portableVersion", "1.1.28");
             string arguments = "--root \"" + _root.Replace("\"", "\\\"") + "\""
                 + " --current \"" + current.Replace("\"", "\\\"") + "\""
                 + " --parent-ui " + Process.GetCurrentProcess().Id;

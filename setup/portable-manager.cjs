@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const childProcess = require("child_process");
+const http = require("http");
 const dns = require("dns").promises;
 const { pathToFileURL } = require("url");
 
@@ -29,6 +30,7 @@ const NGROK_PID_FILE = path.join(RUN_DIR, "ngrok.pid");
 const TUNNEL_SUPERVISOR_PID_FILE = path.join(RUN_DIR, "tunnel-supervisor.pid");
 const TUNNEL_NETWORK_STATE_FILE = path.join(RUN_DIR, "tunnel-network.json");
 const TUNNEL_STOP_FILE = path.join(RUN_DIR, "tunnel.stop");
+const DASHBOARD_PUBLIC_PROBE_FILE = path.join(RUN_DIR, "dashboard-public-probe.json");
 const UI_LEASE_FILE = path.join(RUN_DIR, "ui-session.json");
 const COMPUTER_USE_DIR = path.join(RUN_DIR, "computer-use");
 const COMPUTER_USE_REQUESTS = path.join(COMPUTER_USE_DIR, "requests");
@@ -62,12 +64,14 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.27";
+const PORTABLE_VERSION = "1.1.28";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
 const SERVICE_START_ATTEMPTS = 3;
 const PORTABLE_STOP_TIMEOUT_MS = 20_000;
+const DASHBOARD_PUBLIC_PROBE_SUCCESS_TTL_MS = 15_000;
+const DASHBOARD_PUBLIC_PROBE_FAILURE_TTL_MS = 2_000;
 const COMPUTER_USE_STALE_MS = 5 * 60_000;
 const COMPUTER_USE_CLEANUP_INTERVAL_MS = 30_000;
 let lastComputerUseCleanupAt = 0;
@@ -1579,6 +1583,7 @@ function cleanupRunState() {
     TUNNEL_SUPERVISOR_PID_FILE,
     TUNNEL_NETWORK_STATE_FILE,
     TUNNEL_STOP_FILE,
+    DASHBOARD_PUBLIC_PROBE_FILE,
     UI_LEASE_FILE,
     COMPUTER_USE_BROKER_FILE,
   ]) {
@@ -1956,121 +1961,42 @@ function normalizeOutboundProxyUrl(value) {
   }
 }
 
-function parseWindowsProxyServer(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  if (!raw.includes("=") && !raw.includes(";")) return normalizeOutboundProxyUrl(raw);
-  const entries = new Map();
-  for (const item of raw.split(";")) {
-    const [key, ...rest] = item.split("=");
-    if (!key || !rest.length) continue;
-    entries.set(key.trim().toLowerCase(), rest.join("=").trim());
-  }
-  for (const key of ["https", "http", "socks", "socks5"]) {
-    if (!entries.has(key)) continue;
-    const protocol = key.startsWith("socks") ? "socks5" : "http";
-    const candidate = normalizeOutboundProxyUrl(`${protocol}://${entries.get(key)}`);
-    if (candidate) return candidate;
-  }
-  return "";
-}
-
-function winInetProxyCandidate() {
-  const result = runProgram("reg.exe", [
-    "query",
-    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-  ], { ignoreExitCode: true, outputEncoding: "utf-8" });
-  if (result.status !== 0) return null;
-  const enabledMatch = result.output.match(/ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i);
-  const serverMatch = result.output.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
-  if (!enabledMatch || Number.parseInt(enabledMatch[1], 16) === 0 || !serverMatch) return null;
-  const proxyUrl = parseWindowsProxyServer(serverMatch[1]);
-  return proxyUrl ? { url: proxyUrl, source: "wininet" } : null;
-}
-
-function inheritedProxyCandidates() {
-  const values = [];
-  const seen = new Set();
-  for (const name of ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"]) {
-    const url = normalizeOutboundProxyUrl(process.env[name]);
-    if (!url || seen.has(url.toLowerCase())) continue;
-    seen.add(url.toLowerCase());
-    values.push({ url, source: `env:${name}` });
-  }
-  return values;
-}
-
-function localProxyHealthy(proxyUrl) {
-  if (!proxyUrl) return false;
-  let parsed;
-  try { parsed = new URL(proxyUrl); } catch { return false; }
-  const host = parsed.hostname.toLowerCase();
-  if (!["127.0.0.1", "localhost", "::1", "[::1]"].includes(host)) return true;
-  const port = Number(parsed.port);
-  if (!Number.isInteger(port) || port <= 0) return false;
-  const result = runProgram("netstat.exe", ["-ano", "-p", "TCP"], { ignoreExitCode: true });
-  if (result.status !== 0) return false;
-  const escaped = String(port).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?:127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::\\]|\\[::1\\]|::):${escaped}\\s+\\S+\\s+LISTENING`, "i").test(result.output);
-}
-
 function outboundProbeCandidates() {
-  const values = [];
-  const seen = new Set();
-  const add = (candidate) => {
-    if (!candidate?.url) return;
-    const key = candidate.url.toLowerCase();
-    if (seen.has(key) || !localProxyHealthy(candidate.url)) return;
-    seen.add(key);
-    values.push(candidate);
-  };
+  const tunnelNetwork = currentTunnelNetworkState();
   const configured = existingNgrokNetworkOptions().proxyUrl;
-  if (configured) add({ url: normalizeOutboundProxyUrl(configured), source: "ngrok-config" });
-  add(winInetProxyCandidate());
-  for (const candidate of inheritedProxyCandidates()) add(candidate);
-  values.push({ url: "", source: "direct" });
-  return values;
+  if (configured) {
+    return [{ url: normalizeOutboundProxyUrl(configured), source: "ngrok-config" }];
+  }
+  const explicitProxy = normalizeOutboundProxyUrl(tunnelNetwork?.proxyUrl);
+  if (explicitProxy) {
+    return [{ url: explicitProxy, source: String(tunnelNetwork?.proxySource || "tunnel-network") }];
+  }
+  if (tunnelNetwork) {
+    // Dashboard verification follows the exact egress selected by the tunnel
+    // supervisor. It never hops between an explicit proxy and the system path.
+    return [{ url: "", source: "system-routed" }];
+  }
+  return [{ url: "", source: "direct" }];
 }
 
-function curlProbe(url, timeoutMs, candidate) {
-  if (!fs.existsSync(CURL_EXE)) return null;
-  const timeoutSeconds = Math.max(2, Math.ceil(timeoutMs / 1000));
-  const args = [
-    "--silent",
-    "--show-error",
-    "--location",
-    "--connect-timeout", String(Math.min(6, timeoutSeconds)),
-    "--max-time", String(timeoutSeconds),
-    "--dump-header", "-",
-    "--output", "NUL",
-    "--write-out", "\n__DEVSPACE_HTTP__%{http_code}|%{content_type}\n",
-  ];
-  if (candidate?.url) args.push("--proxy", candidate.url);
-  else args.push("--proxy", "", "--noproxy", "*");
-  args.push(url);
-  const result = childProcess.spawnSync(CURL_EXE, args, {
-    cwd: ROOT,
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: timeoutMs + 2_000,
-    maxBuffer: 2 * 1024 * 1024,
-    env: {
-      ...process.env,
-      HTTP_PROXY: "",
-      HTTPS_PROXY: "",
-      ALL_PROXY: "",
-      http_proxy: "",
-      https_proxy: "",
-      all_proxy: "",
-    },
-  });
-  const stdout = String(result.stdout || "");
-  const stderr = String(result.stderr || "").trim();
+function publicProbeSuppressionState(state = currentTunnelNetworkState()) {
+  const updatedAtMs = Date.parse(String(state?.updatedAt || ""));
+  const fresh = Boolean(process.env.DEVSPACE_TEST_TUNNEL_NETWORK_STATE)
+    || (Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs >= 0 && Date.now() - updatedAtMs < 30_000);
+  const settling = String(state?.transition || "") === "network-path-quiescing"
+    || String(state?.reason || "") === "network-path-settling";
+  return {
+    suppressed: fresh && settling && state?.publicProbesSuppressed === true,
+    reason: "network path is settling; public probes are temporarily suppressed",
+  };
+}
+
+function parseCurlProbeResult(stdout, stderr, status, candidate) {
   const marker = stdout.match(/__DEVSPACE_HTTP__(\d{3})\|([^\r\n]*)/);
-  if (result.status !== 0 || !marker) {
+  if (status !== 0 || !marker) {
     return {
       status: 0,
-      error: stderr || `curl exit ${result.status ?? "unknown"}`,
+      error: stderr || `curl exit ${status ?? "unknown"}`,
       contentType: "",
       server: "",
       ngrokErrorCode: "",
@@ -2093,38 +2019,164 @@ function curlProbe(url, timeoutMs, candidate) {
   };
 }
 
+function curlProbe(url, timeoutMs, candidate) {
+  if (!fs.existsSync(CURL_EXE)) return null;
+  const timeoutSeconds = Math.max(2, Math.ceil(timeoutMs / 1000));
+  const args = [
+    "--silent",
+    "--show-error",
+    "--location",
+    "--connect-timeout", String(Math.min(6, timeoutSeconds)),
+    "--max-time", String(timeoutSeconds),
+    "--dump-header", "-",
+    "--output", "NUL",
+    "--write-out", "\n__DEVSPACE_HTTP__%{http_code}|%{content_type}\n",
+  ];
+  if (candidate?.url) args.push("--proxy", candidate.url);
+  else args.push("--proxy", "", "--noproxy", "*");
+  args.push(url);
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let suppressed = false;
+    let timer = null;
+    let suppressionTimer = null;
+    const finish = (status, error = "") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(suppressionTimer);
+      if (suppressed) {
+        const gate = publicProbeSuppressionState();
+        resolve({
+          status: 0,
+          error: gate.reason,
+          contentType: "",
+          server: "",
+          ngrokErrorCode: "",
+          transport: "suppressed",
+        });
+        return;
+      }
+      const errorText = timedOut
+        ? `curl exceeded ${timeoutMs + 1_500} ms`
+        : [stderr.trim(), error].filter(Boolean).join("; ");
+      resolve(parseCurlProbeResult(stdout, errorText, status, candidate));
+    };
+    let child;
+    try {
+      child = childProcess.spawn(CURL_EXE, args, {
+        cwd: ROOT,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          HTTP_PROXY: "",
+          HTTPS_PROXY: "",
+          ALL_PROXY: "",
+          http_proxy: "",
+          https_proxy: "",
+          all_proxy: "",
+        },
+      });
+    } catch (error) {
+      resolve(parseCurlProbeResult("", error?.message || String(error), null, candidate));
+      return;
+    }
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { if (stdout.length < 2 * 1024 * 1024) stdout += chunk; });
+    child.stderr.on("data", (chunk) => { if (stderr.length < 2 * 1024 * 1024) stderr += chunk; });
+    child.once("error", (error) => finish(null, error?.message || String(error)));
+    child.once("close", (code) => finish(code));
+    suppressionTimer = setInterval(() => {
+      if (!publicProbeSuppressionState().suppressed) return;
+      suppressed = true;
+      try { child.kill(); } catch {}
+    }, 250);
+    timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill(); } catch {}
+    }, timeoutMs + 1_500);
+  });
+}
+
+function loopbackProbe(parsed, timeoutMs) {
+  return new Promise((resolve) => {
+    const result = (status, error = "", headers = {}) => resolve({
+      status,
+      error,
+      contentType: headers["content-type"] || "",
+      server: headers.server || "",
+      ngrokErrorCode: headers["ngrok-error-code"] || "",
+      transport: "loopback",
+    });
+    if (parsed.protocol !== "http:") {
+      result(0, `unsupported loopback protocol: ${parsed.protocol}`);
+      return;
+    }
+    const request = http.request({
+      protocol: "http:",
+      hostname: parsed.hostname.replace(/^\[|\]$/g, ""),
+      port: parsed.port || 80,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: "GET",
+      agent: false,
+      headers: { Connection: "close", "User-Agent": `DevSpace-Portable/${PORTABLE_VERSION}` },
+    }, (response) => {
+      const headers = response.headers || {};
+      response.resume();
+      result(Number(response.statusCode || 0), "", headers);
+    });
+    request.setTimeout(timeoutMs, () => request.destroy(Object.assign(new Error("loopback request timed out"), { code: "ETIMEDOUT" })));
+    request.once("error", (error) => result(0, `${error?.code || "HTTP_ERROR"}: ${error?.message || error}`));
+    request.end();
+  });
+}
+
 async function probeUrl(url, timeoutMs = 20000) {
   let parsed;
   try { parsed = new URL(url); } catch { return { status: 0, error: "invalid URL", contentType: "", server: "", ngrokErrorCode: "", transport: "none" }; }
   const local = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]).has(parsed.hostname.toLowerCase());
   if (local) {
-    try {
-      const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
-      if (response.body) await response.body.cancel();
-      return {
-        status: response.status,
-        error: "",
-        contentType: response.headers.get("content-type") || "",
-        server: response.headers.get("server") || "",
-        ngrokErrorCode: response.headers.get("ngrok-error-code") || "",
-        transport: "loopback",
-      };
-    } catch (error) {
-      const cause = error?.cause;
-      const code = cause?.code || error?.code || error?.name || "FETCH_ERROR";
-      const message = cause?.message || error?.message || String(error);
-      return { status: 0, error: `${code}: ${message}`, contentType: "", server: "", ngrokErrorCode: "", transport: "loopback" };
-    }
+    return loopbackProbe(parsed, timeoutMs);
+  }
+  const probeGate = publicProbeSuppressionState();
+  if (probeGate.suppressed) {
+    return {
+      status: 0,
+      error: probeGate.reason,
+      contentType: "",
+      server: "",
+      ngrokErrorCode: "",
+      transport: "suppressed",
+    };
   }
   const errors = [];
+  let curlAvailable = false;
   for (const candidate of outboundProbeCandidates()) {
-    const result = curlProbe(url, timeoutMs, candidate);
+    const pending = curlProbe(url, timeoutMs, candidate);
+    if (pending) curlAvailable = true;
+    const result = pending ? await pending : null;
     if (!result) break;
     if (result.status > 0) return result;
+    if (result.transport === "suppressed") return result;
     errors.push(`${candidate.source}: ${result.error}`);
   }
+  if (curlAvailable) {
+    return { status: 0, error: errors.join("; "), contentType: "", server: "", ngrokErrorCode: "", transport: "failed" };
+  }
+  const controller = new AbortController();
+  let fetchSuppressed = false;
+  const fetchTimeout = setTimeout(() => controller.abort(), timeoutMs);
+  const suppressionTimer = setInterval(() => {
+    if (!publicProbeSuppressionState().suppressed) return;
+    fetchSuppressed = true;
+    controller.abort();
+  }, 250);
   try {
-    const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(timeoutMs) });
+    const response = await fetch(url, { redirect: "manual", signal: controller.signal });
     if (response.body) await response.body.cancel();
     return {
       status: response.status,
@@ -2135,12 +2187,75 @@ async function probeUrl(url, timeoutMs = 20000) {
       transport: "node-direct-fallback",
     };
   } catch (error) {
+    if (fetchSuppressed) {
+      const gate = publicProbeSuppressionState();
+      return { status: 0, error: gate.reason, contentType: "", server: "", ngrokErrorCode: "", transport: "suppressed" };
+    }
     const cause = error?.cause;
     const code = cause?.code || error?.code || error?.name || "FETCH_ERROR";
     const message = cause?.message || error?.message || String(error);
     errors.push(`node-direct: ${code}: ${message}`);
     return { status: 0, error: errors.join("; "), contentType: "", server: "", ngrokErrorCode: "", transport: "failed" };
+  } finally {
+    clearTimeout(fetchTimeout);
+    clearInterval(suppressionTimer);
   }
+}
+
+function dashboardPublicProbeFingerprint(publicUrl, provider, tunnel, tunnelSupervisor, tunnelNetwork) {
+  return JSON.stringify({
+    portableVersion: PORTABLE_VERSION,
+    publicUrl,
+    provider,
+    tunnelPid: tunnel?.pid || null,
+    supervisorPid: tunnelSupervisor?.pid || null,
+    mode: tunnelNetwork?.mode || "unknown",
+    proxyUrl: tunnelNetwork?.proxyUrl || "",
+    status: tunnelNetwork?.status || "unknown",
+    transition: tunnelNetwork?.transition || "unknown",
+    appliedPathSignature: tunnelNetwork?.appliedPathSignature || "",
+    reconnectCount: Number(tunnelNetwork?.reconnectCount || 0),
+  });
+}
+
+async function dashboardPublicProbes(publicUrl, fingerprint, options = {}) {
+  const empty = { status: 0, error: "public URL not configured", contentType: "", server: "", ngrokErrorCode: "", transport: "none" };
+  if (!publicUrl) return { metadata: empty, mcp: empty, checkedAt: null, cached: false, ageMs: 0 };
+  if (options.suppress === true) {
+    const suppressed = {
+      status: 0,
+      error: String(options.reason || "network path is settling"),
+      contentType: "",
+      server: "",
+      ngrokErrorCode: "",
+      transport: "suppressed",
+    };
+    return { metadata: suppressed, mcp: suppressed, checkedAt: null, cached: false, suppressed: true, ageMs: 0 };
+  }
+  const now = Date.now();
+  const cached = readJson(DASHBOARD_PUBLIC_PROBE_FILE, null);
+  const checkedAtMs = Date.parse(String(cached?.checkedAt || ""));
+  const cachedSuccess = cached?.metadata?.status === 200 && cached?.mcp?.status === 401;
+  const cacheTtlMs = cachedSuccess
+    ? DASHBOARD_PUBLIC_PROBE_SUCCESS_TTL_MS
+    : DASHBOARD_PUBLIC_PROBE_FAILURE_TTL_MS;
+  if (cached?.formatVersion === 1
+      && cached.fingerprint === fingerprint
+      && Number.isFinite(checkedAtMs)
+      && now - checkedAtMs >= 0
+      && now - checkedAtMs < cacheTtlMs
+      && cached.metadata
+      && cached.mcp) {
+    return { metadata: cached.metadata, mcp: cached.mcp, checkedAt: cached.checkedAt, cached: true, ageMs: now - checkedAtMs };
+  }
+  const [metadata, mcp] = await Promise.all([
+    probeUrl(`${publicUrl}/.well-known/oauth-protected-resource/mcp`, 4500),
+    probeUrl(`${publicUrl}/mcp`, 4500),
+  ]);
+  const checkedAt = new Date().toISOString();
+  const suppressed = metadata.transport === "suppressed" || mcp.transport === "suppressed";
+  if (!suppressed) writeJson(DASHBOARD_PUBLIC_PROBE_FILE, { formatVersion: 1, fingerprint, checkedAt, metadata, mcp });
+  return { metadata, mcp, checkedAt, cached: false, suppressed, ageMs: 0 };
 }
 
 function formatProbe(probe) {
@@ -2246,10 +2361,14 @@ async function statusText() {
       `\nNetwork mode: ${tunnelNetwork.mode || "unknown"}` +
       `\nNetwork reason: ${tunnelNetwork.reason || "unknown"}` +
       `\nProxy source: ${tunnelNetwork.proxySource || "none"}` +
+      `\nEgress policy: ${tunnelNetwork.egressPolicy || "system-route"}` +
+      `\nCross-path fallback: ${tunnelNetwork.proxyUrl ? "disabled" : "not applicable (system-routed)"}` +
       `\nNetwork path source: ${tunnelNetwork.pathSource || "unknown"}` +
       `\nNetwork path signature: ${tunnelNetwork.pathSignature || "unavailable"}` +
       `\nApplied path signature: ${tunnelNetwork.appliedPathSignature || "unavailable"}` +
       `\nPath transition: ${tunnelNetwork.transition || "unknown"}` +
+      `\nTopology counts (interfaces/addresses/routes): ${Number(tunnelNetwork.connectedInterfaceCount || 0)}/${Number(tunnelNetwork.addressCount || 0)}/${Number(tunnelNetwork.routeCount || 0)}` +
+      `\nPublic probes suppressed: ${tunnelNetwork.publicProbesSuppressed === true ? "yes" : "no"}` +
       `\nOwned tunnel reconnects: ${Number(tunnelNetwork.reconnectCount || 0)}` +
       `\nTunnel supervisor PID: ${tunnelNetwork.supervisorPid || "none"}`;
   }
@@ -2334,13 +2453,22 @@ async function dashboardStatus() {
   const tunnelSupervisor = recordedProcessStatus(TUNNEL_SUPERVISOR_PID_FILE, "node.exe");
   const tunnelNetwork = currentTunnelNetworkState();
   const networkPath = networkPathState();
-  const [localMetadata, localMcp, publicMetadata, publicMcp, agent] = await Promise.all([
-    probeUrl(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, 2500),
-    probeUrl(`http://127.0.0.1:${port}/mcp`, 2500),
-    publicUrl ? probeUrl(`${publicUrl}/.well-known/oauth-protected-resource/mcp`, 4500) : Promise.resolve({ status: 0, error: "public URL not configured", transport: "none" }),
-    publicUrl ? probeUrl(`${publicUrl}/mcp`, 4500) : Promise.resolve({ status: 0, error: "public URL not configured", transport: "none" }),
+  const publicProbeGate = publicProbeSuppressionState(tunnelNetwork);
+  const networkPathQuiescing = publicProbeGate.suppressed;
+  const publicFingerprint = dashboardPublicProbeFingerprint(publicUrl, provider, tunnel, tunnelSupervisor, tunnelNetwork);
+  const [localResults, publicResults, agent] = await Promise.all([
+    Promise.all([
+      probeUrl(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, 2500),
+      probeUrl(`http://127.0.0.1:${port}/mcp`, 2500),
+    ]),
+    dashboardPublicProbes(publicUrl, publicFingerprint, {
+      suppress: networkPathQuiescing,
+      reason: publicProbeGate.reason,
+    }),
     provider === "ngrok" ? ngrokAgentState(publicUrl) : Promise.resolve({ reachable: false, matchingTunnel: false, tunnels: [], apiPorts: [], errors: [] }),
   ]);
+  const [localMetadata, localMcp] = localResults;
+  const { metadata: publicMetadata, mcp: publicMcp } = publicResults;
 
   const mcpTaskInstalled = taskExists(TASK_MCP);
   const mcpTaskEnabled = mcpTaskInstalled && taskEnabled(TASK_MCP);
@@ -2361,51 +2489,56 @@ async function dashboardStatus() {
   try { installedVersion = String(readJson(path.join(ROOT, "VERSION-MANIFEST.json"), {}).runtime?.devspacePortable || "unknown"); } catch {}
   const filesReady = missingFiles.length === 0 && installedVersion === PORTABLE_VERSION;
 
+  const localProbeUncertain = mcp.running && mcp.listenerMatch
+    && (localMetadata.status === 0 || localMcp.status === 0);
   const serviceState = serviceReady ? (mcpTaskEnabled ? "ready" : "warning") : (mcp.running ? "warning" : "stopped");
-  const serviceTitle = serviceReady ? (mcpTaskEnabled ? "服务已就绪" : "服务已运行，计划任务未启用") : (mcp.running ? "服务正在恢复" : "服务未运行");
-  const pathTransitionPending = String(tunnelNetwork?.transition || "") === "path-change-pending";
-  const explicitProxyUnavailable = tunnelNetwork?.paused === true
+  const serviceTitle = serviceReady
+    ? (mcpTaskEnabled ? "服务已就绪" : "服务已运行，计划任务未启用")
+    : localProbeUncertain ? "服务正在复核" : (mcp.running ? "服务正在恢复" : "服务未运行");
+  const proxyUnavailable = tunnelNetwork?.paused === true
     && String(tunnelNetwork?.reason || "") === "explicit-local-proxy-unavailable";
-  const tunnelState = explicitProxyUnavailable || pathTransitionPending ? "warning" : tunnelReady ? (tunnelTaskEnabled ? "ready" : "warning") : (tunnel.running || tunnelSupervisor.running ? "warning" : "stopped");
-  const tunnelTitle = explicitProxyUnavailable
+  const tunnelState = proxyUnavailable || networkPathQuiescing ? "warning" : tunnelReady ? (tunnelTaskEnabled ? "ready" : "warning") : (tunnel.running || tunnelSupervisor.running ? "warning" : "stopped");
+  const tunnelTitle = proxyUnavailable
     ? "公网隧道正在等待显式代理"
-    : pathTransitionPending
-      ? "网络路径变化，隧道保持运行"
+    : networkPathQuiescing
+      ? "网络路径变化，公网隧道短暂静默"
       : tunnelReady ? (tunnelTaskEnabled ? "公网隧道已就绪" : "隧道已运行，计划任务未启用") : (tunnel.running || tunnelSupervisor.running ? "公网隧道正在恢复" : "公网隧道未运行");
   const httpReady = localMetadata.status === 200 && localMcp.status === 401 && publicMetadata.status === 200 && publicMcp.status === 401;
-  const httpState = httpReady ? "ready" : (localMetadata.status === 200 ? "warning" : "error");
-  const httpTitle = httpReady ? "HTTP / OAuth 验证正常" : (localMetadata.status === 200 ? "本地正常，公网验证异常" : "本地 HTTP 验证异常");
+  const httpState = httpReady ? "ready" : localProbeUncertain ? "warning" : (localMetadata.status === 200 ? "warning" : "error");
+  const httpTitle = httpReady
+    ? "HTTP / OAuth 验证正常"
+    : networkPathQuiescing ? "本地正常，公网检查暂缓" : localProbeUncertain ? "本地 HTTP 正在复核" : (localMetadata.status === 200 ? "本地正常，公网验证异常" : "本地 HTTP 验证异常");
   const networkMode = String(tunnelNetwork?.mode || "unknown");
   const networkSource = String(tunnelNetwork?.proxySource || "none");
-  const publicPathBlocked = serviceReady && (tunnel.running || tunnelSupervisor.running) && !tunnelReady && !pathTransitionPending;
+  const publicPathBlocked = serviceReady && (tunnel.running || tunnelSupervisor.running) && !tunnelReady && !networkPathQuiescing;
   const routeStateAvailable = networkPath.defaultRouteCount > 0
     && !["unavailable", "unreadable"].includes(String(networkPath.source || ""));
-  const networkState = explicitProxyUnavailable || pathTransitionPending || publicPathBlocked || !tunnelNetwork ? "warning" : "ready";
-  const networkTitle = explicitProxyUnavailable
+  const networkState = proxyUnavailable || networkPathQuiescing || publicPathBlocked || !tunnelNetwork ? "warning" : "ready";
+  const networkTitle = proxyUnavailable
     ? "显式出站代理不可用"
-    : pathTransitionPending
-      ? "检测到网络路径变化，正在准备重连"
+    : networkPathQuiescing
+      ? "检测到网络路径变化，正在等待稳定"
       : publicPathBlocked
         ? "公网隧道不可达，可能受当前网络策略限制"
         : tunnelNetwork ? "网络路径自适应正常" : routeStateAvailable ? "网络路径已读取，等待隧道运行" : "正在读取网络路径状态";
   const routeDetail = networkPath.multipleDefaultRoutes
     ? `检测到 ${networkPath.defaultRouteCount} 条活动默认路由；按 Windows 当前选路运行，不按软件名称干预`
     : `活动默认路由=${networkPath.defaultRouteCount}`;
-  const networkDetail = explicitProxyUnavailable
-    ? `ngrok 显式代理当前不可用；恢复该代理或清空代理配置后将自动启动公网隧道`
-    : pathTransitionPending
-      ? `旧隧道暂时保持运行；路径稳定后仅重连 DevSpace 自己的隧道进程 · ${routeDetail}`
+  const networkDetail = proxyUnavailable
+    ? `ngrok 显式代理当前不可用；不会自动改走系统或 VPN 路径`
+    : networkPathQuiescing
+      ? `公网探测与 DevSpace 自有隧道已暂停，本地 MCP 保持运行；网络拓扑连续稳定 15 秒后恢复 · ${routeDetail}`
       : publicPathBlocked
         ? `当前 VPN、TUN、防火墙或企业网络策略可能阻止 ${provider}；请允许该服务，或为 ngrok 配置独立出站代理`
         : !tunnelNetwork && routeStateAvailable
-          ? `只读网络路径已就绪；启动公网隧道后将监测稳定变化并仅重连自有子进程 · ${routeDetail}`
+          ? `只读网络路径已就绪；启动公网隧道后将监测网卡、地址与路由变化并仅管理自有子进程 · ${routeDetail}`
           : `非侵入式自适应 · mode=${networkMode} · proxy=${networkSource} · ${routeDetail}`;
 
   const indicators = {
     service: dashboardIndicator(
       serviceState,
       serviceTitle,
-      serviceReady ? `MCP 监听 127.0.0.1:${port} · PID ${mcp.pid ?? "-"}` : `监听=${mcp.listenerMatch ? "yes" : "no"} · 本地 OAuth=${localMetadata.status || 0}`,
+      serviceReady ? `MCP 监听 127.0.0.1:${port} · PID ${mcp.pid ?? "-"}` : localProbeUncertain ? `监听=yes · 本地 HTTP 正在复核` : `监听=${mcp.listenerMatch ? "yes" : "no"} · 本地 OAuth=${localMetadata.status || 0}`,
       { pid: mcp.pid, listener: mcp.listenerMatch, taskInstalled: mcpTaskInstalled, taskEnabled: mcpTaskEnabled },
     ),
     tunnel: dashboardIndicator(
@@ -2417,8 +2550,8 @@ async function dashboardStatus() {
     http: dashboardIndicator(
       httpState,
       httpTitle,
-      `本地 ${localMetadata.status}/${localMcp.status} · 公网 ${publicMetadata.status}/${publicMcp.status} · ${publicMetadata.transport || "unknown"}`,
-      { localMetadata, localMcp, publicMetadata, publicMcp },
+      `本地 ${localMetadata.status}/${localMcp.status} · 公网 ${publicMetadata.status}/${publicMcp.status} · ${publicMetadata.transport || "unknown"}${publicResults.cached ? ` · 缓存 ${Math.ceil(publicResults.ageMs / 1000)}s` : ""}`,
+      { localMetadata, localMcp, publicMetadata, publicMcp, publicVerification: { checkedAt: publicResults.checkedAt, cached: publicResults.cached, suppressed: publicResults.suppressed === true, ageMs: publicResults.ageMs } },
     ),
     files: dashboardIndicator(
       filesReady ? "ready" : "error",
@@ -2433,6 +2566,8 @@ async function dashboardStatus() {
       {
         mode: networkMode,
         proxySource: networkSource,
+        egressPolicy: tunnelNetwork?.egressPolicy || "system-route",
+        crossPathFallback: tunnelNetwork?.crossPathFallback === false ? "disabled" : "not-applicable",
         policy: tunnelNetwork?.policy || "non-invasive",
         reason: tunnelNetwork?.reason || "unknown",
         transition: tunnelNetwork?.transition || "unknown",

@@ -19,8 +19,16 @@ const dashboard = source.slice(dashboardStart, dashboardEnd);
 assert.match(source, /class StatusIndicatorCard/);
 assert.match(source, /class DiagnosticsDetailsDialog/);
 assert.match(source, /网络自适应（推荐）/);
-assert.match(source, /_statusTimer\.Interval = 7000/);
+assert.match(source, /_statusTimer\.Interval = 3000/);
 assert.match(source, /RunJsonAsync\("dashboard-status"\)/);
+assert.match(source, /private async Task ShowDiagnosticsDetailsAsync\(\)[\s\S]*?dialog\.StatusChanged \+= async delegate[\s\S]*?await RefreshDashboardStatusAsync\(\)/);
+assert.match(source, /private async Task DeployAsync\(\)[\s\S]*?await ExecuteBusyAsync[\s\S]*?\}\);\s*await RefreshDashboardStatusAsync\(\);/);
+assert.match(managerSource, /childProcess\.spawn\(CURL_EXE/);
+assert.doesNotMatch(managerSource.slice(managerSource.indexOf("function curlProbe"), managerSource.indexOf("function loopbackProbe")), /spawnSync/);
+assert.match(managerSource, /function loopbackProbe/);
+assert.match(managerSource, /DASHBOARD_PUBLIC_PROBE_SUCCESS_TTL_MS = 15_000/);
+assert.match(managerSource, /DASHBOARD_PUBLIC_PROBE_FAILURE_TTL_MS = 2_000/);
+assert.match(managerSource, /transport: "suppressed"/);
 assert.match(dashboard, /ActionButton\("详细信息"/);
 assert.doesNotMatch(dashboard, /ActionButton\("刷新状态"/);
 assert.doesNotMatch(dashboard, /ActionButton\("验证 HTTP"/);
@@ -102,6 +110,14 @@ console.log(JSON.stringify({
   logDetailsPreserved: true,
   structuredDashboardStatus: true,
   transientFailureDebounce: true,
+  nonBlockingPublicProbe: true,
+  directLoopbackProbe: true,
+  cachedPublicProbe: true,
+  failedPublicProbeIsRecheckedNextCycle: true,
+  publicProbeSuppressedDuringNetworkQuietWindow: true,
+  threeSecondLocalRefresh: true,
+  dashboardRefreshesAfterDeployment: true,
+  detailsRefreshesHomepage: true,
   multipleDefaultRoutesAreInformational: true,
   vendorNeutralNetworkDiagnostics: true,
   routeStateTitleConvergesWithoutTunnelState: true,

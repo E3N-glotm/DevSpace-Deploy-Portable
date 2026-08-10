@@ -36,8 +36,8 @@ const requestedProvider = isNetworkSelfTest || isNetworkTransitionSelfTest
   ? (String(process.env.DEVSPACE_TEST_TUNNEL_PROVIDER || "ngrok").toLowerCase() === "cloudflare" ? "cloudflare" : "ngrok")
   : requestedExecutable.toLowerCase().endsWith("cloudflared.exe") ? "cloudflare" : "ngrok";
 const NETWORK_POLL_MS = 2_000;
-const NETWORK_PATH_STABLE_MS = 1_500;
-const NETWORK_PATH_STABLE_OBSERVATIONS = 2;
+const NETWORK_PATH_STABLE_MS = 15_000;
+const NETWORK_PATH_STABLE_OBSERVATIONS = 3;
 let child = null;
 let stopping = false;
 let restartTimer = null;
@@ -47,7 +47,7 @@ let reconnectCount = 0;
 let lastReconnectAt = "";
 
 function readJson(file, fallback = {}) {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
+  try { return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "")); } catch { return fallback; }
 }
 
 function writeJson(file, value) {
@@ -93,25 +93,6 @@ function normalizeProxyUrl(value) {
   }
 }
 
-function parseWindowsProxyServer(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  if (!raw.includes("=") && !raw.includes(";")) return normalizeProxyUrl(raw);
-  const entries = new Map();
-  for (const item of raw.split(";")) {
-    const [key, ...rest] = item.split("=");
-    if (!key || !rest.length) continue;
-    entries.set(key.trim().toLowerCase(), rest.join("=").trim());
-  }
-  for (const key of ["https", "http", "socks", "socks5"]) {
-    if (!entries.has(key)) continue;
-    const protocol = key.startsWith("socks") ? "socks5" : "http";
-    const candidate = normalizeProxyUrl(`${protocol}://${entries.get(key)}`);
-    if (candidate) return candidate;
-  }
-  return "";
-}
-
 function configuredNgrokProxy() {
   try {
     const text = fs.readFileSync(ngrokConfigFile, "utf8");
@@ -151,25 +132,29 @@ function activeNetworkPath() {
       source: "test",
       defaultRoutes: [],
       defaultRouteCount: Number(process.env.DEVSPACE_TEST_DEFAULT_ROUTE_COUNT || 1),
+      connectedInterfaceCount: Number(process.env.DEVSPACE_TEST_INTERFACE_COUNT || 1),
+      addressCount: Number(process.env.DEVSPACE_TEST_ADDRESS_COUNT || 1),
+      routeCount: Number(process.env.DEVSPACE_TEST_ROUTE_COUNT || 1),
     };
   }
   const script = [
     "$ErrorActionPreference='Stop'",
     "[Console]::OutputEncoding=(New-Object System.Text.UTF8Encoding($false))",
     "$OutputEncoding=[Console]::OutputEncoding",
-    "$interfaces=@(Get-NetIPInterface -AddressFamily IPv4 | Where-Object {$_.ConnectionState -eq 'Connected'})",
+    "$interfaces=@(Get-NetIPInterface -AddressFamily IPv4 -PolicyStore ActiveStore | Where-Object {$_.ConnectionState -eq 'Connected'} | ForEach-Object {[pscustomobject]@{ifIndex=[int]$_.InterfaceIndex;interfaceAlias=[string]$_.InterfaceAlias;interfaceMetric=[int]$_.InterfaceMetric;dhcp=[string]$_.Dhcp}} | Sort-Object ifIndex,interfaceAlias)",
     "$connected=@{}",
-    "foreach($item in $interfaces){$connected[[int]$item.InterfaceIndex]=$item}",
-    "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore | Where-Object {$connected.ContainsKey([int]$_.ifIndex)} | ForEach-Object {$iface=$connected[[int]$_.ifIndex];[pscustomobject]@{ifIndex=[int]$_.ifIndex;interfaceAlias=[string]$_.InterfaceAlias;nextHop=[string]$_.NextHop;routeMetric=[int]$_.RouteMetric;interfaceMetric=[int]$iface.InterfaceMetric}})",
-    "$ordered=@($routes | Sort-Object routeMetric,interfaceMetric,ifIndex,nextHop)",
-    "[pscustomobject]@{routes=$ordered;source='windows-active-default-routes'} | ConvertTo-Json -Compress -Depth 4",
+    "foreach($item in $interfaces){$connected[[int]$item.ifIndex]=$item}",
+    "$addresses=@(Get-NetIPAddress -AddressFamily IPv4 -PolicyStore ActiveStore | Where-Object {$connected.ContainsKey([int]$_.InterfaceIndex)} | ForEach-Object {[pscustomobject]@{ifIndex=[int]$_.InterfaceIndex;ipAddress=[string]$_.IPAddress;prefixLength=[int]$_.PrefixLength;addressState=[string]$_.AddressState;prefixOrigin=[string]$_.PrefixOrigin;suffixOrigin=[string]$_.SuffixOrigin}} | Sort-Object ifIndex,ipAddress,prefixLength)",
+    "$routes=@(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore | Where-Object {$connected.ContainsKey([int]$_.ifIndex)} | ForEach-Object {[pscustomobject]@{ifIndex=[int]$_.ifIndex;destinationPrefix=[string]$_.DestinationPrefix;nextHop=[string]$_.NextHop;routeMetric=[int]$_.RouteMetric;interfaceMetric=[int]$connected[[int]$_.ifIndex].interfaceMetric;protocol=[string]$_.Protocol}} | Sort-Object ifIndex,destinationPrefix,nextHop,routeMetric)",
+    "$defaults=@($routes | Where-Object {$_.destinationPrefix -eq '0.0.0.0/0'} | ForEach-Object {[pscustomobject]@{ifIndex=[int]$_.ifIndex;interfaceAlias=[string]$connected[[int]$_.ifIndex].interfaceAlias;nextHop=[string]$_.nextHop;routeMetric=[int]$_.routeMetric;interfaceMetric=[int]$_.interfaceMetric}} | Sort-Object routeMetric,interfaceMetric,ifIndex,nextHop)",
+    "[pscustomobject]@{interfaces=$interfaces;addresses=$addresses;routes=$routes;defaultRoutes=$defaults;source='windows-active-ipv4-topology'} | ConvertTo-Json -Compress -Depth 6",
   ].join(";");
   const output = commandOutput(powershellExe, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
   ], 4_000).trim();
   try {
     const parsed = JSON.parse(output || "{}");
-    const values = Array.isArray(parsed.routes) ? parsed.routes : parsed.routes ? [parsed.routes] : [];
+    const values = Array.isArray(parsed.defaultRoutes) ? parsed.defaultRoutes : parsed.defaultRoutes ? [parsed.defaultRoutes] : [];
     const defaultRoutes = values.map((route) => ({
       ifIndex: Number(route.ifIndex || 0),
       interfaceAlias: String(route.interfaceAlias || ""),
@@ -177,22 +162,20 @@ function activeNetworkPath() {
       routeMetric: Number(route.routeMetric || 0),
       interfaceMetric: Number(route.interfaceMetric || 0),
     }));
-    if (!defaultRoutes.length) {
-      return {
-        available: false,
-        signature: "",
-        source: "no-active-default-route",
-        defaultRoutes,
-        defaultRouteCount: 0,
-      };
-    }
-    const signature = crypto.createHash("sha256").update(JSON.stringify(defaultRoutes)).digest("hex").slice(0, 16);
+    const interfaces = Array.isArray(parsed.interfaces) ? parsed.interfaces : parsed.interfaces ? [parsed.interfaces] : [];
+    const addresses = Array.isArray(parsed.addresses) ? parsed.addresses : parsed.addresses ? [parsed.addresses] : [];
+    const routes = Array.isArray(parsed.routes) ? parsed.routes : parsed.routes ? [parsed.routes] : [];
+    const topology = { interfaces, addresses, routes };
+    const signature = crypto.createHash("sha256").update(JSON.stringify(topology)).digest("hex").slice(0, 16);
     return {
       available: true,
       signature,
-      source: String(parsed.source || "windows-active-default-routes"),
+      source: String(parsed.source || "windows-active-ipv4-topology"),
       defaultRoutes,
       defaultRouteCount: defaultRoutes.length,
+      connectedInterfaceCount: interfaces.length,
+      addressCount: addresses.length,
+      routeCount: routes.length,
     };
   } catch {
     return {
@@ -201,6 +184,9 @@ function activeNetworkPath() {
       source: "route-state-unavailable",
       defaultRoutes: [],
       defaultRouteCount: 0,
+      connectedInterfaceCount: 0,
+      addressCount: 0,
+      routeCount: 0,
     };
   }
 }
@@ -214,9 +200,10 @@ class NetworkPathDebouncer {
 
   reset(signature) {
     this.appliedSignature = String(signature || "");
-    this.candidateSignature = "";
-    this.candidateSince = 0;
-    this.candidateObservations = 0;
+    this.observedSignature = this.appliedSignature;
+    this.stableSince = 0;
+    this.stableObservations = 0;
+    this.quiescing = false;
   }
 
   observe(signature, now = Date.now()) {
@@ -226,32 +213,31 @@ class NetworkPathDebouncer {
       this.reset(value);
       return { state: "initial", appliedSignature: value };
     }
-    if (value === this.appliedSignature) {
-      this.candidateSignature = "";
-      this.candidateSince = 0;
-      this.candidateObservations = 0;
+    if (!this.quiescing && value === this.appliedSignature) {
       return { state: "stable", appliedSignature: value };
     }
-    if (value !== this.candidateSignature) {
-      this.candidateSignature = value;
-      this.candidateSince = now;
-      this.candidateObservations = 1;
+    if (!this.quiescing || value !== this.observedSignature) {
+      this.quiescing = true;
+      this.observedSignature = value;
+      this.stableSince = now;
+      this.stableObservations = 1;
     } else {
-      this.candidateObservations += 1;
+      this.stableObservations += 1;
     }
-    const stableForMs = Math.max(0, now - this.candidateSince);
-    if (this.candidateObservations < this.minimumObservations || stableForMs < this.minimumStableMs) {
+    const stableForMs = Math.max(0, now - this.stableSince);
+    if (this.stableObservations < this.minimumObservations || stableForMs < this.minimumStableMs) {
       return {
-        state: "pending",
+        state: "quiescing",
         appliedSignature: this.appliedSignature,
-        candidateSignature: value,
-        observations: this.candidateObservations,
+        candidateSignature: this.observedSignature,
+        observations: this.stableObservations,
         stableForMs,
+        remainingMs: Math.max(0, this.minimumStableMs - stableForMs),
       };
     }
     const previousSignature = this.appliedSignature;
     this.reset(value);
-    return { state: "changed", previousSignature, appliedSignature: value };
+    return { state: "settled", previousSignature, appliedSignature: value };
   }
 }
 
@@ -269,6 +255,9 @@ function resolveNetworkState() {
     source: "adaptation-disabled",
     defaultRoutes: [],
     defaultRouteCount: 0,
+    connectedInterfaceCount: 0,
+    addressCount: 0,
+    routeCount: 0,
   };
   const common = {
     compatibility,
@@ -279,7 +268,11 @@ function resolveNetworkState() {
     defaultRoutes: networkPath.defaultRoutes,
     defaultRouteCount: networkPath.defaultRouteCount,
     multipleDefaultRoutes: networkPath.defaultRouteCount > 1,
-    ambientProxyPolicy: "isolated",
+    connectedInterfaceCount: networkPath.connectedInterfaceCount,
+    addressCount: networkPath.addressCount,
+    routeCount: networkPath.routeCount,
+    egressPolicy: manualProxy ? "explicit-proxy" : "windows-system-route",
+    crossPathFallback: false,
   };
 
   if (!compatibility) {
@@ -349,7 +342,7 @@ function childEnvironment(network) {
 
 function writeNetworkState(network, extra = {}) {
   writeJson(networkStateFile, {
-    formatVersion: 3,
+    formatVersion: 4,
     provider: requestedProvider,
     supervisorPid: process.pid,
     childPid: child?.pid || null,
@@ -434,6 +427,11 @@ function reconcile() {
       defaultRoutes: [],
       defaultRouteCount: 0,
       multipleDefaultRoutes: false,
+      connectedInterfaceCount: 0,
+      addressCount: 0,
+      routeCount: 0,
+      egressPolicy: "none",
+      crossPathFallback: false,
       reason: "stop-request",
     }, { status: "stopped" });
     shutdown();
@@ -461,36 +459,36 @@ function reconcile() {
     network.pathAvailable ? network.pathSignature : "",
     Date.now(),
   );
-  if (pathDecision.state === "changed") {
-    if (child) terminateChild("stable-network-path-change");
+  if (pathDecision.state === "quiescing") {
+    if (child) terminateChild("network-path-quiescing");
+    writeNetworkState(network, {
+      childPid: null,
+      status: "paused",
+      reason: "network-path-settling",
+      transition: "network-path-quiescing",
+      appliedPathSignature: pathDecision.appliedSignature,
+      pendingPathSignature: pathDecision.candidateSignature,
+      pendingObservations: pathDecision.observations,
+      pendingStableForMs: pathDecision.stableForMs,
+      remainingQuietMs: pathDecision.remainingMs,
+      publicProbesSuppressed: true,
+    });
+    return;
+  }
+  if (pathDecision.state === "settled") {
     reconnectCount += 1;
     lastReconnectAt = new Date().toISOString();
     launchChild(network, {
-      transition: "network-path-changed-reconnect",
+      transition: "network-path-settled-reconnect",
       previousPathSignature: pathDecision.previousSignature,
       appliedPathSignature: pathDecision.appliedSignature,
     });
     return;
   }
   if (!child) {
-    if (pathDecision.state === "pending" && network.pathAvailable) {
-      networkPathDebouncer.reset(network.pathSignature);
-    }
     launchChild(network, {
       transition: "stable",
       appliedPathSignature: networkPathDebouncer.appliedSignature || network.pathSignature || null,
-    });
-    return;
-  }
-  if (pathDecision.state === "pending") {
-    writeNetworkState(network, {
-      childPid: child.pid,
-      status: "running",
-      transition: "path-change-pending",
-      appliedPathSignature: pathDecision.appliedSignature,
-      pendingPathSignature: pathDecision.candidateSignature,
-      pendingObservations: pathDecision.observations,
-      pendingStableForMs: pathDecision.stableForMs,
     });
     return;
   }
@@ -520,7 +518,13 @@ if (isNetworkSelfTest) {
 if (isNetworkTransitionSelfTest) {
   const sequence = JSON.parse(process.env.DEVSPACE_TEST_ROUTE_SEQUENCE || "[]");
   const debouncer = new NetworkPathDebouncer(NETWORK_PATH_STABLE_OBSERVATIONS, NETWORK_PATH_STABLE_MS);
-  const decisions = sequence.map((signature, index) => debouncer.observe(signature, index * NETWORK_POLL_MS));
+  const decisions = sequence.map((entry, index) => {
+    const signature = typeof entry === "object" && entry ? entry.signature : entry;
+    const now = typeof entry === "object" && entry && Number.isFinite(Number(entry.atMs))
+      ? Number(entry.atMs)
+      : index * NETWORK_POLL_MS;
+    return debouncer.observe(signature, now);
+  });
   process.stdout.write(`${JSON.stringify(decisions)}\n`);
   process.exit(0);
 }
