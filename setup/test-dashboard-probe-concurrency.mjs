@@ -154,6 +154,47 @@ try {
   assert.equal(dashboard.indicators.http.publicMetadata.transport, "failed");
   assert.match(dashboard.indicators.http.publicMetadata.error, /ngrok-config/);
 
+  writeFileSync(join(configDir, "config.json"), JSON.stringify({
+    port: servicePort,
+    publicBaseUrl: "https://dashboard-no-curl.invalid",
+  }));
+  rmSync(join(runDir, "dashboard-public-probe.json"), { force: true });
+  const noCurlResult = spawnSync(NODE, [MANAGER, "dashboard-status"], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      DEVSPACE_PORTABLE_CONFIG_DIR: configDir,
+      DEVSPACE_PORTABLE_STATE_DIR: stateDir,
+      DEVSPACE_PORTABLE_RUN_DIR: runDir,
+      DEVSPACE_TEST_CURL_UNAVAILABLE: "1",
+      DEVSPACE_TEST_NETWORK_PATH: JSON.stringify({
+        defaultRouteCount: 1,
+        multipleDefaultRoutes: false,
+        routes: [{ ifIndex: 1, interfaceAlias: "test", nextHop: "192.0.2.1", routeMetric: 0, interfaceMetric: 1 }],
+        source: "test",
+      }),
+      DEVSPACE_TEST_TUNNEL_NETWORK_STATE: JSON.stringify({
+        paused: false,
+        mode: "manual-proxy",
+        proxyUrl: `http://127.0.0.1:${proxyPort}`,
+        proxySource: "ngrok-config",
+        policy: "non-invasive",
+        reason: "network-path-stable",
+        transition: "stable",
+      }),
+    },
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 10_000,
+  });
+  assert.equal(noCurlResult.status, 0, noCurlResult.stderr || noCurlResult.stdout);
+  const noCurlDashboard = JSON.parse(noCurlResult.stdout.trim());
+  assert.equal(noCurlDashboard.indicators.http.localMetadata.status, 200);
+  assert.equal(noCurlDashboard.indicators.http.localMcp.status, 401);
+  assert.equal(noCurlDashboard.indicators.http.publicMetadata.transport, "failed");
+  assert.match(noCurlDashboard.indicators.http.publicMetadata.error, /ngrok-config: bundled curl unavailable/);
+  assert.doesNotMatch(noCurlDashboard.indicators.http.publicMetadata.error, /node-direct/);
+
   const quietStartedAt = Date.now();
   const quietResult = spawnSync(NODE, [MANAGER, "dashboard-status"], {
     cwd: ROOT,
@@ -256,6 +297,7 @@ try {
     localMetadataStatus: dashboard.indicators.http.localMetadata.status,
     localMcpStatus: dashboard.indicators.http.localMcp.status,
     publicFallbackToDirect: false,
+    explicitProxyNotBypassedWithoutCurl: true,
     elapsedMs,
     publicProbeSuppressedDuringTopologyChange: true,
     localServiceRemainsVisibleDuringTopologyChange: true,

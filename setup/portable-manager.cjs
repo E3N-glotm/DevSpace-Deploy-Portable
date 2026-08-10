@@ -2020,7 +2020,7 @@ function parseCurlProbeResult(stdout, stderr, status, candidate) {
 }
 
 function curlProbe(url, timeoutMs, candidate) {
-  if (!fs.existsSync(CURL_EXE)) return null;
+  if (process.env.DEVSPACE_TEST_CURL_UNAVAILABLE === "1" || !fs.existsSync(CURL_EXE)) return null;
   const timeoutSeconds = Math.max(2, Math.ceil(timeoutMs / 1000));
   const args = [
     "--silent",
@@ -2155,7 +2155,8 @@ async function probeUrl(url, timeoutMs = 20000) {
   }
   const errors = [];
   let curlAvailable = false;
-  for (const candidate of outboundProbeCandidates()) {
+  const candidates = outboundProbeCandidates();
+  for (const candidate of candidates) {
     const pending = curlProbe(url, timeoutMs, candidate);
     if (pending) curlAvailable = true;
     const result = pending ? await pending : null;
@@ -2166,6 +2167,17 @@ async function probeUrl(url, timeoutMs = 20000) {
   }
   if (curlAvailable) {
     return { status: 0, error: errors.join("; "), contentType: "", server: "", ngrokErrorCode: "", transport: "failed" };
+  }
+  const explicitProxy = candidates.find((candidate) => candidate?.url);
+  if (explicitProxy) {
+    return {
+      status: 0,
+      error: `${explicitProxy.source}: bundled curl unavailable; explicit proxy path was not bypassed`,
+      contentType: "",
+      server: "",
+      ngrokErrorCode: "",
+      transport: "failed",
+    };
   }
   const controller = new AbortController();
   let fetchSuppressed = false;
