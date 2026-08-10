@@ -2,6 +2,16 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.26
+
+- 移除 1.1.25 按 EasyConnect/Sangfor 会话持续暂停公网 tunnel 的过度隔离策略；MCP 公网隧道不再绑定任何具体 VPN/TUN 厂商、进程或网卡名称；
+- 新增只读的 Windows 活动默认路径指纹与稳定性防抖；路径稳定变化后只重连 supervisor 持有的 tunnel child，短暂路由抖动不打断现有隧道；
+- 多条默认路由改为信息状态，公网探测保持启用；本地正常而公网不可达时明确提示 VPN、TUN、防火墙或企业策略限制及独立代理/中继选项；
+- 公网初始就绪超时时保留本地 MCP 与 tunnel supervisor 自动恢复，不再停止整套服务；显式 ngrok 代理优先级、环境代理隔离和第三方状态零修改边界保持不变；
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.26.md)
+
 ## 1.1.25
 
 - EasyConnect/Sangfor 会话存在期间持续隔离 DevSpace 自有公网 tunnel，本地 MCP 保持运行；不再依赖固定时长的登录稳定等待；

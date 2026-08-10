@@ -1,4 +1,4 @@
-# Application update design through 1.1.24
+# Application and network lifecycle design through 1.1.26
 
 ## Goal
 
@@ -10,6 +10,32 @@ rollback safety.
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.26: vendor-neutral network-path adaptation
+
+1. The 1.1.25 full-session pause keyed to named client processes is removed.
+   Tunnel lifecycle decisions no longer identify a VPN/TUN vendor, process,
+   service, or adapter name.
+2. The supervisor reads connected IPv4 default routes from the Windows active
+   route store and creates a stable signature from route/interface identity
+   and metrics. This is observation only.
+3. A new signature must remain stable across consecutive polls before action.
+   During that window the existing public tunnel stays running. A settled
+   change reconnects only the tunnel `ChildProcess` owned by the supervisor.
+4. A user-explicit ngrok proxy remains authoritative. Without one, ambient
+   proxy variables are isolated from the tunnel child and the current Windows
+   route, including a transparent TUN route, selects egress.
+5. Public readiness failure no longer tears down a healthy local MCP service.
+   The tunnel supervisor remains enabled and can recover when the path becomes
+   usable.
+6. Multiple active default routes are informational. The dashboard always
+   tests public access and explains provider blocking without writing routes,
+   proxy settings, adapters, registry values, or third-party state.
+
+The application cannot create a truly independent physical egress when a
+full-tunnel or enterprise endpoint policy blocks all provider traffic. That
+case requires administrator allowlisting or a user-supplied independent
+proxy/relay; DevSpace does not silently install privileged route/WFP policy.
 
 ## Implemented in 1.1.24: standalone Update.exe and target-file delta semantics
 
@@ -268,4 +294,3 @@ launcher reads `current.json` and starts the selected version.
 The manifest should support `stable`, `beta`, and `nightly`, with `stable` as
 the default. Automatic installation should initially remain opt-in; background
 checks may notify without silently replacing the active version.
-

@@ -62,7 +62,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.25";
+const PORTABLE_VERSION = "1.1.26";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -1782,40 +1782,50 @@ async function startLocalService(port) {
 
 async function startPublicTunnel(provider, publicBaseUrl, port) {
   const spec = tunnelProcessSpec(provider);
-  let last = { ready: false, reason: "not attempted" };
-  for (let attempt = 1; attempt <= SERVICE_START_ATTEMPTS; attempt += 1) {
-    endOwnedTask(TASK_TUNNEL);
-    stopRecordedTunnelProcess();
-    fs.rmSync(TUNNEL_STOP_FILE, { force: true });
-    taskCommand("run", TASK_TUNNEL);
-    last = await waitForCondition(TUNNEL_START_TIMEOUT_MS, async () => {
-      const network = readJson(TUNNEL_NETWORK_STATE_FILE, null);
-      const publicReady = await publicServiceReady(publicBaseUrl);
-      if (provider === "ngrok") {
-        const agent = await ngrokAgentState(publicBaseUrl);
-        return {
-          ready: Boolean(publicReady && agent.matchingTunnel),
-          attempt,
-          publicReady,
-          agentReachable: agent.reachable,
-          matchingTunnel: agent.matchingTunnel,
-          networkMode: network?.mode || "unknown",
-          proxySource: network?.proxySource || "none",
-        };
-      }
-      return { ready: publicReady, attempt, publicReady };
-    }, 1000);
-    if (last.ready) return last;
-    endOwnedTask(TASK_TUNNEL);
-    stopRecordedTunnelProcess();
-    await delay(1000);
+  endOwnedTask(TASK_TUNNEL);
+  stopRecordedTunnelProcess();
+  fs.rmSync(TUNNEL_STOP_FILE, { force: true });
+  taskCommand("run", TASK_TUNNEL);
+  const last = await waitForCondition(TUNNEL_START_TIMEOUT_MS, async () => {
+    const network = readJson(TUNNEL_NETWORK_STATE_FILE, null);
+    const publicReady = await publicServiceReady(publicBaseUrl);
+    if (provider === "ngrok") {
+      const agent = await ngrokAgentState(publicBaseUrl);
+      return {
+        ready: Boolean(publicReady && agent.matchingTunnel),
+        publicReady,
+        agentReachable: agent.reachable,
+        matchingTunnel: agent.matchingTunnel,
+        networkMode: network?.mode || "unknown",
+        networkReason: network?.reason || "unknown",
+        proxySource: network?.proxySource || "none",
+      };
+    }
+    return {
+      ready: publicReady,
+      publicReady,
+      networkMode: network?.mode || "unknown",
+      networkReason: network?.reason || "unknown",
+    };
+  }, 1000);
+  if (last.ready) return last;
+  const supervisor = recordedProcessStatus(TUNNEL_SUPERVISOR_PID_FILE, "node.exe");
+  if (supervisor.running) {
+    return {
+      ...last,
+      deferred: true,
+      supervisorPid: supervisor.pid,
+      reason: "public-tunnel-recovering-on-current-network-path",
+    };
   }
+  endOwnedTask(TASK_TUNNEL);
+  stopRecordedTunnelProcess();
   const providerHint = provider === "cloudflare"
     ? `Verify that ${publicBaseUrl} routes to http://127.0.0.1:${port}.`
     : "Verify that the configured domain belongs to the same ngrok account as the Authtoken.";
   const logTail = safeLogTail(spec.logFile, 30);
   throw new Error(
-    `${provider} failed after ${SERVICE_START_ATTEMPTS} attempts to publish ${publicBaseUrl}.\n` +
+    `${provider} could not start its tunnel supervisor for ${publicBaseUrl}.\n` +
     `${providerHint}\nLast readiness: ${JSON.stringify(last)}\n\n` +
     `Recent ${provider} log:\n${logTail || `(no ${provider} log output)`}`,
   );
@@ -1848,7 +1858,7 @@ async function startServices() {
     await startLocalService(expected.port);
     const tunnelStart = await startPublicTunnel(provider, expected.publicBaseUrl, expected.port);
     if (tunnelStart?.deferred) {
-      return `Portable DevSpace local MCP started successfully. Public ${provider} tunnel is intentionally paused while Sangfor VPN is negotiating and will resume automatically after the VPN route stabilizes.\n` +
+      return `Portable DevSpace local MCP started successfully. Public ${provider} tunnel remains enabled and will retry through the current Windows network path. If the active VPN, firewall, or network policy blocks ${provider}, allow that provider or configure an independent outbound proxy.\n` +
         `Owner Password file (auth.json): ${AUTH_FILE}`;
     }
     return `Portable DevSpace and ${provider} started successfully on the first requested operation; local and public OAuth metadata are healthy.\n` +
@@ -2195,13 +2205,11 @@ async function statusText() {
   const mcp = recordedProcessStatus(MCP_PID_FILE, "node.exe", port);
   let tunnel = recordedProcessStatus(TUNNEL_PID_FILE, spec.image);
   if (!tunnel.pid && provider === "ngrok") tunnel = recordedProcessStatus(NGROK_PID_FILE, spec.image);
-  const tunnelNetwork = readJson(TUNNEL_NETWORK_STATE_FILE, null);
-  const protectedTunnelPause = tunnelNetwork?.paused === true
-    && String(tunnelNetwork?.reason || "") === "sangfor-vpn-session-isolation";
+  const tunnelNetwork = currentTunnelNetworkState();
   const publicUrl = String(config.publicBaseUrl || "").replace(/\/$/, "");
-  const publicProbe = publicUrl && !protectedTunnelPause
+  const publicProbe = publicUrl
     ? await probeUrl(`${publicUrl}/.well-known/oauth-protected-resource/mcp`, 5000)
-    : { status: 0, error: protectedTunnelPause ? "expected Sangfor session isolation" : "public URL not configured", transport: "none" };
+    : { status: 0, error: "public URL not configured", transport: "none" };
   lines.push(
     `=== DevSpace Portable MCP Server ===\n` +
     `Tool mode: ${toolMode}\n` +
@@ -2223,12 +2231,10 @@ async function statusText() {
     `Process running: ${tunnel.running ? "yes" : "no"}\n` +
     `Public OAuth metadata: ${formatProbe(publicProbe)}`;
   if (provider === "ngrok") {
-    const agent = protectedTunnelPause
-      ? { reachable: false, matchingTunnel: false, tunnels: [], apiPorts: [], errors: [] }
-      : await ngrokAgentState(publicUrl);
+    const agent = await ngrokAgentState(publicUrl);
     tunnelDetails +=
-      `\nAgent API: ${protectedTunnelPause ? "not checked during expected Sangfor isolation" : agent.reachable ? `reachable on ${agent.apiPorts.join(", ")}` : "unreachable on 4040-4049"}` +
-      `\nConfigured public tunnel active: ${protectedTunnelPause ? "expected pause" : agent.matchingTunnel ? "yes" : "no"}` +
+      `\nAgent API: ${agent.reachable ? `reachable on ${agent.apiPorts.join(", ")}` : "unreachable on 4040-4049"}` +
+      `\nConfigured public tunnel active: ${agent.matchingTunnel ? "yes" : "no"}` +
       `\nObserved tunnels: ${agent.tunnels.length ? agent.tunnels.map((item) => `${item.publicUrl} -> ${item.target}`).join("; ") : "none"}`;
   } else {
     tunnelDetails += `\nPinned cloudflared: ${CLOUDFLARED_VERSION}`;
@@ -2240,12 +2246,18 @@ async function statusText() {
       `\nNetwork mode: ${tunnelNetwork.mode || "unknown"}` +
       `\nNetwork reason: ${tunnelNetwork.reason || "unknown"}` +
       `\nProxy source: ${tunnelNetwork.proxySource || "none"}` +
+      `\nNetwork path source: ${tunnelNetwork.pathSource || "unknown"}` +
+      `\nNetwork path signature: ${tunnelNetwork.pathSignature || "unavailable"}` +
+      `\nApplied path signature: ${tunnelNetwork.appliedPathSignature || "unavailable"}` +
+      `\nPath transition: ${tunnelNetwork.transition || "unknown"}` +
+      `\nOwned tunnel reconnects: ${Number(tunnelNetwork.reconnectCount || 0)}` +
       `\nTunnel supervisor PID: ${tunnelNetwork.supervisorPid || "none"}`;
   }
-  const coexistence = thirdPartyTunConflictState();
+  const networkPath = networkPathState();
   tunnelDetails +=
-    `\nSangfor session: ${coexistence.sangforActive ? (coexistence.sangforConnected ? "connected" : "active") : "absent"}` +
-    `\nCompeting TUN default route: ${coexistence.competingTunDefault ? `yes (${coexistence.tunInterfaces.join(", ") || "unknown"})` : "no"}` +
+    `\nActive IPv4 default routes: ${networkPath.defaultRouteCount}` +
+    `\nRoute interfaces: ${networkPath.routes.length ? networkPath.routes.map((route) => `${route.interfaceAlias || route.ifIndex} (metric ${route.routeMetric + route.interfaceMetric})`).join(", ") : "unavailable"}` +
+    `\nVendor or process detection: none` +
     `\nThird-party mutation: never`;
   lines.push(tunnelDetails);
   const allListeners = listenerPids(port);
@@ -2257,19 +2269,27 @@ function dashboardIndicator(state, title, detail, extra = {}) {
   return { state, title, detail, ...extra };
 }
 
-function thirdPartyTunConflictState() {
-  if (process.env.DEVSPACE_TEST_NETWORK_CONFLICT) {
-    try { return JSON.parse(process.env.DEVSPACE_TEST_NETWORK_CONFLICT); } catch {}
+function currentTunnelNetworkState() {
+  if (process.env.DEVSPACE_TEST_TUNNEL_NETWORK_STATE) {
+    try { return JSON.parse(process.env.DEVSPACE_TEST_TUNNEL_NETWORK_STATE); } catch {}
+  }
+  return readJson(TUNNEL_NETWORK_STATE_FILE, null);
+}
+
+function networkPathState() {
+  if (process.env.DEVSPACE_TEST_NETWORK_PATH) {
+    try { return JSON.parse(process.env.DEVSPACE_TEST_NETWORK_PATH); } catch {}
   }
   const script = [
-    "$ErrorActionPreference='SilentlyContinue'",
-    "$processNames=@(Get-CimInstance Win32_Process | Select-Object -ExpandProperty Name)",
-    "$sangforActive=@($processNames | Where-Object {$_ -match '^(EasyConnect|SangforCSClient)\\.exe$'}).Count -gt 0",
-    "$vnic=Get-CimInstance Win32_NetworkAdapter | Where-Object {$_.ServiceName -eq 'SangforVnic'} | Select-Object -First 1 NetEnabled,NetConnectionStatus",
-    "$adapters=@(Get-NetAdapter -IncludeHidden | Where-Object {$_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch 'Sangfor' -and (($_.Name+' '+$_.InterfaceDescription) -match '(?i)(singbox[_ -]?tun|wintun|wireguard|clash|mihomo|tailscale|zerotier|\\btun\\b)')})",
-    "$indexes=@($adapters | Select-Object -ExpandProperty ifIndex)",
-    "$defaults=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object {$indexes -contains $_.ifIndex})",
-    "[pscustomobject]@{sangforActive=$sangforActive;sangforConnected=[bool]($vnic -and $vnic.NetEnabled -and [int]$vnic.NetConnectionStatus -eq 2);competingTunDefault=($defaults.Count -gt 0);tunInterfaces=@($adapters | ForEach-Object {$_.Name});source='read-only-windows-network'} | ConvertTo-Json -Compress",
+    "$ErrorActionPreference='Stop'",
+    "[Console]::OutputEncoding=(New-Object System.Text.UTF8Encoding($false))",
+    "$OutputEncoding=[Console]::OutputEncoding",
+    "$interfaces=@(Get-NetIPInterface -AddressFamily IPv4 | Where-Object {$_.ConnectionState -eq 'Connected'})",
+    "$connected=@{}",
+    "foreach($item in $interfaces){$connected[[int]$item.InterfaceIndex]=$item}",
+    "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore | Where-Object {$connected.ContainsKey([int]$_.ifIndex)} | ForEach-Object {$iface=$connected[[int]$_.ifIndex];[pscustomobject]@{ifIndex=[int]$_.ifIndex;interfaceAlias=[string]$_.InterfaceAlias;nextHop=[string]$_.NextHop;routeMetric=[int]$_.RouteMetric;interfaceMetric=[int]$iface.InterfaceMetric}})",
+    "$ordered=@($routes | Sort-Object routeMetric,interfaceMetric,ifIndex,nextHop)",
+    "[pscustomobject]@{defaultRouteCount=$ordered.Count;multipleDefaultRoutes=($ordered.Count -gt 1);routes=$ordered;source='read-only-active-default-routes'} | ConvertTo-Json -Compress -Depth 4",
   ].join(";");
   const result = childProcess.spawnSync(POWERSHELL_EXE, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
@@ -2279,18 +2299,25 @@ function thirdPartyTunConflictState() {
     timeout: 6_000,
     maxBuffer: 1024 * 1024,
   });
-  if (result.status !== 0) return { sangforActive: false, sangforConnected: false, competingTunDefault: false, tunInterfaces: [], source: "unavailable" };
+  if (result.status !== 0) return { defaultRouteCount: 0, multipleDefaultRoutes: false, routes: [], source: "unavailable" };
   try {
     const parsed = JSON.parse(String(result.stdout || "{}").trim() || "{}");
+    const values = Array.isArray(parsed.routes) ? parsed.routes : parsed.routes ? [parsed.routes] : [];
+    const routes = values.map((route) => ({
+      ifIndex: Number(route.ifIndex || 0),
+      interfaceAlias: String(route.interfaceAlias || ""),
+      nextHop: String(route.nextHop || ""),
+      routeMetric: Number(route.routeMetric || 0),
+      interfaceMetric: Number(route.interfaceMetric || 0),
+    }));
     return {
-      sangforActive: Boolean(parsed.sangforActive),
-      sangforConnected: Boolean(parsed.sangforConnected),
-      competingTunDefault: Boolean(parsed.competingTunDefault),
-      tunInterfaces: Array.isArray(parsed.tunInterfaces) ? parsed.tunInterfaces.map(String) : parsed.tunInterfaces ? [String(parsed.tunInterfaces)] : [],
-      source: String(parsed.source || "read-only-windows-network"),
+      defaultRouteCount: Number(parsed.defaultRouteCount ?? routes.length),
+      multipleDefaultRoutes: Boolean(parsed.multipleDefaultRoutes ?? routes.length > 1),
+      routes,
+      source: String(parsed.source || "read-only-active-default-routes"),
     };
   } catch {
-    return { sangforActive: false, sangforConnected: false, competingTunDefault: false, tunInterfaces: [], source: "unreadable" };
+    return { defaultRouteCount: 0, multipleDefaultRoutes: false, routes: [], source: "unreadable" };
   }
 }
 
@@ -2304,16 +2331,15 @@ async function dashboardStatus() {
   const mcp = recordedProcessStatus(MCP_PID_FILE, "node.exe", port);
   let tunnel = recordedProcessStatus(TUNNEL_PID_FILE, spec.image);
   if (!tunnel.pid && provider === "ngrok") tunnel = recordedProcessStatus(NGROK_PID_FILE, spec.image);
-  const tunnelNetwork = readJson(TUNNEL_NETWORK_STATE_FILE, null);
-  const coexistence = thirdPartyTunConflictState();
-  const protectedTunnelPause = tunnelNetwork?.paused === true
-    && String(tunnelNetwork?.reason || "") === "sangfor-vpn-session-isolation";
+  const tunnelSupervisor = recordedProcessStatus(TUNNEL_SUPERVISOR_PID_FILE, "node.exe");
+  const tunnelNetwork = currentTunnelNetworkState();
+  const networkPath = networkPathState();
   const [localMetadata, localMcp, publicMetadata, publicMcp, agent] = await Promise.all([
     probeUrl(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, 2500),
     probeUrl(`http://127.0.0.1:${port}/mcp`, 2500),
-    publicUrl && !protectedTunnelPause ? probeUrl(`${publicUrl}/.well-known/oauth-protected-resource/mcp`, 4500) : Promise.resolve({ status: 0, error: protectedTunnelPause ? "expected Sangfor negotiation pause" : "public URL not configured", transport: "none" }),
-    publicUrl && !protectedTunnelPause ? probeUrl(`${publicUrl}/mcp`, 4500) : Promise.resolve({ status: 0, error: protectedTunnelPause ? "expected Sangfor negotiation pause" : "public URL not configured", transport: "none" }),
-    provider === "ngrok" && !protectedTunnelPause ? ngrokAgentState(publicUrl) : Promise.resolve({ reachable: false, matchingTunnel: false, tunnels: [], apiPorts: [], errors: [] }),
+    publicUrl ? probeUrl(`${publicUrl}/.well-known/oauth-protected-resource/mcp`, 4500) : Promise.resolve({ status: 0, error: "public URL not configured", transport: "none" }),
+    publicUrl ? probeUrl(`${publicUrl}/mcp`, 4500) : Promise.resolve({ status: 0, error: "public URL not configured", transport: "none" }),
+    provider === "ngrok" ? ngrokAgentState(publicUrl) : Promise.resolve({ reachable: false, matchingTunnel: false, tunnels: [], apiPorts: [], errors: [] }),
   ]);
 
   const mcpTaskInstalled = taskExists(TASK_MCP);
@@ -2337,20 +2363,43 @@ async function dashboardStatus() {
 
   const serviceState = serviceReady ? (mcpTaskEnabled ? "ready" : "warning") : (mcp.running ? "warning" : "stopped");
   const serviceTitle = serviceReady ? (mcpTaskEnabled ? "服务已就绪" : "服务已运行，计划任务未启用") : (mcp.running ? "服务正在恢复" : "服务未运行");
-  const tunnelState = protectedTunnelPause ? "warning" : tunnelReady ? (tunnelTaskEnabled ? "ready" : "warning") : (tunnel.running ? "warning" : "stopped");
-  const tunnelTitle = protectedTunnelPause ? "公网隧道已按预期暂停" : tunnelReady ? (tunnelTaskEnabled ? "公网隧道已就绪" : "隧道已运行，计划任务未启用") : (tunnel.running ? "公网隧道正在恢复" : "公网隧道未运行");
+  const pathTransitionPending = String(tunnelNetwork?.transition || "") === "path-change-pending";
+  const explicitProxyUnavailable = tunnelNetwork?.paused === true
+    && String(tunnelNetwork?.reason || "") === "explicit-local-proxy-unavailable";
+  const tunnelState = explicitProxyUnavailable || pathTransitionPending ? "warning" : tunnelReady ? (tunnelTaskEnabled ? "ready" : "warning") : (tunnel.running || tunnelSupervisor.running ? "warning" : "stopped");
+  const tunnelTitle = explicitProxyUnavailable
+    ? "公网隧道正在等待显式代理"
+    : pathTransitionPending
+      ? "网络路径变化，隧道保持运行"
+      : tunnelReady ? (tunnelTaskEnabled ? "公网隧道已就绪" : "隧道已运行，计划任务未启用") : (tunnel.running || tunnelSupervisor.running ? "公网隧道正在恢复" : "公网隧道未运行");
   const httpReady = localMetadata.status === 200 && localMcp.status === 401 && publicMetadata.status === 200 && publicMcp.status === 401;
-  const httpState = protectedTunnelPause && localMetadata.status === 200 && localMcp.status === 401 ? "warning" : httpReady ? "ready" : (localMetadata.status === 200 ? "warning" : "error");
-  const httpTitle = protectedTunnelPause && localMetadata.status === 200 && localMcp.status === 401 ? "本地正常，公网检查暂缓" : httpReady ? "HTTP / OAuth 验证正常" : (localMetadata.status === 200 ? "本地正常，公网验证异常" : "本地 HTTP 验证异常");
+  const httpState = httpReady ? "ready" : (localMetadata.status === 200 ? "warning" : "error");
+  const httpTitle = httpReady ? "HTTP / OAuth 验证正常" : (localMetadata.status === 200 ? "本地正常，公网验证异常" : "本地 HTTP 验证异常");
   const networkMode = String(tunnelNetwork?.mode || "unknown");
   const networkSource = String(tunnelNetwork?.proxySource || "none");
-  const externalTunConflict = coexistence.sangforActive && coexistence.competingTunDefault;
-  const networkState = externalTunConflict || tunnelNetwork?.paused ? "warning" : "ready";
-  const networkTitle = externalTunConflict
-    ? "检测到 EasyConnect 与第三方 TUN 默认路由冲突"
-    : protectedTunnelPause
-    ? "EasyConnect 会话隔离已启用"
-    : tunnelNetwork?.paused ? "公网出站正在等待可用代理" : "网络共存策略正常";
+  const publicPathBlocked = serviceReady && (tunnel.running || tunnelSupervisor.running) && !tunnelReady && !pathTransitionPending;
+  const routeStateAvailable = networkPath.defaultRouteCount > 0
+    && !["unavailable", "unreadable"].includes(String(networkPath.source || ""));
+  const networkState = explicitProxyUnavailable || pathTransitionPending || publicPathBlocked || !tunnelNetwork ? "warning" : "ready";
+  const networkTitle = explicitProxyUnavailable
+    ? "显式出站代理不可用"
+    : pathTransitionPending
+      ? "检测到网络路径变化，正在准备重连"
+      : publicPathBlocked
+        ? "公网隧道不可达，可能受当前网络策略限制"
+        : tunnelNetwork ? "网络路径自适应正常" : routeStateAvailable ? "网络路径已读取，等待隧道运行" : "正在读取网络路径状态";
+  const routeDetail = networkPath.multipleDefaultRoutes
+    ? `检测到 ${networkPath.defaultRouteCount} 条活动默认路由；按 Windows 当前选路运行，不按软件名称干预`
+    : `活动默认路由=${networkPath.defaultRouteCount}`;
+  const networkDetail = explicitProxyUnavailable
+    ? `ngrok 显式代理当前不可用；恢复该代理或清空代理配置后将自动启动公网隧道`
+    : pathTransitionPending
+      ? `旧隧道暂时保持运行；路径稳定后仅重连 DevSpace 自己的隧道进程 · ${routeDetail}`
+      : publicPathBlocked
+        ? `当前 VPN、TUN、防火墙或企业网络策略可能阻止 ${provider}；请允许该服务，或为 ngrok 配置独立出站代理`
+        : !tunnelNetwork && routeStateAvailable
+          ? `只读网络路径已就绪；启动公网隧道后将监测稳定变化并仅重连自有子进程 · ${routeDetail}`
+          : `非侵入式自适应 · mode=${networkMode} · proxy=${networkSource} · ${routeDetail}`;
 
   const indicators = {
     service: dashboardIndicator(
@@ -2362,13 +2411,13 @@ async function dashboardStatus() {
     tunnel: dashboardIndicator(
       tunnelState,
       tunnelTitle,
-      protectedTunnelPause ? `${provider} · DevSpace 仅暂停自有隧道子进程 · MCP 本地服务保持运行` : tunnelReady ? `${provider} · 公网 OAuth HTTP 200 · PID ${tunnel.pid ?? "-"}` : `${provider} · 公网 OAuth=${publicMetadata.status || 0} · 进程=${tunnel.running ? "running" : "stopped"}`,
-      { pid: tunnel.pid, taskInstalled: tunnelTaskInstalled, taskEnabled: tunnelTaskEnabled, provider },
+      tunnelReady ? `${provider} · 公网 OAuth HTTP 200 · PID ${tunnel.pid ?? "-"}` : `${provider} · 公网 OAuth=${publicMetadata.status || 0} · 子进程=${tunnel.running ? "running" : "stopped"} · supervisor=${tunnelSupervisor.running ? tunnelSupervisor.pid : "stopped"}`,
+      { pid: tunnel.pid, supervisorPid: tunnelSupervisor.pid, taskInstalled: tunnelTaskInstalled, taskEnabled: tunnelTaskEnabled, provider },
     ),
     http: dashboardIndicator(
       httpState,
       httpTitle,
-      protectedTunnelPause ? `本地 ${localMetadata.status}/${localMcp.status} · 公网探测已暂缓，避免干扰 EasyConnect 协商` : `本地 ${localMetadata.status}/${localMcp.status} · 公网 ${publicMetadata.status}/${publicMcp.status} · ${publicMetadata.transport || "unknown"}`,
+      `本地 ${localMetadata.status}/${localMcp.status} · 公网 ${publicMetadata.status}/${publicMcp.status} · ${publicMetadata.transport || "unknown"}`,
       { localMetadata, localMcp, publicMetadata, publicMcp },
     ),
     files: dashboardIndicator(
@@ -2380,8 +2429,16 @@ async function dashboardStatus() {
     network: dashboardIndicator(
       networkState,
       networkTitle,
-      externalTunConflict ? `DevSpace 未修改第三方软件或系统路由 · TUN=${coexistence.tunInterfaces.join(", ") || "unknown"} · 公网 tunnel 将保持隔离` : `非侵入式网络策略 · mode=${networkMode} · proxy=${networkSource}`,
-      { mode: networkMode, proxySource: networkSource, policy: tunnelNetwork?.policy || "non-invasive", reason: tunnelNetwork?.reason || "unknown", coexistence },
+      networkDetail,
+      {
+        mode: networkMode,
+        proxySource: networkSource,
+        policy: tunnelNetwork?.policy || "non-invasive",
+        reason: tunnelNetwork?.reason || "unknown",
+        transition: tunnelNetwork?.transition || "unknown",
+        reconnectCount: Number(tunnelNetwork?.reconnectCount || 0),
+        networkPath,
+      },
     ),
   };
   const values = Object.values(indicators);
