@@ -40,7 +40,13 @@ assert.match(updater, /updateMode = "incremental"/);
 assert.match(updater, /Unsafe archive entry/);
 assert.match(updater, /Online application update is disabled inside a Git source checkout/);
 assert.match(updater, /\.update-backup-/);
-assert.match(updater, /rolledBack = \$true/);
+assert.match(updater, /rolledBack = \$filesRestored/);
+assert.match(updater, /Repair-PortableTasksAndStart/);
+assert.match(updater, /Invoke-Manager "install-tasks"/);
+assert.match(updater, /servicesRecovered/);
+assert.match(updater, /rollbackErrors/);
+assert.match(updater, /DevSpace update error:/);
+assert.match(updater, /Write-JsonResult \(\[ordered\]@\{/);
 assert.match(updater, /\$persistent = @\("data", "logs", "reports"\)/);
 assert.match(manager, /command === "update-check"/);
 assert.match(manager, /command === "update-stage"/);
@@ -77,5 +83,8 @@ console.log(JSON.stringify({
   archiveTraversalProtection: true,
   sourceCheckoutProtection: true,
   transactionalRollback: true,
+  scheduledTaskRepairBeforeRestart: true,
+  rollbackTaskAndServiceRecovery: true,
+  structuredBackendFailure: true,
   persistentDataPreserved: true,
 }));

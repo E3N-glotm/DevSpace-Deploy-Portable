@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.26";
+export const DEVSPACE_SERVER_VERSION = "1.1.27";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -98,6 +98,9 @@ const FEATURE_CATALOG = [
     { id: "vendor-neutral-network-path-adaptation", maturity: "stable", since: "1.1.26" },
     { id: "owned-tunnel-route-change-reconnect", maturity: "stable", since: "1.1.26" },
     { id: "public-tunnel-local-service-independent-readiness", maturity: "stable", since: "1.1.26" },
+    { id: "transactional-updater-task-reconciliation", maturity: "stable", since: "1.1.27" },
+    { id: "transactional-updater-rollback-task-recovery", maturity: "stable", since: "1.1.27" },
+    { id: "structured-updater-backend-errors", maturity: "stable", since: "1.1.27" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

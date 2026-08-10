@@ -23,6 +23,10 @@ assert.match(updaterSource, /_allowBusyClose = true/);
 assert.match(updaterSource, /RunPortableUpdaterAsync\("Stage"/);
 assert.match(updaterSource, /RunPowerShellAsync\(stagedUpdater, "Apply"/);
 assert.match(updaterSource, /update-progress\.json/);
+assert.match(updaterSource, /BackendFailureMessage/);
+assert.match(updaterSource, /TryParseLastJsonObject/);
+assert.match(updaterSource, /DevSpace update error:/);
+assert.match(updaterSource, /FullyQualifiedErrorId/);
 assert.match(updaterSource, /源码工作区不执行在线覆盖更新/);
 assert.match(updaterSource, /CleanupOldTemporaryControllers/);
 assert.doesNotMatch(updaterSource, /schtasks/i);
@@ -49,6 +53,10 @@ try {
   assert.equal(report.progressPolling, true);
   assert.equal(report.validatedUiTermination, true);
   assert.equal(report.transactionalPowerShellBackend, true);
+  assert.equal(report.structuredBackendErrors, true);
+  assert.equal(report.taskRepairBeforeRestart, true);
+  assert.equal(report.rollbackTaskRepair, true);
+  assert.equal(report.backendErrorParser, true);
   console.log(JSON.stringify(report));
 }
 finally {

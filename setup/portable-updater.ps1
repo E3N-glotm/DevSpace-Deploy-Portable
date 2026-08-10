@@ -753,6 +753,28 @@ function Invoke-Manager([string]$Command, [switch]$IgnoreFailure) {
     return $output.Trim()
 }
 
+function Repair-PortableTasksAndStart([switch]$IgnoreFailure) {
+    $result = [ordered]@{
+        success = $false
+        tasks = ""
+        services = ""
+        error = ""
+    }
+    try {
+        # Task definitions are executable deployment state, not durable user
+        # data. Recreate them after every program-file transaction so a missing,
+        # stale, or externally cleaned task cannot leave an otherwise valid
+        # update in a half-applied state.
+        $result.tasks = Invoke-Manager "install-tasks"
+        $result.services = Invoke-Manager "start"
+        $result.success = $true
+    } catch {
+        $result.error = $_.Exception.Message
+        if (-not $IgnoreFailure) { throw }
+    }
+    return [pscustomobject]$result
+}
+
 function Apply-StagedUpdate {
     if ([string]::IsNullOrWhiteSpace($StagingPath)) { throw "StagingPath is required for Apply." }
     $stage = [IO.Path]::GetFullPath($StagingPath).TrimEnd('\')
@@ -874,14 +896,33 @@ function Apply-StagedUpdate {
 
         $newManifest = Get-Content -LiteralPath (Join-Path $Root "VERSION-MANIFEST.json") -Raw | ConvertFrom-Json
         if ([string]$newManifest.runtime.devspacePortable -ne $targetVersion) { throw "Applied version manifest does not report $targetVersion." }
-        $startOutput = if ($shouldRestartServices) { Invoke-Manager "start" } else { "Portable is not configured; service restart was skipped." }
-        Start-Process -FilePath (Join-Path $Root "DevSpace-Portable.exe") -WorkingDirectory $Root
+        $taskOutput = "Portable is not configured; task reconciliation was skipped."
+        $startOutput = "Portable is not configured; service restart was skipped."
+        if ($shouldRestartServices) {
+            $serviceRecovery = Repair-PortableTasksAndStart
+            $taskOutput = [string]$serviceRecovery.tasks
+            $startOutput = [string]$serviceRecovery.services
+        }
+        $uiStarted = $false
+        $uiStartError = ""
+        try {
+            Start-Process -FilePath (Join-Path $Root "DevSpace-Portable.exe") -WorkingDirectory $Root
+            $uiStarted = $true
+        } catch {
+            # The program transaction and service recovery already succeeded.
+            # A shell/UI launch failure must not roll the installed version back.
+            $uiStartError = $_.Exception.Message
+            Write-UpdateLog "Update completed, but the control center could not be started automatically: $uiStartError"
+        }
         $result = [ordered]@{
             success = $true
             version = $targetVersion
             updateMode = $updateMode
             appliedAt = (Get-Date).ToUniversalTime().ToString("o")
+            tasks = $taskOutput
             services = $startOutput
+            uiStarted = $uiStarted
+            uiStartError = $uiStartError
             backupRemoved = $true
         }
         Write-UpdateResult $result
@@ -892,24 +933,55 @@ function Apply-StagedUpdate {
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         return $result
     } catch {
-        $message = $_.Exception.Message
+        $originalError = $_
+        $message = $originalError.Exception.Message
         Write-UpdateLog "Update apply failed; restoring previous version: $message"
         Write-UpdateProgress -Phase "rollback" -Message "Update failed; restoring the previous version: $message"
-        Invoke-Manager "stop" -IgnoreFailure | Out-Null
+        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        try { Invoke-Manager "stop" -IgnoreFailure | Out-Null }
+        catch { [void]$rollbackErrors.Add("Unable to stop the partially updated runtime: $($_.Exception.Message)") }
         foreach ($name in $movedNew) {
-            Remove-Item -LiteralPath (Join-Path $Root $name) -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                $newTarget = Join-Path $Root $name
+                if (Test-Path -LiteralPath $newTarget) {
+                    Remove-Item -LiteralPath $newTarget -Recurse -Force -ErrorAction Stop
+                }
+            } catch {
+                [void]$rollbackErrors.Add("Unable to remove partially applied path ${name}: $($_.Exception.Message)")
+            }
         }
         foreach ($name in $movedOld) {
             $source = Join-Path $backup $name
-            if (Test-Path $source) {
+            try {
+                if (-not (Test-Path -LiteralPath $source)) {
+                    throw "Backup path is missing: $source"
+                }
                 $destination = Join-Path $Root $name
                 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-                Move-Item -LiteralPath $source -Destination $destination -Force
+                Move-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
+            } catch {
+                [void]$rollbackErrors.Add("Unable to restore ${name}: $($_.Exception.Message)")
             }
         }
-        Invoke-Manager "start" -IgnoreFailure | Out-Null
-        if (Test-Path (Join-Path $Root "DevSpace-Portable.exe")) {
-            Start-Process -FilePath (Join-Path $Root "DevSpace-Portable.exe") -WorkingDirectory $Root
+        $filesRestored = $rollbackErrors.Count -eq 0
+        $servicesRecovered = -not $shouldRestartServices
+        $serviceRecoveryError = ""
+        if ($filesRestored -and $shouldRestartServices) {
+            $rollbackServiceRecovery = Repair-PortableTasksAndStart -IgnoreFailure
+            $servicesRecovered = [bool]$rollbackServiceRecovery.success
+            $serviceRecoveryError = [string]$rollbackServiceRecovery.error
+            if (-not $servicesRecovered) {
+                [void]$rollbackErrors.Add("Previous-version tasks or services could not be recovered: $serviceRecoveryError")
+            }
+        }
+        $rollbackUiStarted = $false
+        if ($filesRestored -and (Test-Path (Join-Path $Root "DevSpace-Portable.exe"))) {
+            try {
+                Start-Process -FilePath (Join-Path $Root "DevSpace-Portable.exe") -WorkingDirectory $Root
+                $rollbackUiStarted = $true
+            } catch {
+                [void]$rollbackErrors.Add("Previous control center could not be started automatically: $($_.Exception.Message)")
+            }
         }
         $result = [ordered]@{
             success = $false
@@ -917,10 +989,21 @@ function Apply-StagedUpdate {
             updateMode = $updateMode
             failedAt = (Get-Date).ToUniversalTime().ToString("o")
             error = $message
-            rolledBack = $true
+            rolledBack = $filesRestored
+            servicesRecovered = $servicesRecovered
+            serviceRecoveryError = $serviceRecoveryError
+            uiStarted = $rollbackUiStarted
+            rollbackErrors = @($rollbackErrors)
+            backupPath = $backup
         }
         Write-UpdateResult $result
-        throw
+        if ($rollbackErrors.Count -gt 0) {
+            $rollbackMessage = $rollbackErrors -join "; "
+            Write-UpdateLog "Rollback completed with errors: $rollbackMessage"
+            throw "${message} Rollback diagnostics: $rollbackMessage"
+        }
+        Write-UpdateLog "Previous version, scheduled tasks, and service state were restored after the failed update."
+        throw $originalError
     }
 }
 
@@ -932,10 +1015,20 @@ try {
         "Apply" { Write-JsonResult (Apply-StagedUpdate) }
     }
 } catch {
-    Write-UpdateLog "$Action failed: $($_.Exception.Message)"
+    $failureMessage = $_.Exception.Message
+    Write-UpdateLog "$Action failed: $failureMessage"
     if ($_.ScriptStackTrace) { Write-UpdateLog "Updater stack: $($_.ScriptStackTrace)" }
-    Write-UpdateProgress -Phase "error" -Message "$Action failed: $($_.Exception.Message)"
+    Write-UpdateProgress -Phase "error" -Message "$Action failed: $failureMessage"
     if ($Action -eq "Apply") { Remove-TransientUpdateTask }
-    Write-Error $_
+    Write-JsonResult ([ordered]@{
+        success = $false
+        action = $Action
+        error = $failureMessage
+    })
+    Write-Error $_ -ErrorAction Continue
+    # Older Update.exe builds selected only the last stderr line. Keep a
+    # concise final line so upgrades into this release expose the real cause
+    # instead of PowerShell's FullyQualifiedErrorId metadata.
+    [Console]::Error.WriteLine("DevSpace update error: $failureMessage")
     exit 1
 }
