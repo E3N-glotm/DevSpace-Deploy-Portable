@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.28**
+当前稳定版本：**1.1.29**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.28.zip
+DevSpacePortable-Windows-x64-1.1.29.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.28 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.27 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.29 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.28 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -300,6 +300,17 @@ https://你的域名/mcp
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
+## 1.1.29 主要变化
+
+- **本地 MCP 与公网隧道完全拆开启停。**“保存并部署本地 MCP”“启动本地 MCP”“重启本地 MCP”只操作 `127.0.0.1` 服务，不会启动、停止或重连 ngrok/cloudflared；“启动/重启/停止公网隧道”只操作 DevSpace 自己的 tunnel。新安装的 tunnel 计划任务默认禁用，避免部署本地服务时产生意外公网流量；已有安装在更新/任务修复后会保留 tunnel 原来的 enabled/disabled 状态。
+- **本地 MCP 不再依赖公网组件。**只部署本地 MCP 时不要求 ngrok/cloudflared runtime，也不要求 ngrok Authtoken 或 Cloudflare Tunnel Token；需要从 ChatGPT 等公网客户端连接时，再单独配置并启动 tunnel。
+- **首页不再主动访问公网。**3 秒状态刷新只执行 `127.0.0.1` 回环检查、计划任务/PID 检查和 tunnel agent 本地状态读取，不会周期性通过公网域名回打自己。公网 OAuth/HTTP 验证只在“详细信息”中由用户明确点击“验证 HTTP/诊断隧道”时执行。
+- **第三方网络拓扑变化只读观察。**v2ray、Clash、sing-box、EasyConnect、企业 VPN、透明 TUN、Wi-Fi 切换等导致 Windows 网卡/地址/路由改变时，DevSpace 不再主动杀掉并重连自己的 tunnel；provider 自己维持现有连接，只有其进程真实退出时 supervisor 才恢复自己的子进程。
+- **不继承传统代理软件的环境代理。**tunnel 子进程会清除继承的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及小写变量；只有你在 DevSpace 中明确填写的 tunnel 出站代理才会注入，因此 Windows 系统代理、v2ray/Clash/sing-box 的普通代理开关不会自动成为 DevSpace 的运行依赖。透明 TUN 仍由 Windows 当前系统选路自然决定。
+- **新增失效系统代理诊断。**如果某个本地代理软件退出后遗留 `ProxyEnable=1`，但 `127.0.0.1:<port>` 已无人监听，DevSpace 会在网络状态中提示这一点；默认只读，不自动修改。只有你在“详细信息”里明确点击“修复失效系统代理”时，才会关闭该系统代理并保存可恢复备份。
+- 正常启动、停止、状态刷新和 tunnel 运行路径不修改 Windows 系统代理、WinHTTP、DNS、默认路由、接口 metric、VPN 网卡或任何第三方进程；网络逻辑不按任何代理/VPN 厂商名称写特判。
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变，不需要重新 OAuth 或重新 Scan Tools。
+
 ## 1.1.28 主要变化
 
 - 首页本地 HTTP/OAuth 探测改为真正的回环直连；公网 curl 子进程由同步阻塞改为异步并发，避免慢公网/代理探测阻塞 Node 事件循环并把健康的本地 `200/401` 误报为 `0/0`。
@@ -320,7 +331,7 @@ https://你的域名/mcp
 - 新增真实事务回归：在隔离 Portable 中从“配置存在但计划任务完全缺失”开始执行 Apply，并强制模拟一次新版本启动失败，验证成功修复和失败回滚两条路径。
 - Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
 
-## 1.1.26 主要变化（网络切换行为已由 1.1.28 取代）
+## 1.1.26 主要变化（网络切换行为已由 1.1.29 取代）
 
 - 删除 1.1.25 按 EasyConnect/Sangfor 会话名称持续暂停公网 tunnel 的策略。DevSpace 不再扫描任何 VPN/TUN 客户端进程、服务或厂商网卡，也不会因为某个软件正在运行就关闭公网 MCP。
 - 默认启用厂商无关的网络路径自适应：公网 tunnel 始终保持启用并遵循 Windows 当前选路；IPv4 默认路径连续稳定变化后，只重连 supervisor 自己持有的 ngrok/cloudflared 子进程。短暂路由抖动不会触发重连。
@@ -469,7 +480,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.28
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.29
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -497,7 +508,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.28 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.29 -BypassProxy
 ```
 
 ## 在线更新

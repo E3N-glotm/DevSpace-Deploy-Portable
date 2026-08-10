@@ -31,18 +31,16 @@ const allowedExecutables = new Set([
   path.join(root, "runtime", "cloudflared", "cloudflared.exe").toLowerCase(),
 ]);
 const isNetworkSelfTest = process.argv.includes("--network-self-test");
-const isNetworkTransitionSelfTest = process.argv.includes("--network-transition-self-test");
-const requestedProvider = isNetworkSelfTest || isNetworkTransitionSelfTest
+const requestedProvider = isNetworkSelfTest
   ? (String(process.env.DEVSPACE_TEST_TUNNEL_PROVIDER || "ngrok").toLowerCase() === "cloudflare" ? "cloudflare" : "ngrok")
   : requestedExecutable.toLowerCase().endsWith("cloudflared.exe") ? "cloudflare" : "ngrok";
-const NETWORK_POLL_MS = 2_000;
-const NETWORK_PATH_STABLE_MS = 15_000;
-const NETWORK_PATH_STABLE_OBSERVATIONS = 3;
+const NETWORK_POLL_MS = 5_000;
 let child = null;
 let stopping = false;
 let restartTimer = null;
 let pollTimer = null;
 let lastConfigurationSignature = "";
+let lastObservedPathSignature = "";
 let reconnectCount = 0;
 let lastReconnectAt = "";
 
@@ -190,61 +188,6 @@ function activeNetworkPath() {
     };
   }
 }
-
-class NetworkPathDebouncer {
-  constructor(minimumObservations, minimumStableMs) {
-    this.minimumObservations = minimumObservations;
-    this.minimumStableMs = minimumStableMs;
-    this.reset("");
-  }
-
-  reset(signature) {
-    this.appliedSignature = String(signature || "");
-    this.observedSignature = this.appliedSignature;
-    this.stableSince = 0;
-    this.stableObservations = 0;
-    this.quiescing = false;
-  }
-
-  observe(signature, now = Date.now()) {
-    const value = String(signature || "");
-    if (!value) return { state: "unavailable", appliedSignature: this.appliedSignature };
-    if (!this.appliedSignature) {
-      this.reset(value);
-      return { state: "initial", appliedSignature: value };
-    }
-    if (!this.quiescing && value === this.appliedSignature) {
-      return { state: "stable", appliedSignature: value };
-    }
-    if (!this.quiescing || value !== this.observedSignature) {
-      this.quiescing = true;
-      this.observedSignature = value;
-      this.stableSince = now;
-      this.stableObservations = 1;
-    } else {
-      this.stableObservations += 1;
-    }
-    const stableForMs = Math.max(0, now - this.stableSince);
-    if (this.stableObservations < this.minimumObservations || stableForMs < this.minimumStableMs) {
-      return {
-        state: "quiescing",
-        appliedSignature: this.appliedSignature,
-        candidateSignature: this.observedSignature,
-        observations: this.stableObservations,
-        stableForMs,
-        remainingMs: Math.max(0, this.minimumStableMs - stableForMs),
-      };
-    }
-    const previousSignature = this.appliedSignature;
-    this.reset(value);
-    return { state: "settled", previousSignature, appliedSignature: value };
-  }
-}
-
-const networkPathDebouncer = new NetworkPathDebouncer(
-  NETWORK_PATH_STABLE_OBSERVATIONS,
-  NETWORK_PATH_STABLE_MS,
-);
 
 function resolveNetworkState() {
   const compatibility = compatibilityEnabled();
@@ -441,62 +384,38 @@ function reconcile() {
   const configurationSignature = networkConfigurationSignature(network);
   if (!lastConfigurationSignature) {
     lastConfigurationSignature = configurationSignature;
-    networkPathDebouncer.reset(network.pathAvailable ? network.pathSignature : "");
   } else if (configurationSignature !== lastConfigurationSignature) {
     if (child) terminateChild(`network-configuration:${network.reason}`);
     lastConfigurationSignature = configurationSignature;
-    networkPathDebouncer.reset(network.pathAvailable ? network.pathSignature : "");
   }
   if (network.paused) {
+    if (child) terminateChild(`network-configuration:${network.reason}`);
     writeNetworkState(network, {
       status: "paused",
       transition: "waiting-for-explicit-proxy",
-      appliedPathSignature: networkPathDebouncer.appliedSignature || null,
+      appliedPathSignature: lastObservedPathSignature || network.pathSignature || null,
     });
     return;
   }
-  const pathDecision = networkPathDebouncer.observe(
-    network.pathAvailable ? network.pathSignature : "",
-    Date.now(),
-  );
-  if (pathDecision.state === "quiescing") {
-    if (child) terminateChild("network-path-quiescing");
-    writeNetworkState(network, {
-      childPid: null,
-      status: "paused",
-      reason: "network-path-settling",
-      transition: "network-path-quiescing",
-      appliedPathSignature: pathDecision.appliedSignature,
-      pendingPathSignature: pathDecision.candidateSignature,
-      pendingObservations: pathDecision.observations,
-      pendingStableForMs: pathDecision.stableForMs,
-      remainingQuietMs: pathDecision.remainingMs,
-      publicProbesSuppressed: true,
-    });
-    return;
-  }
-  if (pathDecision.state === "settled") {
-    reconnectCount += 1;
-    lastReconnectAt = new Date().toISOString();
-    launchChild(network, {
-      transition: "network-path-settled-reconnect",
-      previousPathSignature: pathDecision.previousSignature,
-      appliedPathSignature: pathDecision.appliedSignature,
-    });
-    return;
-  }
+  const currentPathSignature = network.pathAvailable ? network.pathSignature : "";
+  const pathChanged = Boolean(lastObservedPathSignature && currentPathSignature && currentPathSignature !== lastObservedPathSignature);
+  const previousPathSignature = lastObservedPathSignature;
+  if (currentPathSignature) lastObservedPathSignature = currentPathSignature;
   if (!child) {
     launchChild(network, {
-      transition: "stable",
-      appliedPathSignature: networkPathDebouncer.appliedSignature || network.pathSignature || null,
+      transition: pathChanged ? "topology-changed-provider-recovered" : "stable",
+      previousPathSignature: pathChanged ? previousPathSignature : undefined,
+      appliedPathSignature: lastObservedPathSignature || network.pathSignature || null,
     });
     return;
   }
   writeNetworkState(network, {
     childPid: child.pid,
     status: "running",
-    transition: "stable",
-    appliedPathSignature: networkPathDebouncer.appliedSignature || network.pathSignature || null,
+    transition: pathChanged ? "topology-changed-no-restart" : "stable",
+    previousPathSignature: pathChanged ? previousPathSignature : undefined,
+    appliedPathSignature: lastObservedPathSignature || network.pathSignature || null,
+    publicProbesSuppressed: false,
   });
 }
 
@@ -512,20 +431,6 @@ function shutdown() {
 
 if (isNetworkSelfTest) {
   process.stdout.write(`${JSON.stringify(resolveNetworkState())}\n`);
-  process.exit(0);
-}
-
-if (isNetworkTransitionSelfTest) {
-  const sequence = JSON.parse(process.env.DEVSPACE_TEST_ROUTE_SEQUENCE || "[]");
-  const debouncer = new NetworkPathDebouncer(NETWORK_PATH_STABLE_OBSERVATIONS, NETWORK_PATH_STABLE_MS);
-  const decisions = sequence.map((entry, index) => {
-    const signature = typeof entry === "object" && entry ? entry.signature : entry;
-    const now = typeof entry === "object" && entry && Number.isFinite(Number(entry.atMs))
-      ? Number(entry.atMs)
-      : index * NETWORK_POLL_MS;
-    return debouncer.observe(signature, now);
-  });
-  process.stdout.write(`${JSON.stringify(decisions)}\n`);
   process.exit(0);
 }
 

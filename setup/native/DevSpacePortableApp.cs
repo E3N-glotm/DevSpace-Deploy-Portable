@@ -1309,7 +1309,7 @@ namespace DevSpacePortable.NativeUI
                 BackColor = UiPalette.Background,
             };
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             Panel header = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
@@ -1337,7 +1337,7 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 FlowDirection = FlowDirection.LeftToRight,
-                WrapContents = false,
+                WrapContents = true,
                 BackColor = Color.Transparent,
                 Padding = new Padding(0, 4, 0, 4),
             };
@@ -1346,6 +1346,9 @@ namespace DevSpacePortable.NativeUI
             actions.Controls.Add(ActionButton("诊断隧道", async delegate { await RunDiagnosticAsync("diagnose", _tunnel, 2); }));
             actions.Controls.Add(ActionButton("验证文件", async delegate { await RunDiagnosticAsync("verify-files", _files, 3); }));
             actions.Controls.Add(ActionButton("刷新日志", async delegate { await RefreshLogsAsync(); }));
+            actions.Controls.Add(ActionButton("检查系统代理", async delegate { await InspectSystemProxyAsync(); }));
+            actions.Controls.Add(ActionButton("修复失效系统代理", async delegate { await RepairStaleProxyAsync(); }));
+            actions.Controls.Add(ActionButton("恢复代理修复", async delegate { await RestoreProxyRepairAsync(); }));
             actions.Controls.Add(ActionButton("任务计划程序", delegate { OpenExternal("taskschd.msc"); }));
             actions.Controls.Add(ActionButton("日志目录", delegate { OpenExternal(Path.Combine(_root, "logs")); }));
             _activity.Text = "等待操作";
@@ -1419,6 +1422,68 @@ namespace DevSpacePortable.NativeUI
             await RunDiagnosticAsync("status", _summary, 0);
         }
 
+        private async Task InspectSystemProxyAsync()
+        {
+            if (_busy) return;
+            _busy = true;
+            _activity.Text = "正在检查系统代理…";
+            _pages.SelectedIndex = 0;
+            try
+            {
+                Dictionary<string, object> state = await _manager.RunJsonAsync("network-proxy-state");
+                StringBuilder text = new StringBuilder();
+                text.AppendLine("=== Windows System Proxy ===");
+                text.AppendLine("Enabled: " + GetBool(state, "enabled"));
+                text.AppendLine("ProxyServer: " + GetString(state, "rawServer"));
+                text.AppendLine("Candidate: " + GetString(state, "candidate"));
+                text.AppendLine("Loopback: " + GetBool(state, "loopback"));
+                text.AppendLine("Local listener healthy: " + GetBool(state, "localHealthy"));
+                text.AppendLine("Stale loopback proxy: " + GetBool(state, "staleLoopback"));
+                text.AppendLine("Repair backup exists: " + GetBool(state, "repairBackupExists"));
+                text.AppendLine("Repair backup: " + GetString(state, "repairBackupFile"));
+                text.AppendLine();
+                text.AppendLine("DevSpace 仅进行只读检查；除非你明确点击“修复失效系统代理”，否则不会改 Windows 代理设置。");
+                _summary.Text = text.ToString().Trim();
+                _activity.Text = "系统代理已检查 · " + DateTime.Now.ToString("HH:mm:ss");
+            }
+            catch (Exception ex)
+            {
+                _summary.Text = "错误：\r\n" + ex.Message;
+                _activity.Text = "检查失败";
+            }
+            finally { _busy = false; }
+        }
+
+        private async Task RepairStaleProxyAsync()
+        {
+            if (_busy) return;
+            Dictionary<string, object> state = await _manager.RunJsonAsync("network-proxy-state");
+            if (!GetBool(state, "staleLoopback"))
+            {
+                MessageBox.Show(this, "当前没有检测到“系统代理已启用，但本地代理端口无人监听”的状态，因此不会修改任何网络设置。", "无需修复", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            string proxy = GetString(state, "rawServer");
+            if (MessageBox.Show(this,
+                "检测到 Windows 系统代理仍指向本机代理：\r\n\r\n" + proxy +
+                "\r\n\r\n但对应本地端口当前没有监听。这会让部分浏览器内核、登录页或命令行程序在代理软件关闭后无法联网。\r\n\r\nDevSpace 可以仅将 ProxyEnable 关闭，并把原值备份到 data\\state，便于恢复。不会修改路由、VPN、网卡或第三方进程。是否继续？",
+                "修复失效系统代理", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            await RunDiagnosticAsync("repair-stale-proxy", _summary, 0);
+        }
+
+        private async Task RestoreProxyRepairAsync()
+        {
+            if (_busy) return;
+            Dictionary<string, object> state = await _manager.RunJsonAsync("network-proxy-state");
+            if (!GetBool(state, "repairBackupExists"))
+            {
+                MessageBox.Show(this, "没有找到由 DevSpace 创建的系统代理修复备份。", "没有可恢复项", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (MessageBox.Show(this, "将恢复上一次“修复失效系统代理”前保存的 Windows 系统代理设置。是否继续？", "恢复系统代理", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            await RunDiagnosticAsync("restore-proxy-repair", _summary, 0);
+        }
+
         private async Task RunDiagnosticAsync(string action, RichTextBox target, int pageIndex)
         {
             if (_busy) return;
@@ -1488,6 +1553,15 @@ namespace DevSpacePortable.NativeUI
         {
             object item;
             return value != null && value.TryGetValue(key, out item) && item != null ? Convert.ToString(item) : "";
+        }
+
+        private static bool GetBool(Dictionary<string, object> value, string key)
+        {
+            object item;
+            if (value == null || !value.TryGetValue(key, out item) || item == null) return false;
+            if (item is bool) return (bool)item;
+            bool parsed;
+            return bool.TryParse(Convert.ToString(item), out parsed) && parsed;
         }
 
         private static void OpenExternal(string target)
@@ -2200,7 +2274,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.28 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.29 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2261,12 +2335,15 @@ namespace DevSpacePortable.NativeUI
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             FlowLayoutPanel buttons = NewButtonBar();
-            buttons.Controls.Add(ActionButton("保存并自动部署", async delegate { await DeployAsync(); }, true));
-            buttons.Controls.Add(ActionButton("启动服务", async delegate { await RunActionAsync("start"); }));
-            buttons.Controls.Add(ActionButton("重启服务", async delegate { await ConfirmActionAsync("restart", "确定重启 DevSpace 和公网隧道吗？"); }));
+            buttons.Controls.Add(ActionButton("保存并部署本地 MCP", async delegate { await DeployAsync(); }, true));
+            buttons.Controls.Add(ActionButton("启动本地 MCP", async delegate { await RunActionAsync("start-local"); }));
+            buttons.Controls.Add(ActionButton("重启本地 MCP", async delegate { await ConfirmActionAsync("restart-local", "确定只重启本地 MCP 吗？公网隧道不会被停止或重启。"); }));
+            buttons.Controls.Add(ActionButton("启动公网隧道", async delegate { await RunActionAsync("start-tunnel"); }, true));
+            buttons.Controls.Add(ActionButton("重启公网隧道", async delegate { await ConfirmActionAsync("restart-tunnel", "确定只重启 DevSpace 公网隧道吗？本地 MCP 将保持运行。"); }));
+            buttons.Controls.Add(ActionButton("停止公网隧道", async delegate { await ConfirmActionAsync("stop-tunnel", "确定停止公网隧道吗？本地 MCP 将继续运行。"); }, false, true));
             buttons.Controls.Add(ActionButton("停止全部并退出", async delegate { await StopEverythingAsync(); }, false, true));
             buttons.Controls.Add(ActionButton("停止并禁用", async delegate { await ConfirmActionAsync("disable", "确定停止并禁用 DevSpace 与隧道计划任务吗？"); }, false, true));
-            buttons.Controls.Add(ActionButton("恢复并启动", async delegate { await RunActionAsync("enable"); }));
+            buttons.Controls.Add(ActionButton("恢复并启动全部", async delegate { await RunActionAsync("enable"); }));
             buttons.Controls.Add(ActionButton("卸载计划任务", async delegate { await ConfirmActionAsync("uninstall-tasks", "确定卸载 DevSpace 与隧道计划任务吗？配置和认证数据不会删除。"); }, false, true));
             buttons.Controls.Add(ActionButton("检查更新", async delegate { await CheckForUpdatesAsync(); }, true));
             buttons.Controls.Add(ActionButton("详细信息", async delegate { await ShowDiagnosticsDetailsAsync(); }, true));
@@ -2343,7 +2420,7 @@ namespace DevSpacePortable.NativeUI
             _toolMode = AddCombo(networkForm, "工具模式", new[] { "full", "codex", "minimal" });
             _ngrokToken = AddPassword(networkForm, "ngrok Authtoken（留空保留）");
             _ngrokProxy = AddText(networkForm, "ngrok 出站代理（可选）");
-            _tunnelNetworkCompatibility = AddCheck(networkForm, "网络自适应（推荐）", "tunnelNetworkCompatibility");
+            _tunnelNetworkCompatibility = AddCheck(networkForm, "网络隔离监测（推荐）", "tunnelNetworkCompatibility");
             _ngrokCas = AddCheck(networkForm, "使用 Windows 根证书", "ngrokConnectCasHost");
             _cloudflareToken = AddPassword(networkForm, "Cloudflare Tunnel Token（留空保留）");
             network.Controls.Add(networkForm);
@@ -2373,7 +2450,7 @@ namespace DevSpacePortable.NativeUI
             FlowLayoutPanel actions = NewButtonBar();
             actions.Controls.Add(ActionButton("添加工作目录", delegate { AddWorkspaceRoot(); }));
             actions.Controls.Add(ActionButton("只保存设置", async delegate { await SaveConfigurationAsync(false); }, true));
-            actions.Controls.Add(ActionButton("保存并自动部署", async delegate { await DeployAsync(); }));
+            actions.Controls.Add(ActionButton("保存并部署本地 MCP", async delegate { await DeployAsync(); }));
             actions.Controls.Add(ActionButton("重新加载", async delegate { await LoadConfigurationAsync(); }));
             layout.Controls.Add(actions, 0, 1);
             layout.SetColumnSpan(actions, 2);
@@ -2973,7 +3050,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.28") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.29") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -3042,13 +3119,11 @@ namespace DevSpacePortable.NativeUI
             await ExecuteBusyAsync(async delegate
             {
                 await SaveConfigurationAsync(true);
-                SetOutput("正在安装任务并启动服务……");
+                SetOutput("正在安装任务并启动本地 MCP……\r\n公网隧道不会在此步骤自动启动；需要远程访问时请单独点击“启动公网隧道”。");
                 string install = await _manager.RunAsync("install-tasks");
-                string start = await _manager.RunAsync("start");
-                string test;
-                try { test = await _manager.RunAsync("test"); }
-                catch (Exception ex) { test = "HTTP 验证未通过：" + ex.Message; }
-                SetOutput(install + Environment.NewLine + start + Environment.NewLine + test);
+                string start = await _manager.RunAsync("start-local");
+                string status = await _manager.RunAsync("status");
+                SetOutput(install + Environment.NewLine + start + Environment.NewLine + status);
                 await RefreshStatusAsync(false);
             });
             await RefreshDashboardStatusAsync();
@@ -3172,7 +3247,7 @@ namespace DevSpacePortable.NativeUI
                     MessageBoxIcon.Information);
                 return;
             }
-            string current = GetString(_currentConfig, "portableVersion", "1.1.28");
+            string current = GetString(_currentConfig, "portableVersion", "1.1.29");
             string arguments = "--root \"" + _root.Replace("\"", "\\\"") + "\""
                 + " --current \"" + current.Replace("\"", "\\\"") + "\""
                 + " --parent-ui " + Process.GetCurrentProcess().Id;

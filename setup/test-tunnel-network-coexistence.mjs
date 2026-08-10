@@ -57,21 +57,6 @@ function resolveNetwork(overrides = {}) {
   return JSON.parse(result.stdout.trim());
 }
 
-function transitionSequence(sequence) {
-  const result = spawnSync(NODE, [LAUNCHER, "--network-transition-self-test"], {
-    cwd: ROOT,
-    env: {
-      ...process.env,
-      DEVSPACE_TEST_ROUTE_SEQUENCE: JSON.stringify(sequence),
-    },
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 10_000,
-  });
-  if (result.status !== 0) throw new Error(result.stderr || result.stdout || `launcher exited ${result.status}`);
-  return JSON.parse(result.stdout.trim());
-}
-
 try {
   const registryBefore = registrySnapshot();
 
@@ -135,40 +120,16 @@ try {
     tunnelNetworkCompatibility: true,
   }, null, 2));
 
-  const stableChange = transitionSequence([
-    { signature: "route-a", atMs: 0 },
-    { signature: "route-b", atMs: 2_000 },
-    { signature: "route-b", atMs: 10_000 },
-    { signature: "route-b", atMs: 17_001 },
-  ]);
-  assert.deepEqual(stableChange.map((item) => item.state), ["initial", "quiescing", "quiescing", "settled"]);
-  assert.equal(stableChange[1].stableForMs, 0);
-  assert.equal(stableChange[1].remainingMs, 15_000);
-  assert.equal(stableChange[3].previousSignature, "route-a");
-  assert.equal(stableChange[3].appliedSignature, "route-b");
-  const routeJitter = transitionSequence([
-    { signature: "route-a", atMs: 0 },
-    { signature: "route-b", atMs: 2_000 },
-    { signature: "route-a", atMs: 4_000 },
-    { signature: "route-a", atMs: 12_000 },
-    { signature: "route-a", atMs: 19_001 },
-  ]);
-  assert.deepEqual(routeJitter.map((item) => item.state), ["initial", "quiescing", "quiescing", "quiescing", "settled"]);
-  assert.equal(routeJitter[4].previousSignature, "route-a");
-  assert.equal(routeJitter[4].appliedSignature, "route-a");
-
   const launcherSource = readFileSync(LAUNCHER, "utf8");
   const managerSource = readFileSync(MANAGER, "utf8");
   assert.match(launcherSource, /Get-NetIPAddress[^\n]+ActiveStore/,
     "the supervisor must observe connected IPv4 addresses without identifying a vendor");
   assert.match(launcherSource, /Get-NetRoute[^\n]+ActiveStore/,
     "the supervisor must observe all active IPv4 routes, including split routes");
-  assert.match(launcherSource, /class NetworkPathDebouncer/,
-    "topology changes must remain quiet before reconnecting the owned tunnel");
-  assert.match(launcherSource, /NETWORK_PATH_STABLE_MS = 15_000/,
-    "the quiet window must cover multi-step VPN or TUN route setup");
-  assert.match(launcherSource, /pathDecision\.state === "quiescing"[\s\S]*?terminateChild\("network-path-quiescing"\)/,
-    "the owned tunnel must stop on the first observed topology change");
+  assert.match(launcherSource, /transition: pathChanged \? "topology-changed-no-restart" : "stable"/,
+    "third-party route or adapter changes must be recorded without restarting the owned tunnel");
+  assert.doesNotMatch(launcherSource, /terminateChild\("network-path-quiescing"\)|network-path-settled-reconnect/,
+    "third-party topology changes must not trigger proactive tunnel churn");
   assert.match(launcherSource, /ownedChild\.kill\(\)/,
     "network transitions may stop only the ChildProcess owned by this supervisor");
   assert.doesNotMatch(launcherSource, /EasyConnect|Sangfor|SangforVnic|WireGuard|OpenVPN|AnyConnect|GlobalProtect/i,
@@ -195,11 +156,9 @@ try {
 
   console.log(JSON.stringify({
     vendorNeutralNetworkPathAdaptation: true,
-    publicTunnelRecoversAcrossRouteChanges: true,
+    publicTunnelRemainsStableAcrossRouteChanges: true,
     publicReadinessFailurePreservesLocalService: true,
-    topologyChangeImmediatelyQuiescesOwnedTunnel: true,
-    stableTopologyReconnectsOwnedTunnelAfterQuietWindow: true,
-    routeJitterRestartsQuietWindow: true,
+    topologyChangeDoesNotRestartOwnedTunnel: true,
     splitRouteAndAddressChangesAreObserved: true,
     explicitNgrokProxyStillSupported: true,
     ambientProxyInjection: false,

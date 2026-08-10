@@ -31,6 +31,7 @@ const TUNNEL_SUPERVISOR_PID_FILE = path.join(RUN_DIR, "tunnel-supervisor.pid");
 const TUNNEL_NETWORK_STATE_FILE = path.join(RUN_DIR, "tunnel-network.json");
 const TUNNEL_STOP_FILE = path.join(RUN_DIR, "tunnel.stop");
 const DASHBOARD_PUBLIC_PROBE_FILE = path.join(RUN_DIR, "dashboard-public-probe.json");
+const PROXY_REPAIR_BACKUP_FILE = path.join(STATE_DIR, "network-proxy-repair-backup.json");
 const UI_LEASE_FILE = path.join(RUN_DIR, "ui-session.json");
 const COMPUTER_USE_DIR = path.join(RUN_DIR, "computer-use");
 const COMPUTER_USE_REQUESTS = path.join(COMPUTER_USE_DIR, "requests");
@@ -64,7 +65,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.28";
+const PORTABLE_VERSION = "1.1.29";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -227,6 +228,17 @@ function ensureRuntime(provider = selectedTunnelProvider()) {
     ["Git Bash", BASH_EXE],
     ["DevSpace CLI", CLI_FILE],
     ...(provider === "ngrok" ? [["ngrok", NGROK_EXE]] : [["cloudflared", CLOUDFLARED_EXE]]),
+  ];
+  for (const [label, file] of requirements) {
+    if (!fs.existsSync(file)) fail(`${label} is missing: ${file}`);
+  }
+}
+
+function ensureLocalRuntime() {
+  const requirements = [
+    ["Node", NODE_EXE],
+    ["Git Bash", BASH_EXE],
+    ["DevSpace CLI", CLI_FILE],
   ];
   for (const [label, file] of requirements) {
     if (!fs.existsSync(file)) fail(`${label} is missing: ${file}`);
@@ -1396,17 +1408,14 @@ async function runMemoryAdmin(action, payload = {}) {
 
 function installTasks() {
   const provider = selectedTunnelProvider();
-  ensureRuntime(provider);
+  ensureLocalRuntime();
   if (!fs.existsSync(CONFIG_FILE) || !fs.existsSync(AUTH_FILE)) {
     throw new Error("Save configuration before installing tasks.");
   }
-  if (provider === "ngrok" && !fs.existsSync(NGROK_CONFIG)) {
-    throw new Error("ngrok configuration is missing. Save the ngrok configuration first.");
-  }
-  if (provider === "cloudflare" && !existingCloudflareToken()) {
-    throw new Error("Cloudflare Tunnel Token is missing. Save the Cloudflare configuration first.");
-  }
   fs.mkdirSync(REPORTS_DIR, { recursive: true });
+  const preserveTunnelEnabled = taskOwnedByRoot(TASK_TUNNEL)
+    ? taskEnabled(TASK_TUNNEL)
+    : false;
   const mcpXml = path.join(REPORTS_DIR, "portable-mcp-task.xml");
   const tunnelXml = path.join(REPORTS_DIR, "portable-tunnel-task.xml");
   writeAtomic(mcpXml, `\uFEFF${taskXml("Portable DevSpace MCP server through bundled Git Bash.", path.join(ROOT, "scripts", "start-devspace.cmd"), "")}`, "utf16le");
@@ -1415,7 +1424,10 @@ function installTasks() {
   runProgram("schtasks.exe", ["/delete", "/tn", LEGACY_TASK_NGROK, "/f"], { ignoreExitCode: true });
   runProgram("schtasks.exe", ["/create", "/tn", TASK_MCP, "/xml", mcpXml, "/f"]);
   runProgram("schtasks.exe", ["/create", "/tn", TASK_TUNNEL, "/xml", tunnelXml, "/f"]);
-  return `Portable user-level scheduled tasks were installed for ${provider}.`;
+  // Fresh installs keep the tunnel opt-in. Task repair/update preserves an
+  // existing tunnel-disabled choice instead of silently turning it back on.
+  setOwnedTaskEnabled(TASK_TUNNEL, preserveTunnelEnabled);
+  return `Portable user-level tasks were installed. Local MCP is available; the ${provider} tunnel task is ${preserveTunnelEnabled ? "enabled as before" : "disabled until explicitly started"}.`;
 }
 
 function taskCommand(action, task, ignoreExitCode = false) {
@@ -1708,6 +1720,48 @@ function stopServices(options = {}) {
   return `Portable DevSpace, tunnel, Computer Use Broker, and ${processResult.killed.length} Portable-owned process(es) were stopped. No background service PID remains.`;
 }
 
+function stopLocalServiceOnly(options = {}) {
+  const deployment = readJson(DEPLOYMENT_FILE, { port: 7676 });
+  const port = Number(deployment.port || 7676);
+  const owned = taskOwnedByRoot(TASK_MCP);
+  const wasEnabled = owned && taskEnabled(TASK_MCP);
+  if (owned) setOwnedTaskEnabled(TASK_MCP, false);
+  endOwnedTask(TASK_MCP);
+  stopRecordedProcess(MCP_PID_FILE, "node.exe", port);
+  if (!options.leaveDisabled && owned && wasEnabled) setOwnedTaskEnabled(TASK_MCP, true);
+  const remaining = recordedProcessStatus(MCP_PID_FILE, "node.exe", port);
+  if (remaining.running || remaining.listenerMatch) {
+    throw new Error(`Local MCP stop did not fully release 127.0.0.1:${port}.`);
+  }
+  return `Local MCP service stopped. Public tunnel state was left unchanged.`;
+}
+
+function cleanupTunnelRunStateOnly() {
+  for (const file of [
+    TUNNEL_PID_FILE,
+    NGROK_PID_FILE,
+    TUNNEL_SUPERVISOR_PID_FILE,
+    TUNNEL_NETWORK_STATE_FILE,
+    DASHBOARD_PUBLIC_PROBE_FILE,
+  ]) {
+    try { fs.rmSync(file, { force: true }); } catch {}
+  }
+}
+
+function stopPublicTunnelOnly(options = {}) {
+  fs.mkdirSync(RUN_DIR, { recursive: true });
+  writeAtomic(TUNNEL_STOP_FILE, "stop\n");
+  const owned = taskOwnedByRoot(TASK_TUNNEL);
+  const wasEnabled = owned && taskEnabled(TASK_TUNNEL);
+  if (owned) setOwnedTaskEnabled(TASK_TUNNEL, false);
+  endOwnedTask(TASK_TUNNEL);
+  stopRecordedTunnelProcess();
+  stopRecordedProcess(TUNNEL_SUPERVISOR_PID_FILE, "node.exe");
+  cleanupTunnelRunStateOnly();
+  if (!options.leaveDisabled && owned && wasEnabled) setOwnedTaskEnabled(TASK_TUNNEL, true);
+  return `Public tunnel stopped. Local MCP service was left unchanged.`;
+}
+
 function shutdownServices() {
   // "Stop all and exit" is a terminal user action. Keep any existing tasks
   // disabled so they cannot race the UI shutdown or immediately recreate
@@ -1725,8 +1779,7 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function validateStartConfiguration(provider, deployment, config) {
-  const publicBaseUrl = normalizePublicBaseUrl(config.publicBaseUrl || deployment.publicBaseUrl);
+function validateLocalStartConfiguration(deployment, config) {
   const configuredPort = Number(config.port || deployment.port || 7676);
   if (!Number.isInteger(configuredPort) || configuredPort < 1024 || configuredPort > 65535) {
     throw new Error("Saved local port is invalid. Save the configuration again.");
@@ -1734,13 +1787,23 @@ function validateStartConfiguration(provider, deployment, config) {
   if (!fs.existsSync(AUTH_FILE) || String(readJson(AUTH_FILE, {}).ownerToken || "").length < 16) {
     throw new Error("Owner Password is missing or invalid. Save the configuration again.");
   }
+  return { port: configuredPort };
+}
+
+function validateTunnelStartConfiguration(provider, deployment, config) {
+  const local = validateLocalStartConfiguration(deployment, config);
+  const publicBaseUrl = normalizePublicBaseUrl(config.publicBaseUrl || deployment.publicBaseUrl);
   if (provider === "ngrok" && !existingNgrokToken()) {
     throw new Error("ngrok Authtoken is missing. Save a real token before starting.");
   }
   if (provider === "cloudflare" && !existingCloudflareToken()) {
     throw new Error("Cloudflare Tunnel Token is missing. Save a real token before starting.");
   }
-  return { publicBaseUrl, port: configuredPort };
+  return { publicBaseUrl, port: local.port };
+}
+
+function validateStartConfiguration(provider, deployment, config) {
+  return validateTunnelStartConfiguration(provider, deployment, config);
 }
 
 async function localServiceReady(port) {
@@ -1793,12 +1856,10 @@ async function startPublicTunnel(provider, publicBaseUrl, port) {
   taskCommand("run", TASK_TUNNEL);
   const last = await waitForCondition(TUNNEL_START_TIMEOUT_MS, async () => {
     const network = readJson(TUNNEL_NETWORK_STATE_FILE, null);
-    const publicReady = await publicServiceReady(publicBaseUrl);
     if (provider === "ngrok") {
       const agent = await ngrokAgentState(publicBaseUrl);
       return {
-        ready: Boolean(publicReady && agent.matchingTunnel),
-        publicReady,
+        ready: Boolean(agent.matchingTunnel),
         agentReachable: agent.reachable,
         matchingTunnel: agent.matchingTunnel,
         networkMode: network?.mode || "unknown",
@@ -1806,9 +1867,10 @@ async function startPublicTunnel(provider, publicBaseUrl, port) {
         proxySource: network?.proxySource || "none",
       };
     }
+    const childStatus = recordedProcessStatus(TUNNEL_PID_FILE, spec.image);
     return {
-      ready: publicReady,
-      publicReady,
+      ready: Boolean(childStatus.running && network?.paused !== true),
+      childRunning: childStatus.running,
       networkMode: network?.mode || "unknown",
       networkReason: network?.reason || "unknown",
     };
@@ -1836,9 +1898,57 @@ async function startPublicTunnel(provider, publicBaseUrl, port) {
   );
 }
 
-async function startServices() {
+async function startLocalOnly() {
+  ensureLocalRuntime();
+  seedBundledPlugins();
+  if (!taskExists(TASK_MCP)) {
+    throw new Error("Portable MCP scheduled task is not installed. Save the configuration and install tasks first.");
+  }
+  requireOwnedTask(TASK_MCP);
+  if (!taskEnabled(TASK_MCP)) setOwnedTaskEnabled(TASK_MCP, true);
+  const deployment = readJson(DEPLOYMENT_FILE, { port: 7676 });
+  const config = readJson(CONFIG_FILE, {});
+  const expected = validateLocalStartConfiguration(deployment, config);
+  if (await localServiceReady(expected.port)) {
+    return `Local MCP service is already healthy on 127.0.0.1:${expected.port}. Public tunnel was not touched.`;
+  }
+  await startLocalService(expected.port);
+  return `Local MCP service started successfully on 127.0.0.1:${expected.port}. Public tunnel was not touched.`;
+}
+
+async function startTunnelOnly() {
   const provider = selectedTunnelProvider();
   ensureRuntime(provider);
+  if (!taskExists(TASK_TUNNEL)) {
+    throw new Error("Portable tunnel scheduled task is not installed. Save the configuration and install tasks first.");
+  }
+  requireOwnedTask(TASK_TUNNEL);
+  if (!taskEnabled(TASK_TUNNEL)) setOwnedTaskEnabled(TASK_TUNNEL, true);
+  const deployment = readJson(DEPLOYMENT_FILE, { port: 7676 });
+  const config = readJson(CONFIG_FILE, {});
+  const expected = validateTunnelStartConfiguration(provider, deployment, config);
+  if (!(await localServiceReady(expected.port))) {
+    throw new Error(`Local MCP is not healthy on 127.0.0.1:${expected.port}. Start the local MCP service first.`);
+  }
+  if (provider === "ngrok") {
+    const currentAgent = await ngrokAgentState(expected.publicBaseUrl);
+    if (currentAgent.matchingTunnel) {
+      return `Public ngrok tunnel is already active. Local MCP was not restarted.`;
+    }
+  } else {
+    const current = recordedProcessStatus(TUNNEL_PID_FILE, tunnelProcessSpec(provider).image);
+    if (current.running) return `Public ${provider} tunnel is already running. Local MCP was not restarted.`;
+  }
+  const started = await startPublicTunnel(provider, expected.publicBaseUrl, expected.port);
+  if (started?.deferred) {
+    return `Public ${provider} tunnel supervisor started and will recover on the current Windows network path. Local MCP remained online.`;
+  }
+  return `Public ${provider} tunnel started without restarting the local MCP service.`;
+}
+
+async function startServices() {
+  const provider = selectedTunnelProvider();
+  ensureLocalRuntime();
   seedBundledPlugins();
   const missingTasks = [TASK_MCP, TASK_TUNNEL].filter((task) => !taskExists(task));
   if (missingTasks.length) {
@@ -1849,27 +1959,34 @@ async function startServices() {
   }
   requireOwnedTask(TASK_MCP);
   requireOwnedTask(TASK_TUNNEL);
+  if (!taskEnabled(TASK_MCP)) setOwnedTaskEnabled(TASK_MCP, true);
+  const tunnelEnabled = taskEnabled(TASK_TUNNEL);
   const deployment = readJson(DEPLOYMENT_FILE, { port: 7676 });
   const config = readJson(CONFIG_FILE, {});
-  const expected = validateStartConfiguration(provider, deployment, config);
-  const existingLocal = await localServiceReady(expected.port);
-  const existingPublic = existingLocal && await publicServiceReady(expected.publicBaseUrl);
-  const existingAgent = provider !== "ngrok" || (await ngrokAgentState(expected.publicBaseUrl)).matchingTunnel;
-  if (existingLocal && existingPublic && existingAgent) {
+  const localExpected = validateLocalStartConfiguration(deployment, config);
+  const existingLocal = await localServiceReady(localExpected.port);
+  if (!tunnelEnabled) {
+    if (!existingLocal) await startLocalService(localExpected.port);
+    return `Portable DevSpace local MCP is healthy. Public ${provider} tunnel remains disabled by user/task state and was not started.\nOwner Password file (auth.json): ${AUTH_FILE}`;
+  }
+  ensureRuntime(provider);
+  const expected = validateTunnelStartConfiguration(provider, deployment, config);
+  const existingTunnel = provider === "ngrok"
+    ? (await ngrokAgentState(expected.publicBaseUrl)).matchingTunnel
+    : recordedProcessStatus(TUNNEL_PID_FILE, tunnelProcessSpec(provider).image).running;
+  if (existingLocal && existingTunnel) {
     return `Portable DevSpace and ${provider} are already healthy; no restart was required.\nOwner Password file (auth.json): ${AUTH_FILE}`;
   }
-  stopServices();
   try {
-    await startLocalService(expected.port);
-    const tunnelStart = await startPublicTunnel(provider, expected.publicBaseUrl, expected.port);
+    if (!existingLocal) await startLocalService(localExpected.port);
+    const tunnelStart = existingTunnel ? { ready: true } : await startPublicTunnel(provider, expected.publicBaseUrl, expected.port);
     if (tunnelStart?.deferred) {
       return `Portable DevSpace local MCP started successfully. Public ${provider} tunnel remains enabled and will retry through the current Windows network path. If the active VPN, firewall, or network policy blocks ${provider}, allow that provider or configure an independent outbound proxy.\n` +
         `Owner Password file (auth.json): ${AUTH_FILE}`;
     }
-    return `Portable DevSpace and ${provider} started successfully on the first requested operation; local and public OAuth metadata are healthy.\n` +
+    return `Portable DevSpace local MCP and ${provider} tunnel started successfully; local OAuth endpoints are healthy and the tunnel agent is active.\n` +
       `Owner Password file (auth.json): ${AUTH_FILE}`;
   } catch (error) {
-    try { stopServices(); } catch {}
     throw error;
   }
 }
@@ -1959,6 +2076,130 @@ function normalizeOutboundProxyUrl(value) {
   } catch {
     return "";
   }
+}
+
+function localProxyHealthy(proxyUrl) {
+  if (!proxyUrl) return false;
+  let parsed;
+  try { parsed = new URL(proxyUrl); } catch { return false; }
+  const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!["127.0.0.1", "localhost", "::1"].includes(host)) return true;
+  const port = Number(parsed.port || 0);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return false;
+  const result = runProgram("netstat.exe", ["-ano", "-p", "TCP"], { ignoreExitCode: true, outputEncoding: "utf-8" });
+  if (result.status !== 0) return false;
+  const escaped = String(port).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::\\]|\\[::1\\]|::):${escaped}\\s+\\S+\\s+LISTENING`, "i").test(String(result.output || ""));
+}
+
+function windowsInternetProxyState() {
+  const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+  const query = runProgram("reg.exe", ["query", key], { ignoreExitCode: true, outputEncoding: "utf-8" });
+  const text = String(query.output || "");
+  const enableMatch = text.match(/ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i);
+  const serverMatch = text.match(/ProxyServer\s+REG_SZ\s+([^\r\n]+)/i);
+  const enabled = Boolean(enableMatch && Number.parseInt(enableMatch[1], 16) !== 0);
+  const rawServer = serverMatch ? serverMatch[1].trim() : "";
+  let candidate = "";
+  if (rawServer && !rawServer.includes("=") && !rawServer.includes(";")) {
+    candidate = normalizeOutboundProxyUrl(rawServer);
+  } else if (rawServer) {
+    const entries = new Map();
+    for (const item of rawServer.split(";")) {
+      const [rawKey, ...rest] = item.split("=");
+      if (!rawKey || !rest.length) continue;
+      entries.set(rawKey.trim().toLowerCase(), rest.join("=").trim());
+    }
+    for (const protocol of ["https", "http", "socks", "socks5"]) {
+      if (!entries.has(protocol)) continue;
+      candidate = normalizeOutboundProxyUrl(`${protocol.startsWith("socks") ? "socks5" : "http"}://${entries.get(protocol)}`);
+      if (candidate) break;
+    }
+  }
+  let loopback = false;
+  let localHealthy = true;
+  let host = "";
+  let port = 0;
+  if (candidate) {
+    try {
+      const parsed = new URL(candidate);
+      host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+      port = Number(parsed.port || 0);
+      loopback = ["127.0.0.1", "localhost", "::1"].includes(host);
+      localHealthy = !loopback || localProxyHealthy(candidate);
+    } catch {}
+  }
+  return {
+    enabled,
+    rawServer,
+    candidate,
+    loopback,
+    localHealthy,
+    staleLoopback: Boolean(enabled && candidate && loopback && !localHealthy),
+    host,
+    port,
+    source: "wininet-read-only",
+  };
+}
+
+function notifyInternetSettingsChanged() {
+  const script = [
+    "$sig='[DllImport(\"wininet.dll\", SetLastError=true)] public static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);'",
+    "$t=Add-Type -MemberDefinition $sig -Name NativeInternetSettings -Namespace DevSpacePortable -PassThru",
+    "$null=$t::InternetSetOption([IntPtr]::Zero,39,[IntPtr]::Zero,0)",
+    "$null=$t::InternetSetOption([IntPtr]::Zero,37,[IntPtr]::Zero,0)",
+  ].join(";");
+  runProgram(POWERSHELL_EXE, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { ignoreExitCode: true });
+}
+
+function repairStaleLoopbackSystemProxy() {
+  const state = windowsInternetProxyState();
+  if (!state.staleLoopback) {
+    throw new Error("Windows system proxy is not an enabled stale loopback proxy. No setting was changed.");
+  }
+  if (fs.existsSync(PROXY_REPAIR_BACKUP_FILE)) {
+    throw new Error(`A previous system-proxy repair backup already exists: ${PROXY_REPAIR_BACKUP_FILE}. Restore it before creating another repair.`);
+  }
+  writeJson(PROXY_REPAIR_BACKUP_FILE, {
+    formatVersion: 1,
+    createdAt: new Date().toISOString(),
+    proxyEnable: state.enabled ? 1 : 0,
+    proxyServer: state.rawServer,
+  });
+  const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+  const result = runProgram("reg.exe", ["add", key, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "0", "/f"], { ignoreExitCode: true, outputEncoding: "utf-8" });
+  if (result.status !== 0) {
+    try { fs.rmSync(PROXY_REPAIR_BACKUP_FILE, { force: true }); } catch {}
+    throw new Error(`Failed to disable stale Windows system proxy: ${result.output || `exit ${result.status}`}`);
+  }
+  notifyInternetSettingsChanged();
+  const after = windowsInternetProxyState();
+  if (after.enabled) throw new Error("Windows system proxy still reports enabled after repair. The backup was preserved for manual recovery.");
+  return {
+    repaired: true,
+    previousProxyServer: state.rawServer,
+    backupFile: PROXY_REPAIR_BACKUP_FILE,
+    message: "Disabled an enabled loopback Windows system proxy whose local listener was unavailable. No VPN, route, adapter, or third-party process was modified.",
+  };
+}
+
+function restoreSystemProxyRepair() {
+  const backup = readJson(PROXY_REPAIR_BACKUP_FILE, null);
+  if (!backup || backup.formatVersion !== 1) throw new Error("No DevSpace system-proxy repair backup exists.");
+  const key = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+  const server = String(backup.proxyServer || "");
+  if (server) {
+    const serverResult = runProgram("reg.exe", ["add", key, "/v", "ProxyServer", "/t", "REG_SZ", "/d", server, "/f"], { ignoreExitCode: true, outputEncoding: "utf-8" });
+    if (serverResult.status !== 0) throw new Error(`Failed to restore ProxyServer: ${serverResult.output || `exit ${serverResult.status}`}`);
+  }
+  const enableResult = runProgram("reg.exe", ["add", key, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", String(Number(backup.proxyEnable || 0)), "/f"], { ignoreExitCode: true, outputEncoding: "utf-8" });
+  if (enableResult.status !== 0) throw new Error(`Failed to restore ProxyEnable: ${enableResult.output || `exit ${enableResult.status}`}`);
+  notifyInternetSettingsChanged();
+  fs.rmSync(PROXY_REPAIR_BACKUP_FILE, { force: true });
+  return {
+    restored: true,
+    message: "Restored the Windows system proxy settings saved by the previous DevSpace repair action.",
+  };
 }
 
 function outboundProbeCandidates() {
@@ -2334,9 +2575,12 @@ async function statusText() {
   if (!tunnel.pid && provider === "ngrok") tunnel = recordedProcessStatus(NGROK_PID_FILE, spec.image);
   const tunnelNetwork = currentTunnelNetworkState();
   const publicUrl = String(config.publicBaseUrl || "").replace(/\/$/, "");
-  const publicProbe = publicUrl
-    ? await probeUrl(`${publicUrl}/.well-known/oauth-protected-resource/mcp`, 5000)
-    : { status: 0, error: "public URL not configured", transport: "none" };
+  const publicProbeCache = readJson(DASHBOARD_PUBLIC_PROBE_FILE, null);
+  const publicProbe = publicProbeCache?.metadata || {
+    status: 0,
+    error: "not actively probed by background status",
+    transport: "passive",
+  };
   lines.push(
     `=== DevSpace Portable MCP Server ===\n` +
     `Tool mode: ${toolMode}\n` +
@@ -2356,7 +2600,7 @@ async function statusText() {
     `Task installed: ${taskExists(TASK_TUNNEL) ? "yes" : "no"}\n` +
     `Recorded PID: ${tunnel.pid ?? "none"}\n` +
     `Process running: ${tunnel.running ? "yes" : "no"}\n` +
-    `Public OAuth metadata: ${formatProbe(publicProbe)}`;
+    `Last explicit public OAuth metadata: ${formatProbe(publicProbe)}`;
   if (provider === "ngrok") {
     const agent = await ngrokAgentState(publicUrl);
     tunnelDetails +=
@@ -2388,12 +2632,39 @@ async function statusText() {
   tunnelDetails +=
     `\nActive IPv4 default routes: ${networkPath.defaultRouteCount}` +
     `\nRoute interfaces: ${networkPath.routes.length ? networkPath.routes.map((route) => `${route.interfaceAlias || route.ifIndex} (metric ${route.routeMetric + route.interfaceMetric})`).join(", ") : "unavailable"}` +
+    `\nWindows system proxy: ${internetProxy.enabled ? internetProxy.rawServer || "enabled" : "disabled"}` +
+    `\nStale loopback proxy: ${internetProxy.staleLoopback ? `yes (${internetProxy.host}:${internetProxy.port} is not listening)` : "no"}` +
     `\nVendor or process detection: none` +
     `\nThird-party mutation: never`;
   lines.push(tunnelDetails);
   const allListeners = listenerPids(port);
   lines.push(`=== TCP :${port} ===\nListener PIDs: ${allListeners.length ? allListeners.join(", ") : "none"}`);
   return lines.join("\n\n");
+}
+
+function cachedDashboardPublicProbes(publicUrl, fingerprint) {
+  const empty = {
+    status: 0,
+    error: "not actively probed by homepage",
+    contentType: "",
+    server: "",
+    ngrokErrorCode: "",
+    transport: "passive",
+  };
+  if (!publicUrl) return { metadata: empty, mcp: empty, checkedAt: null, cached: false, passive: true, ageMs: 0 };
+  const cached = readJson(DASHBOARD_PUBLIC_PROBE_FILE, null);
+  if (cached?.formatVersion !== 1 || cached.fingerprint !== fingerprint || !cached.metadata || !cached.mcp) {
+    return { metadata: empty, mcp: empty, checkedAt: null, cached: false, passive: true, ageMs: 0 };
+  }
+  const checkedAtMs = Date.parse(String(cached.checkedAt || ""));
+  return {
+    metadata: cached.metadata,
+    mcp: cached.mcp,
+    checkedAt: cached.checkedAt || null,
+    cached: true,
+    passive: true,
+    ageMs: Number.isFinite(checkedAtMs) ? Math.max(0, Date.now() - checkedAtMs) : 0,
+  };
 }
 
 function dashboardIndicator(state, title, detail, extra = {}) {
@@ -2465,29 +2736,28 @@ async function dashboardStatus() {
   const tunnelSupervisor = recordedProcessStatus(TUNNEL_SUPERVISOR_PID_FILE, "node.exe");
   const tunnelNetwork = currentTunnelNetworkState();
   const networkPath = networkPathState();
+  const internetProxy = windowsInternetProxyState();
   const publicProbeGate = publicProbeSuppressionState(tunnelNetwork);
   const networkPathQuiescing = publicProbeGate.suppressed;
   const publicFingerprint = dashboardPublicProbeFingerprint(publicUrl, provider, tunnel, tunnelSupervisor, tunnelNetwork);
-  const [localResults, publicResults, agent] = await Promise.all([
+  const [localResults, agent] = await Promise.all([
     Promise.all([
       probeUrl(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource/mcp`, 2500),
       probeUrl(`http://127.0.0.1:${port}/mcp`, 2500),
     ]),
-    dashboardPublicProbes(publicUrl, publicFingerprint, {
-      suppress: networkPathQuiescing,
-      reason: publicProbeGate.reason,
-    }),
     provider === "ngrok" ? ngrokAgentState(publicUrl) : Promise.resolve({ reachable: false, matchingTunnel: false, tunnels: [], apiPorts: [], errors: [] }),
   ]);
   const [localMetadata, localMcp] = localResults;
+  const publicResults = cachedDashboardPublicProbes(publicUrl, publicFingerprint);
   const { metadata: publicMetadata, mcp: publicMcp } = publicResults;
 
   const mcpTaskInstalled = taskExists(TASK_MCP);
   const mcpTaskEnabled = mcpTaskInstalled && taskEnabled(TASK_MCP);
   const tunnelTaskInstalled = taskExists(TASK_TUNNEL);
   const tunnelTaskEnabled = tunnelTaskInstalled && taskEnabled(TASK_TUNNEL);
+  const tunnelIntentionallyOff = tunnelTaskInstalled && !tunnelTaskEnabled && !tunnel.running && !tunnelSupervisor.running;
   const serviceReady = mcp.running && mcp.listenerMatch && localMetadata.status === 200 && localMcp.status === 401;
-  const tunnelReady = tunnel.running && publicMetadata.status === 200 && publicMcp.status === 401 && (provider !== "ngrok" || agent.matchingTunnel);
+  const tunnelReady = tunnel.running && (provider !== "ngrok" || agent.matchingTunnel);
   const criticalFiles = [
     "DevSpace-Portable.exe",
     "VERSION-MANIFEST.json",
@@ -2509,39 +2779,52 @@ async function dashboardStatus() {
     : localProbeUncertain ? "服务正在复核" : (mcp.running ? "服务正在恢复" : "服务未运行");
   const proxyUnavailable = tunnelNetwork?.paused === true
     && String(tunnelNetwork?.reason || "") === "explicit-local-proxy-unavailable";
-  const tunnelState = proxyUnavailable || networkPathQuiescing ? "warning" : tunnelReady ? (tunnelTaskEnabled ? "ready" : "warning") : (tunnel.running || tunnelSupervisor.running ? "warning" : "stopped");
-  const tunnelTitle = proxyUnavailable
+  const tunnelState = tunnelIntentionallyOff
+    ? "ready"
+    : proxyUnavailable || networkPathQuiescing ? "warning" : tunnelReady ? (tunnelTaskEnabled ? "ready" : "warning") : (tunnel.running || tunnelSupervisor.running ? "warning" : "stopped");
+  const tunnelTitle = tunnelIntentionallyOff
+    ? "公网隧道已按需关闭"
+    : proxyUnavailable
     ? "公网隧道正在等待显式代理"
     : networkPathQuiescing
       ? "网络路径变化，公网隧道短暂静默"
       : tunnelReady ? (tunnelTaskEnabled ? "公网隧道已就绪" : "隧道已运行，计划任务未启用") : (tunnel.running || tunnelSupervisor.running ? "公网隧道正在恢复" : "公网隧道未运行");
-  const httpReady = localMetadata.status === 200 && localMcp.status === 401 && publicMetadata.status === 200 && publicMcp.status === 401;
-  const httpState = httpReady ? "ready" : localProbeUncertain ? "warning" : (localMetadata.status === 200 ? "warning" : "error");
-  const httpTitle = httpReady
-    ? "HTTP / OAuth 验证正常"
-    : networkPathQuiescing ? "本地正常，公网检查暂缓" : localProbeUncertain ? "本地 HTTP 正在复核" : (localMetadata.status === 200 ? "本地正常，公网验证异常" : "本地 HTTP 验证异常");
+  const localHttpReady = localMetadata.status === 200 && localMcp.status === 401;
+  const cachedPublicVerified = publicMetadata.status === 200 && publicMcp.status === 401;
+  const httpState = localHttpReady ? (tunnelReady || tunnelIntentionallyOff || networkPathQuiescing ? "ready" : "warning") : localProbeUncertain ? "warning" : "error";
+  const httpTitle = localHttpReady
+    ? (cachedPublicVerified ? "HTTP / OAuth 正常，公网曾验证" : "本地 HTTP / OAuth 正常")
+    : localProbeUncertain ? "本地 HTTP 正在复核" : "本地 HTTP 验证异常";
   const networkMode = String(tunnelNetwork?.mode || "unknown");
   const networkSource = String(tunnelNetwork?.proxySource || "none");
   const publicPathBlocked = serviceReady && (tunnel.running || tunnelSupervisor.running) && !tunnelReady && !networkPathQuiescing;
   const routeStateAvailable = networkPath.defaultRouteCount > 0
     && !["unavailable", "unreadable"].includes(String(networkPath.source || ""));
-  const networkState = proxyUnavailable || networkPathQuiescing || publicPathBlocked || !tunnelNetwork ? "warning" : "ready";
-  const networkTitle = proxyUnavailable
+  const networkState = internetProxy.staleLoopback || proxyUnavailable || networkPathQuiescing || publicPathBlocked
+    ? "warning"
+    : tunnelIntentionallyOff || tunnelNetwork || routeStateAvailable ? "ready" : "warning";
+  const networkTitle = internetProxy.staleLoopback
+    ? "检测到失效的本地系统代理"
+    : proxyUnavailable
     ? "显式出站代理不可用"
     : networkPathQuiescing
       ? "检测到网络路径变化，正在等待稳定"
       : publicPathBlocked
         ? "公网隧道不可达，可能受当前网络策略限制"
-        : tunnelNetwork ? "网络路径自适应正常" : routeStateAvailable ? "网络路径已读取，等待隧道运行" : "正在读取网络路径状态";
+        : tunnelIntentionallyOff ? "网络隔离状态正常" : tunnelNetwork ? "网络路径自适应正常" : routeStateAvailable ? "网络路径已读取，等待隧道运行" : "正在读取网络路径状态";
   const routeDetail = networkPath.multipleDefaultRoutes
     ? `检测到 ${networkPath.defaultRouteCount} 条活动默认路由；按 Windows 当前选路运行，不按软件名称干预`
     : `活动默认路由=${networkPath.defaultRouteCount}`;
-  const networkDetail = proxyUnavailable
+  const networkDetail = internetProxy.staleLoopback
+    ? `Windows 系统代理仍指向 ${internetProxy.host}:${internetProxy.port}，但该端口没有监听；关闭代理程序后，依赖系统代理的登录页可能无法联网。可在“详细信息”中显式修复并保留回滚备份。`
+    : proxyUnavailable
     ? `ngrok 显式代理当前不可用；不会自动改走系统或 VPN 路径`
     : networkPathQuiescing
       ? `公网探测与 DevSpace 自有隧道已暂停，本地 MCP 保持运行；网络拓扑连续稳定 15 秒后恢复 · ${routeDetail}`
       : publicPathBlocked
         ? `当前 VPN、TUN、防火墙或企业网络策略可能阻止 ${provider}；请允许该服务，或为 ngrok 配置独立出站代理`
+        : tunnelIntentionallyOff
+          ? `公网隧道当前按需关闭；本地 MCP 独立运行，不产生 tunnel 公网连接 · ${routeDetail}`
         : !tunnelNetwork && routeStateAvailable
           ? `只读网络路径已就绪；启动公网隧道后将监测网卡、地址与路由变化并仅管理自有子进程 · ${routeDetail}`
           : `非侵入式自适应 · mode=${networkMode} · proxy=${networkSource} · ${routeDetail}`;
@@ -2556,14 +2839,18 @@ async function dashboardStatus() {
     tunnel: dashboardIndicator(
       tunnelState,
       tunnelTitle,
-      tunnelReady ? `${provider} · 公网 OAuth HTTP 200 · PID ${tunnel.pid ?? "-"}` : `${provider} · 公网 OAuth=${publicMetadata.status || 0} · 子进程=${tunnel.running ? "running" : "stopped"} · supervisor=${tunnelSupervisor.running ? tunnelSupervisor.pid : "stopped"}`,
+      tunnelIntentionallyOff
+        ? `${provider} · 已禁用自动启动 · 本地 MCP 不受影响`
+        : tunnelReady ? `${provider} · tunnel agent active · PID ${tunnel.pid ?? "-"}` : `${provider} · 子进程=${tunnel.running ? "running" : "stopped"} · supervisor=${tunnelSupervisor.running ? tunnelSupervisor.pid : "stopped"}`,
       { pid: tunnel.pid, supervisorPid: tunnelSupervisor.pid, taskInstalled: tunnelTaskInstalled, taskEnabled: tunnelTaskEnabled, provider },
     ),
     http: dashboardIndicator(
       httpState,
       httpTitle,
-      `本地 ${localMetadata.status}/${localMcp.status} · 公网 ${publicMetadata.status}/${publicMcp.status} · ${publicMetadata.transport || "unknown"}${publicResults.cached ? ` · 缓存 ${Math.ceil(publicResults.ageMs / 1000)}s` : ""}`,
-      { localMetadata, localMcp, publicMetadata, publicMcp, publicVerification: { checkedAt: publicResults.checkedAt, cached: publicResults.cached, suppressed: publicResults.suppressed === true, ageMs: publicResults.ageMs } },
+      cachedPublicVerified
+        ? `本地 ${localMetadata.status}/${localMcp.status} · 最近主动公网验证 ${publicMetadata.status}/${publicMcp.status} · ${Math.ceil(publicResults.ageMs / 1000)}s 前`
+        : `本地 ${localMetadata.status}/${localMcp.status} · 主页不主动访问公网；需要时在“详细信息”执行公网验证`,
+      { localMetadata, localMcp, publicMetadata, publicMcp, publicVerification: { checkedAt: publicResults.checkedAt, cached: publicResults.cached, passive: true, ageMs: publicResults.ageMs } },
     ),
     files: dashboardIndicator(
       filesReady ? "ready" : "error",
@@ -2585,6 +2872,7 @@ async function dashboardStatus() {
         transition: tunnelNetwork?.transition || "unknown",
         reconnectCount: Number(tunnelNetwork?.reconnectCount || 0),
         networkPath,
+        internetProxy,
       },
     ),
   };
@@ -2603,7 +2891,11 @@ async function dashboardStatus() {
     overall: dashboardIndicator(
       overallState,
       overallState === "ready" ? "DevSpace 已就绪" : overallState === "warning" ? "DevSpace 可用，但存在需要关注的状态" : overallState === "stopped" ? "DevSpace 部分服务未运行" : "DevSpace 状态异常",
-      overallState === "ready" ? "本地服务、公网隧道、HTTP/OAuth 与核心文件均通过轻量检查。" : "打开“详细信息”查看验证、隧道、文件和日志。",
+      overallState === "ready"
+        ? (tunnelIntentionallyOff
+            ? "本地 MCP、HTTP/OAuth 与核心文件均正常；公网隧道按需关闭，不产生额外公网连接。"
+            : "本地 MCP、公网隧道、HTTP/OAuth 与核心文件均通过轻量检查。")
+        : "打开“详细信息”查看验证、隧道、文件和日志。",
     ),
     indicators,
   };
@@ -2839,13 +3131,27 @@ async function main() {
       writeOutput(installTasks() + "\n");
     } else if (command === "start") {
       writeOutput(`${await startServices()}\n`);
+    } else if (command === "start-local") {
+      writeOutput(`${await startLocalOnly()}\n`);
+    } else if (command === "start-tunnel") {
+      writeOutput(`${await startTunnelOnly()}\n`);
     } else if (command === "stop") {
       writeOutput(stopServices() + "\n");
+    } else if (command === "stop-local") {
+      writeOutput(stopLocalServiceOnly({ leaveDisabled: true }) + "\n");
+    } else if (command === "stop-tunnel") {
+      writeOutput(stopPublicTunnelOnly({ leaveDisabled: true }) + "\n");
     } else if (command === "shutdown") {
       writeOutput(shutdownServices() + "\n");
     } else if (command === "restart") {
       stopServices();
       writeOutput(`${await startServices()}\n`);
+    } else if (command === "restart-local") {
+      stopLocalServiceOnly();
+      writeOutput(`${await startLocalOnly()}\n`);
+    } else if (command === "restart-tunnel") {
+      stopPublicTunnelOnly();
+      writeOutput(`${await startTunnelOnly()}\n`);
     } else if (command === "enable") {
       writeOutput(`${await enableServices()}\n`);
     } else if (command === "disable") {
@@ -2856,6 +3162,12 @@ async function main() {
       writeOutput(`${await statusText()}\n`);
     } else if (command === "dashboard-status") {
       stdoutJson(await dashboardStatus());
+    } else if (command === "network-proxy-state") {
+      stdoutJson({ ...windowsInternetProxyState(), repairBackupExists: fs.existsSync(PROXY_REPAIR_BACKUP_FILE), repairBackupFile: PROXY_REPAIR_BACKUP_FILE });
+    } else if (command === "repair-stale-proxy") {
+      stdoutJson(repairStaleLoopbackSystemProxy());
+    } else if (command === "restore-proxy-repair") {
+      stdoutJson(restoreSystemProxyRepair());
     } else if (command === "test") {
       await testEndpoints();
     } else if (command === "diagnose") {
@@ -2917,7 +3229,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop shutdown restart enable disable uninstall-tasks status dashboard-status test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);

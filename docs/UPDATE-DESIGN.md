@@ -1,4 +1,4 @@
-# Application and network lifecycle design through 1.1.28
+# Application and network lifecycle design through 1.1.29
 
 ## Goal
 
@@ -11,7 +11,40 @@ The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
 
+## Implemented in 1.1.29: strict lifecycle separation and non-interference
+
+1. Local MCP and the public tunnel are separate lifecycle units. Installing or
+   starting the local service does not start the tunnel, does not require a
+   tunnel runtime/token, and does not stop/restart an already running tunnel.
+   A freshly installed tunnel task is disabled until explicitly started, while
+   task repair/update preserves an existing enabled/disabled tunnel choice.
+2. The three-second homepage refresh is public-network passive. It probes only
+   loopback endpoints and reads local task/PID/agent state. Public OAuth/HTTP
+   requests are reserved for explicit user diagnostics; the homepage may only
+   display a cached result from such a diagnostic.
+3. Interface/address/route topology remains observable, but topology changes no
+   longer terminate or reconnect the public tunnel. The provider keeps its own
+   connection across VPN/TUN/Wi-Fi route changes; the supervisor intervenes
+   only when its own child exits or its own explicit proxy configuration
+   changes/becomes unavailable.
+4. The tunnel child removes inherited HTTP/HTTPS/ALL proxy environment
+   variables. Only a user-explicit DevSpace tunnel proxy is injected. WinINET
+   system proxy switches therefore do not silently become tunnel dependencies;
+   transparent TUN routing is still naturally selected by Windows.
+5. The dashboard can read WinINET proxy state and warn when an enabled loopback
+   proxy points to a port that is no longer listening. Repair is never automatic:
+   a separate confirmed action stores a rollback backup and disables only that
+   stale proxy setting.
+6. Normal runtime paths remain vendor-neutral and do not mutate proxy settings,
+   WinHTTP, DNS, routes, interface metrics, VPN/TUN adapters, or third-party
+   processes. An enterprise policy that intentionally blocks a tunnel provider
+   still requires allowlisting or a truly independent user-supplied egress.
+
 ## Implemented in 1.1.28: non-blocking status and a topology quiet window
+
+> The active topology quiet/reconnect behavior in this historical section is
+> superseded by the 1.1.29 non-interference model above. Public probes are also
+> no longer part of the automatic homepage refresh.
 
 1. Loopback MCP probes use a direct local HTTP request and never depend on an
    ambient proxy. Public curl probes run as asynchronous child processes, so a
@@ -63,7 +96,7 @@ the native UI is still running.
 ## Implemented in 1.1.26: vendor-neutral network-path adaptation
 
 > The keep-running debounce behavior in this historical section is superseded
-> by the 1.1.28 topology quiet window above.
+> by the 1.1.29 strict non-interference model above.
 
 1. The 1.1.25 full-session pause keyed to named client processes is removed.
    Tunnel lifecycle decisions no longer identify a VPN/TUN vendor, process,
