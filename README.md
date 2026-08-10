@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.26**
+当前稳定版本：**1.1.27**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.26.zip
+DevSpacePortable-Windows-x64-1.1.27.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.26 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.25 升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.27 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.26 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -297,6 +297,15 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.27 主要变化
+
+- 修复 `Update.exe` 在版本文件已经替换后，直接调用 `manager start` 并假设两个计划任务仍存在的问题。更新器现在会使用目标版本管理器重新生成属于当前 Portable 根目录的 MCP 与 tunnel 任务，再启动服务。
+- 如果新版本启动失败，事务会停止半升级运行时、恢复全部旧程序路径，并使用恢复后的旧版本管理器再次重建任务、恢复服务；结果文件分别记录 `rolledBack`、`servicesRecovered`、`rollbackErrors` 和保留备份路径，不再掩盖不完整回滚。
+- 更新成功但控制中心未能自动打开时，已完成的程序与服务更新会保留，并在结果中报告 `uiStartError`，不会为单纯的 UI 启动问题回退整个版本。
+- PowerShell 后端会输出结构化错误，并把真实原因保留为 stderr 最后一行，使 1.1.24–1.1.26 的旧 `Update.exe` 在升级到 1.1.27 失败时也不会只显示 `FullyQualifiedErrorId`。1.1.27 更新窗口还会优先读取结构化结果和进度文件。
+- 新增真实事务回归：在隔离 Portable 中从“配置存在但计划任务完全缺失”开始执行 Apply，并强制模拟一次新版本启动失败，验证成功修复和失败回滚两条路径。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
 
 ## 1.1.26 主要变化
 
@@ -447,7 +456,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.26
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.27
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -475,7 +484,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.26 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.27 -BypassProxy
 ```
 
 ## 在线更新

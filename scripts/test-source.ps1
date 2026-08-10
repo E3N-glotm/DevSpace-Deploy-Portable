@@ -52,6 +52,7 @@ $Tests = @(
     "setup/test-standalone-updater.mjs",
     "setup/test-selected-file-diff.mjs",
     "setup/test-online-updater-contract.mjs",
+    "setup/test-updater-apply-recovery.mjs",
     "setup/test-update-launch-ack.mjs",
     "setup/test-dashboard-live-status.mjs",
     "setup/test-strict-stop.mjs",

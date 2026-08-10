@@ -1,4 +1,4 @@
-# Application and network lifecycle design through 1.1.26
+# Application and network lifecycle design through 1.1.27
 
 ## Goal
 
@@ -10,6 +10,26 @@ rollback safety.
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.27: transactional task reconciliation and recovery
+
+1. A configured Portable installation no longer assumes that its two Task
+   Scheduler definitions survived until Apply. After target files and the
+   target version manifest are verified, the target manager recreates the MCP
+   and tunnel tasks before starting services.
+2. Task definitions are treated as reproducible deployment state. User data,
+   OAuth state, logs, reports, plugins, and sessions remain persistent and are
+   never replaced by task reconciliation.
+3. If target service startup fails, Apply stops the partial runtime, restores
+   every moved old path, then uses the restored manager to recreate the old
+   task definitions and restart the old services.
+4. Rollback results distinguish file restoration from service restoration and
+   retain the backup when recovery is incomplete. A failure to reopen the UI
+   does not roll back an otherwise completed program and service transaction.
+5. The PowerShell backend emits a one-line JSON failure object and a concise
+   final stderr line. This preserves the real failure for old Update.exe
+   controllers, while 1.1.27 prefers structured output and the progress file
+   over PowerShell metadata such as `FullyQualifiedErrorId`.
 
 ## Implemented in 1.1.26: vendor-neutral network-path adaptation
 

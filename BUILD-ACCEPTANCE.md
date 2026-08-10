@@ -429,3 +429,13 @@
 - [x] 公网首次就绪超时时保留本地 MCP 和 tunnel supervisor 运行，网络恢复后可自行恢复公网访问；
 - [x] 完整源码回归、原生 UI 编译、Release 构建、更新清单校验和多尺寸 UI 验收全部通过；
 - [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。
+
+## 1.1.27 更新事务任务恢复与错误诊断
+
+- [x] 现场 `update-progress.json` 已确认失败发生在目标文件替换后的服务启动阶段，原始错误为两个 Portable 计划任务均不存在；任务文件创建时间确认它们是在失败后才重新部署；
+- [x] 配置完整时，Apply 在目标版本校验后固定执行 `install-tasks` 再执行 `start`，能够修复缺失、被清理或定义过期的 Portable 任务；
+- [x] 启动失败后先恢复旧文件，再使用恢复后的管理器重建任务并恢复旧服务；结果分别记录文件回滚、服务恢复、回滚错误和备份位置；
+- [x] 控制中心自动启动失败与程序事务解耦，不会撤销已经验证并成功启动服务的更新；
+- [x] PowerShell 输出结构化错误及兼容旧 `Update.exe` 的最终简明错误行；新版窗口过滤 `FullyQualifiedErrorId` 等 PowerShell 元数据并优先展示真实原因；
+- [x] 隔离 Apply 回归覆盖缺任务成功更新和强制启动失败回滚，确认旧文件、任务、服务及诊断信息全部恢复；
+- [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。

@@ -21,6 +21,13 @@ namespace DevSpacePortableUpdater
             string selfTest;
             if (options.TryGetValue("self-test", out selfTest))
             {
+                string parsedBackendError = UpdateForm.LastUsefulLine(
+                    "C:\\Portable\\portable-updater.ps1 : scheduled tasks are missing\r\n" +
+                    "所在位置 C:\\Portable\\portable-updater.ps1:10 字符: 5\r\n" +
+                    "+     Write-Error $_\r\n" +
+                    "+     ~~~~~~~~~~~~~~\r\n" +
+                    "    + CategoryInfo : NotSpecified\r\n" +
+                    "    + FullyQualifiedErrorId : WriteErrorException");
                 var report = new Dictionary<string, object>
                 {
                     ["standaloneUpdater"] = true,
@@ -30,6 +37,10 @@ namespace DevSpacePortableUpdater
                     ["progressPolling"] = true,
                     ["validatedUiTermination"] = true,
                     ["transactionalPowerShellBackend"] = true,
+                    ["structuredBackendErrors"] = true,
+                    ["taskRepairBeforeRestart"] = true,
+                    ["rollbackTaskRepair"] = true,
+                    ["backendErrorParser"] = parsedBackendError == "scheduled tasks are missing",
                 };
                 File.WriteAllText(selfTest, new JavaScriptSerializer().Serialize(report), new UTF8Encoding(false));
                 return 0;
@@ -511,9 +522,11 @@ namespace DevSpacePortableUpdater
                         throw new TimeoutException("更新后端执行超时。");
                     }
                     Task.WaitAll(stdout, stderr);
-                    string output = (stdout.Result + "\n" + stderr.Result).Trim();
+                    string standardOutput = (stdout.Result ?? "").Trim();
+                    string standardError = (stderr.Result ?? "").Trim();
+                    string output = (standardOutput + "\n" + standardError).Trim();
                     if (process.ExitCode != 0)
-                        throw new InvalidOperationException("更新后端失败 (" + process.ExitCode + ")：" + LastUsefulLine(output));
+                        throw new InvalidOperationException("更新后端失败 (" + process.ExitCode + ")：" + BackendFailureMessage(standardOutput, standardError));
                     return new BackendResult { ExitCode = process.ExitCode, Output = output };
                 }
             });
@@ -594,16 +607,50 @@ namespace DevSpacePortableUpdater
 
         private Dictionary<string, object> ParseLastJsonObject(string output)
         {
+            Dictionary<string, object> value = TryParseLastJsonObject(output);
+            if (value != null) return value;
+            throw new InvalidOperationException("更新后端没有返回有效 JSON：" + LastUsefulLine(output));
+        }
+
+        private Dictionary<string, object> TryParseLastJsonObject(string output)
+        {
             string[] lines = (output ?? "").Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
             for (int i = lines.Length - 1; i >= 0; i--)
             {
                 string line = lines[i].Trim();
                 if (!line.StartsWith("{", StringComparison.Ordinal) || !line.EndsWith("}", StringComparison.Ordinal)) continue;
-                object parsed = _json.DeserializeObject(line);
-                Dictionary<string, object> value = parsed as Dictionary<string, object>;
-                if (value != null) return value;
+                try
+                {
+                    object parsed = _json.DeserializeObject(line);
+                    Dictionary<string, object> value = parsed as Dictionary<string, object>;
+                    if (value != null) return value;
+                }
+                catch { }
             }
-            throw new InvalidOperationException("更新后端没有返回有效 JSON：" + LastUsefulLine(output));
+            return null;
+        }
+
+        private string BackendFailureMessage(string standardOutput, string standardError)
+        {
+            Dictionary<string, object> structured = TryParseLastJsonObject(standardOutput);
+            string message = GetString(structured, "error", "").Trim();
+            if (!string.IsNullOrWhiteSpace(message)) return message;
+
+            try
+            {
+                string file = Path.Combine(_root, "data", "state", "update-progress.json");
+                if (File.Exists(file))
+                {
+                    object parsed = _json.DeserializeObject(File.ReadAllText(file, Encoding.UTF8));
+                    Dictionary<string, object> progress = parsed as Dictionary<string, object>;
+                    string phase = GetString(progress, "phase", "");
+                    message = GetString(progress, "message", "").Trim();
+                    if ((phase == "error" || phase == "rollback") && !string.IsNullOrWhiteSpace(message)) return message;
+                }
+            }
+            catch { }
+
+            return LastUsefulLine((standardError ?? "") + Environment.NewLine + (standardOutput ?? ""));
         }
 
         private static string ResolveRoot(Dictionary<string, string> options)
@@ -689,10 +736,27 @@ namespace DevSpacePortableUpdater
             try { return Convert.ToDouble(raw); } catch { return fallback; }
         }
 
-        private static string LastUsefulLine(string text)
+        internal static string LastUsefulLine(string text)
         {
             string[] lines = (text ?? "").Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-            return lines.Length == 0 ? "无详细错误信息。" : lines[lines.Length - 1].Trim();
+            for (int i = lines.Length - 1; i >= 0; i--)
+            {
+                string line = lines[i].Trim();
+                if (line.Length == 0
+                    || line.StartsWith("At ", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("+ CategoryInfo", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("+ FullyQualifiedErrorId", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("+ PSComputerName", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("+", StringComparison.Ordinal)
+                    || line.StartsWith("所在位置 ", StringComparison.Ordinal)) continue;
+                const string concisePrefix = "DevSpace update error:";
+                if (line.StartsWith(concisePrefix, StringComparison.OrdinalIgnoreCase))
+                    return line.Substring(concisePrefix.Length).Trim();
+                int scriptPrefix = line.IndexOf(".ps1 :", StringComparison.OrdinalIgnoreCase);
+                if (scriptPrefix >= 0) line = line.Substring(scriptPrefix + 6).Trim();
+                if (line.Length > 0) return line;
+            }
+            return "无详细错误信息。请查看 logs\\update.log。";
         }
 
         private static string FormatBytes(long value)
