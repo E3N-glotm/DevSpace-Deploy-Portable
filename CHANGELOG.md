@@ -2,6 +2,16 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.25
+
+- EasyConnect/Sangfor 会话存在期间持续隔离 DevSpace 自有公网 tunnel，本地 MCP 保持运行；不再依赖固定时长的登录稳定等待；
+- 首页把预期的 VPN 隔离显示为警告而不是故障，并加入连续失败复核，修复日志正确但首页偶发保持红色的问题；
+- 只读检测 EasyConnect 与第三方 TUN 默认路由竞争，不修改第三方进程、配置、系统代理、注册表、网卡或路由；
+- 删除首页“最近操作”，文件差异和 Memories 完整内容改为可缩放、可最大化的独立窗口，文件差异窗口保留回退与恢复；日志页加入可拖动分隔条；
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.25.md)
+
 ## 1.1.24
 
 - 新增独立 `Update.exe`，主控制中心“检查更新”只负责启动更新程序，不再在主 UI 进程中执行 Check/Stage/Apply；
@@ -142,4 +152,3 @@
 ## 更早版本
 
 从 1.0.1 到 1.1.10 的完整记录均保存在 [`docs/releases/`](docs/releases/)。
-

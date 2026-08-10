@@ -17,20 +17,28 @@ const pidFile = process.env.TUNNEL_PID_FILE || path.join(runDir, "tunnel.pid");
 const supervisorPidFile = path.join(runDir, "tunnel-supervisor.pid");
 const networkStateFile = path.join(runDir, "tunnel-network.json");
 const stopFile = path.join(runDir, "tunnel.stop");
+const powershellExe = path.join(
+  process.env.SystemRoot || "C:\\Windows",
+  "System32",
+  "WindowsPowerShell",
+  "v1.0",
+  "powershell.exe",
+);
 const requestedExecutable = path.resolve(String(process.argv[2] || ""));
 const allowedExecutables = new Set([
   path.join(root, "runtime", "ngrok", "ngrok.exe").toLowerCase(),
   path.join(root, "runtime", "cloudflared", "cloudflared.exe").toLowerCase(),
 ]);
 const isNetworkSelfTest = process.argv.includes("--network-self-test");
-const STOP_POLL_MS = 750;
-const RESTART_MIN_MS = 1_500;
-const RESTART_MAX_MS = 15_000;
+const requestedProvider = isNetworkSelfTest
+  ? (String(process.env.DEVSPACE_TEST_TUNNEL_PROVIDER || "ngrok").toLowerCase() === "cloudflare" ? "cloudflare" : "ngrok")
+  : requestedExecutable.toLowerCase().endsWith("cloudflared.exe") ? "cloudflare" : "ngrok";
+const NETWORK_POLL_MS = 2_000;
 let child = null;
 let stopping = false;
 let restartTimer = null;
-let stopPollTimer = null;
-let restartDelayMs = RESTART_MIN_MS;
+let pollTimer = null;
+let lastSignature = "";
 
 function readJson(file, fallback = {}) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
@@ -127,9 +135,76 @@ function compatibilityEnabled() {
   return deployment.tunnelNetworkCompatibility !== false;
 }
 
+function sangforState() {
+  const testValue = String(process.env.DEVSPACE_TEST_SANGFOR_STATE || "").trim().toLowerCase();
+  if (["absent", "negotiating", "connected"].includes(testValue)) {
+    return {
+      clientActive: testValue !== "absent",
+      connected: testValue === "connected",
+      source: "test",
+    };
+  }
+  const taskOutput = commandOutput("tasklist.exe", ["/fo", "csv", "/nh"]);
+  const clientActive = /"(?:EasyConnect|SangforCSClient)\.exe"/i.test(taskOutput);
+  if (!clientActive) return { clientActive: false, connected: false, source: "process" };
+  const script = [
+    "$a=Get-CimInstance Win32_NetworkAdapter | Where-Object {$_.ServiceName -eq 'SangforVnic'} | Select-Object -First 1 NetEnabled,NetConnectionStatus",
+    "if($null -eq $a){'{\"present\":false}'}else{$a | Add-Member -NotePropertyName present -NotePropertyValue $true -PassThru | ConvertTo-Json -Compress}",
+  ].join(";");
+  const output = commandOutput(powershellExe, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+  ], 4_000).trim();
+  try {
+    const adapter = JSON.parse(output || "{}");
+    return {
+      clientActive: true,
+      connected: Boolean(adapter.present && adapter.NetEnabled && Number(adapter.NetConnectionStatus) === 2),
+      source: "sangfor-vnic",
+    };
+  } catch {
+    return { clientActive: true, connected: false, source: "sangfor-vnic-unreadable" };
+  }
+}
+
 function resolveNetworkState() {
   const compatibility = compatibilityEnabled();
-  const manualProxy = configuredNgrokProxy();
+  const manualProxy = requestedProvider === "ngrok" ? configuredNgrokProxy() : "";
+  const vpn = sangforState();
+  const vpnState = vpn.clientActive ? (vpn.connected ? "connected" : "negotiating") : "absent";
+
+  if (!compatibility) {
+    return {
+      compatibility,
+      paused: false,
+      mode: requestedProvider === "ngrok" ? (manualProxy ? "manual-proxy" : "direct") : "provider-managed",
+      proxyUrl: manualProxy,
+      proxySource: manualProxy ? "ngrok-config" : "none",
+      vpnState,
+      reason: "compatibility-disabled",
+    };
+  }
+  if (vpn.clientActive) {
+    return {
+      compatibility,
+      paused: true,
+      mode: "paused",
+      proxyUrl: "",
+      proxySource: "none",
+      vpnState,
+      reason: "sangfor-vpn-session-isolation",
+    };
+  }
+  if (requestedProvider !== "ngrok") {
+    return {
+      compatibility,
+      paused: false,
+      mode: "provider-managed",
+      proxyUrl: "",
+      proxySource: "none",
+      vpnState,
+      reason: "provider-managed-network",
+    };
+  }
   if (manualProxy) {
     return localProxyHealthy(manualProxy)
       ? {
@@ -138,7 +213,7 @@ function resolveNetworkState() {
           mode: "manual-proxy",
           proxyUrl: manualProxy,
           proxySource: "ngrok-config",
-          vpnState: "unmanaged",
+          vpnState,
           reason: "explicit-proxy",
         }
       : {
@@ -147,7 +222,7 @@ function resolveNetworkState() {
           mode: "paused",
           proxyUrl: manualProxy,
           proxySource: "ngrok-config",
-          vpnState: "unmanaged",
+          vpnState,
           reason: "explicit-local-proxy-unavailable",
       };
   }
@@ -157,8 +232,8 @@ function resolveNetworkState() {
     mode: "direct",
     proxyUrl: "",
     proxySource: "none",
-    vpnState: "unmanaged",
-    reason: compatibility ? "ambient-proxy-isolated-direct-or-transparent-tun" : "compatibility-disabled",
+    vpnState,
+    reason: "ambient-proxy-isolated-direct-or-transparent-tun",
   };
 }
 
@@ -181,7 +256,7 @@ function childEnvironment(network) {
 function writeNetworkState(network, extra = {}) {
   writeJson(networkStateFile, {
     formatVersion: 2,
-    provider: requestedExecutable.toLowerCase().endsWith("ngrok.exe") ? "ngrok" : "cloudflare",
+    provider: requestedProvider,
     supervisorPid: process.pid,
     childPid: child?.pid || null,
     policy: "non-invasive",
@@ -191,37 +266,18 @@ function writeNetworkState(network, extra = {}) {
   });
 }
 
-function terminateChild(reason = "supervisor-shutdown") {
+function terminateChild(reason = "network-transition") {
   if (!child?.pid) return;
-  const pid = child.pid;
+  const ownedChild = child;
+  const pid = ownedChild.pid;
   child = null;
-  childProcess.spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], {
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 10_000,
-  });
+  try { ownedChild.kill(); } catch {}
   removeOwnPidFile(pidFile, pid);
   process.stderr.write(`Tunnel child ${pid} stopped for ${reason}.\n`);
 }
 
-function launchChild() {
-  if (stopping || fs.existsSync(stopFile)) return;
-  const network = requestedExecutable.toLowerCase().endsWith("ngrok.exe")
-    ? resolveNetworkState()
-    : {
-        compatibility: compatibilityEnabled(),
-        paused: false,
-        mode: "provider-managed",
-        proxyUrl: "",
-        proxySource: "none",
-        vpnState: "not-applicable",
-        reason: "non-ngrok-provider",
-      };
-  if (network.paused) {
-    writeNetworkState(network, { status: "paused" });
-    scheduleRestart(Math.min(restartDelayMs, 5_000));
-    return;
-  }
+function launchChild(network) {
+  if (stopping || network.paused || fs.existsSync(stopFile)) return;
   child = childProcess.spawn(requestedExecutable, process.argv.slice(3), {
     cwd: root,
     stdio: "inherit",
@@ -235,47 +291,71 @@ function launchChild() {
     removeOwnPidFile(pidFile, ownChild.pid);
     if (child === ownChild) child = null;
     process.stderr.write(`${error.stack || error}\n`);
-    scheduleRestart();
+    scheduleReconcile();
   });
   ownChild.once("exit", (code, signal) => {
     removeOwnPidFile(pidFile, ownChild.pid);
     if (child === ownChild) child = null;
     if (!stopping) {
-      process.stderr.write(`Tunnel child exited code=${code ?? "none"} signal=${signal || "none"}; retrying with a freshly selected outbound path.\n`);
-      scheduleRestart();
+      process.stderr.write(`Tunnel child exited code=${code ?? "none"} signal=${signal || "none"}; re-evaluating network path.\n`);
+      scheduleReconcile();
     }
   });
-  restartDelayMs = RESTART_MIN_MS;
 }
 
-function scheduleRestart(delay = restartDelayMs) {
+function scheduleReconcile(delay = 1_500) {
   if (stopping || restartTimer) return;
   restartTimer = setTimeout(() => {
     restartTimer = null;
-    launchChild();
+    reconcile();
   }, delay);
-  restartDelayMs = Math.min(RESTART_MAX_MS, Math.max(RESTART_MIN_MS, restartDelayMs * 2));
 }
 
-function checkStopRequest() {
-  if (!fs.existsSync(stopFile)) return;
-  writeNetworkState({
-    compatibility: compatibilityEnabled(),
-    paused: true,
-    mode: "paused",
-    proxyUrl: "",
-    proxySource: "none",
-    vpnState: "unmanaged",
-    reason: "stop-request",
-  }, { status: "stopped" });
-  shutdown();
+function networkSignature(network) {
+  return JSON.stringify({
+    paused: Boolean(network.paused),
+    mode: network.mode,
+    proxyUrl: network.proxyUrl,
+    vpnState: network.vpnState,
+    reason: network.reason,
+  });
+}
+
+function reconcile() {
+  if (stopping) return;
+  if (fs.existsSync(stopFile)) {
+    terminateChild("stop-request");
+    writeNetworkState({
+      compatibility: compatibilityEnabled(),
+      paused: true,
+      mode: "paused",
+      proxyUrl: "",
+      proxySource: "none",
+      vpnState: "unknown",
+      reason: "stop-request",
+    }, { status: "stopped" });
+    shutdown();
+    return;
+  }
+  const network = resolveNetworkState();
+  const signature = networkSignature(network);
+  if (signature !== lastSignature) {
+    if (child) terminateChild(`network-state:${network.reason}`);
+    lastSignature = signature;
+  }
+  if (network.paused) {
+    writeNetworkState(network, { status: "paused" });
+    return;
+  }
+  if (!child) launchChild(network);
+  else writeNetworkState(network, { childPid: child.pid, status: "running" });
 }
 
 function shutdown() {
   if (stopping) return;
   stopping = true;
   if (restartTimer) clearTimeout(restartTimer);
-  if (stopPollTimer) clearInterval(stopPollTimer);
+  if (pollTimer) clearInterval(pollTimer);
   terminateChild("supervisor-shutdown");
   removeOwnPidFile(supervisorPidFile, process.pid);
   process.exitCode = 0;
@@ -291,8 +371,8 @@ if (!fs.existsSync(requestedExecutable)) throw new Error(`Tunnel executable is m
 
 fs.mkdirSync(runDir, { recursive: true });
 writePid(supervisorPidFile, process.pid);
-launchChild();
-stopPollTimer = setInterval(checkStopRequest, STOP_POLL_MS);
+reconcile();
+pollTimer = setInterval(reconcile, NETWORK_POLL_MS);
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

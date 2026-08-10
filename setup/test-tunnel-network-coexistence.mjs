@@ -42,6 +42,7 @@ function resolveNetwork(overrides = {}) {
     http_proxy: "",
     https_proxy: "",
     all_proxy: "",
+    DEVSPACE_TEST_SANGFOR_STATE: "absent",
     ...overrides,
   };
   const result = spawnSync(NODE, [LAUNCHER, "--network-self-test"], {
@@ -67,7 +68,7 @@ try {
   assert.equal(isolatedFromAmbientProxy.mode, "direct");
   assert.equal(isolatedFromAmbientProxy.proxyUrl, "");
   assert.equal(isolatedFromAmbientProxy.reason, "ambient-proxy-isolated-direct-or-transparent-tun");
-  assert.equal(isolatedFromAmbientProxy.vpnState, "unmanaged");
+  assert.equal(isolatedFromAmbientProxy.vpnState, "absent");
 
   writeFileSync(join(configDir, "ngrok.yml"), 'version: "3"\nagent:\n  authtoken: "test-token-value"\n  proxy_url: "http://127.0.0.1:10809"\n');
   const explicitProxy = resolveNetwork({ DEVSPACE_TEST_PROXY_HEALTHY: "1" });
@@ -81,13 +82,42 @@ try {
   assert.equal(tun.paused, false);
   assert.equal(tun.mode, "direct");
   assert.equal(tun.reason, "ambient-proxy-isolated-direct-or-transparent-tun");
-  assert.equal(tun.vpnState, "unmanaged");
+  assert.equal(tun.vpnState, "absent");
+
+  const negotiating = resolveNetwork({ DEVSPACE_TEST_SANGFOR_STATE: "negotiating" });
+  assert.equal(negotiating.paused, true);
+  assert.equal(negotiating.mode, "paused");
+  assert.equal(negotiating.vpnState, "negotiating");
+  assert.equal(negotiating.reason, "sangfor-vpn-session-isolation");
+
+  const connected = resolveNetwork({ DEVSPACE_TEST_SANGFOR_STATE: "connected" });
+  assert.equal(connected.paused, true);
+  assert.equal(connected.vpnState, "connected");
+  assert.equal(connected.reason, "sangfor-vpn-session-isolation");
+
+  const cloudflareNormal = resolveNetwork({ DEVSPACE_TEST_TUNNEL_PROVIDER: "cloudflare" });
+  assert.equal(cloudflareNormal.paused, false);
+  assert.equal(cloudflareNormal.mode, "provider-managed");
+  const cloudflareWithSangfor = resolveNetwork({
+    DEVSPACE_TEST_TUNNEL_PROVIDER: "cloudflare",
+    DEVSPACE_TEST_SANGFOR_STATE: "connected",
+  });
+  assert.equal(cloudflareWithSangfor.paused, true);
+  assert.equal(cloudflareWithSangfor.reason, "sangfor-vpn-session-isolation");
 
   const launcherSource = await import("node:fs/promises").then(({ readFile }) => readFile(LAUNCHER, "utf8"));
-  assert.doesNotMatch(launcherSource, /EasyConnect|SangforCSClient|SangforVnic|Win32_NetworkAdapter/i,
-    "the tunnel supervisor must not inspect or control third-party VPN clients or adapters");
-  assert.doesNotMatch(launcherSource, /setInterval\(reconcile|network-state:sangfor/i,
-    "the tunnel supervisor must not restart a healthy tunnel on VPN state transitions");
+  assert.match(launcherSource, /EasyConnect\|SangforCSClient/,
+    "the tunnel supervisor must recognize active Sangfor clients");
+  assert.match(launcherSource, /ServiceName -eq 'SangforVnic'/,
+    "the tunnel supervisor must read the Sangfor VNIC state without mutating it");
+  assert.match(launcherSource, /if \(child\) terminateChild\(`network-state:\$\{network\.reason\}`\)/,
+    "network transitions may stop only the child object spawned by this supervisor");
+  assert.doesNotMatch(launcherSource, /taskkill\.exe/i,
+    "the tunnel supervisor must terminate through its owned ChildProcess handle, not an unverified PID");
+  assert.match(launcherSource, /reason: "stop-request",[\s\S]*?shutdown\(\);/,
+    "an explicit stop request must also end the tunnel supervisor");
+  assert.doesNotMatch(launcherSource, /taskkill\.exe[^\n]*(EasyConnect|Sangfor)|Stop-Process[^\n]*(EasyConnect|Sangfor)/i,
+    "the tunnel supervisor must never terminate a third-party VPN process");
 
   const registryAfter = registrySnapshot();
   assert.equal(registryAfter, registryBefore, "tunnel self-test modified WinINET proxy settings");
@@ -96,8 +126,10 @@ try {
     ambientSystemProxyIsolatedFromNgrok: true,
     explicitNgrokProxyStillSupported: true,
     transparentTunUsesDirectPath: true,
-    thirdPartyVpnInspection: false,
-    healthyTunnelNetworkChurn: false,
+    sangforNegotiationPause: true,
+    fullSangforSessionIsolation: true,
+    allPublicTunnelProvidersIsolated: true,
+    thirdPartyVpnMutation: false,
     registryMutation: false,
   }));
 } finally {

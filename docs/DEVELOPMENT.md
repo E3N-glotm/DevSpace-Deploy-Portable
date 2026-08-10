@@ -27,7 +27,7 @@ To build a complete Release, restore the pinned runtime from a previous
 Release first:
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.24
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.25
 ```
 
 ## Core development loop
@@ -72,4 +72,3 @@ DEVSPACE_PORTABLE_RUN_DIR
 
 Automated tests already create temporary directories and must leave them
 clean after completion.
-

@@ -407,3 +407,14 @@
 - 新增 `setup/test-tunnel-network-coexistence.mjs`，覆盖本地代理跟随、Sangfor 协商暂停、稳定恢复，并断言测试前后 WinINET 注册表查询结果完全一致。
 - `tunnel.stop` 用于防止显式 stop/shutdown 与 supervisor 自动重启发生竞争；状态输出包含 network mode、VPN state、reason、proxy source 和 supervisor PID。
 - Portable Protocol 保持 1.5，现有 OAuth、MCP Schema 和增量更新格式不变。
+
+## 1.1.25 EasyConnect 全会话隔离、状态收敛与可调整审阅窗口
+
+- [x] EasyConnect/Sangfor 客户端会话存在期间，supervisor 持续暂停 DevSpace 自有公网 tunnel；本地 MCP 服务不停止，也不再使用固定恢复等待时间；
+- [x] tunnel 只通过 supervisor 持有的 `ChildProcess` 句柄结束，不按裸 PID 调用 `taskkill`；第三方 VPN/TUN 进程、注册表、代理、网卡和路由保持只读；
+- [x] 首页把预期隔离显示为警告并跳过公网探测；普通错误连续两次确认后才转红，整轮刷新失败不保留陈旧红色；“最近操作”已移除；
+- [x] 只读诊断能够提示 EasyConnect 与第三方 TUN IPv4 默认路由竞争，并明确 DevSpace 未修改该外部状态；
+- [x] 文件差异与 Memories 完整内容使用可缩放、可最大化的独立窗口；差异窗口包含回退与恢复，日志页和 Memories 双栏支持拖动调整；
+- [x] 125% DPI 下以 1460×940 和最小 1180×780 检查主页、会话列表及 Memories 页面，未发现主窗口溢出；Memories 搜索/刷新和编辑滚动在最小尺寸仍可用；
+- [x] 完整源码与 Portable 回归全部通过；生产依赖审计曾完成并报告 0 漏洞，后续重复审计遇到 npm registry `ECONNRESET`，未改变锁文件或依赖树；
+- [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。

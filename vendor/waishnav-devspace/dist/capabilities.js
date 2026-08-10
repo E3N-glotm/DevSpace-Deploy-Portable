@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.24";
+export const DEVSPACE_SERVER_VERSION = "1.1.25";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -93,6 +93,10 @@ const FEATURE_CATALOG = [
     { id: "standalone-native-update-controller", maturity: "stable", since: "1.1.24" },
     { id: "incremental-full-file-drift-tolerance", maturity: "stable", since: "1.1.24" },
     { id: "temporary-out-of-tree-update-apply", maturity: "stable", since: "1.1.24" },
+    { id: "sangfor-full-session-tunnel-isolation", maturity: "stable", since: "1.1.25" },
+    { id: "third-party-tun-readonly-diagnosis", maturity: "stable", since: "1.1.25" },
+    { id: "native-ui-dashboard-failure-debounce", maturity: "stable", since: "1.1.25" },
+    { id: "native-ui-resizable-review-dialogs", maturity: "stable", since: "1.1.25" },
 ];
 
 export function buildCapabilities(config, pluginManager) {
