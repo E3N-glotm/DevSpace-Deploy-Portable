@@ -30,6 +30,16 @@ assert.match(source, /=== Update ===/);
 
 const result = spawnSync(NODE, [MANAGER, "dashboard-status"], {
   cwd: ROOT,
+  env: {
+    ...process.env,
+    DEVSPACE_TEST_NETWORK_CONFLICT: JSON.stringify({
+      sangforActive: true,
+      sangforConnected: true,
+      competingTunDefault: true,
+      tunInterfaces: ["singbox_tun"],
+      source: "test",
+    }),
+  },
   encoding: "utf8",
   windowsHide: true,
   timeout: 30_000,
@@ -43,6 +53,11 @@ for (const key of ["service", "tunnel", "http", "files", "network"]) {
   assert.equal(typeof value.indicators[key].title, "string");
   assert.equal(typeof value.indicators[key].detail, "string");
 }
+assert.equal(value.indicators.network.state, "warning");
+assert.match(value.indicators.network.title, /EasyConnect.*TUN/);
+assert.equal(value.indicators.network.coexistence.competingTunDefault, true);
+assert.match(source, /连续两次确认后才会标记为异常/);
+assert.doesNotMatch(dashboard, /NewGroup\("最近操作"\)/);
 
 console.log(JSON.stringify({
   automaticStatusIndicators: true,
@@ -51,4 +66,7 @@ console.log(JSON.stringify({
   httpTunnelFileChecksPreserved: true,
   logDetailsPreserved: true,
   structuredDashboardStatus: true,
+  transientFailureDebounce: true,
+  externalTunConflictVisible: true,
+  recentOperationsRemoved: true,
 }));

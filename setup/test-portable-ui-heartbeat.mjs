@@ -46,7 +46,8 @@ try {
     "启动服务", "重启服务", "停止全部并退出", "停止并禁用",
     "恢复并启动", "详细信息", "检查更新", "查看本轮修改",
     "全部折叠", "全部展开",
-    "← 返回会话", "回退此次修改", "新建 Memory", "保存 Memory", "删除所选",
+    "← 返回会话", "打开差异窗口", "回退此次修改", "打开完整内容窗口",
+    "新建 Memory", "保存 Memory", "删除所选",
   ];
   for (const button of requiredButtons) {
     assert.ok(report.uiButtons.includes(button), `native UI button is missing: ${button}`);

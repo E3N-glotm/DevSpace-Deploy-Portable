@@ -983,6 +983,137 @@ namespace DevSpacePortable.NativeUI
         }
     }
 
+    internal sealed class SessionDiffDialog : Form
+    {
+        private readonly ModernDiffViewer _viewer = new ModernDiffViewer();
+        private readonly Func<Task> _rollback;
+        private readonly Func<Task> _restore;
+        private readonly Label _activity = new Label();
+        private bool _busy;
+
+        public SessionDiffDialog(Func<Task> rollback, Func<Task> restore)
+        {
+            _rollback = rollback;
+            _restore = restore;
+            Text = "文件差异";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = true;
+            MinimizeBox = true;
+            MinimumSize = new Size(900, 600);
+            Size = new Size(1180, 780);
+            BackColor = UiPalette.Background;
+            Font = UiTypography.Ui(9F);
+
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                Padding = new Padding(12),
+                BackColor = UiPalette.Background,
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            FlowLayoutPanel actions = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                WrapContents = true,
+                Padding = new Padding(2, 2, 2, 10),
+                BackColor = Color.Transparent,
+            };
+            actions.Controls.Add(ActionButton("回退此次修改", _rollback, true));
+            actions.Controls.Add(ActionButton("恢复回退前快照", _restore, false));
+            _activity.AutoSize = true;
+            _activity.ForeColor = UiPalette.TextMuted;
+            _activity.Padding = new Padding(12, 10, 0, 0);
+            _activity.Text = "可自由调整窗口大小；仅显示主窗口当前选择的文件。";
+            actions.Controls.Add(_activity);
+            layout.Controls.Add(actions, 0, 0);
+            SurfacePanel surface = new SurfacePanel { Dock = DockStyle.Fill, Dark = true, Padding = new Padding(1) };
+            surface.Controls.Add(_viewer);
+            layout.Controls.Add(surface, 0, 1);
+            Controls.Add(layout);
+            Shown += delegate { NativeWindowEffects.Apply(Handle); };
+        }
+
+        public void UpdateDiff(string patch, string title)
+        {
+            Text = string.IsNullOrWhiteSpace(title) ? "文件差异" : "文件差异 · " + title;
+            _viewer.Render(patch, title);
+        }
+
+        public void ShowEmpty(string message) { _viewer.ShowEmpty(message); }
+
+        private ModernButton ActionButton(string text, Func<Task> action, bool danger)
+        {
+            ModernButton button = new ModernButton { Text = text, AutoSize = true, Danger = danger };
+            button.Click += async delegate
+            {
+                if (_busy || action == null) return;
+                _busy = true;
+                button.Busy = true;
+                _activity.Text = "正在执行，请稍候……";
+                try
+                {
+                    await action();
+                    _activity.Text = "操作完成 · " + DateTime.Now.ToString("HH:mm:ss");
+                }
+                catch (Exception ex)
+                {
+                    _activity.Text = "操作失败";
+                    MessageBox.Show(this, ex.Message, "操作未完成", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                finally
+                {
+                    button.Busy = false;
+                    _busy = false;
+                }
+            };
+            return button;
+        }
+    }
+
+    internal sealed class ContentPreviewDialog : Form
+    {
+        private readonly RichTextBox _content = new RichTextBox();
+
+        public ContentPreviewDialog()
+        {
+            Text = "完整内容浏览";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = true;
+            MinimizeBox = true;
+            MinimumSize = new Size(760, 520);
+            Size = new Size(980, 720);
+            BackColor = UiPalette.Background;
+            Font = UiTypography.Ui(9F);
+            Padding = new Padding(14);
+            _content.Dock = DockStyle.Fill;
+            _content.ReadOnly = true;
+            _content.BackColor = UiPalette.Surface;
+            _content.ForeColor = UiPalette.Text;
+            _content.Font = UiTypography.Ui(10F);
+            _content.BorderStyle = BorderStyle.None;
+            _content.DetectUrls = false;
+            _content.WordWrap = true;
+            _content.ScrollBars = RichTextBoxScrollBars.Both;
+            Controls.Add(_content);
+            Shown += delegate { NativeWindowEffects.Apply(Handle); };
+        }
+
+        public void UpdateContent(string title, string content)
+        {
+            Text = string.IsNullOrWhiteSpace(title) ? "完整内容浏览" : "完整内容浏览 · " + title;
+            _content.Text = content ?? "";
+            _content.SelectionStart = 0;
+            _content.SelectionLength = 0;
+            _content.ScrollToCaret();
+        }
+    }
+
     internal static class Program
     {
         [STAThread]
@@ -1738,7 +1869,6 @@ namespace DevSpacePortable.NativeUI
         private readonly DataGridView _slotGrid = CreateGrid();
         private readonly DataGridView _sessionGrid = CreateGrid();
         private readonly DataGridView _fileGrid = CreateGrid();
-        private readonly ModernDiffViewer _diffViewer = new ModernDiffViewer();
         private readonly BorderlessTabControl _sessionPages = new BorderlessTabControl();
         private readonly DataGridView _memoryGrid = CreateGrid();
         private readonly System.Windows.Forms.Timer _heartbeatTimer = new System.Windows.Forms.Timer();
@@ -1768,7 +1898,9 @@ namespace DevSpacePortable.NativeUI
         private List<Dictionary<string, object>> _allSessions = new List<Dictionary<string, object>>();
         private List<Dictionary<string, object>> _allMemories = new List<Dictionary<string, object>>();
         private readonly HashSet<string> _expandedSessionGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, int> _dashboardProblemCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private string _fullSessionPatch = "";
+        private string _memoryPreviewText = "";
         private string _editingMemoryId = "";
         private string _closePreference = "";
         private readonly Dictionary<string, string> _providerUrls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1807,8 +1939,9 @@ namespace DevSpacePortable.NativeUI
         private TextBox _memoryTitle;
         private TextBox _memoryTags;
         private TextBox _memoryContent;
-        private RichTextBox _memoryPreview;
         private Label _memoryStatus;
+        private SessionDiffDialog _diffWindow;
+        private ContentPreviewDialog _memoryPreviewWindow;
 
         public MainForm(string root)
         {
@@ -2064,7 +2197,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.24 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.25 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2120,11 +2253,10 @@ namespace DevSpacePortable.NativeUI
         private TabPage BuildDashboardTab()
         {
             TabPage page = new TabPage("状态与部署");
-            TableLayoutPanel layout = NewTable(1, 4);
+            TableLayoutPanel layout = NewTable(1, 3);
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 116));
             FlowLayoutPanel buttons = NewButtonBar();
             buttons.Controls.Add(ActionButton("保存并自动部署", async delegate { await DeployAsync(); }, true));
             buttons.Controls.Add(ActionButton("启动服务", async delegate { await RunActionAsync("start"); }));
@@ -2176,9 +2308,6 @@ namespace DevSpacePortable.NativeUI
             indicators.Controls.Add(_computerUseStatus, 1, 2);
             layout.Controls.Add(indicators, 0, 2);
 
-            GroupBox recent = NewGroup("最近操作");
-            recent.Controls.Add(WrapSurface(_operationOutput, true));
-            layout.Controls.Add(recent, 0, 3);
             page.Controls.Add(layout);
             return page;
         }
@@ -2211,7 +2340,7 @@ namespace DevSpacePortable.NativeUI
             _toolMode = AddCombo(networkForm, "工具模式", new[] { "full", "codex", "minimal" });
             _ngrokToken = AddPassword(networkForm, "ngrok Authtoken（留空保留）");
             _ngrokProxy = AddText(networkForm, "ngrok 出站代理（可选）");
-            _tunnelNetworkCompatibility = AddCheck(networkForm, "非侵入式网络隔离（推荐）", "tunnelNetworkCompatibility");
+            _tunnelNetworkCompatibility = AddCheck(networkForm, "EasyConnect 会话隔离（推荐）", "tunnelNetworkCompatibility");
             _ngrokCas = AddCheck(networkForm, "使用 Windows 根证书", "ngrokConnectCasHost");
             _cloudflareToken = AddPassword(networkForm, "Cloudflare Tunnel Token（留空保留）");
             network.Controls.Add(networkForm);
@@ -2469,12 +2598,11 @@ namespace DevSpacePortable.NativeUI
             listPage.Controls.Add(listLayout);
 
             TabPage detailPage = new TabPage("会话详情") { BackColor = UiPalette.Background };
-            TableLayoutPanel details = NewTable(1, 4);
+            TableLayoutPanel details = NewTable(1, 3);
             details.AutoScroll = false;
             details.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
             details.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            details.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
-            details.RowStyles.Add(new RowStyle(SizeType.Percent, 62));
+            details.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             TableLayoutPanel detailHeader = new TableLayoutPanel
             {
@@ -2514,6 +2642,7 @@ namespace DevSpacePortable.NativeUI
 
             FlowLayoutPanel reviewActions = NewButtonBar();
             reviewActions.Controls.Add(ActionButton("刷新修改", async delegate { await LoadSelectedSessionDetailsAsync(); }, true));
+            reviewActions.Controls.Add(ActionButton("打开差异窗口", delegate { OpenSelectedFileDiff(); }, true));
             reviewActions.Controls.Add(ActionButton("回退此次修改", async delegate { await RollbackSelectedSessionAsync(); }, false, true));
             reviewActions.Controls.Add(ActionButton("恢复回退前快照", async delegate { await RestoreSafetySnapshotAsync(); }));
             reviewActions.Controls.Add(ActionButton("打开项目目录", delegate { OpenSelectedSessionFolder(); }));
@@ -2523,11 +2652,6 @@ namespace DevSpacePortable.NativeUI
             GroupBox filesGroup = NewGroup("本轮改动文件");
             filesGroup.Controls.Add(WrapSurface(_fileGrid));
             details.Controls.Add(filesGroup, 0, 2);
-            GroupBox diffGroup = NewGroup("文件差异 · 仅显示当前选择");
-            SurfacePanel diffSurface = new SurfacePanel { Dock = DockStyle.Fill, Dark = true, Padding = new Padding(1), Margin = new Padding(4) };
-            diffSurface.Controls.Add(_diffViewer);
-            diffGroup.Controls.Add(diffSurface);
-            details.Controls.Add(diffGroup, 0, 3);
             detailPage.Controls.Add(details);
 
             _sessionPages.TabPages.Add(listPage);
@@ -2544,9 +2668,9 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 Size = new Size(1080, 680),
-                SplitterDistance = 560,
-                Panel1MinSize = 500,
-                Panel2MinSize = 500,
+                SplitterDistance = 500,
+                Panel1MinSize = 380,
+                Panel2MinSize = 380,
                 SplitterWidth = 14,
                 BorderStyle = BorderStyle.None,
                 BackColor = UiPalette.Background,
@@ -2584,10 +2708,9 @@ namespace DevSpacePortable.NativeUI
             });
             list.Controls.Add(intro, 0, 0);
 
-            TableLayoutPanel scopeBar = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 4, BackColor = Color.Transparent, Padding = new Padding(3) };
+            TableLayoutPanel scopeBar = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, BackColor = Color.Transparent, Padding = new Padding(3) };
             scopeBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             scopeBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            scopeBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             scopeBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             _memoryViewWorkspace = new ModernComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
             StyleField(_memoryViewWorkspace);
@@ -2596,7 +2719,7 @@ namespace DevSpacePortable.NativeUI
             memoryWorkspaceHost.Dock = DockStyle.Fill;
             _showOtherWorkspaceMemories = new CheckBox
             {
-                Text = "显示其他工作区",
+                Text = "显示其他",
                 AutoSize = true,
                 Font = UiTypography.Ui(9F),
                 ForeColor = UiPalette.TextMuted,
@@ -2607,13 +2730,11 @@ namespace DevSpacePortable.NativeUI
             scopeBar.Controls.Add(ToolbarLabel("查看工作区"), 0, 0);
             scopeBar.Controls.Add(memoryWorkspaceHost, 1, 0);
             scopeBar.Controls.Add(_showOtherWorkspaceMemories, 2, 0);
-            scopeBar.Controls.Add(new Label { AutoSize = true, Text = "默认仅显示：当前工作区 + 全局", Font = UiTypography.Ui(8.5F), ForeColor = UiPalette.TextMuted, BackColor = Color.Transparent, Padding = new Padding(8, 9, 0, 0) }, 3, 0);
             list.Controls.Add(scopeBar, 0, 1);
 
-            TableLayoutPanel search = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, BackColor = Color.Transparent, Padding = new Padding(3) };
+            TableLayoutPanel search = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, BackColor = Color.Transparent, Padding = new Padding(3) };
             search.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             search.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            search.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             _memorySearch = new TextBox();
             StyleField(_memorySearch);
             _memorySearch.TextChanged += delegate { RenderMemoryList(); };
@@ -2621,11 +2742,11 @@ namespace DevSpacePortable.NativeUI
             memorySearchHost.Dock = DockStyle.Fill;
             search.Controls.Add(ToolbarLabel("搜索"), 0, 0);
             search.Controls.Add(memorySearchHost, 1, 0);
-            search.Controls.Add(ActionButton("刷新", async delegate { await LoadMemoriesAsync(); }, true), 2, 0);
             list.Controls.Add(search, 0, 2);
             ConfigureMemoryGrid();
             list.Controls.Add(WrapSurface(_memoryGrid), 0, 3);
             FlowLayoutPanel memoryListActions = NewButtonBar();
+            memoryListActions.Controls.Add(ActionButton("刷新", async delegate { await LoadMemoriesAsync(); }));
             memoryListActions.Controls.Add(ActionButton("新建 Memory", delegate { BeginNewMemory(); }, true));
             memoryListActions.Controls.Add(ActionButton("删除所选", async delegate { await DeleteSelectedMemoryAsync(); }, false, true));
             list.Controls.Add(memoryListActions, 0, 4);
@@ -2634,7 +2755,7 @@ namespace DevSpacePortable.NativeUI
             TableLayoutPanel editorLayout = NewTable(1, 4);
             editorLayout.AutoScroll = false;
             editorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
-            editorLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 170));
+            editorLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             editorLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             editorLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             _memoryStatus = new Label
@@ -2648,11 +2769,18 @@ namespace DevSpacePortable.NativeUI
             };
             editorLayout.Controls.Add(_memoryStatus, 0, 0);
 
-            GroupBox preview = NewGroup("完整内容预览");
-            _memoryPreview = CreateMemoryPreviewBox();
-            _memoryPreview.Text = "选择左侧 Memory 后，这里会显示完整内容、作用域、工作区与标签。";
-            preview.Controls.Add(_memoryPreview);
-            editorLayout.Controls.Add(preview, 0, 1);
+            FlowLayoutPanel previewActions = NewButtonBar();
+            previewActions.Controls.Add(ActionButton("打开完整内容窗口", delegate { OpenMemoryPreviewWindow(); }, true));
+            previewActions.Controls.Add(new Label
+            {
+                AutoSize = true,
+                Text = "独立窗口支持自由缩放和最大化；切换 Memory 时内容会同步更新。",
+                Font = UiTypography.Ui(8.75F),
+                ForeColor = UiPalette.TextMuted,
+                BackColor = Color.Transparent,
+                Padding = new Padding(10, 10, 0, 0),
+            });
+            editorLayout.Controls.Add(previewActions, 0, 1);
 
             GroupBox editor = NewGroup("Memory 内容");
             TableLayoutPanel form = NewFormTable();
@@ -2662,7 +2790,9 @@ namespace DevSpacePortable.NativeUI
             _memoryTitle = AddText(form, "标题");
             _memoryTags = AddText(form, "标签（逗号分隔）");
             _memoryContent = AddMultiline(form, "内容", 260);
-            editor.Controls.Add(form);
+            Panel editorScroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = UiPalette.Surface };
+            editorScroll.Controls.Add(form);
+            editor.Controls.Add(editorScroll);
             editorLayout.Controls.Add(editor, 0, 2);
             FlowLayoutPanel editorActions = NewButtonBar();
             editorActions.Controls.Add(ActionButton("保存 Memory", async delegate { await SaveMemoryAsync(); }, true));
@@ -2677,17 +2807,32 @@ namespace DevSpacePortable.NativeUI
         private TabPage BuildLogsTab()
         {
             TabPage page = new TabPage("日志与诊断");
-            TableLayoutPanel layout = NewTable(1, 3);
+            TableLayoutPanel layout = NewTable(1, 2);
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             FlowLayoutPanel buttons = NewButtonBar();
             buttons.Controls.Add(ActionButton("刷新日志", async delegate { await LoadLogsAsync(); }, true));
             buttons.Controls.Add(ActionButton("打开日志目录", delegate { OpenExternal(Path.Combine(_root, "logs")); }));
             buttons.Controls.Add(ActionButton("运行诊断", async delegate { await RunActionAsync("diagnose"); }));
             layout.Controls.Add(buttons, 0, 0);
-            GroupBox dev = NewGroup("DevSpace 日志"); dev.Controls.Add(_devspaceLog); layout.Controls.Add(dev, 0, 1);
-            GroupBox tunnel = NewGroup("隧道日志"); tunnel.Controls.Add(_tunnelLog); layout.Controls.Add(tunnel, 0, 2);
+            SplitContainer logSplit = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Horizontal,
+                Size = new Size(1000, 640),
+                SplitterDistance = 390,
+                Panel1MinSize = 180,
+                Panel2MinSize = 160,
+                SplitterWidth = 12,
+                BackColor = UiPalette.Background,
+            };
+            GroupBox dev = NewGroup("DevSpace 日志 · 可拖动分隔条调整大小");
+            dev.Controls.Add(_devspaceLog);
+            GroupBox tunnel = NewGroup("隧道日志");
+            tunnel.Controls.Add(_tunnelLog);
+            logSplit.Panel1.Controls.Add(dev);
+            logSplit.Panel2.Controls.Add(tunnel);
+            layout.Controls.Add(logSplit, 0, 1);
             page.Controls.Add(layout);
             return page;
         }
@@ -2825,7 +2970,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.24") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.25") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -2954,25 +3099,54 @@ namespace DevSpacePortable.NativeUI
             try
             {
                 Dictionary<string, object> status = await _manager.RunJsonAsync("dashboard-status");
-                ApplyIndicator(_overallStatus, GetDictionary(status, "overall"));
+                ApplyIndicator("overall", _overallStatus, GetDictionary(status, "overall"));
                 Dictionary<string, object> indicators = GetDictionary(status, "indicators");
-                ApplyIndicator(_serviceStatus, GetDictionary(indicators, "service"));
-                ApplyIndicator(_tunnelStatus, GetDictionary(indicators, "tunnel"));
-                ApplyIndicator(_httpStatus, GetDictionary(indicators, "http"));
-                ApplyIndicator(_filesStatus, GetDictionary(indicators, "files"));
-                ApplyIndicator(_networkStatus, GetDictionary(indicators, "network"));
+                ApplyIndicator("service", _serviceStatus, GetDictionary(indicators, "service"));
+                ApplyIndicator("tunnel", _tunnelStatus, GetDictionary(indicators, "tunnel"));
+                ApplyIndicator("http", _httpStatus, GetDictionary(indicators, "http"));
+                ApplyIndicator("files", _filesStatus, GetDictionary(indicators, "files"));
+                ApplyIndicator("network", _networkStatus, GetDictionary(indicators, "network"));
             }
             catch (Exception ex)
             {
                 _overallStatus.SetStatus("warning", "状态自动刷新暂时失败", FirstLine(ex.Message));
+                MarkIndicatorAwaitingRefresh(_serviceStatus);
+                MarkIndicatorAwaitingRefresh(_tunnelStatus);
+                MarkIndicatorAwaitingRefresh(_httpStatus);
+                MarkIndicatorAwaitingRefresh(_filesStatus);
+                MarkIndicatorAwaitingRefresh(_networkStatus);
             }
             finally { _dashboardStatusBusy = false; }
         }
 
-        private static void ApplyIndicator(StatusIndicatorCard card, Dictionary<string, object> value)
+        private void ApplyIndicator(string key, StatusIndicatorCard card, Dictionary<string, object> value)
         {
             if (card == null) return;
-            card.SetStatus(GetString(value, "state", "working"), GetString(value, "title", "正在检查"), GetString(value, "detail", "正在读取状态……"));
+            string state = GetString(value, "state", "working");
+            string title = GetString(value, "title", "正在检查");
+            string detail = GetString(value, "detail", "正在读取状态……");
+            if (state == "error" || state == "stopped")
+            {
+                int count;
+                _dashboardProblemCounts.TryGetValue(key, out count);
+                count++;
+                _dashboardProblemCounts[key] = count;
+                if (count < 2)
+                {
+                    card.SetStatus("warning", "正在复核：" + title, detail + " · 连续两次确认后才会标记为异常");
+                    return;
+                }
+            }
+            else
+            {
+                _dashboardProblemCounts[key] = 0;
+            }
+            card.SetStatus(state, title, detail);
+        }
+
+        private static void MarkIndicatorAwaitingRefresh(StatusIndicatorCard card)
+        {
+            if (card != null) card.SetStatus("warning", "等待下一次自动检查", "本轮状态读取失败，未沿用可能已经过期的红色结果。");
         }
 
         private async Task CheckForUpdatesAsync()
@@ -2990,7 +3164,7 @@ namespace DevSpacePortable.NativeUI
                     MessageBoxIcon.Information);
                 return;
             }
-            string current = GetString(_currentConfig, "portableVersion", "1.1.24");
+            string current = GetString(_currentConfig, "portableVersion", "1.1.25");
             string arguments = "--root \"" + _root.Replace("\"", "\\\"") + "\""
                 + " --current \"" + current.Replace("\"", "\\\"") + "\""
                 + " --parent-ui " + Process.GetCurrentProcess().Id;
@@ -3257,7 +3431,7 @@ namespace DevSpacePortable.NativeUI
             }
             else
             {
-                _diffViewer.ShowEmpty("本轮没有已跟踪文件变化。 ");
+                if (_diffWindow != null && !_diffWindow.IsDisposed) _diffWindow.ShowEmpty("本轮没有已跟踪文件变化。 ");
             }
             _sessionPages.SelectedIndex = 1;
         }
@@ -3266,12 +3440,34 @@ namespace DevSpacePortable.NativeUI
         {
             if (_fileGrid.SelectedRows.Count != 1)
             {
-                _diffViewer.ShowEmpty("请在上方选择一个文件；不会在未选择时展示整轮差异。 ");
+                if (_diffWindow != null && !_diffWindow.IsDisposed) _diffWindow.ShowEmpty("请在主窗口选择一个文件；不会在未选择时展示整轮差异。 ");
                 return;
             }
             Dictionary<string, object> file = _fileGrid.SelectedRows[0].Tag as Dictionary<string, object>;
             string path = GetString(file, "path");
-            RenderDiff(ExtractPatchForFile(_fullSessionPatch, path), path);
+            if (_diffWindow != null && !_diffWindow.IsDisposed)
+                _diffWindow.UpdateDiff(ExtractPatchForFile(_fullSessionPatch, path), path);
+        }
+
+        private void OpenSelectedFileDiff()
+        {
+            if (_fileGrid.SelectedRows.Count != 1) throw new InvalidOperationException("请先选择一个改动文件。 ");
+            if (_diffWindow == null || _diffWindow.IsDisposed)
+            {
+                _diffWindow = new SessionDiffDialog(
+                    async delegate { await RollbackSelectedSessionAsync(); },
+                    async delegate { await RestoreSafetySnapshotAsync(); });
+                _diffWindow.FormClosed += delegate { _diffWindow = null; };
+                _diffWindow.Show(this);
+            }
+            else
+            {
+                if (_diffWindow.WindowState == FormWindowState.Minimized) _diffWindow.WindowState = FormWindowState.Normal;
+                _diffWindow.BringToFront();
+            }
+            Dictionary<string, object> file = _fileGrid.SelectedRows[0].Tag as Dictionary<string, object>;
+            string filePath = GetString(file, "path");
+            _diffWindow.UpdateDiff(ExtractPatchForFile(_fullSessionPatch, filePath), filePath);
         }
 
         internal static string ExtractPatchForFile(string patch, string filePath)
@@ -3328,11 +3524,6 @@ namespace DevSpacePortable.NativeUI
             if (string.IsNullOrEmpty(line) || line.Length < 12) return false;
             for (int index = 0; index < line.Length; index++) if (line[index] != '=') return false;
             return true;
-        }
-
-        private void RenderDiff(string patch, string title)
-        {
-            _diffViewer.Render(patch, title);
         }
 
         private void PopulateMemoryWorkspaces()
@@ -3429,7 +3620,11 @@ namespace DevSpacePortable.NativeUI
             }
             finally { _memoryListLoading = false; }
             if (_memoryGrid.SelectedRows.Count == 1) PopulateMemoryEditor(SelectedMemory());
-            else if (_memoryPreview != null && string.IsNullOrWhiteSpace(_editingMemoryId)) _memoryPreview.Text = "选择左侧 Memory 后，这里会显示完整内容、作用域、工作区与标签。";
+            else if (string.IsNullOrWhiteSpace(_editingMemoryId))
+            {
+                _memoryPreviewText = "选择一条 Memory 后，点击“打开完整内容窗口”浏览完整内容、作用域、工作区与标签。";
+                if (_memoryPreviewWindow != null && !_memoryPreviewWindow.IsDisposed) _memoryPreviewWindow.UpdateContent("", _memoryPreviewText);
+            }
         }
 
         private static bool MemoryVisibleForWorkspace(Dictionary<string, object> memory, string workspaceRoot)
@@ -3502,7 +3697,8 @@ namespace DevSpacePortable.NativeUI
             _memoryContent.Text = "";
             _memoryScope.SelectedItem = "workspace";
             PopulateMemoryWorkspaces();
-            if (_memoryPreview != null) _memoryPreview.Text = "正在新建 Memory；保存前不会写入本地 SQLite。";
+            _memoryPreviewText = "正在新建 Memory；保存前不会写入本地 SQLite。";
+            if (_memoryPreviewWindow != null && !_memoryPreviewWindow.IsDisposed) _memoryPreviewWindow.UpdateContent("新建 Memory", _memoryPreviewText);
             _memoryStatus.Text = "正在新建 Memory；保存后才会写入本地 SQLite。";
             _memoryGrid.ClearSelection();
             _memoryTitle.Focus();
@@ -3538,11 +3734,10 @@ namespace DevSpacePortable.NativeUI
 
         private void RenderMemoryPreview(Dictionary<string, object> memory)
         {
-            if (_memoryPreview == null) return;
             string scope = GetString(memory, "scope", "workspace");
             string workspace = string.Equals(scope, "global", StringComparison.OrdinalIgnoreCase) ? "所有工作区" : GetString(memory, "workspaceRoot", "（未绑定）");
             string tags = string.Join(", ", GetStringList(memory, "tags"));
-            _memoryPreview.Text =
+            _memoryPreviewText =
                 "标题：" + GetString(memory, "title") + Environment.NewLine +
                 "作用域：" + (string.Equals(scope, "global", StringComparison.OrdinalIgnoreCase) ? "全局" : "工作区") + Environment.NewLine +
                 "工作区：" + workspace + Environment.NewLine +
@@ -3550,9 +3745,26 @@ namespace DevSpacePortable.NativeUI
                 "更新：" + FormatLocalTime(GetString(memory, "updatedAt")) + Environment.NewLine +
                 Environment.NewLine +
                 GetString(memory, "content");
-            _memoryPreview.SelectionStart = 0;
-            _memoryPreview.SelectionLength = 0;
-            _memoryPreview.ScrollToCaret();
+            if (_memoryPreviewWindow != null && !_memoryPreviewWindow.IsDisposed)
+                _memoryPreviewWindow.UpdateContent(GetString(memory, "title"), _memoryPreviewText);
+        }
+
+        private void OpenMemoryPreviewWindow()
+        {
+            Dictionary<string, object> memory = SelectedMemory();
+            RenderMemoryPreview(memory);
+            if (_memoryPreviewWindow == null || _memoryPreviewWindow.IsDisposed)
+            {
+                _memoryPreviewWindow = new ContentPreviewDialog();
+                _memoryPreviewWindow.FormClosed += delegate { _memoryPreviewWindow = null; };
+                _memoryPreviewWindow.Show(this);
+            }
+            else
+            {
+                if (_memoryPreviewWindow.WindowState == FormWindowState.Minimized) _memoryPreviewWindow.WindowState = FormWindowState.Normal;
+                _memoryPreviewWindow.BringToFront();
+            }
+            _memoryPreviewWindow.UpdateContent(GetString(memory, "title"), _memoryPreviewText);
         }
 
         private async Task SaveMemoryAsync()
@@ -4079,6 +4291,11 @@ namespace DevSpacePortable.NativeUI
             _fileGrid.Columns["remove"].Width = 72;
             _fileGrid.Columns["path"].AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
             _fileGrid.SelectionChanged += delegate { RenderSelectedFileDiff(); };
+            _fileGrid.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e)
+            {
+                if (e.RowIndex < 0) return;
+                try { OpenSelectedFileDiff(); } catch (Exception ex) { ShowError(ex); }
+            };
         }
         private void ConfigureMemoryGrid()
         {
@@ -4096,6 +4313,11 @@ namespace DevSpacePortable.NativeUI
             _memoryGrid.Columns["memoryTags"].Width = 120;
             _memoryGrid.Columns["memoryUpdated"].Width = 128;
             _memoryGrid.SelectionChanged += MemorySelectionChanged;
+            _memoryGrid.CellDoubleClick += delegate(object sender, DataGridViewCellEventArgs e)
+            {
+                if (e.RowIndex < 0) return;
+                try { OpenMemoryPreviewWindow(); } catch (Exception ex) { ShowError(ex); }
+            };
         }
 
         private static TableLayoutPanel NewTable(int columns, int rows) { return new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = columns, RowCount = rows, Padding = new Padding(10), AutoScroll = true, BackColor = UiPalette.Background }; }

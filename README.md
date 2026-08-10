@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.24**
+当前稳定版本：**1.1.25**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.24.zip
+DevSpacePortable-Windows-x64-1.1.25.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -88,7 +88,7 @@ Free 方案的这个 Development Domain 可以长期重复使用，但域名名�
 | 工具模式 | 通常选 `full` | `full` 暴露完整 DevSpace 工具；`codex`/`minimal` 用于更受限场景 |
 | ngrok Authtoken | 从 ngrok Dashboard 复制的 Token | 首次必须填写；以后留空会保留已保存 Token |
 | ngrok 出站代理 | 没有代理就留空 | 可填 `http://127.0.0.1:7890`、`https://...` 或 `socks5://...` |
-| VPN/代理兼容模式 | 推荐保持开启 | EasyConnect/Sangfor 协商时暂缓 tunnel；检测到健康本地系统代理时让 tunnel 跟随代理出站 |
+| EasyConnect 会话隔离 | 推荐保持开启 | EasyConnect/Sangfor 会话存在期间持续暂停 DevSpace 自己的公网 tunnel；不修改第三方进程、代理、网卡或路由 |
 | 使用 Windows 根证书 | 通常关闭 | 企业代理/自签根证书环境出现 TLS 问题时再考虑开启 |
 | Cloudflare Tunnel Token | 使用 ngrok 时留空 | 只在 Cloudflare 模式使用 |
 | 访问权限 | 推荐先用 `workspace` | `full-access` 权限很大，只在明确需要时启用 |
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.24 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.23 升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.25 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.24 升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -297,6 +297,15 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.25 主要变化
+
+- EasyConnect/Sangfor 会话存在期间，DevSpace 会持续隔离**自己启动的公网 tunnel**，而不是只等待固定秒数后恢复；本地 MCP 继续运行，首页将该状态显示为预期隔离而不是故障。
+- 网络诊断会只读识别 EasyConnect 与其他 TUN 软件同时提供 IPv4 默认路由的情况，并明确提示可能的路由竞争。DevSpace 不结束或重启第三方进程，也不修改系统代理、注册表、网卡、路由表或第三方配置。
+- 该边界适用于所有安装：它保证 DevSpace 不在 EasyConnect 会话中维持自己的公网长连接，但无法替第三方 TUN 软件修复其独立发生的路由重建或服务端访问授权注销。
+- 首页状态加入连续失败复核，单次短暂探测失败先显示“正在复核”，避免详细日志已经恢复而首页仍停留在红色；无效的“最近操作”卡片已移除。
+- 会话文件差异改为可自由缩放、最大化的独立窗口，并保留回退与恢复入口；Memories 完整内容也改为可自由缩放的独立预览窗口；日志区域增加可拖动分隔条。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
 
 ## 1.1.24 主要变化
 
@@ -428,7 +437,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.24
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.25
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -456,7 +465,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.24 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.25 -BypassProxy
 ```
 
 ## 在线更新
@@ -485,4 +494,3 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-relea
 ## 参与维护
 
 请通过分支和 Pull Request 提交修改，不要直接向 `main` 强推。开发、测试、版本号、更新日志和 Release 规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
