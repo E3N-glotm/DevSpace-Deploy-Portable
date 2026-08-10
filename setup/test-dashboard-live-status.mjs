@@ -9,6 +9,7 @@ const NODE = join(ROOT, "runtime", "node", "node.exe");
 const MANAGER = join(ROOT, "setup", "portable-manager.cjs");
 const UI = join(ROOT, "setup", "native", "DevSpacePortableApp.cs");
 const source = readFileSync(UI, "utf8");
+const managerSource = readFileSync(MANAGER, "utf8");
 
 const dashboardStart = source.indexOf("private TabPage BuildDashboardTab()");
 const dashboardEnd = source.indexOf("private TabPage BuildConfigurationTab()", dashboardStart);
@@ -17,6 +18,7 @@ const dashboard = source.slice(dashboardStart, dashboardEnd);
 
 assert.match(source, /class StatusIndicatorCard/);
 assert.match(source, /class DiagnosticsDetailsDialog/);
+assert.match(source, /网络自适应（推荐）/);
 assert.match(source, /_statusTimer\.Interval = 7000/);
 assert.match(source, /RunJsonAsync\("dashboard-status"\)/);
 assert.match(dashboard, /ActionButton\("详细信息"/);
@@ -32,12 +34,23 @@ const result = spawnSync(NODE, [MANAGER, "dashboard-status"], {
   cwd: ROOT,
   env: {
     ...process.env,
-    DEVSPACE_TEST_NETWORK_CONFLICT: JSON.stringify({
-      sangforActive: true,
-      sangforConnected: true,
-      competingTunDefault: true,
-      tunInterfaces: ["singbox_tun"],
+    DEVSPACE_TEST_NETWORK_PATH: JSON.stringify({
+      defaultRouteCount: 2,
+      multipleDefaultRoutes: true,
+      routes: [
+        { ifIndex: 7, interfaceAlias: "path-a", nextHop: "192.0.2.1", routeMetric: 0, interfaceMetric: 25 },
+        { ifIndex: 9, interfaceAlias: "path-b", nextHop: "198.51.100.1", routeMetric: 5, interfaceMetric: 25 },
+      ],
       source: "test",
+    }),
+    DEVSPACE_TEST_TUNNEL_NETWORK_STATE: JSON.stringify({
+      paused: false,
+      mode: "system-routed",
+      proxySource: "none",
+      policy: "non-invasive",
+      reason: "network-path-stable",
+      transition: "stable",
+      reconnectCount: 1,
     }),
   },
   encoding: "utf8",
@@ -53,9 +66,31 @@ for (const key of ["service", "tunnel", "http", "files", "network"]) {
   assert.equal(typeof value.indicators[key].title, "string");
   assert.equal(typeof value.indicators[key].detail, "string");
 }
-assert.equal(value.indicators.network.state, "warning");
-assert.match(value.indicators.network.title, /EasyConnect.*TUN/);
-assert.equal(value.indicators.network.coexistence.competingTunDefault, true);
+assert.equal(value.indicators.network.state, "ready");
+assert.match(value.indicators.network.title, /网络路径自适应正常/);
+assert.equal(value.indicators.network.networkPath.multipleDefaultRoutes, true);
+assert.equal(value.indicators.network.networkPath.defaultRouteCount, 2);
+assert.match(value.indicators.network.detail, /不按软件名称干预/);
+assert.doesNotMatch(managerSource, /EasyConnect|Sangfor|SangforVnic/i);
+const routeOnlyResult = spawnSync(NODE, [MANAGER, "dashboard-status"], {
+  cwd: ROOT,
+  env: {
+    ...process.env,
+    DEVSPACE_TEST_NETWORK_PATH: JSON.stringify({
+      defaultRouteCount: 1,
+      multipleDefaultRoutes: false,
+      routes: [{ ifIndex: 7, interfaceAlias: "path-a", nextHop: "192.0.2.1", routeMetric: 0, interfaceMetric: 25 }],
+      source: "test",
+    }),
+    DEVSPACE_TEST_TUNNEL_NETWORK_STATE: "null",
+  },
+  encoding: "utf8",
+  windowsHide: true,
+  timeout: 30_000,
+});
+assert.equal(routeOnlyResult.status, 0, routeOnlyResult.stderr || routeOnlyResult.stdout);
+const routeOnlyValue = JSON.parse(routeOnlyResult.stdout.trim());
+assert.match(routeOnlyValue.indicators.network.title, /网络路径已读取，等待隧道运行/);
 assert.match(source, /连续两次确认后才会标记为异常/);
 assert.doesNotMatch(dashboard, /NewGroup\("最近操作"\)/);
 
@@ -67,6 +102,8 @@ console.log(JSON.stringify({
   logDetailsPreserved: true,
   structuredDashboardStatus: true,
   transientFailureDebounce: true,
-  externalTunConflictVisible: true,
+  multipleDefaultRoutesAreInformational: true,
+  vendorNeutralNetworkDiagnostics: true,
+  routeStateTitleConvergesWithoutTunnelState: true,
   recentOperationsRemoved: true,
 }));

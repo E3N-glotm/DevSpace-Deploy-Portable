@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.25**
+当前稳定版本：**1.1.26**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.25.zip
+DevSpacePortable-Windows-x64-1.1.26.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -88,7 +88,7 @@ Free 方案的这个 Development Domain 可以长期重复使用，但域名名�
 | 工具模式 | 通常选 `full` | `full` 暴露完整 DevSpace 工具；`codex`/`minimal` 用于更受限场景 |
 | ngrok Authtoken | 从 ngrok Dashboard 复制的 Token | 首次必须填写；以后留空会保留已保存 Token |
 | ngrok 出站代理 | 没有代理就留空 | 可填 `http://127.0.0.1:7890`、`https://...` 或 `socks5://...` |
-| EasyConnect 会话隔离 | 推荐保持开启 | EasyConnect/Sangfor 会话存在期间持续暂停 DevSpace 自己的公网 tunnel；不修改第三方进程、代理、网卡或路由 |
+| 公网隧道网络自适应 | 推荐保持开启 | 不识别具体 VPN/TUN 软件；始终保留公网 tunnel，并在 Windows 默认网络路径稳定变化后仅重连 DevSpace 自有隧道 |
 | 使用 Windows 根证书 | 通常关闭 | 企业代理/自签根证书环境出现 TLS 问题时再考虑开启 |
 | Cloudflare Tunnel Token | 使用 ngrok 时留空 | 只在 Cloudflare 模式使用 |
 | 访问权限 | 推荐先用 `workspace` | `full-access` 权限很大，只在明确需要时启用 |
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.25 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.24 升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.26 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.25 升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -298,7 +298,17 @@ https://你的域名/mcp
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
-## 1.1.25 主要变化
+## 1.1.26 主要变化
+
+- 删除 1.1.25 按 EasyConnect/Sangfor 会话名称持续暂停公网 tunnel 的策略。DevSpace 不再扫描任何 VPN/TUN 客户端进程、服务或厂商网卡，也不会因为某个软件正在运行就关闭公网 MCP。
+- 默认启用厂商无关的网络路径自适应：公网 tunnel 始终保持启用并遵循 Windows 当前选路；IPv4 默认路径连续稳定变化后，只重连 supervisor 自己持有的 ngrok/cloudflared 子进程。短暂路由抖动不会触发重连。
+- 显式配置的 ngrok 出站代理仍具有最高优先级；本地显式代理未监听时只等待该代理恢复。未显式配置时会隔离环境代理变量，并由 Windows 当前直连、VPN 或透明 TUN 路径自然选路。
+- 多条活动默认路由只作为只读信息，不再按软件名称推断“冲突”。首页始终执行公网验证；若本地 MCP 正常但公网 tunnel 不可达，会明确提示当前 VPN、TUN、防火墙或企业网络策略可能阻止隧道，并建议放行服务或配置独立出站代理。
+- 公网暂时不可达时，本地 MCP 与 tunnel supervisor 继续运行并自动恢复，不再因为一次启动就绪超时停止整套服务。
+- DevSpace 不修改第三方进程、系统代理、注册表、网卡或路由。若企业 VPN 强制封锁 ngrok/cloudflare，普通非提权应用无法凭空创建独立物理出口；这种场景需要网络管理员放行，或由用户提供真正独立的代理/中继。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.25 主要变化（网络隔离策略已由 1.1.26 取代）
 
 - EasyConnect/Sangfor 会话存在期间，DevSpace 会持续隔离**自己启动的公网 tunnel**，而不是只等待固定秒数后恢复；本地 MCP 继续运行，首页将该状态显示为预期隔离而不是故障。
 - 网络诊断会只读识别 EasyConnect 与其他 TUN 软件同时提供 IPv4 默认路由的情况，并明确提示可能的路由竞争。DevSpace 不结束或重启第三方进程，也不修改系统代理、注册表、网卡、路由表或第三方配置。
@@ -437,7 +447,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.25
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.26
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -465,7 +475,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.25 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.26 -BypassProxy
 ```
 
 ## 在线更新

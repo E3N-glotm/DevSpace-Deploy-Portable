@@ -418,3 +418,14 @@
 - [x] 125% DPI 下以 1460×940 和最小 1180×780 检查主页、会话列表及 Memories 页面，未发现主窗口溢出；Memories 搜索/刷新和编辑滚动在最小尺寸仍可用；
 - [x] 完整源码与 Portable 回归全部通过；生产依赖审计曾完成并报告 0 漏洞，后续重复审计遇到 npm registry `ECONNRESET`，未改变锁文件或依赖树；
 - [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。
+
+## 1.1.26 厂商无关网络路径自适应
+
+- [x] tunnel supervisor 不包含任何 VPN/TUN 厂商、客户端进程、服务或网卡名称识别；第三方软件运行本身绝不触发暂停；
+- [x] ngrok/cloudflared 始终保持启用，并遵循 Windows 当前活动默认路径；稳定路径变化只重连 supervisor 自己持有的 tunnel child；
+- [x] 默认路径变化至少连续两次且跨越稳定时间后才生效；短暂切换后恢复原路径不得重连；
+- [x] 显式 ngrok 代理继续优先，未显式配置时隔离环境代理变量；不修改 WinINET/WinHTTP、注册表、路由、网卡或第三方进程；
+- [x] 多条活动默认路由仅显示为信息，不按软件名称判定冲突；公网检查持续运行，并在企业网络阻断时展示放行或独立代理/中继建议；
+- [x] 公网首次就绪超时时保留本地 MCP 和 tunnel supervisor 运行，网络恢复后可自行恢复公网访问；
+- [x] 完整源码回归、原生 UI 编译、Release 构建、更新清单校验和多尺寸 UI 验收全部通过；
+- [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。

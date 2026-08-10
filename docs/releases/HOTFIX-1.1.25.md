@@ -1,5 +1,9 @@
 # DevSpace Portable 1.1.25
 
+> Superseded by 1.1.26: the named-client full-session pause documented below
+> was removed because it necessarily disabled public MCP for the whole VPN
+> session. This file remains the historical record of the 1.1.25 release.
+
 ## Scope
 
 1.1.25 adds a general EasyConnect/Sangfor coexistence boundary, corrects

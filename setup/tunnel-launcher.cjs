@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const childProcess = require("child_process");
 
 const root = path.resolve(__dirname, "..");
@@ -30,15 +31,20 @@ const allowedExecutables = new Set([
   path.join(root, "runtime", "cloudflared", "cloudflared.exe").toLowerCase(),
 ]);
 const isNetworkSelfTest = process.argv.includes("--network-self-test");
-const requestedProvider = isNetworkSelfTest
+const isNetworkTransitionSelfTest = process.argv.includes("--network-transition-self-test");
+const requestedProvider = isNetworkSelfTest || isNetworkTransitionSelfTest
   ? (String(process.env.DEVSPACE_TEST_TUNNEL_PROVIDER || "ngrok").toLowerCase() === "cloudflare" ? "cloudflare" : "ngrok")
   : requestedExecutable.toLowerCase().endsWith("cloudflared.exe") ? "cloudflare" : "ngrok";
 const NETWORK_POLL_MS = 2_000;
+const NETWORK_PATH_STABLE_MS = 1_500;
+const NETWORK_PATH_STABLE_OBSERVATIONS = 2;
 let child = null;
 let stopping = false;
 let restartTimer = null;
 let pollTimer = null;
-let lastSignature = "";
+let lastConfigurationSignature = "";
+let reconnectCount = 0;
+let lastReconnectAt = "";
 
 function readJson(file, fallback = {}) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
@@ -119,6 +125,7 @@ function configuredNgrokProxy() {
 function localProxyHealthy(proxyUrl) {
   if (!proxyUrl) return false;
   if (process.env.DEVSPACE_TEST_PROXY_HEALTHY === "1") return true;
+  if (process.env.DEVSPACE_TEST_PROXY_HEALTHY === "0") return false;
   let parsed;
   try { parsed = new URL(proxyUrl); } catch { return false; }
   const host = parsed.hostname.toLowerCase();
@@ -135,105 +142,192 @@ function compatibilityEnabled() {
   return deployment.tunnelNetworkCompatibility !== false;
 }
 
-function sangforState() {
-  const testValue = String(process.env.DEVSPACE_TEST_SANGFOR_STATE || "").trim().toLowerCase();
-  if (["absent", "negotiating", "connected"].includes(testValue)) {
+function activeNetworkPath() {
+  const testSignature = String(process.env.DEVSPACE_TEST_ROUTE_SIGNATURE || "").trim();
+  if (testSignature) {
     return {
-      clientActive: testValue !== "absent",
-      connected: testValue === "connected",
+      available: true,
+      signature: testSignature,
       source: "test",
+      defaultRoutes: [],
+      defaultRouteCount: Number(process.env.DEVSPACE_TEST_DEFAULT_ROUTE_COUNT || 1),
     };
   }
-  const taskOutput = commandOutput("tasklist.exe", ["/fo", "csv", "/nh"]);
-  const clientActive = /"(?:EasyConnect|SangforCSClient)\.exe"/i.test(taskOutput);
-  if (!clientActive) return { clientActive: false, connected: false, source: "process" };
   const script = [
-    "$a=Get-CimInstance Win32_NetworkAdapter | Where-Object {$_.ServiceName -eq 'SangforVnic'} | Select-Object -First 1 NetEnabled,NetConnectionStatus",
-    "if($null -eq $a){'{\"present\":false}'}else{$a | Add-Member -NotePropertyName present -NotePropertyValue $true -PassThru | ConvertTo-Json -Compress}",
+    "$ErrorActionPreference='Stop'",
+    "[Console]::OutputEncoding=(New-Object System.Text.UTF8Encoding($false))",
+    "$OutputEncoding=[Console]::OutputEncoding",
+    "$interfaces=@(Get-NetIPInterface -AddressFamily IPv4 | Where-Object {$_.ConnectionState -eq 'Connected'})",
+    "$connected=@{}",
+    "foreach($item in $interfaces){$connected[[int]$item.InterfaceIndex]=$item}",
+    "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore | Where-Object {$connected.ContainsKey([int]$_.ifIndex)} | ForEach-Object {$iface=$connected[[int]$_.ifIndex];[pscustomobject]@{ifIndex=[int]$_.ifIndex;interfaceAlias=[string]$_.InterfaceAlias;nextHop=[string]$_.NextHop;routeMetric=[int]$_.RouteMetric;interfaceMetric=[int]$iface.InterfaceMetric}})",
+    "$ordered=@($routes | Sort-Object routeMetric,interfaceMetric,ifIndex,nextHop)",
+    "[pscustomobject]@{routes=$ordered;source='windows-active-default-routes'} | ConvertTo-Json -Compress -Depth 4",
   ].join(";");
   const output = commandOutput(powershellExe, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
   ], 4_000).trim();
   try {
-    const adapter = JSON.parse(output || "{}");
+    const parsed = JSON.parse(output || "{}");
+    const values = Array.isArray(parsed.routes) ? parsed.routes : parsed.routes ? [parsed.routes] : [];
+    const defaultRoutes = values.map((route) => ({
+      ifIndex: Number(route.ifIndex || 0),
+      interfaceAlias: String(route.interfaceAlias || ""),
+      nextHop: String(route.nextHop || ""),
+      routeMetric: Number(route.routeMetric || 0),
+      interfaceMetric: Number(route.interfaceMetric || 0),
+    }));
+    if (!defaultRoutes.length) {
+      return {
+        available: false,
+        signature: "",
+        source: "no-active-default-route",
+        defaultRoutes,
+        defaultRouteCount: 0,
+      };
+    }
+    const signature = crypto.createHash("sha256").update(JSON.stringify(defaultRoutes)).digest("hex").slice(0, 16);
     return {
-      clientActive: true,
-      connected: Boolean(adapter.present && adapter.NetEnabled && Number(adapter.NetConnectionStatus) === 2),
-      source: "sangfor-vnic",
+      available: true,
+      signature,
+      source: String(parsed.source || "windows-active-default-routes"),
+      defaultRoutes,
+      defaultRouteCount: defaultRoutes.length,
     };
   } catch {
-    return { clientActive: true, connected: false, source: "sangfor-vnic-unreadable" };
+    return {
+      available: false,
+      signature: "",
+      source: "route-state-unavailable",
+      defaultRoutes: [],
+      defaultRouteCount: 0,
+    };
   }
 }
+
+class NetworkPathDebouncer {
+  constructor(minimumObservations, minimumStableMs) {
+    this.minimumObservations = minimumObservations;
+    this.minimumStableMs = minimumStableMs;
+    this.reset("");
+  }
+
+  reset(signature) {
+    this.appliedSignature = String(signature || "");
+    this.candidateSignature = "";
+    this.candidateSince = 0;
+    this.candidateObservations = 0;
+  }
+
+  observe(signature, now = Date.now()) {
+    const value = String(signature || "");
+    if (!value) return { state: "unavailable", appliedSignature: this.appliedSignature };
+    if (!this.appliedSignature) {
+      this.reset(value);
+      return { state: "initial", appliedSignature: value };
+    }
+    if (value === this.appliedSignature) {
+      this.candidateSignature = "";
+      this.candidateSince = 0;
+      this.candidateObservations = 0;
+      return { state: "stable", appliedSignature: value };
+    }
+    if (value !== this.candidateSignature) {
+      this.candidateSignature = value;
+      this.candidateSince = now;
+      this.candidateObservations = 1;
+    } else {
+      this.candidateObservations += 1;
+    }
+    const stableForMs = Math.max(0, now - this.candidateSince);
+    if (this.candidateObservations < this.minimumObservations || stableForMs < this.minimumStableMs) {
+      return {
+        state: "pending",
+        appliedSignature: this.appliedSignature,
+        candidateSignature: value,
+        observations: this.candidateObservations,
+        stableForMs,
+      };
+    }
+    const previousSignature = this.appliedSignature;
+    this.reset(value);
+    return { state: "changed", previousSignature, appliedSignature: value };
+  }
+}
+
+const networkPathDebouncer = new NetworkPathDebouncer(
+  NETWORK_PATH_STABLE_OBSERVATIONS,
+  NETWORK_PATH_STABLE_MS,
+);
 
 function resolveNetworkState() {
   const compatibility = compatibilityEnabled();
   const manualProxy = requestedProvider === "ngrok" ? configuredNgrokProxy() : "";
-  const vpn = sangforState();
-  const vpnState = vpn.clientActive ? (vpn.connected ? "connected" : "negotiating") : "absent";
+  const networkPath = compatibility ? activeNetworkPath() : {
+    available: false,
+    signature: "",
+    source: "adaptation-disabled",
+    defaultRoutes: [],
+    defaultRouteCount: 0,
+  };
+  const common = {
+    compatibility,
+    adaptation: compatibility,
+    pathAvailable: networkPath.available,
+    pathSignature: networkPath.signature,
+    pathSource: networkPath.source,
+    defaultRoutes: networkPath.defaultRoutes,
+    defaultRouteCount: networkPath.defaultRouteCount,
+    multipleDefaultRoutes: networkPath.defaultRouteCount > 1,
+    ambientProxyPolicy: "isolated",
+  };
 
   if (!compatibility) {
     return {
-      compatibility,
+      ...common,
       paused: false,
-      mode: requestedProvider === "ngrok" ? (manualProxy ? "manual-proxy" : "direct") : "provider-managed",
+      mode: requestedProvider === "ngrok" ? (manualProxy ? "manual-proxy" : "system-routed") : "provider-managed",
       proxyUrl: manualProxy,
       proxySource: manualProxy ? "ngrok-config" : "none",
-      vpnState,
-      reason: "compatibility-disabled",
-    };
-  }
-  if (vpn.clientActive) {
-    return {
-      compatibility,
-      paused: true,
-      mode: "paused",
-      proxyUrl: "",
-      proxySource: "none",
-      vpnState,
-      reason: "sangfor-vpn-session-isolation",
+      reason: "network-adaptation-disabled",
     };
   }
   if (requestedProvider !== "ngrok") {
     return {
-      compatibility,
+      ...common,
       paused: false,
       mode: "provider-managed",
       proxyUrl: "",
       proxySource: "none",
-      vpnState,
-      reason: "provider-managed-network",
+      reason: "network-path-stable",
     };
   }
   if (manualProxy) {
     return localProxyHealthy(manualProxy)
       ? {
-          compatibility,
+          ...common,
           paused: false,
           mode: "manual-proxy",
           proxyUrl: manualProxy,
           proxySource: "ngrok-config",
-          vpnState,
-          reason: "explicit-proxy",
+          reason: "network-path-stable",
         }
       : {
-          compatibility,
+          ...common,
           paused: true,
           mode: "paused",
           proxyUrl: manualProxy,
           proxySource: "ngrok-config",
-          vpnState,
           reason: "explicit-local-proxy-unavailable",
       };
   }
   return {
-    compatibility,
+    ...common,
     paused: false,
-    mode: "direct",
+    mode: "system-routed",
     proxyUrl: "",
     proxySource: "none",
-    vpnState,
-    reason: "ambient-proxy-isolated-direct-or-transparent-tun",
+    reason: "network-path-stable",
   };
 }
 
@@ -255,11 +349,13 @@ function childEnvironment(network) {
 
 function writeNetworkState(network, extra = {}) {
   writeJson(networkStateFile, {
-    formatVersion: 2,
+    formatVersion: 3,
     provider: requestedProvider,
     supervisorPid: process.pid,
     childPid: child?.pid || null,
     policy: "non-invasive",
+    reconnectCount,
+    lastReconnectAt: lastReconnectAt || null,
     ...network,
     ...extra,
     updatedAt: new Date().toISOString(),
@@ -276,7 +372,7 @@ function terminateChild(reason = "network-transition") {
   process.stderr.write(`Tunnel child ${pid} stopped for ${reason}.\n`);
 }
 
-function launchChild(network) {
+function launchChild(network, extra = {}) {
   if (stopping || network.paused || fs.existsSync(stopFile)) return;
   child = childProcess.spawn(requestedExecutable, process.argv.slice(3), {
     cwd: root,
@@ -285,7 +381,7 @@ function launchChild(network) {
     env: childEnvironment(network),
   });
   writePid(pidFile, child.pid);
-  writeNetworkState(network, { childPid: child.pid, status: "running" });
+  writeNetworkState(network, { ...extra, childPid: child.pid, status: "running" });
   const ownChild = child;
   ownChild.once("error", (error) => {
     removeOwnPidFile(pidFile, ownChild.pid);
@@ -311,13 +407,13 @@ function scheduleReconcile(delay = 1_500) {
   }, delay);
 }
 
-function networkSignature(network) {
+function networkConfigurationSignature(network) {
   return JSON.stringify({
     paused: Boolean(network.paused),
     mode: network.mode,
     proxyUrl: network.proxyUrl,
-    vpnState: network.vpnState,
     reason: network.reason,
+    compatibility: network.compatibility,
   });
 }
 
@@ -331,24 +427,79 @@ function reconcile() {
       mode: "paused",
       proxyUrl: "",
       proxySource: "none",
-      vpnState: "unknown",
+      adaptation: compatibilityEnabled(),
+      pathAvailable: false,
+      pathSignature: "",
+      pathSource: "stop-request",
+      defaultRoutes: [],
+      defaultRouteCount: 0,
+      multipleDefaultRoutes: false,
       reason: "stop-request",
     }, { status: "stopped" });
     shutdown();
     return;
   }
   const network = resolveNetworkState();
-  const signature = networkSignature(network);
-  if (signature !== lastSignature) {
-    if (child) terminateChild(`network-state:${network.reason}`);
-    lastSignature = signature;
+  const configurationSignature = networkConfigurationSignature(network);
+  if (!lastConfigurationSignature) {
+    lastConfigurationSignature = configurationSignature;
+    networkPathDebouncer.reset(network.pathAvailable ? network.pathSignature : "");
+  } else if (configurationSignature !== lastConfigurationSignature) {
+    if (child) terminateChild(`network-configuration:${network.reason}`);
+    lastConfigurationSignature = configurationSignature;
+    networkPathDebouncer.reset(network.pathAvailable ? network.pathSignature : "");
   }
   if (network.paused) {
-    writeNetworkState(network, { status: "paused" });
+    writeNetworkState(network, {
+      status: "paused",
+      transition: "waiting-for-explicit-proxy",
+      appliedPathSignature: networkPathDebouncer.appliedSignature || null,
+    });
     return;
   }
-  if (!child) launchChild(network);
-  else writeNetworkState(network, { childPid: child.pid, status: "running" });
+  const pathDecision = networkPathDebouncer.observe(
+    network.pathAvailable ? network.pathSignature : "",
+    Date.now(),
+  );
+  if (pathDecision.state === "changed") {
+    if (child) terminateChild("stable-network-path-change");
+    reconnectCount += 1;
+    lastReconnectAt = new Date().toISOString();
+    launchChild(network, {
+      transition: "network-path-changed-reconnect",
+      previousPathSignature: pathDecision.previousSignature,
+      appliedPathSignature: pathDecision.appliedSignature,
+    });
+    return;
+  }
+  if (!child) {
+    if (pathDecision.state === "pending" && network.pathAvailable) {
+      networkPathDebouncer.reset(network.pathSignature);
+    }
+    launchChild(network, {
+      transition: "stable",
+      appliedPathSignature: networkPathDebouncer.appliedSignature || network.pathSignature || null,
+    });
+    return;
+  }
+  if (pathDecision.state === "pending") {
+    writeNetworkState(network, {
+      childPid: child.pid,
+      status: "running",
+      transition: "path-change-pending",
+      appliedPathSignature: pathDecision.appliedSignature,
+      pendingPathSignature: pathDecision.candidateSignature,
+      pendingObservations: pathDecision.observations,
+      pendingStableForMs: pathDecision.stableForMs,
+    });
+    return;
+  }
+  writeNetworkState(network, {
+    childPid: child.pid,
+    status: "running",
+    transition: "stable",
+    appliedPathSignature: networkPathDebouncer.appliedSignature || network.pathSignature || null,
+  });
 }
 
 function shutdown() {
@@ -363,6 +514,14 @@ function shutdown() {
 
 if (isNetworkSelfTest) {
   process.stdout.write(`${JSON.stringify(resolveNetworkState())}\n`);
+  process.exit(0);
+}
+
+if (isNetworkTransitionSelfTest) {
+  const sequence = JSON.parse(process.env.DEVSPACE_TEST_ROUTE_SEQUENCE || "[]");
+  const debouncer = new NetworkPathDebouncer(NETWORK_PATH_STABLE_OBSERVATIONS, NETWORK_PATH_STABLE_MS);
+  const decisions = sequence.map((signature, index) => debouncer.observe(signature, index * NETWORK_POLL_MS));
+  process.stdout.write(`${JSON.stringify(decisions)}\n`);
   process.exit(0);
 }
 
