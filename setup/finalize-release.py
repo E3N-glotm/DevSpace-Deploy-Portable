@@ -96,6 +96,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "setup/test-updater-apply-recovery.mjs",
             "setup/test-update-launch-ack.mjs",
             "setup/test-dashboard-live-status.mjs",
+            "setup/test-dashboard-probe-concurrency.mjs",
             "setup/test-incremental-update.py",
             "setup/test-release-plugin-layout.py",
             "setup/test-strict-stop.mjs",

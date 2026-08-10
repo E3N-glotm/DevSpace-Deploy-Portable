@@ -93,6 +93,8 @@ try {
   assert.equal(explicitProxy.mode, "manual-proxy");
   assert.equal(explicitProxy.proxyUrl, "http://127.0.0.1:10809");
   assert.equal(explicitProxy.proxySource, "ngrok-config");
+  assert.equal(explicitProxy.egressPolicy, "explicit-proxy");
+  assert.equal(explicitProxy.crossPathFallback, false);
 
   const unavailableExplicitProxy = resolveNetwork({ DEVSPACE_TEST_PROXY_HEALTHY: "0" });
   assert.equal(unavailableExplicitProxy.paused, true);
@@ -119,25 +121,54 @@ try {
   assert.equal(adaptationDisabled.adaptation, false);
   assert.equal(adaptationDisabled.pathSignature, "");
   assert.equal(adaptationDisabled.reason, "network-adaptation-disabled");
+  writeFileSync(join(configDir, "deployment.json"), `\uFEFF${JSON.stringify({
+    formatVersion: 5,
+    tunnelProvider: "ngrok",
+    tunnelNetworkCompatibility: false,
+  }, null, 2)}`);
+  const bomEncodedConfiguration = resolveNetwork();
+  assert.equal(bomEncodedConfiguration.adaptation, false,
+    "a UTF-8 BOM must not silently re-enable network compatibility");
   writeFileSync(join(configDir, "deployment.json"), JSON.stringify({
     formatVersion: 5,
     tunnelProvider: "ngrok",
     tunnelNetworkCompatibility: true,
   }, null, 2));
 
-  const stableChange = transitionSequence(["route-a", "route-b", "route-b"]);
-  assert.deepEqual(stableChange.map((item) => item.state), ["initial", "pending", "changed"]);
-  assert.equal(stableChange[2].previousSignature, "route-a");
-  assert.equal(stableChange[2].appliedSignature, "route-b");
-  const routeJitter = transitionSequence(["route-a", "route-b", "route-a"]);
-  assert.deepEqual(routeJitter.map((item) => item.state), ["initial", "pending", "stable"]);
+  const stableChange = transitionSequence([
+    { signature: "route-a", atMs: 0 },
+    { signature: "route-b", atMs: 2_000 },
+    { signature: "route-b", atMs: 10_000 },
+    { signature: "route-b", atMs: 17_001 },
+  ]);
+  assert.deepEqual(stableChange.map((item) => item.state), ["initial", "quiescing", "quiescing", "settled"]);
+  assert.equal(stableChange[1].stableForMs, 0);
+  assert.equal(stableChange[1].remainingMs, 15_000);
+  assert.equal(stableChange[3].previousSignature, "route-a");
+  assert.equal(stableChange[3].appliedSignature, "route-b");
+  const routeJitter = transitionSequence([
+    { signature: "route-a", atMs: 0 },
+    { signature: "route-b", atMs: 2_000 },
+    { signature: "route-a", atMs: 4_000 },
+    { signature: "route-a", atMs: 12_000 },
+    { signature: "route-a", atMs: 19_001 },
+  ]);
+  assert.deepEqual(routeJitter.map((item) => item.state), ["initial", "quiescing", "quiescing", "quiescing", "settled"]);
+  assert.equal(routeJitter[4].previousSignature, "route-a");
+  assert.equal(routeJitter[4].appliedSignature, "route-a");
 
   const launcherSource = readFileSync(LAUNCHER, "utf8");
   const managerSource = readFileSync(MANAGER, "utf8");
-  assert.match(launcherSource, /Get-NetRoute[^\n]+0\.0\.0\.0\/0/,
-    "the supervisor must observe the active default path without identifying a vendor");
+  assert.match(launcherSource, /Get-NetIPAddress[^\n]+ActiveStore/,
+    "the supervisor must observe connected IPv4 addresses without identifying a vendor");
+  assert.match(launcherSource, /Get-NetRoute[^\n]+ActiveStore/,
+    "the supervisor must observe all active IPv4 routes, including split routes");
   assert.match(launcherSource, /class NetworkPathDebouncer/,
-    "route changes must be debounced before reconnecting the owned tunnel");
+    "topology changes must remain quiet before reconnecting the owned tunnel");
+  assert.match(launcherSource, /NETWORK_PATH_STABLE_MS = 15_000/,
+    "the quiet window must cover multi-step VPN or TUN route setup");
+  assert.match(launcherSource, /pathDecision\.state === "quiescing"[\s\S]*?terminateChild\("network-path-quiescing"\)/,
+    "the owned tunnel must stop on the first observed topology change");
   assert.match(launcherSource, /ownedChild\.kill\(\)/,
     "network transitions may stop only the ChildProcess owned by this supervisor");
   assert.doesNotMatch(launcherSource, /EasyConnect|Sangfor|SangforVnic|WireGuard|OpenVPN|AnyConnect|GlobalProtect/i,
@@ -148,6 +179,10 @@ try {
     "the supervisor must not terminate an unverified PID");
   assert.doesNotMatch(launcherSource, /(?:New|Set|Remove)-NetRoute|route\.exe|netsh\.exe|Set-ItemProperty[^\n]+Internet Settings/i,
     "network adaptation must never mutate routes, adapters, or system proxy settings");
+  assert.doesNotMatch(launcherSource, /winInetLocalProxyCandidate|discoverAmbientLocalProxy|isolated-proxy/,
+    "ambient proxies must not be injected into ngrok because that capability may require a paid account");
+  assert.match(launcherSource, /egressPolicy: manualProxy \? "explicit-proxy" : "windows-system-route"/,
+    "only an explicit ngrok proxy may override Windows system routing");
   assert.match(launcherSource, /reason: "stop-request",[\s\S]*?shutdown\(\);/,
     "an explicit stop request must also end the tunnel supervisor");
   assert.match(managerSource, /if \(supervisor\.running\) \{[\s\S]*?deferred: true,[\s\S]*?public-tunnel-recovering-on-current-network-path/,
@@ -160,12 +195,15 @@ try {
 
   console.log(JSON.stringify({
     vendorNeutralNetworkPathAdaptation: true,
-    publicTunnelRemainsEnabledAcrossRouteChanges: true,
+    publicTunnelRecoversAcrossRouteChanges: true,
     publicReadinessFailurePreservesLocalService: true,
-    stableRouteChangeReconnectsOwnedTunnel: true,
-    transientRouteJitterDoesNotReconnect: true,
+    topologyChangeImmediatelyQuiescesOwnedTunnel: true,
+    stableTopologyReconnectsOwnedTunnelAfterQuietWindow: true,
+    routeJitterRestartsQuietWindow: true,
+    splitRouteAndAddressChangesAreObserved: true,
     explicitNgrokProxyStillSupported: true,
-    ambientSystemProxyIsolatedFromTunnel: true,
+    ambientProxyInjection: false,
+    utf8BomConfigurationSupported: true,
     thirdPartyProcessMutation: false,
     routeOrRegistryMutation: false,
   }));

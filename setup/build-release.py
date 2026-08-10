@@ -33,6 +33,10 @@ EXCLUDED_TOP_LEVEL_FILES = {
     "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
     "package.json",
+    # A legacy updater UI self-test accidentally redirected its JSON result to
+    # this extensionless file in the 1.1.27 local build. Keep source-local
+    # diagnostics out of distributable payloads.
+    "true",
 }
 RELEASE_DIRECTORY_PREFIX = "DevSpacePortable-Windows-x64-"
 TEMP_NATIVE_UI_PATTERN = re.compile(r"^[0-9a-fA-F-]{36}_DevSpace-Portable\.exe$")

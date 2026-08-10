@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.27**
+当前稳定版本：**1.1.28**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.27.zip
+DevSpacePortable-Windows-x64-1.1.28.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -87,8 +87,8 @@ Free 方案的这个 Development Domain 可以长期重复使用，但域名名�
 | 本地端口 | 一般保持 `7676` | 必须是 `1024-65535` 的空闲端口 |
 | 工具模式 | 通常选 `full` | `full` 暴露完整 DevSpace 工具；`codex`/`minimal` 用于更受限场景 |
 | ngrok Authtoken | 从 ngrok Dashboard 复制的 Token | 首次必须填写；以后留空会保留已保存 Token |
-| ngrok 出站代理 | 没有代理就留空 | 可填 `http://127.0.0.1:7890`、`https://...` 或 `socks5://...` |
-| 公网隧道网络自适应 | 推荐保持开启 | 不识别具体 VPN/TUN 软件；始终保留公网 tunnel，并在 Windows 默认网络路径稳定变化后仅重连 DevSpace 自有隧道 |
+| ngrok 出站代理 | 没有代理就留空 | 只有账号支持 ngrok agent proxy 时才填写；部分免费账号会返回 `ERR_NGROK_9009` |
+| 公网隧道网络自适应 | 推荐保持开启 | 不识别具体 VPN/TUN 软件；网卡、地址或路由变化时仅静默 DevSpace 自有公网隧道，连续稳定 15 秒后恢复，本地 MCP 不停止 |
 | 使用 Windows 根证书 | 通常关闭 | 企业代理/自签根证书环境出现 TLS 问题时再考虑开启 |
 | Cloudflare Tunnel Token | 使用 ngrok 时留空 | 只在 Cloudflare 模式使用 |
 | 访问权限 | 推荐先用 `workspace` | `full-access` 权限很大，只在明确需要时启用 |
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.27 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.26 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.28 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.27 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -284,6 +284,8 @@ socks5://host:port
 
 不要把代理用户名/密码直接写进 URL。
 
+这是 ngrok agent 自身的显式代理配置，不等同于 Windows“系统代理”。请先确认当前 ngrok 账号支持 agent proxy；不支持的账号会返回 `ERR_NGROK_9009`，此时应清空该字段，让 ngrok 使用 Windows 系统选路。DevSpace 不会自动把 WinINET 或环境代理写入此字段。
+
 ### 6. ChatGPT 扫描不到工具
 
 先确认公网 OAuth metadata 正常，再检查 ChatGPT 当前账号/工作区是否具有自定义 App/MCP 能力。产品入口和权限可能变化，应以 OpenAI 当前官方文档为准。创建或刷新 App 时，MCP Endpoint 必须是完整的：
@@ -298,6 +300,17 @@ https://你的域名/mcp
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
+## 1.1.28 主要变化
+
+- 首页本地 HTTP/OAuth 探测改为真正的回环直连；公网 curl 子进程由同步阻塞改为异步并发，避免慢公网/代理探测阻塞 Node 事件循环并把健康的本地 `200/401` 误报为 `0/0`。
+- 首页每 3 秒刷新本地服务状态；成功公网验证按 tunnel PID、网络模式和路径指纹缓存 15 秒，失败结果 2 秒后即失效，下一轮自动复核。部署操作和详细信息检查完成后也会主动刷新主页；监听存在但一次本地传输探测未完成时显示“正在复核”，不直接标红。
+- 网络自适应读取所有已连接 IPv4 网卡、地址和活动路由的只读签名。任一变化会立即停止 DevSpace 自己的公网 tunnel 子进程并暂停 DevSpace 公网探测，本地 MCP 始终运行；完整拓扑连续稳定 15 秒后恢复，期间再变化会重新计时。
+- ngrok 不再自动采用 WinINET 或进程继承的本地代理。只有用户显式填写 `proxy_url` 才走该代理，否则遵循 Windows 系统选路；这是因为部分 ngrok 免费账号不支持 agent proxy，会明确返回 `ERR_NGROK_9009`。
+- 静默策略不识别任何 VPN/TUN 厂商、进程、服务或网卡名称，也不修改系统代理、注册表、路由、网卡或第三方进程。它同样适用于企业 VPN、透明 TUN、拨号、Wi-Fi 切换及其他会改变 Windows 网络拓扑的软件。
+- 第三方 VPN 日志若明确显示服务端拒绝授权（例如 `LOGOUT_NO_ACCESS_AUTH`），该远端授权仍不能由 DevSpace 客户端改写；1.1.28 在客户端范围内消除的是认证/路由切换窗口中的 DevSpace 公网长连接与探测干扰。
+- Release 构建不再包含 1.1.27 曾误带的源码本地测试输出 `true`；增量更新会按已知基线哈希清理正式目录中的该无效文件。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
 ## 1.1.27 主要变化
 
 - 修复 `Update.exe` 在版本文件已经替换后，直接调用 `manager start` 并假设两个计划任务仍存在的问题。更新器现在会使用目标版本管理器重新生成属于当前 Portable 根目录的 MCP 与 tunnel 任务，再启动服务。
@@ -307,7 +320,7 @@ https://你的域名/mcp
 - 新增真实事务回归：在隔离 Portable 中从“配置存在但计划任务完全缺失”开始执行 Apply，并强制模拟一次新版本启动失败，验证成功修复和失败回滚两条路径。
 - Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
 
-## 1.1.26 主要变化
+## 1.1.26 主要变化（网络切换行为已由 1.1.28 取代）
 
 - 删除 1.1.25 按 EasyConnect/Sangfor 会话名称持续暂停公网 tunnel 的策略。DevSpace 不再扫描任何 VPN/TUN 客户端进程、服务或厂商网卡，也不会因为某个软件正在运行就关闭公网 MCP。
 - 默认启用厂商无关的网络路径自适应：公网 tunnel 始终保持启用并遵循 Windows 当前选路；IPv4 默认路径连续稳定变化后，只重连 supervisor 自己持有的 ngrok/cloudflared 子进程。短暂路由抖动不会触发重连。
@@ -456,7 +469,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.27
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.28
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -484,7 +497,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.27 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.28 -BypassProxy
 ```
 
 ## 在线更新

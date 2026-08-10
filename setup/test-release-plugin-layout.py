@@ -12,6 +12,7 @@ BUILD_RELEASE = ROOT / "setup" / "build-release.py"
 def main() -> int:
     module = runpy.run_path(str(BUILD_RELEASE))
     release_plugin_entries = module["release_plugin_entries"]
+    release_files = module["release_files"]
     validate_release_plugins = module["validate_release_plugins"]
 
     entries = release_plugin_entries()
@@ -40,6 +41,7 @@ def main() -> int:
 
     wrong_root = [target for target in targets if target.startswith("plugins/installed/")]
     assert not wrong_root, f"plugin must not be packaged at repository root: {wrong_root}"
+    assert Path("true") not in release_files(), "source-local updater test output leaked into release payload"
 
     print(
         json.dumps(
@@ -49,6 +51,7 @@ def main() -> int:
                 "requiredFilesPresent": True,
                 "wrongRootEntries": 0,
                 "virtualMappingKeepsLocalDataUntouched": True,
+                "sourceLocalTestOutputExcluded": True,
             },
             ensure_ascii=False,
         )

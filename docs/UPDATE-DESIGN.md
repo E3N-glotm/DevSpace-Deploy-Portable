@@ -1,4 +1,4 @@
-# Application and network lifecycle design through 1.1.27
+# Application and network lifecycle design through 1.1.28
 
 ## Goal
 
@@ -10,6 +10,35 @@ rollback safety.
 The first implementation uses a detached updater, a staging directory and a
 same-volume backup around a controlled restart. It never replaces files while
 the native UI is still running.
+
+## Implemented in 1.1.28: non-blocking status and a topology quiet window
+
+1. Loopback MCP probes use a direct local HTTP request and never depend on an
+   ambient proxy. Public curl probes run as asynchronous child processes, so a
+   slow proxy or public route cannot block the Node event loop until the local
+   probe's timeout expires.
+2. Local dashboard state refreshes every three seconds. Successful public
+   verification is cached for fifteen seconds, while a failed result expires
+   after two seconds so the next UI cycle can show recovery instead of keeping
+   a stale red result. Operations and the Details dialog request an immediate
+   dashboard refresh when they complete.
+3. The supervisor creates one signature from every connected IPv4 interface,
+   its active addresses, and all of its active routes. On the first signature
+   change it immediately stops only its owned public-tunnel child and suppresses
+   all DevSpace public health probes. Local MCP remains running. The tunnel and
+   public probes resume only after the complete topology has been unchanged for
+   fifteen seconds, and every additional change restarts that quiet window.
+4. The tunnel never adopts an ambient WinINET or inherited environment proxy.
+   A user-explicit ngrok `proxy_url` remains authoritative; otherwise the agent
+   uses Windows system routing. This avoids relying on an ngrok agent proxy
+   feature that is not available on every account tier.
+5. Dashboard public checks follow the supervisor's selected egress exactly;
+   they do not try an explicit proxy and then fall back to a direct path.
+6. The policy remains vendor-neutral and read-only: no client/process/adapter
+   names are inspected, and DevSpace does not write proxy settings, registry,
+   routes, adapters, or third-party state. A remote VPN authorization rejection
+   remains an administrator/server issue rather than something a local tunnel
+   process can override.
 
 ## Implemented in 1.1.27: transactional task reconciliation and recovery
 
@@ -32,6 +61,9 @@ the native UI is still running.
    over PowerShell metadata such as `FullyQualifiedErrorId`.
 
 ## Implemented in 1.1.26: vendor-neutral network-path adaptation
+
+> The keep-running debounce behavior in this historical section is superseded
+> by the 1.1.28 topology quiet window above.
 
 1. The 1.1.25 full-session pause keyed to named client processes is removed.
    Tunnel lifecycle decisions no longer identify a VPN/TUN vendor, process,

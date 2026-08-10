@@ -55,6 +55,7 @@ $Tests = @(
     "setup/test-updater-apply-recovery.mjs",
     "setup/test-update-launch-ack.mjs",
     "setup/test-dashboard-live-status.mjs",
+    "setup/test-dashboard-probe-concurrency.mjs",
     "setup/test-strict-stop.mjs",
     "setup/test-ui-open-process-safety.mjs",
     "setup/test-tunnel-network-coexistence.mjs",
