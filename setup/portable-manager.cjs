@@ -5,6 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 const childProcess = require("child_process");
 const dns = require("dns").promises;
+const net = require("net");
 const { pathToFileURL } = require("url");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -67,6 +68,13 @@ const PORTABLE_STOP_TIMEOUT_MS = 20_000;
 const COMPUTER_USE_STALE_MS = 5 * 60_000;
 const COMPUTER_USE_CLEANUP_INTERVAL_MS = 30_000;
 let lastComputerUseCleanupAt = 0;
+
+// Console Server（长驻 HTTP API，供 WebView2 壳 / 远程浏览器访问控制中心）
+const CONSOLE_SERVER_SCRIPT = path.join(ROOT, "setup", "console-server.cjs");
+const CONSOLE_SERVER_DEFAULT_PORT = 7677;
+const CONSOLE_SERVER_STATE_FILE = path.join(RUN_DIR, "console-server.json");
+const CONSOLE_SERVER_START_TIMEOUT_MS = 10_000;
+const CONSOLE_SERVER_POLL_INTERVAL_MS = 100;
 
 function argumentValue(name) {
   const index = process.argv.indexOf(name);
@@ -1137,6 +1145,76 @@ function decodeProgramOutput(value, requestedEncoding = "windows") {
   }
 }
 
+/**
+ * 探测 console-server 端口是否已就绪。用 net.createConnection 而非 spawn netstat，
+ * 避免每次探测再启一个进程——这正是阶段 1 想消除的"每点一次按钮启一个 node.exe"反模式。
+ */
+function isConsoleServerPortOpen(port) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port }, () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.setTimeout(800, () => {
+      socket.destroy();
+      resolve(false);
+    });
+  });
+}
+
+function readConsoleServerState() {
+  try {
+    if (!fs.existsSync(CONSOLE_SERVER_STATE_FILE)) return null;
+    return JSON.parse(fs.readFileSync(CONSOLE_SERVER_STATE_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 确保 console-server 在跑。冗余入口：
+ * - C# 壳（DevSpace-Portable.exe）启动时会拉起（MainForm.EnsureConsoleServer）
+ * - 本函数供 CLI / 未来远程访问场景显式调用，避免 C# 壳未编译时无 HTTP API
+ *
+ * 设计要点：
+ * - 端口已开则直接返回，不重复 spawn（幂等）
+ * - detached + unref：console-server 作为独立长驻进程，不随本次 CLI 退出
+ * - 优先用打包内 runtime/node，开发环境未 hydrate 时回退到当前 node 进程
+ * - 不会递归：console-server.cjs 虽 require 本模块，但 main() 仅在 require.main === module 时跑
+ */
+async function ensureConsoleServer(options = {}) {
+  const port = options.port || CONSOLE_SERVER_DEFAULT_PORT;
+  if (await isConsoleServerPortOpen(port)) {
+    return { alreadyRunning: true, port, state: readConsoleServerState() };
+  }
+  const nodeExe = fs.existsSync(NODE_EXE) ? NODE_EXE : process.execPath;
+  if (!fs.existsSync(CONSOLE_SERVER_SCRIPT)) {
+    throw new Error(`Console server script is missing: ${CONSOLE_SERVER_SCRIPT}`);
+  }
+  fs.mkdirSync(RUN_DIR, { recursive: true });
+  const child = childProcess.spawn(nodeExe, [CONSOLE_SERVER_SCRIPT, "--port", String(port)], {
+    cwd: ROOT,
+    windowsHide: true,
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, DEVSPACE_PORTABLE_ROOT: ROOT },
+  });
+  child.unref();
+  const timeoutMs = options.timeoutMs || CONSOLE_SERVER_START_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, CONSOLE_SERVER_POLL_INTERVAL_MS));
+    if (await isConsoleServerPortOpen(port)) {
+      return { alreadyRunning: false, started: true, port, pid: child.pid, state: readConsoleServerState() };
+    }
+  }
+  throw new Error(`Console server did not become ready on port ${port} within ${timeoutMs} ms`);
+}
+
 function runProgram(file, args, options = {}) {
   const { ignoreExitCode = false, outputEncoding = "windows", ...spawnOptions } = options;
   const result = childProcess.spawnSync(file, args, {
@@ -2190,10 +2268,13 @@ async function main() {
       stdoutJson(logPaths());
     } else if (command === "portable-processes") {
       stdoutJson({ processes: portableProcessSnapshot() });
+    } else if (command === "console-server-ensure") {
+      const port = parseInt(argumentValue("--port"), 10) || CONSOLE_SERVER_DEFAULT_PORT;
+      stdoutJson(await ensureConsoleServer({ port }));
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop restart enable disable uninstall-tasks status test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start stop restart enable disable uninstall-tasks status test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes console-server-ensure get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);
@@ -2263,6 +2344,11 @@ module.exports = {
   // 进程与日志
   portableProcessSnapshot,
   logPaths,
+  // Console Server
+  ensureConsoleServer,
+  isConsoleServerPortOpen,
+  readConsoleServerState,
+  CONSOLE_SERVER_DEFAULT_PORT,
   // 基础工具
   readJson,
   writeJson,
