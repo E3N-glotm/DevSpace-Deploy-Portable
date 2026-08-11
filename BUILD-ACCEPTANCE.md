@@ -319,3 +319,18 @@
 - 修复 Windows 文本编码探测没有超时的问题，并把核心 TGZ 改为 Python 生成的确定性归档，避免本机 npm CLI 异常阻塞发行流程；
 - 原生 WinForms 编译通过，公开 Release 检查实测成功；源码边界、Runtime Cards、现代日志、UI 工作流、更新器安全契约、原生 UI 韧性、稀疏会话、插件、Computer Use 批量和 Broker 回归全部通过；
 - Portable 与服务端版本统一为 1.1.15，Protocol 保持 1.5，未新增或修改 MCP 顶层工具 Schema。
+
+## 1.1.16 增量更新、严格逐文件差异与现代字体
+
+- 在线更新策略改为 `file-delta-v1` 增量优先，并保留完整 Portable ZIP 自动兜底；增量包按精确 `fromVersion` 选择，校验下载大小、SHA-256、压缩路径、目标文件和被触及基础文件哈希。
+- Release 构建从上一稳定完整 ZIP 生成 changed/new 文件与 deleted path manifest；`data`、`logs`、`reports` 不进入增量修改集合。
+- 修复 `createTwoFilesPatch` 不包含 `diff --git` 导致的跨文件 patch 泄漏；当前选择只允许渲染匹配的 `--- a/path` / `+++ b/path` block。
+- 差异视图增加旧/新双行号 gutter，代码字体使用 Cascadia Code；原生 UI 使用 Segoe UI Variable 系列并具备系统字体回退。
+- 新增增量构建器与原生单文件差异回归；Portable Protocol 仍为 1.5，MCP 顶层工具 Schema 不变。
+
+## 1.1.17 Release 内置 Codex Runtime Bridge
+
+- 完整 ZIP 必须包含 `DevSpacePortable/plugins/installed/codex-runtime-bridge/<版本>/`，不能只依赖首次启动后从 `setup/bundled-plugins` 写入 `data/plugins/installed`。
+- `setup/build-release.py` 在每次构建时清理并重建发布用 `plugins/installed/` 镜像，来源仍是受版本控制的 `setup/bundled-plugins/`，避免维护两套插件源码。
+- Portable 运行时在 Release 中存在 `plugins/installed/` 时优先把它作为 bundled seed source；用户安装态仍写入并保留在 `data/plugins/installed/`。
+- 构建器和源码回归都会验证 `codex-runtime-bridge` 的 manifest、runtime、keep-awake 与 Skill 实际进入发布 payload；Protocol 仍为 1.5。

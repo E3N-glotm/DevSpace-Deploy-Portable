@@ -45,9 +45,13 @@ def update_manifest(version: str, hotfix: str | None) -> None:
 
     key_files: dict[str, str] = manifest.setdefault("keyFiles", {})
     candidates = {
-        key.removesuffix(".sha256") if key.endswith(".sha256") else key
+        (key.removesuffix(".sha256") if key.endswith(".sha256") else key).replace("\\", "/")
         for key in key_files
     }
+    # Rebuild the mapping from normalized POSIX-style paths so a Windows
+    # command-line --hotfix using backslashes cannot leave duplicate logical
+    # keys such as docs/releases/x.md and docs\releases\x.md.
+    key_files.clear()
     candidates.update(
         {
             "packages/waishnav-devspace-1.0.5.tgz",
@@ -70,6 +74,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "setup/build-release.py",
             "setup/finalize-release.py",
             "setup/create-update-manifest.py",
+            "setup/create-incremental-update.py",
             "setup/portable-updater.ps1",
             "setup/test-runtime-cards.mjs",
             "setup/test-runtime-log-ui.mjs",
@@ -83,7 +88,10 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "setup/test-native-ui-resilience.mjs",
             "setup/test-native-close-tray.mjs",
             "setup/test-portable-ui-workflows.mjs",
+            "setup/test-selected-file-diff.mjs",
             "setup/test-online-updater-contract.mjs",
+            "setup/test-incremental-update.py",
+            "setup/test-release-plugin-layout.py",
             "setup/test-strict-stop.mjs",
             "setup/build-computer-use-helper.cmd",
             "setup/native/computer-use-capture.cpp",
@@ -146,7 +154,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
         if path.is_file()
     )
     if hotfix:
-        candidates.add(hotfix)
+        candidates.add(hotfix.replace("\\", "/"))
     for relative in sorted(candidates):
         path = ROOT / relative
         key_files.pop(relative, None)

@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.15**
+当前稳定版本：**1.1.17**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -14,13 +14,13 @@ Portable Protocol：**1.5**
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
-## 1.1.15 主要变化
+## 1.1.17 主要变化
 
-- “状态与部署”可直接通过公开 GitHub Release 检查、下载并安装更新；更新包验证字节数和 SHA-256，失败时自动恢复旧版本；
-- 会话历史按会话名称分组，分组与组内轮次均按最近更新时间从新到旧排列；
-- 文件差异改为接近 PyCharm/Codex 的现代深色视图，并且只显示上方当前选中的文件；
-- 点击关闭窗口可选择最小化到系统托盘或仅退出控制中心，并可记住选择；
-- `data/`、`logs/`、`reports/`、OAuth 状态、插件、Memories 和会话审阅数据不会被在线更新覆盖。
+- 完整 Release ZIP 在首次启动前就直接包含 `plugins/installed/codex-runtime-bridge/<版本>/`，包括 `manifest.json`、`runtime.mjs`、`keep-awake.ps1` 和 Skill；
+- 构建时从维护源 `setup/bundled-plugins/` 自动生成 `plugins/installed/` 发布镜像，并在打包前强制验证 `codex-runtime-bridge` 是否进入最终 payload；
+- 正式 Release 优先以 `plugins/installed/` 作为内置插件 seed source；真正的用户安装/启用状态仍保存在 `data/plugins/installed/`，因此在线升级不会覆盖用户自己的插件状态；
+- 修复 Windows PowerShell 5.1 经本地代理访问 GitHub 时偶发“基础连接已经关闭”的问题：显式启用 TLS 1.2，PowerShell 网络请求最多重试 3 次，仍失败则自动切换 `curl.exe`；Release API、更新清单、增量包和完整包下载都使用同一套有界 fallback；
+- 继续继承 1.1.16 的“增量优先、完整包兜底”、严格逐文件 Diff 与现代字体行为，Portable Protocol 仍为 1.5。
 
 完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
 
@@ -69,7 +69,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.15
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.17
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -97,12 +97,12 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.15 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.17 -BypassProxy
 ```
 
 ## 在线更新
 
-正式 Release 解压目录可在原生 UI 的“状态与部署”页面点击“检查更新”。程序会读取公开仓库的最新稳定 Release，校验 `update-manifest.json`、文件大小和 SHA-256，安全解压到暂存目录，然后在用户确认后关闭 UI、停止当前 Portable 服务、替换应用文件并重新启动；替换失败会自动回滚。
+正式 Release 解压目录可在原生 UI 的“状态与部署”页面点击“检查更新”。从 1.1.16 开始，程序先寻找 `fromVersion` 与当前安装版本完全一致的 `file-delta-v1` 增量包；增量包会先验证下载大小、SHA-256、压缩路径、变更文件目标哈希以及当前基础文件哈希。只要增量路径不适用或任一预检失败，就自动改用完整 Portable ZIP。安装阶段继续使用同盘备份和事务回滚，`data/`、`logs/`、`reports/` 始终保留。
 
 源码检出目录包含 `.git` 时，应用级在线更新会拒绝覆盖，请继续使用 Git 分支和 Pull Request 更新源码。当前更新器实现与后续签名、版本目录方案见 [docs/UPDATE-DESIGN.md](docs/UPDATE-DESIGN.md)。
 

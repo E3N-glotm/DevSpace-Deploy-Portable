@@ -27,7 +27,7 @@ To build a complete Release, restore the pinned runtime from a previous
 Release first:
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.15
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.17
 ```
 
 ## Core development loop

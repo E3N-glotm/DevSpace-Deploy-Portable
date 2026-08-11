@@ -37,10 +37,19 @@ if (-not $SkipNativeBuild) {
     if ($LASTEXITCODE -ne 0) { throw "Native UI build failed." }
 }
 
+Write-Host "==> setup/test-incremental-update.py"
+& python setup\test-incremental-update.py
+if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-incremental-update.py" }
+
+Write-Host "==> setup/test-release-plugin-layout.py"
+& python setup\test-release-plugin-layout.py
+if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-release-plugin-layout.py" }
+
 $Tests = @(
     "setup/test-runtime-cards.mjs",
     "setup/test-runtime-log-ui.mjs",
     "setup/test-portable-ui-workflows.mjs",
+    "setup/test-selected-file-diff.mjs",
     "setup/test-online-updater-contract.mjs",
     "setup/test-native-ui-resilience.mjs",
     "setup/test-native-close-tray.mjs",

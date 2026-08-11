@@ -20,7 +20,9 @@ reports/
 # Generated package and release artifacts.
 packages/*.tgz
 packages/staging/
+/plugins/installed/
 DevSpacePortable-Windows-x64-*.zip
+DevSpacePortable-Update-*.zip
 SHA256SUMS.txt
 release-assets/*
 !release-assets/README.md
