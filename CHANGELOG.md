@@ -2,6 +2,14 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.32
+
+- 修复 1.1.31 “检查更新”按钮启动 `Update.exe` 后立即以 CLR 未处理异常退出的问题。Windows `.NET Runtime 1026` 证实旧主 UI 将带尾部反斜杠的 Portable 根目录手工拼成 `--root "D:\\DevSpacePortable\\"`，Windows 命令行解析会吞掉闭合引号，最终让 `ResolveRoot()` 收到损坏参数并在 `Path.GetFullPath()` 抛 `System.ArgumentException`。1.1.32 主 UI 不再向同目录 Update.exe 传冗余 `--root/--current`，只传必要的 `parent-ui` PID；更新器内部其余子进程参数统一使用完整 Windows quoting 规则，并增加顶层异常提示，避免再次以 CLR 崩溃码静默退出。
+- 将原生 Windows Logo 统一为当前控制中心使用的蓝紫底白色 `D`：主窗口、独立 Update、文件差异、完整内容、详细诊断、关闭选择、首次部署等标题栏以及系统托盘全部复用同一个品牌绘制实现，不再显示 .NET/默认应用图标。
+- 新增 updater/brand regression：验证主 UI 启动更新器时不再传易损 root/current 参数、Windows 参数 quoting 对尾部反斜杠安全、两个原生程序都能创建品牌 Icon。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.32.md)
+
 ## 1.1.31
 
 - 修复原生 UI“检查更新”点击后更新窗口可能没有被用户看到的问题：启动后等待并验证可见窗口；已有同一 Portable 的 Update.exe 时直接恢复并前置现有窗口；启动失败/立即退出/超时均在主 UI 明确报错，不再静默。

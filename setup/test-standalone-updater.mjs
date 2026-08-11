@@ -9,10 +9,19 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const updaterSource = readFileSync(join(root, "setup", "native", "DevSpaceUpdaterApp.cs"), "utf8");
 const mainSource = readFileSync(join(root, "setup", "native", "DevSpacePortableApp.cs"), "utf8");
 const buildSource = readFileSync(join(root, "setup", "build-native-ui.cjs"), "utf8");
+const brandIconSource = readFileSync(join(root, "setup", "native", "DevSpaceBrandIcon.cs"), "utf8");
 const updaterExe = join(root, "Update.exe");
 
 assert.match(buildSource, /DevSpaceUpdaterApp\.cs/);
 assert.match(buildSource, /Update\.exe/);
+assert.match(buildSource, /DevSpaceBrandIcon\.cs/);
+assert.match(brandIconSource, /BrandIconFactory/);
+assert.match(brandIconSource, /Color\.FromArgb\(73, 91, 246\)/);
+assert.match(brandIconSource, /public static void DrawMark/);
+assert.match(mainSource, /BrandIconFactory\.DrawMark/);
+assert.match(mainSource, /Icon = BrandIconFactory\.Create\(64\)/);
+assert.match(mainSource, /_notifyIcon\.Icon = Icon \?\? SystemIcons\.Application/);
+assert.match(updaterSource, /Icon = BrandIconFactory\.Create\(64\)/);
 assert.match(updaterSource, /--apply-helper/);
 assert.match(updaterSource, /Path\.GetTempPath\(\), "DevSpacePortableUpdater"/);
 assert.match(updaterSource, /CloseValidatedParentUiAsync/);
@@ -34,6 +43,9 @@ assert.doesNotMatch(updaterSource, /schtasks/i);
 const checkFunction = mainSource.match(/private async Task CheckForUpdatesAsync\(\)[\s\S]*?\n        }/i)?.[0] || "";
 assert.match(checkFunction, /Path\.Combine\(_root, "Update\.exe"\)/);
 assert.match(checkFunction, /Process\.Start/);
+assert.doesNotMatch(checkFunction, /--root/);
+assert.doesNotMatch(checkFunction, /--current/);
+assert.match(checkFunction, /--parent-ui/);
 assert.match(checkFunction, /TryActivateExistingUpdater\(updater\)/);
 assert.match(checkFunction, /WaitForVisibleUpdaterWindowAsync\(process, 7000\)/);
 assert.match(checkFunction, /UseShellExecute = true/);
@@ -44,6 +56,9 @@ assert.match(mainSource, /private async Task<IntPtr> WaitForVisibleUpdaterWindow
 assert.match(mainSource, /NativeWindowEffects\.ActivateWindow\(/);
 assert.match(mainSource, /Update\.exe 启动后立即退出/);
 assert.match(mainSource, /7 秒内没有创建可见更新窗口/);
+assert.match(updaterSource, /Update\.exe 启动失败/);
+assert.match(updaterSource, /backslashes \* 2 \+ 1/);
+assert.match(updaterSource, /backslashes \* 2\)/);
 
 const temporary = mkdtempSync(join(tmpdir(), "devspace-updater-selftest-"));
 try {
@@ -66,6 +81,8 @@ try {
   assert.equal(report.taskRepairBeforeRestart, true);
   assert.equal(report.rollbackTaskRepair, true);
   assert.equal(report.backendErrorParser, true);
+  assert.equal(report.brandIcon, true);
+  assert.equal(report.windowsArgumentQuoting, true);
   console.log(JSON.stringify(report));
 }
 finally {

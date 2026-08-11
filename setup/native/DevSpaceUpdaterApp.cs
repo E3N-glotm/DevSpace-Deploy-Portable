@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using DevSpaceBranding;
 
 namespace DevSpacePortableUpdater
 {
@@ -28,6 +29,11 @@ namespace DevSpacePortableUpdater
                     "+     ~~~~~~~~~~~~~~\r\n" +
                     "    + CategoryInfo : NotSpecified\r\n" +
                     "    + FullyQualifiedErrorId : WriteErrorException");
+                bool brandIcon;
+                using (Icon icon = BrandIconFactory.Create(64))
+                    brandIcon = icon != null && icon.Width > 0 && icon.Height > 0;
+                bool windowsArgumentQuoting = UpdateForm.QuoteArgumentForSelfTest("C:\\Portable Root\\")
+                    == "\"C:\\Portable Root\\\\\"";
                 var report = new Dictionary<string, object>
                 {
                     ["standaloneUpdater"] = true,
@@ -41,37 +47,52 @@ namespace DevSpacePortableUpdater
                     ["taskRepairBeforeRestart"] = true,
                     ["rollbackTaskRepair"] = true,
                     ["backendErrorParser"] = parsedBackendError == "scheduled tasks are missing",
+                    ["brandIcon"] = brandIcon,
+                    ["windowsArgumentQuoting"] = windowsArgumentQuoting,
                 };
                 File.WriteAllText(selfTest, new JavaScriptSerializer().Serialize(report), new UTF8Encoding(false));
                 return 0;
             }
 
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            bool applyHelper = options.ContainsKey("apply-helper");
-            Mutex singleInstance = null;
-            if (!applyHelper)
-            {
-                bool created;
-                singleInstance = new Mutex(true, "Local\\DevSpacePortableStandaloneUpdater", out created);
-                if (!created)
-                {
-                    MessageBox.Show("DevSpace Update 已经在运行。", "DevSpace Update", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return 0;
-                }
-            }
             try
             {
-                Application.Run(new UpdateForm(options, applyHelper));
-                return 0;
-            }
-            finally
-            {
-                if (singleInstance != null)
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                bool applyHelper = options.ContainsKey("apply-helper");
+                Mutex singleInstance = null;
+                if (!applyHelper)
                 {
-                    try { singleInstance.ReleaseMutex(); } catch { }
-                    singleInstance.Dispose();
+                    bool created;
+                    singleInstance = new Mutex(true, "Local\\DevSpacePortableStandaloneUpdater", out created);
+                    if (!created)
+                    {
+                        MessageBox.Show("DevSpace Update 已经在运行。", "DevSpace Update", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return 0;
+                    }
                 }
+                try
+                {
+                    Application.Run(new UpdateForm(options, applyHelper));
+                    return 0;
+                }
+                finally
+                {
+                    if (singleInstance != null)
+                    {
+                        try { singleInstance.ReleaseMutex(); } catch { }
+                        singleInstance.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    MessageBox.Show("Update.exe 启动失败：" + ex.Message,
+                        "DevSpace Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch { }
+                return 2;
             }
         }
 
@@ -129,6 +150,7 @@ namespace DevSpacePortableUpdater
             if (!applyHelper) CleanupOldTemporaryControllers();
 
             Text = applyHelper ? "DevSpace Update · 正在安装" : "DevSpace Update";
+            Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterScreen;
             Size = new Size(760, 590);
             MinimumSize = new Size(680, 520);
@@ -772,12 +794,44 @@ namespace DevSpacePortableUpdater
             return string.Join(" ", args.Select(QuoteArgument));
         }
 
+        internal static string QuoteArgumentForSelfTest(string value)
+        {
+            return QuoteArgument(value);
+        }
+
         private static string QuoteArgument(string value)
         {
             string text = value ?? "";
             if (text.Length == 0) return "\"\"";
             if (!text.Any(char.IsWhiteSpace) && text.IndexOf('"') < 0) return text;
-            return "\"" + text.Replace("\"", "\\\"") + "\"";
+
+            var result = new StringBuilder();
+            result.Append('"');
+            int backslashes = 0;
+            foreach (char current in text)
+            {
+                if (current == '\\')
+                {
+                    backslashes++;
+                    continue;
+                }
+                if (current == '"')
+                {
+                    result.Append('\\', backslashes * 2 + 1);
+                    result.Append('"');
+                    backslashes = 0;
+                    continue;
+                }
+                if (backslashes > 0)
+                {
+                    result.Append('\\', backslashes);
+                    backslashes = 0;
+                }
+                result.Append(current);
+            }
+            if (backslashes > 0) result.Append('\\', backslashes * 2);
+            result.Append('"');
+            return result.ToString();
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)

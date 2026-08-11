@@ -1,4 +1,11 @@
-# Application and network lifecycle design through 1.1.31
+# Application and network lifecycle design through 1.1.32
+
+## Implemented in 1.1.32: standalone updater launch quoting and native branding
+
+- The main UI no longer passes redundant `--root` or `--current` arguments when starting the sibling `Update.exe`; the updater resolves both from its own Portable directory and manifest. This removes the Windows trailing-backslash quoting failure that could corrupt the root argument and crash before the update window appeared.
+- Paths that still must cross a Windows command-line boundary use a full backslash-aware quoting algorithm rather than simple quoted-string wrapping.
+- `Update.exe` has a top-level startup exception boundary so malformed launch state is reported as a user-visible error instead of an unhandled CLR termination.
+- All native titled windows and the tray icon use one shared DevSpace `D` brand icon generator.
 
 ## Implemented in 1.1.31: network-independent updater and bounded server memory
 

@@ -70,6 +70,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "setup/legacy/Portable-Setup-1.1.8.hta",
             "setup/build-native-ui.cmd",
             "setup/build-native-ui.cjs",
+            "setup/native/DevSpaceBrandIcon.cs",
             "setup/native/DevSpacePortableApp.cs",
             "setup/native/DevSpaceUpdaterApp.cs",
             "setup/tunnel-launcher.cjs",

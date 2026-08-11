@@ -21,6 +21,9 @@ const TARGETS = [
     output: path.join(ROOT, "Update.exe"),
   },
 ];
+const SHARED_SOURCES = [
+  path.join(ROOT, "setup", "native", "DevSpaceBrandIcon.cs"),
+];
 
 function run(file, args) {
   const result = childProcess.spawnSync(file, args, {
@@ -41,6 +44,9 @@ function run(file, args) {
 if (!fs.existsSync(VSWHERE)) throw new Error(`vswhere.exe was not found: ${VSWHERE}`);
 for (const target of TARGETS) {
   if (!fs.existsSync(target.source)) throw new Error(`Native UI source was not found: ${target.source}`);
+}
+for (const source of SHARED_SOURCES) {
+  if (!fs.existsSync(source)) throw new Error(`Shared native UI source was not found: ${source}`);
 }
 
 const vsRoot = run(VSWHERE, [
@@ -84,6 +90,7 @@ for (const target of TARGETS) {
     "/langversion:latest",
     `/out:${target.output}`,
     ...references.map((reference) => `/reference:${reference}`),
+    ...SHARED_SOURCES,
     target.source,
   ]);
 

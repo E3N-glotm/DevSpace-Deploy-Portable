@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using DevSpaceBranding;
 
 namespace DevSpacePortable.NativeUI
 {
@@ -693,16 +694,9 @@ namespace DevSpacePortable.NativeUI
         }
         protected override void OnPaint(PaintEventArgs e)
         {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             base.OnPaintBackground(e);
             if (ClientSize.Width <= 1 || ClientSize.Height <= 1) return;
-            Rectangle bounds = new Rectangle(1, 1, Width - 3, Height - 3);
-            using (GraphicsPath path = DrawingUtil.Rounded(bounds, 15))
-            using (SolidBrush fill = new SolidBrush(UiPalette.Primary))
-                e.Graphics.FillPath(fill, path);
-            using (Font mark = UiTypography.Display(19F, FontStyle.Bold))
-                TextRenderer.DrawText(e.Graphics, "D", mark, bounds, Color.White,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            BrandIconFactory.DrawMark(e.Graphics, new RectangleF(1, 1, Width - 3, Height - 3));
         }
     }
 
@@ -1007,6 +1001,7 @@ namespace DevSpacePortable.NativeUI
             _rollback = rollback;
             _restore = restore;
             Text = "文件差异";
+            Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = true;
@@ -1093,6 +1088,7 @@ namespace DevSpacePortable.NativeUI
         public ContentPreviewDialog()
         {
             Text = "完整内容浏览";
+            Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = true;
@@ -1199,6 +1195,7 @@ namespace DevSpacePortable.NativeUI
                 report["uiTabs"] = FindControls<TabControl>(form).SelectMany(tab => tab.TabPages.Cast<TabPage>()).Select(page => page.Text).ToArray();
                 report["uiButtons"] = FindControls<Button>(form).Select(button => button.Text).Where(text => !string.IsNullOrWhiteSpace(text)).Distinct().OrderBy(text => text).ToArray();
                 report["nativeWindowTitle"] = form.Text;
+                report["brandIcon"] = form.Icon != null && form.Icon.Width > 0 && form.Icon.Height > 0;
             }
             report["passed"] = true;
             Directory.CreateDirectory(Path.GetDirectoryName(output));
@@ -1305,6 +1302,7 @@ namespace DevSpacePortable.NativeUI
             _root = root;
             _manager = manager;
             Text = "DevSpace 详细信息";
+            Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(920, 620);
             Size = new Size(1120, 760);
@@ -2036,6 +2034,7 @@ namespace DevSpacePortable.NativeUI
             _root = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             _manager = new ManagerClient(_root);
             Text = "DevSpace Portable";
+            Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(1180, 780);
             Size = new Size(1460, 940);
@@ -2140,7 +2139,7 @@ namespace DevSpacePortable.NativeUI
                 _allowUiExit = true;
                 Close();
             });
-            _notifyIcon.Icon = SystemIcons.Application;
+            _notifyIcon.Icon = Icon ?? SystemIcons.Application;
             _notifyIcon.Text = "DevSpace Portable";
             _notifyIcon.ContextMenuStrip = _trayMenu;
             _notifyIcon.Visible = false;
@@ -2285,7 +2284,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.31 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.32 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -3061,7 +3060,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.31") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.32") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -3263,10 +3262,7 @@ namespace DevSpacePortable.NativeUI
                 SetOutput("检测到当前 Portable 的 Update.exe 已经在运行，已将更新窗口切换到前台。");
                 return;
             }
-            string current = GetString(_currentConfig, "portableVersion", "1.1.31");
-            string arguments = "--root \"" + _root.Replace("\"", "\\\"") + "\""
-                + " --current \"" + current.Replace("\"", "\\\"") + "\""
-                + " --parent-ui " + Process.GetCurrentProcess().Id;
+            string arguments = "--parent-ui " + Process.GetCurrentProcess().Id;
             Process process = Process.Start(new ProcessStartInfo
             {
                 FileName = updater,
@@ -4647,6 +4643,7 @@ namespace DevSpacePortable.NativeUI
         private CloseChoiceDialog()
         {
             Text = "关闭 DevSpace Portable";
+            Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterParent;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -4771,7 +4768,7 @@ namespace DevSpacePortable.NativeUI
         private readonly TextBox _value = new TextBox();
         private PromptDialog(string title, string message, string initial)
         {
-            Text = title; StartPosition = FormStartPosition.CenterParent; Size = new Size(520, 190); MinimizeBox = false; MaximizeBox = false; FormBorderStyle = FormBorderStyle.FixedDialog;
+            Text = title; Icon = BrandIconFactory.Create(64); StartPosition = FormStartPosition.CenterParent; Size = new Size(520, 190); MinimizeBox = false; MaximizeBox = false; FormBorderStyle = FormBorderStyle.FixedDialog;
             Label label = new Label { Text = message, Dock = DockStyle.Top, Height = 58, Padding = new Padding(12), AutoEllipsis = true };
             _value.Text = initial ?? ""; _value.Dock = DockStyle.Top; _value.Margin = new Padding(12);
             FlowLayoutPanel buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 52, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(8) };
@@ -4790,6 +4787,7 @@ namespace DevSpacePortable.NativeUI
         private OwnerPasswordDialog(string token, string authFile)
         {
             Text = "首次部署 · Owner Password";
+            Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterParent;
             ClientSize = new Size(720, 330);
             MinimumSize = new Size(720, 330);
