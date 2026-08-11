@@ -2,23 +2,451 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.17**
+当前稳定版本：**1.1.31**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
 > 本仓库只维护源码、构建脚本、测试、文档和体积可控的 Portable 核心分支。Node、Git、cloudflared、ngrok、完整 `node_modules`、运行状态与发行 ZIP 不进入 Git 历史；完整 Windows 便携包发布在 GitHub Releases。
 
-## 下载
+![DevSpace Portable 控制中心示意图](docs/assets/devspace-portable-ui.svg)
+
+> 文档中的界面图只使用脱敏示意数据，不展示真实公网域名、Token、Owner Password、本机用户名或实际项目路径。
+
+控制中心左侧主要页面分别用于：**状态与部署**（服务/隧道/更新/诊断）、**配置与权限**（公网域名、Token、工作目录和权限）、**插件管理**、**会话与回退**、**显式 Memories**、**日志与诊断**；右上角的 Computer Use 开关只控制桌面操作能力，不会替代目录/命令权限配置。
+
+## 这个项目是做什么的
+
+DevSpace Portable 的目标是把一台 Windows 电脑上的本地项目目录，通过受控的 MCP 服务暴露给 ChatGPT/Codex 使用，同时尽量把部署、隧道、OAuth、权限、插件、Computer Use、会话审阅和更新整合到一个原生 Windows 控制中心里。
+
+典型链路如下：
+
+```mermaid
+flowchart LR
+    A[ChatGPT / MCP Client] -->|HTTPS + OAuth| B[ngrok / Cloudflare Tunnel]
+    B --> C[DevSpace MCP<br/>127.0.0.1:7676]
+    C --> D[允许的 Windows 工作目录]
+    C --> E[插件 / Computer Use / Memories]
+```
+
+默认情况下，ChatGPT **不会直接连接 `127.0.0.1`**。你需要先用 ngrok 或 Cloudflare Tunnel 给本机 DevSpace 提供一个公网 HTTPS 地址，再把这个地址的 `/mcp` 端点添加到 ChatGPT 的自定义 MCP App 中。
+
+---
+
+## 最快上手：使用 ngrok 部署
+
+### 第 1 步：下载并解压 DevSpace Portable
+
+进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
+
+```text
+DevSpacePortable-Windows-x64-1.1.31.zip
+```
+
+不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
+
+把 ZIP 解压到一个长期固定的位置，例如：
+
+```text
+D:\DevSpacePortable
+```
+
+然后运行：
+
+```text
+DevSpace-Portable.exe
+```
+
+建议不要把正式部署目录放在临时目录、浏览器下载缓存或会被自动清理的位置；在线更新、计划任务和日志都以这个解压目录作为 Portable 根目录。
+
+### 第 2 步：注册 ngrok，并获取 Authtoken
+
+DevSpace Portable 已经携带所需的 ngrok Agent，**不需要你另外安装 ngrok**，但你仍然需要一个自己的 ngrok 账号、Authtoken 和可用的 HTTPS 域名。
+
+1. 打开 [ngrok Dashboard](https://dashboard.ngrok.com/) 并注册/登录账号。
+2. 打开 [Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken)，复制页面中的 **Authtoken**。
+3. 打开 Dashboard 的 [Domains](https://dashboard.ngrok.com/domains) 页面，找到分配给当前账号的 Development Domain。
+
+当前 ngrok Free 方案会为账号自动分配 1 个 Development Domain，例如：
+
+```text
+https://example-name.ngrok-free.app
+```
+
+Free 方案的这个 Development Domain 可以长期重复使用，但域名名称由 ngrok 自动分配，不能自由指定；自定义 ngrok 域名或自有域名需要使用支持相应域名能力的付费方案。ngrok 当前 Free 方案说明见 [Free Plan Limits](https://ngrok.com/docs/pricing-limits/free-plan-limits)。
+
+> **Authtoken 和域名必须属于同一个 ngrok 账号。** 如果复制了 A 账号的 Authtoken，却填写 B 账号的域名，DevSpace 的隧道健康检查会失败。
+
+### 第 3 步：在 DevSpace Portable 中填写配置
+
+打开左侧 **“配置与权限”** 页面。使用 ngrok 时，最常用的配置如下：
+
+| UI 字段 | 应该填写什么 | 示例 / 说明 |
+| --- | --- | --- |
+| 隧道提供商 | `ngrok` | 使用 ngrok 时选择它 |
+| 公网 HTTPS 根地址 | ngrok 分配给你的 HTTPS 域名 | `https://example-name.ngrok-free.app` |
+| 本地端口 | 一般保持 `7676` | 必须是 `1024-65535` 的空闲端口 |
+| 工具模式 | 通常选 `full` | `full` 暴露完整 DevSpace 工具；`codex`/`minimal` 用于更受限场景 |
+| ngrok Authtoken | 从 ngrok Dashboard 复制的 Token | 首次必须填写；以后留空会保留已保存 Token |
+| ngrok 出站代理 | 没有代理就留空 | 只有账号支持 ngrok agent proxy 时才填写；部分免费账号会返回 `ERR_NGROK_9009` |
+| 公网隧道网络自适应 | 推荐保持开启 | 不识别具体 VPN/TUN 软件；网卡、地址或路由变化时仅静默 DevSpace 自有公网隧道，连续稳定 15 秒后恢复，本地 MCP 不停止 |
+| 使用 Windows 根证书 | 通常关闭 | 企业代理/自签根证书环境出现 TLS 问题时再考虑开启 |
+| Cloudflare Tunnel Token | 使用 ngrok 时留空 | 只在 Cloudflare 模式使用 |
+| 访问权限 | 推荐先用 `workspace` | `full-access` 权限很大，只在明确需要时启用 |
+| 允许的工作目录 | 每行一个真实存在的目录 | 例如 `E:\program\Python\MyProject` |
+| 开放当前全部盘符根目录 | 默认不要开启 | 开启后会把当前固定盘根目录作为 allowed roots |
+| Owner Password | 可自定义，也可留空 | 首次留空时 DevSpace 自动生成，必须保存好 |
+
+**“公网 HTTPS 根地址”只填写 origin，不要手动加 `/mcp`。** 正确：
+
+```text
+https://example-name.ngrok-free.app
+```
+
+错误：
+
+```text
+https://example-name.ngrok-free.app/mcp
+```
+
+DevSpace 会自动生成真正的 MCP 地址：
+
+```text
+https://example-name.ngrok-free.app/mcp
+```
+
+### 第 4 步：选择权限和功能
+
+第一次部署建议先使用：
+
+```text
+访问权限：workspace
+允许的工作目录：只填写你准备让 ChatGPT 操作的项目目录
+Computer Use：按需开启
+显式 Memories：按需开启
+生命周期 Hooks：按需开启
+会话修改统计与回退：建议开启
+```
+
+如果选择 `custom`，可以分别控制：工作区外路径、任意命令、Shell 修改、网络/SSH、凭据接口、Computer Use、交互式进程和持续进程。
+
+`full-access` 是面向高级用户的高权限配置，它仍然受当前 Windows 用户、ACL、UAC、防病毒软件和远端系统权限约束，但允许 DevSpace 在当前用户可访问范围内执行更多操作。公共部署或不可信环境不建议直接启用。
+
+### 第 5 步：保存并自动部署
+
+配置完成后点击：
+
+```text
+保存并自动部署
+```
+
+首次部署会完成配置写入、计划任务安装、本地 MCP 服务启动、隧道启动和健康检查。成功后，状态页应能看到：
+
+```text
+Local URL : http://127.0.0.1:7676
+Public URL: https://你的域名
+MCP URL   : https://你的域名/mcp
+```
+
+如果首次没有填写 Owner Password，DevSpace 会弹窗显示自动生成的 Owner Password。**立即保存到密码管理器**；ChatGPT 第一次 OAuth 授权时会用到它。
+
+可以在“状态与部署”页面进一步执行 HTTP 验证、隧道诊断、文件验证或查看日志。如果公网地址不可达，先检查：Authtoken 是否正确、域名是否属于同一账号、本地端口是否被占用，以及代理配置是否正确。
+
+### 第 6 步：在 ChatGPT 网页端添加 DevSpace
+
+ChatGPT 的自定义 MCP/App 功能会随套餐、工作区角色和产品版本变化。以当前官方文档为准：需要先启用可用的 Developer Mode / 自定义 App 能力，然后在 **Settings → Apps** 或工作区 **Apps → Create** 中创建自定义 MCP App。官方说明见 [Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt)。
+
+创建时重点填写：
+
+| ChatGPT 网页字段 | 填写内容 |
+| --- | --- |
+| App 名称 | 例如 `DevSpace MCP` |
+| MCP Server / Endpoint | `https://你的-ngrok-域名/mcp` |
+| Authentication | 使用服务器提供的 OAuth 流程 / 按页面自动发现 |
+
+然后执行 **Scan Tools / 扫描工具**。ChatGPT 会读取 DevSpace 暴露的 OAuth metadata 和 MCP 工具定义。
+
+第一次授权时浏览器会打开 DevSpace 自己的 **Connect DevSpace** 页面，其中会显示 Client、Scope 和 Resource，并要求输入：
+
+```text
+Owner password
+```
+
+这里输入的是 DevSpace UI 中保存或自动生成的 **Owner Password**，不是 ngrok Authtoken。点击 **Authorize DevSpace** 后，OAuth 完成，ChatGPT 才能取得 MCP 访问令牌。
+
+> **不要把 ngrok Authtoken 填进 ChatGPT。** ngrok Authtoken 只应该保存在本机 DevSpace 配置中；ChatGPT 连接阶段只需要公网 MCP URL，并通过 DevSpace OAuth 页面完成 Owner Password 授权。
+
+### 第 7 步：在聊天中使用
+
+连接成功后，新开一个聊天并选择 DevSpace App，或者在支持 App/MCP 引用的界面中直接调用它。例如：
+
+```text
+用 DevSpace 打开 E:\program\Python\MyProject，检查 Git 状态和项目结构。
+```
+
+```text
+只在这个项目目录里修改 README，完成后给我看 diff，不要动其他目录。
+```
+
+```text
+检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
+```
+
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.31 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.30 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
+
+---
+
+## ngrok 网页端到底需要做什么
+
+如果只使用 DevSpace Portable 的标准 ngrok 模式，ngrok 网页端实际只需要完成三件事：
+
+1. **注册账号**；
+2. **复制 Authtoken**；
+3. **查看账号的 Development Domain**。
+
+不需要在 ngrok Dashboard 手工创建一个指向 `7676` 的网页应用，也不需要自己执行 `ngrok http 7676`。DevSpace 会使用本地保存的 Authtoken、你填写的公网域名和本地端口自动启动 Agent，并检查该域名是否真的映射到本机 DevSpace MCP。
+
+ngrok Free 方案可能对普通浏览器 HTML 流量显示中间提示页，但 ngrok 官方说明该提示页不影响 API/程序化访问，因此不会要求 ChatGPT 手工点击提示页。
+
+## 配置示例
+
+假设 ngrok Dashboard 显示：
+
+```text
+Development Domain:
+https://albatross-example.ngrok-free.app
+
+Authtoken:
+2abcDEF...你的真实Token
+```
+
+DevSpace UI 中填写：
+
+```text
+隧道提供商：ngrok
+公网 HTTPS 根地址：https://albatross-example.ngrok-free.app
+本地端口：7676
+工具模式：full
+ngrok Authtoken：2abcDEF...你的真实Token
+允许的工作目录：E:\program\Python\MyProject
+访问权限：workspace
+Owner Password：留空自动生成，或填写一个至少 16 字符的密码
+```
+
+ChatGPT 网页端填写：
+
+```text
+MCP Endpoint:
+https://albatross-example.ngrok-free.app/mcp
+```
+
+第一次 OAuth 页面再输入 Owner Password 即可。
+
+## 常见问题
+
+### 1. `Public URL must be the origin only, without /mcp`
+
+说明你在 DevSpace UI 的“公网 HTTPS 根地址”里写了 `/mcp`。删掉路径，只保留：
+
+```text
+https://xxxxx.ngrok-free.app
+```
+
+### 2. ngrok 启动了，但 DevSpace 提示域名不匹配
+
+检查当前填写的 Development Domain 与 Authtoken 是否属于同一个 ngrok 账号。如果切换过账号，旧 Token 和新域名混用会导致 DevSpace 拒绝把隧道判定为健康。
+
+### 3. 浏览器直接访问 `/mcp` 返回 401
+
+未经过 OAuth 的请求返回 401 是正常现象。DevSpace 会额外检查下面两个 metadata 地址是否返回成功：
+
+```text
+https://你的域名/.well-known/oauth-protected-resource/mcp
+https://你的域名/.well-known/oauth-authorization-server
+```
+
+ChatGPT 会通过这些 metadata 自动发现 OAuth 流程。
+
+### 4. `基础连接已经关闭: 发送时发生错误`
+
+1.1.19 将更新下载改为 **curl 优先、代理异常自动直连、断点续传和实时进度**。UI 会持续显示已下载字节、百分比、速度、预计剩余时间和当前网络路径；连接长时间没有有效数据会有界失败并切换路径，不再让 PowerShell 网络请求长时间无反馈等待。
+
+更新器只读取当前进程继承的网络环境，**不会启动、停止、重启或修改 EasyConnect、v2rayN、Windows WinINET/WinHTTP 代理设置**。如果代理不可用，会只对当前 GitHub 请求使用 `curl --noproxy '*'` 直连重试。
+
+### 5. 使用本地代理
+
+“ngrok 出站代理”支持：
+
+```text
+http://host:port
+https://host:port
+socks5://host:port
+```
+
+不要把代理用户名/密码直接写进 URL。
+
+这是 ngrok agent 自身的显式代理配置，不等同于 Windows“系统代理”。请先确认当前 ngrok 账号支持 agent proxy；不支持的账号会返回 `ERR_NGROK_9009`，此时应清空该字段，让 ngrok 使用 Windows 系统选路。DevSpace 不会自动把 WinINET 或环境代理写入此字段。
+
+### 6. ChatGPT 扫描不到工具
+
+先确认公网 OAuth metadata 正常，再检查 ChatGPT 当前账号/工作区是否具有自定义 App/MCP 能力。产品入口和权限可能变化，应以 OpenAI 当前官方文档为准。创建或刷新 App 时，MCP Endpoint 必须是完整的：
+
+```text
+https://你的域名/mcp
+```
+
+## Release 文件说明
 
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
+## 1.1.31 主要变化
+
+- **检查更新窗口可见性修复。** 主 UI 点击“检查更新”后会确认 Update.exe 真实启动并创建可见窗口；同一 Portable 已经存在更新器时会直接恢复/前置现有窗口；启动立即退出或 7 秒内没有创建窗口会显示明确错误。
+- **更新链路与系统代理解耦。** updater 优先尝试显式 direct/TUN 的 .NET 与 curl 传输，再按当前 Windows/WinINET/PAC、环境代理动态 fallback；不硬编码 v2ray、Clash、sing-box 的进程名或代理端口。失效代理不会阻断可用直连；代理正常时可使用系统代理路径。
+- **减少 GitHub CDN 单点。** GitHub Release API 提供 asset `digest` 时直接使用官方 SHA-256/size/name 构造检查结果；只有旧 API 没有 digest 时才读取 `update-manifest.json`。下载后的完整包/增量包仍执行 SHA-256 与大小校验。
+- **公网隧道按需关闭使用琥珀色 idle。** 不再以绿色 Ready 表示“当前没有公网 tunnel”，也不会把用户主动关闭当作故障。
+- **修复概览 ReferenceError。** `statusText()` 现在独立获取只读 Windows 系统代理快照，“刷新概览”和“保存并部署”不再因为 `internetProxy` 未定义报错。
+- **Node 内存有界化。** MCP session/server 最多保留 32 个且 1 小时空闲回收；workspace/review 热缓存分别限制为 64/32；活动命令会话最多 128；文件 watcher 最多 64；待交换 OAuth code 最多 256；进程输出缓冲降至 512k 字符并移除高分配 Unicode 数组转换；大型目录的嵌套 AGENTS/CLAUDE 扫描加入 2 秒/25k entries/2048 directories/16 层预算。目标是从结构上阻止堆无限增长，而不是提高 Node heap 上限。
+
+## 1.1.30 主要变化
+
+- **修复 EasyConnect/企业 VPN 会话被 DevSpace 首页状态刷新干扰的根因。** 1.1.29 的 `dashboard-status` 会为了发现 ngrok Agent 扫描 `127.0.0.1:4040-4049` 并请求 `/api/tunnels`。实机重复验证发现企业 VPN 自身也可能占用其中端口，因此这种“猜端口”行为违反第三方隔离边界。
+- **ngrok Agent 发现改为严格所有权校验。** DevSpace 先确认进程可执行文件确为当前 Portable 的 `runtime\ngrok\ngrok.exe`，并通过当前 PID 记录或当前 Portable 的 ngrok 配置路径确认归属；然后只读取这些 PID 自己的 LISTEN 端口。只有已证明属于 DevSpace 的端口才允许访问 `/api/tunnels`。
+- **不再扫描任何任意 localhost 端口。** EasyConnect、v2ray、Clash、sing-box、浏览器、调试器或其他程序即使监听 4040/4041/任意其他本地端口，DevSpace 状态页都不会主动探测它们。
+- 这一修复同时覆盖首页 3 秒刷新、tunnel 启动前已有 Agent 判断、公共 tunnel 就绪检查和诊断状态文本，因为这些路径统一使用同一套 ownership-gated `ngrokAgentState()`。
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.29 主要变化
+
+- **本地 MCP 与公网隧道完全拆开启停。**“保存并部署本地 MCP”“启动本地 MCP”“重启本地 MCP”只操作 `127.0.0.1` 服务，不会启动、停止或重连 ngrok/cloudflared；“启动/重启/停止公网隧道”只操作 DevSpace 自己的 tunnel。新安装的 tunnel 计划任务默认禁用，避免部署本地服务时产生意外公网流量；已有安装在更新/任务修复后会保留 tunnel 原来的 enabled/disabled 状态。
+- **本地 MCP 不再依赖公网组件。**只部署本地 MCP 时不要求 ngrok/cloudflared runtime，也不要求 ngrok Authtoken 或 Cloudflare Tunnel Token；需要从 ChatGPT 等公网客户端连接时，再单独配置并启动 tunnel。
+- **首页不再主动访问公网。**3 秒状态刷新只执行 `127.0.0.1` 回环检查、计划任务/PID 检查和 tunnel agent 本地状态读取，不会周期性通过公网域名回打自己。公网 OAuth/HTTP 验证只在“详细信息”中由用户明确点击“验证 HTTP/诊断隧道”时执行。
+- **第三方网络拓扑变化只读观察。**v2ray、Clash、sing-box、EasyConnect、企业 VPN、透明 TUN、Wi-Fi 切换等导致 Windows 网卡/地址/路由改变时，DevSpace 不再主动杀掉并重连自己的 tunnel；provider 自己维持现有连接，只有其进程真实退出时 supervisor 才恢复自己的子进程。
+- **不继承传统代理软件的环境代理。**tunnel 子进程会清除继承的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 及小写变量；只有你在 DevSpace 中明确填写的 tunnel 出站代理才会注入，因此 Windows 系统代理、v2ray/Clash/sing-box 的普通代理开关不会自动成为 DevSpace 的运行依赖。透明 TUN 仍由 Windows 当前系统选路自然决定。
+- **新增失效系统代理诊断。**如果某个本地代理软件退出后遗留 `ProxyEnable=1`，但 `127.0.0.1:<port>` 已无人监听，DevSpace 会在网络状态中提示这一点；默认只读，不自动修改。只有你在“详细信息”里明确点击“修复失效系统代理”时，才会关闭该系统代理并保存可恢复备份。
+- 正常启动、停止、状态刷新和 tunnel 运行路径不修改 Windows 系统代理、WinHTTP、DNS、默认路由、接口 metric、VPN 网卡或任何第三方进程；网络逻辑不按任何代理/VPN 厂商名称写特判。
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.28 主要变化
+
+- 首页本地 HTTP/OAuth 探测改为真正的回环直连；公网 curl 子进程由同步阻塞改为异步并发，避免慢公网/代理探测阻塞 Node 事件循环并把健康的本地 `200/401` 误报为 `0/0`。
+- 首页每 3 秒刷新本地服务状态；成功公网验证按 tunnel PID、网络模式和路径指纹缓存 15 秒，失败结果 2 秒后即失效，下一轮自动复核。部署操作和详细信息检查完成后也会主动刷新主页；监听存在但一次本地传输探测未完成时显示“正在复核”，不直接标红。
+- 网络自适应读取所有已连接 IPv4 网卡、地址和活动路由的只读签名。任一变化会立即停止 DevSpace 自己的公网 tunnel 子进程并暂停 DevSpace 公网探测，本地 MCP 始终运行；完整拓扑连续稳定 15 秒后恢复，期间再变化会重新计时。
+- ngrok 不再自动采用 WinINET 或进程继承的本地代理。只有用户显式填写 `proxy_url` 才走该代理，否则遵循 Windows 系统选路；这是因为部分 ngrok 免费账号不支持 agent proxy，会明确返回 `ERR_NGROK_9009`。
+- 静默策略不识别任何 VPN/TUN 厂商、进程、服务或网卡名称，也不修改系统代理、注册表、路由、网卡或第三方进程。它同样适用于企业 VPN、透明 TUN、拨号、Wi-Fi 切换及其他会改变 Windows 网络拓扑的软件。
+- 第三方 VPN 日志若明确显示服务端拒绝授权（例如 `LOGOUT_NO_ACCESS_AUTH`），该远端授权仍不能由 DevSpace 客户端改写；1.1.28 在客户端范围内消除的是认证/路由切换窗口中的 DevSpace 公网长连接与探测干扰。
+- Release 构建不再包含 1.1.27 曾误带的源码本地测试输出 `true`；增量更新会按已知基线哈希清理正式目录中的该无效文件。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.27 主要变化
+
+- 修复 `Update.exe` 在版本文件已经替换后，直接调用 `manager start` 并假设两个计划任务仍存在的问题。更新器现在会使用目标版本管理器重新生成属于当前 Portable 根目录的 MCP 与 tunnel 任务，再启动服务。
+- 如果新版本启动失败，事务会停止半升级运行时、恢复全部旧程序路径，并使用恢复后的旧版本管理器再次重建任务、恢复服务；结果文件分别记录 `rolledBack`、`servicesRecovered`、`rollbackErrors` 和保留备份路径，不再掩盖不完整回滚。
+- 更新成功但控制中心未能自动打开时，已完成的程序与服务更新会保留，并在结果中报告 `uiStartError`，不会为单纯的 UI 启动问题回退整个版本。
+- PowerShell 后端会输出结构化错误，并把真实原因保留为 stderr 最后一行，使 1.1.24–1.1.26 的旧 `Update.exe` 在升级到 1.1.27 失败时也不会只显示 `FullyQualifiedErrorId`。1.1.27 更新窗口还会优先读取结构化结果和进度文件。
+- 新增真实事务回归：在隔离 Portable 中从“配置存在但计划任务完全缺失”开始执行 Apply，并强制模拟一次新版本启动失败，验证成功修复和失败回滚两条路径。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.26 主要变化（网络切换行为已由 1.1.29 取代）
+
+- 删除 1.1.25 按 EasyConnect/Sangfor 会话名称持续暂停公网 tunnel 的策略。DevSpace 不再扫描任何 VPN/TUN 客户端进程、服务或厂商网卡，也不会因为某个软件正在运行就关闭公网 MCP。
+- 默认启用厂商无关的网络路径自适应：公网 tunnel 始终保持启用并遵循 Windows 当前选路；IPv4 默认路径连续稳定变化后，只重连 supervisor 自己持有的 ngrok/cloudflared 子进程。短暂路由抖动不会触发重连。
+- 显式配置的 ngrok 出站代理仍具有最高优先级；本地显式代理未监听时只等待该代理恢复。未显式配置时会隔离环境代理变量，并由 Windows 当前直连、VPN 或透明 TUN 路径自然选路。
+- 多条活动默认路由只作为只读信息，不再按软件名称推断“冲突”。首页始终执行公网验证；若本地 MCP 正常但公网 tunnel 不可达，会明确提示当前 VPN、TUN、防火墙或企业网络策略可能阻止隧道，并建议放行服务或配置独立出站代理。
+- 公网暂时不可达时，本地 MCP 与 tunnel supervisor 继续运行并自动恢复，不再因为一次启动就绪超时停止整套服务。
+- DevSpace 不修改第三方进程、系统代理、注册表、网卡或路由。若企业 VPN 强制封锁 ngrok/cloudflare，普通非提权应用无法凭空创建独立物理出口；这种场景需要网络管理员放行，或由用户提供真正独立的代理/中继。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.25 主要变化（网络隔离策略已由 1.1.26 取代）
+
+- EasyConnect/Sangfor 会话存在期间，DevSpace 会持续隔离**自己启动的公网 tunnel**，而不是只等待固定秒数后恢复；本地 MCP 继续运行，首页将该状态显示为预期隔离而不是故障。
+- 网络诊断会只读识别 EasyConnect 与其他 TUN 软件同时提供 IPv4 默认路由的情况，并明确提示可能的路由竞争。DevSpace 不结束或重启第三方进程，也不修改系统代理、注册表、网卡、路由表或第三方配置。
+- 该边界适用于所有安装：它保证 DevSpace 不在 EasyConnect 会话中维持自己的公网长连接，但无法替第三方 TUN 软件修复其独立发生的路由重建或服务端访问授权注销。
+- 首页状态加入连续失败复核，单次短暂探测失败先显示“正在复核”，避免详细日志已经恢复而首页仍停留在红色；无效的“最近操作”卡片已移除。
+- 会话文件差异改为可自由缩放、最大化的独立窗口，并保留回退与恢复入口；Memories 完整内容也改为可自由缩放的独立预览窗口；日志区域增加可拖动分隔条。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.24 主要变化
+
+- 新增根目录独立 **`Update.exe`**。主控制中心中的“检查更新”不再自己执行 GitHub Check、下载、暂存和 Apply，而只负责启动独立更新程序；更新窗口可单独运行，也可以直接双击 `Update.exe` 使用。
+- `Update.exe` 在下载和校验阶段与主控制中心完全分离，持续展示检查结果、实际采用的增量/完整方式、百分比、下载量、速度和当前网络路径。主程序和 MCP 服务只有在真正开始替换文件时才会关闭/停止。
+- 安装阶段不再依赖主程序中的 Task Scheduler 启动链。`Update.exe` 会把自身复制到系统临时目录，由临时控制器验证主 UI PID 身份后关闭控制中心，再直接调用事务 Apply；这样根目录中的 `Update.exe` 本身也可以被安全替换。
+- `file-delta-v1` 的 changed file 本来就携带**完整目标文件**，因此 1.1.24 不再因为 changed file 的本地 base SHA-256 漂移直接退回 500+ MB 完整包。更新器仍验证增量 ZIP 的 Release SHA-256、每个目标文件 SHA-256、最终落盘 SHA-256，并继续禁止增量修改 `data/`、`logs/`、`reports/`；删除文件仍保持严格 base hash 保护。
+- 这项策略专门解决“同版本不同构建产物、依赖包文本文件或构建生成文件发生无害漂移，却导致增量包下载后又改下完整包”的问题。1.1.23 本机实际更新日志曾因 `@types/node/README.md` base drift 从增量自动回退完整包，1.1.24 以后这种 changed-file drift 不再触发全量下载。
+- 旧的 `portable-updater.ps1`、`update-check/update-stage/update-launch` 接口继续保留作为兼容后端和旧版本升级路径，但 1.1.24 原生主 UI 的正常更新入口已经切换到 `Update.exe`。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.23 主要变化
+
+- “会话与回退”中的同名会话分组改为**默认折叠**。分组标题显示 `▶/▼` 状态，单击分组标题即可展开或折叠；搜索时会临时展开匹配分组，避免搜索结果被折叠状态隐藏。
+- 会话页新增 **“全部折叠”** 与 **“全部展开”**，大量历史轮次不再一次性铺满列表；具体会话仍保持双击进入独立审阅页、逐文件 diff 与回退能力。
+- 首次自动生成 Owner Password 时使用专用提示窗口，同时显示 Owner Password 和 `auth.json` 的完整位置；两项都提供独立复制按钮，避免用户关闭窗口后不知道凭据保存在哪里。
+- 继续沿用 1.1.22 的非侵入式网络策略：DevSpace 不读取或操纵 EasyConnect/Sangfor 生命周期，不修改第三方 VPN、系统代理、WinHTTP、路由或网卡。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+## 1.1.22 主要变化
+
+- 公网 tunnel 改为**非侵入式网络策略**：DevSpace 不再扫描 EasyConnect/Sangfor 进程、不再轮询 Sangfor/VPN 网卡，也不会因为 VPN 登录状态变化主动停止或重启健康的 ngrok。它只管理 DevSpace 自己的 tunnel 子进程。
+- ngrok tunnel 与环境中的 v2rayN/系统代理彻底解耦：除非用户在 ngrok 配置中**显式**填写 `proxy_url`，DevSpace 会清除 tunnel 子进程继承的 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` 并直接连接；这样先打开 v2rayN“系统代理”不会把 ngrok 强行送入其代理链。v2rayN 使用透明 TUN 时，ngrok 的 direct socket 仍可由 TUN 层自然接管。GitHub 更新和公网 HTTP/OAuth 探测则独立使用健康代理候选，并会跳过未监听的 `127.0.0.1:<port>`。
+- 本地服务和公网 OAuth/HTTP 就绪检查改为代理感知：公网探测使用 bundled curl，并明确选择“健康代理”或“直连/透明 TUN”，不再依赖 Node `fetch()` 强制直连。
+- GitHub 更新器继续使用“增量优先、完整包兜底”，但会容忍 `SHA256SUMS.txt`、`VERSION-MANIFEST.json`、lockfile 和打包 TGZ 等 Release 构建生成物在本地构建与 GitHub Actions canonical 构建之间的合法差异；普通程序文件和删除文件仍保持严格 base SHA-256 防漂移检查。
+- 更新 Apply 改为**一次性 Task Scheduler 独立控制器 + 启动 ACK**。只有独立更新器实际启动、写入 ACK 并返回自己的 PID 后，原生 UI 才允许关闭；如果 ACK 没出现，UI 保持打开并报告任务状态，不再出现“提示重启后没有任何反应、版本仍未更新”的静默失败。
+- 首页改为自动刷新活动指示器：总状态、MCP 服务、公网隧道、HTTP/OAuth、核心文件、网络共存和 Computer Use 都以彩色圆点卡片持续更新，不再需要手动点击“刷新状态”。
+- 首页新增 **“详细信息”**：完整状态、HTTP 验证、隧道诊断、文件验证、DevSpace/tunnel/update 日志、任务计划程序和日志目录入口统一放入独立对话框，主页保持简洁但不丢失诊断能力。
+- Portable Protocol 仍为 1.5，不需要重新 OAuth 或重新 Scan Tools。
+
+> 1.1.21 中基于 Sangfor 进程/网卡状态主动暂停、恢复 tunnel 的策略在 1.1.22 中已被替换。1.1.22 不再把 EasyConnect 的生命周期当作 DevSpace tunnel 生命周期的一部分。
+
+## 1.1.21 主要变化
+
+- 新增默认开启的 **“VPN/代理兼容模式（推荐）”**。它只管理 DevSpace 自己的公网 tunnel，不修改 Windows 系统代理、WinHTTP、路由表、网卡或第三方 VPN/代理进程；
+- 当检测到 EasyConnect/Sangfor 正在建立 VPN、但其虚拟网卡尚未真正连通时，DevSpace 会暂时挂起 ngrok，避免 ngrok 的长连接在 VPN 登录/路由切换窗口内与客户端竞争网络状态；VPN 建立后再等待一个短暂稳定期并恢复 tunnel；
+- 当 Windows 当前启用了可用的本地 HTTP/SOCKS 代理（例如 v2rayN 的本地监听）时，DevSpace tunnel 会跟随该代理出站，而不是强制绕过代理直连公网；代理退出或网络路径变化时，只重建 DevSpace 自己的 tunnel 子进程；
+- tunnel 运行状态新增 `Network mode / VPN state / Network reason / Proxy source / Tunnel supervisor PID`，方便区分“公网 tunnel 暂停等待 VPN”与真正的服务故障；
+- 新增网络共存回归，验证代理跟随、Sangfor 协商期暂停、VPN 稳定后恢复，以及整个过程不会修改 WinINET 代理注册表；
+- 继续继承 1.1.20 的启动期第三方 PID 保护、1.1.19 的严格停止与可观测更新机制；Portable Protocol 仍为 1.5。
+
+> 如果你需要完全固定的 tunnel 网络路径，可以关闭“VPN/代理兼容模式”，或在“ngrok 出站代理”里显式填写一个稳定代理。默认兼容模式更适合 EasyConnect、v2rayN 与 DevSpace 需要同时运行的 Windows 主机。
+
+完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
+
+## 1.1.20 主要变化
+
+- 修复一个发生在**打开原生控制中心**时的高风险 PID 复用问题：旧的 Computer Use Broker 状态文件可能保存已经退出的 broker PID，而 Windows 后续可能把同一个 PID 分配给 EasyConnect、v2rayN 或其他程序；旧代码在打开 UI、切换租约或确认 Computer Use 使用原生队列时会直接按记录 PID 执行 `taskkill`，因此存在打开 DevSpace 就误终止第三方程序的可能；
+- `stopComputerUseBroker()` 现在必须同时验证 PID、Portable 自有 `node.exe` 路径、`computer-use-broker.cjs` 完整脚本路径和对应 leaseId，四项身份不能同时确认时只删除陈旧 broker 记录，绝不结束该 PID；
+- 新增 `test-ui-open-process-safety.mjs`：人为把一个仍在运行的系统 `PING.EXE` PID 写入陈旧 broker 状态，再执行 `ui-open` 和 `ui-close`，验收条件是外部进程必须全过程存活而陈旧状态被清理；
+- 实机只读检查显示当前 DevSpace/ngrok、v2rayN/sing-box 与 Sangfor ECAgent 可以同时存在，监听端口分别为 `7676/4040`、`10809/10815` 和 `10000`，没有发现直接端口占用重叠；因此本次修复重点是启动期陈旧 PID 误杀，而不是修改 Windows 路由、系统代理或 EasyConnect/v2rayN 配置；
+- 继承 1.1.19 的 curl-first 更新、非递归 Portable 停止、严格 shutdown 与事务回滚，Portable Protocol 仍为 1.5。
+
+完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
+
+## 1.1.19 主要变化
+
+- GitHub 在线更新改为 `curl.exe` 优先，先使用当前网络/代理环境，连接失败后对该请求自动使用 `--noproxy '*'` 直连；仅保留一次短时 PowerShell 兼容回退，不再执行多轮长超时 PowerShell 下载；
+- 下载支持 partial file 断点续传、低速超时检测和实时 `update-progress.json`；原生 UI 每 500 ms 展示进度、下载量、速度、ETA 与当前网络路径；
+- 更新器明确不控制 EasyConnect、v2rayN 或 Windows 系统代理，网络 fallback 只作用于更新器自己的 GitHub 请求；
+- 修复 Portable 停止流程递归 `taskkill /T` 可能误杀由 DevSpace 启动、但并不属于 Portable 的第三方子进程的问题；现在只终止自身可执行路径或命令行明确属于当前 Portable 根目录的 PID，并按自身进程层级从叶到根清理；
+- “停止全部并退出”改用终止态 `shutdown`，现有计划任务保持禁用；“卸载计划任务”删除任务后再做一次严格的 Portable 自有 PID 清理，如果仍有后台进程则直接报错，不再错误声称已经退出；
+- 保持 `file-delta-v1` 增量优先、完整 ZIP 自动兜底和事务回滚，Portable Protocol 仍为 1.5。
+
+完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
+
+## 1.1.18 主要变化
+
+- 显式 Memories 默认只显示“当前所选工作区 + 全局”记忆，其他工作区不会再混入默认列表；
+- Memories 页面新增“查看工作区”和“显示其他工作区”，需要跨项目检查时再显式开启；
+- Memory 列表明确区分“当前工作区 / 全局 / 其他工作区”，并显示绑定工作区；
+- 选择任意 Memory 后，右侧“完整内容预览”会显示完整正文、作用域、工作区、标签与更新时间；
+- 更新协议继续兼容 1.1.16/1.1.17 的 `file-delta-v1`：精确版本增量优先，任一预检失败时自动下载完整 Portable ZIP；Portable Protocol 仍为 1.5。
+
+完整历史见 [CHANGELOG.md](CHANGELOG.md) 和 [`docs/releases/`](docs/releases/)。
+
 ## 1.1.17 主要变化
 
-- 完整 Release ZIP 在首次启动前就直接包含 `plugins/installed/codex-runtime-bridge/<版本>/`，包括 `manifest.json`、`runtime.mjs`、`keep-awake.ps1` 和 Skill；
-- 构建时从维护源 `setup/bundled-plugins/` 自动生成 `plugins/installed/` 发布镜像，并在打包前强制验证 `codex-runtime-bridge` 是否进入最终 payload；
-- 正式 Release 优先以 `plugins/installed/` 作为内置插件 seed source；真正的用户安装/启用状态仍保存在 `data/plugins/installed/`，因此在线升级不会覆盖用户自己的插件状态；
+- 完整 Release ZIP 在首次启动前就直接包含 `data/plugins/installed/codex-runtime-bridge/<版本>/`，包括 `manifest.json`、`runtime.mjs`、`keep-awake.ps1` 和 Skill；该目录就是 PluginManager 的实际安装目录，不再额外生成根目录 `plugins/`；
+- 构建时从维护源 `setup/bundled-plugins/` 通过虚拟归档映射写入最终 ZIP 的 `data/plugins/installed/`，不会复制维护机本地 `data/` 中的 OAuth、SQLite、配置或其他插件状态；
+- 运行时仍以 `data/plugins/installed/` 作为 PluginManager 的实际插件目录；`setup/bundled-plugins/` 只作为受控的 bundled plugin 来源和缺失恢复来源；
 - 修复 Windows PowerShell 5.1 经本地代理访问 GitHub 时偶发“基础连接已经关闭”的问题：显式启用 TLS 1.2，PowerShell 网络请求最多重试 3 次，仍失败则自动切换 `curl.exe`；Release API、更新清单、增量包和完整包下载都使用同一套有界 fallback；
 - 继续继承 1.1.16 的“增量优先、完整包兜底”、严格逐文件 Diff 与现代字体行为，Portable Protocol 仍为 1.5。
 
@@ -69,7 +497,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.17
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.31
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -97,12 +525,12 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.17 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.31 -BypassProxy
 ```
 
 ## 在线更新
 
-正式 Release 解压目录可在原生 UI 的“状态与部署”页面点击“检查更新”。从 1.1.16 开始，程序先寻找 `fromVersion` 与当前安装版本完全一致的 `file-delta-v1` 增量包；增量包会先验证下载大小、SHA-256、压缩路径、变更文件目标哈希以及当前基础文件哈希。只要增量路径不适用或任一预检失败，就自动改用完整 Portable ZIP。安装阶段继续使用同盘备份和事务回滚，`data/`、`logs/`、`reports/` 始终保留。
+正式 Release 解压目录可在原生 UI 的“状态与部署”页面点击“检查更新”。从 1.1.16 开始，程序先寻找 `fromVersion` 与当前安装版本完全一致的 `file-delta-v1` 增量包；增量包会先验证下载大小、SHA-256、压缩路径、变更文件目标哈希以及当前基础文件哈希。只要增量路径不适用或任一预检失败，就自动改用完整 Portable ZIP。1.1.19 进一步加入实时下载进度、速度/ETA、断点续传、低速失败检测和 per-request 直连 fallback；这些网络策略不会修改系统代理或第三方 VPN/代理软件。安装阶段继续使用同盘备份和事务回滚，`data/`、`logs/`、`reports/` 始终保留。
 
 源码检出目录包含 `.git` 时，应用级在线更新会拒绝覆盖，请继续使用 Git 分支和 Pull Request 更新源码。当前更新器实现与后续签名、版本目录方案见 [docs/UPDATE-DESIGN.md](docs/UPDATE-DESIGN.md)。
 
@@ -126,4 +554,3 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-relea
 ## 参与维护
 
 请通过分支和 Pull Request 提交修改，不要直接向 `main` 强推。开发、测试、版本号、更新日志和 Release 规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-

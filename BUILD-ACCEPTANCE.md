@@ -330,7 +330,124 @@
 
 ## 1.1.17 Release 内置 Codex Runtime Bridge
 
-- 完整 ZIP 必须包含 `DevSpacePortable/plugins/installed/codex-runtime-bridge/<版本>/`，不能只依赖首次启动后从 `setup/bundled-plugins` 写入 `data/plugins/installed`。
+- 完整 ZIP 必须包含 `DevSpacePortable/data/plugins/installed/codex-runtime-bridge/<版本>/`，并且不得生成 `DevSpacePortable/plugins/installed/...` 根目录镜像。
 - `setup/build-release.py` 在每次构建时清理并重建发布用 `plugins/installed/` 镜像，来源仍是受版本控制的 `setup/bundled-plugins/`，避免维护两套插件源码。
 - Portable 运行时在 Release 中存在 `plugins/installed/` 时优先把它作为 bundled seed source；用户安装态仍写入并保留在 `data/plugins/installed/`。
 - 构建器和源码回归都会验证 `codex-runtime-bridge` 的 manifest、runtime、keep-awake 与 Skill 实际进入发布 payload；Protocol 仍为 1.5。
+
+## 1.1.18 显式 Memories 作用域与内容预览
+
+- 原生 Memories 页面增加“查看工作区”选择器，默认仅展示该工作区的 workspace Memory 与 global Memory；其他工作区记录默认隐藏。
+- “显示其他工作区”是显式开关，开启后才允许跨项目查看 workspace Memory；列表以“当前工作区 / 全局 / 其他工作区”标识作用域并展示绑定路径。
+- 选择任意 Memory 后，右侧只读“完整内容预览”显示标题、作用域、工作区、标签、更新时间和完整正文；原编辑器继续负责修改和保存。
+- `devspace_memories` SQLite 表、MCP `memory_list/memory_upsert/memory_delete` Schema 和 `open_workspace` 的既有相关性过滤均不改变。
+- 1.1.18 延续 `file-delta-v1` 增量优先、完整 ZIP 自动兜底；从 1.1.17 生成精确增量包，Protocol 仍为 1.5。
+- 构建和测试仅允许作用于源码根目录或临时目录，不得停止、重启或覆盖其他 Portable 根目录中的运行服务。
+
+## 1.1.19 更新可观测性、网络隔离与严格退出
+
+- updater 的 metadata 与文件下载改为 bundled curl 优先；当前代理路径失败时仅对该 GitHub 请求使用 `--noproxy '*'` 直连，不修改 Windows 系统代理，也不启动、停止或重启 EasyConnect/v2rayN。
+- 下载输出原子 `data/state/update-progress.json`，包含 phase、bytes、percent、speed、ETA 和 transport；原生 UI 500 ms 轮询并展示实时进度，不允许长时间只有“执行中”而没有可观察状态。
+- 增量/完整包下载支持 partial file `--continue-at -`；使用连接超时和 low-speed cutoff 避免无数据挂死，失败后仍保持增量优先、完整 ZIP 兜底和 SHA-256/基础哈希安全验证。
+- Portable 进程归属不再递归继承到所有后代；停止流程禁止使用 `taskkill /T` 清理普通服务树，避免误杀由 DevSpace 启动但自身不属于 Portable 根目录的 VPN、代理或其他第三方应用。
+- 新增终止态 `shutdown`，供“停止全部并退出”使用，停止后不重新启用计划任务；`uninstall-tasks` 删除任务后再次清理并验证自有 PID，残留时 fail-closed。
+- 严格停止回归使用 Portable 自有 Node 启动一个系统 `PING.EXE` 外部后代，验证 stop 会结束自有 Node、但不会递归结束外部后代；生产 D 盘实例不得参与该测试。
+- Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
+
+## 1.1.20 UI 打开阶段第三方进程隔离
+
+- 根因补充：1.1.19 已修复普通 stop/shutdown 的递归进程树误杀，但 `openUiLease()` 在打开原生控制中心时仍会清理旧 Computer Use Broker；旧 `stopComputerUseBroker()` 只检查状态文件里的数字 PID 是否存在，没有验证该 PID 当前仍是不是原 broker，因此 Windows PID 复用后存在启动 UI 时误杀 EasyConnect、v2rayN 或任意第三方进程的风险。
+- Broker 清理现在 fail-safe：只有当前 PID 的 `ExecutablePath` 精确等于当前 Portable 的 bundled `node.exe`、命令行包含当前根目录 `setup/computer-use-broker.cjs` 且包含状态文件 leaseId 时才允许结束该进程；否则仅删除陈旧 `broker.json`。
+- 新增 `setup/test-ui-open-process-safety.mjs`，将一个真实运行的系统 `PING.EXE` PID 写入陈旧 broker 状态，再调用 `ui-open`/`ui-close`；外部 PID 必须保持存活，broker 状态必须被清除。
+- 实机只读检查期间 DevSpace MCP `127.0.0.1:7676`、ngrok `127.0.0.1:4040`、sing-box `0.0.0.0:10809/127.0.0.1:10815`、Sangfor Promote Service `127.0.0.1:10000` 同时存在，没有直接端口重叠；WinINET 代理仍由 v2rayN 指向 `127.0.0.1:10809`，本次代码不改变该配置。
+- Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
+
+## 1.1.22 非侵入式网络、更新 ACK 与实时主页
+
+- [ ] tunnel supervisor 不包含 EasyConnect/Sangfor/VNIC 进程或网卡轮询；
+- [ ] ngrok tunnel 默认隔离 WinINET/环境代理；先打开 v2rayN 系统代理不会把 ngrok 强制送入代理链；仅显式 `proxy_url` 可启用 ngrok 自身代理；
+- [ ] TUN 模式使用 direct socket 并可被透明接管，不修改 WinINET/WinHTTP/路由/网卡；
+- [ ] GitHub Check 在故障注入的死 `127.0.0.1` 代理下仍能跳过代理并完成 direct/TUN 检查；
+- [ ] 增量包对普通程序文件继续严格 base SHA-256，对限定的 Release 构建生成物允许整文件替换；
+- [ ] Apply 使用一次性用户级 Task Scheduler 控制器，UI 只在 `apply-launch-ack.json` 成功后关闭；
+- [ ] updater 在 ACK 前退出会被拒绝，控制中心保持打开；
+- [ ] 首页每约 7 秒自动刷新活动状态，不再提供手动“刷新状态”；
+- [ ] “详细信息”对话框保留 status、HTTP、tunnel、文件验证与三类日志；
+- [ ] Portable Protocol 保持 1.5。
+
+## 1.1.23 会话折叠与首次凭据提示
+
+- [ ] 会话列表同名分组初始状态为折叠，不再默认渲染全部历史轮次；
+- [ ] 单击分组标题可在 `▶` 与 `▼` 间切换并展开/折叠子会话；
+- [ ] “全部折叠”和“全部展开”可一次控制所有当前分组；
+- [ ] 搜索文本非空时，匹配分组的具体会话临时可见，不因折叠状态导致搜索结果不可见；
+- [ ] 分组标题行不能触发“查看本轮修改”，具体会话双击仍进入独立审阅页；
+- [ ] 首次自动生成 Owner Password 时，提示框明确显示 `auth.json` 完整路径；
+- [ ] Owner Password 与 `auth.json` 路径分别具有一键复制按钮，复制使用 Windows Clipboard；
+- [ ] Portable Protocol 保持 1.5，MCP 顶层工具 Schema 不变。
+
+## 1.1.24 独立 Update.exe 与增量替换语义
+
+- [ ] Release 根目录包含可独立运行的 `Update.exe`；
+- [ ] 主控制中心“检查更新”只启动 `Update.exe`，不直接调用 `update-check`、`update-stage` 或 `update-launch`；
+- [ ] `Update.exe --self-test` 验证独立检查/暂存、实时进度、临时目录 Apply controller、主 UI PID 身份校验；
+- [ ] 下载/校验阶段主 UI 与 MCP/tunnel 服务保持运行，只有 Apply 阶段才关闭主 UI并停止 Portable 自有服务；
+- [ ] Apply controller 从 `%TEMP%/DevSpacePortableUpdater/<guid>/Update.exe` 运行，因此根目录 `Update.exe` 可随版本正常替换；
+- [ ] 新正常更新路径不依赖一次性 Task Scheduler 任务；旧 manager launcher 只作为兼容路径保留；
+- [ ] `file-delta-v1` changed file 的 base SHA 漂移/缺失不会触发完整包兜底，目标 payload SHA 与最终落盘 SHA 必须严格一致；
+- [ ] deleted file 仍要求 base SHA 一致，`data/logs/reports` 仍禁止增量修改；
+- [ ] 1.1.23 -> 1.1.24 增量包可由 1.1.23 旧 updater 正常识别，以完成独立更新器的 bootstrap；
+- [ ] Portable Protocol 保持 1.5。
+
+## 1.1.21 VPN / Proxy 共存
+
+- 实机只读日志确认：Sangfor VPN 可先正常登录并建立长连接，随后在网络变化后收到服务端被动注销；同时 ngrok 控制连接也会被本机网络变化打断，说明问题不是 TCP 监听端口重叠或单纯 PID 误杀。
+- tunnel 改由独立 supervisor 管理：Sangfor 协商期暂停公网 tunnel，VNIC 连通并稳定后恢复；健康 WinINET 本地代理存在时，tunnel 跟随代理出站。
+- supervisor 网络切换只允许重建当前 Portable 自己的 tunnel child；禁止修改 WinINET/WinHTTP、路由、网卡和第三方进程。
+- 新增 `setup/test-tunnel-network-coexistence.mjs`，覆盖本地代理跟随、Sangfor 协商暂停、稳定恢复，并断言测试前后 WinINET 注册表查询结果完全一致。
+- `tunnel.stop` 用于防止显式 stop/shutdown 与 supervisor 自动重启发生竞争；状态输出包含 network mode、VPN state、reason、proxy source 和 supervisor PID。
+- Portable Protocol 保持 1.5，现有 OAuth、MCP Schema 和增量更新格式不变。
+
+## 1.1.25 EasyConnect 全会话隔离、状态收敛与可调整审阅窗口
+
+- [x] EasyConnect/Sangfor 客户端会话存在期间，supervisor 持续暂停 DevSpace 自有公网 tunnel；本地 MCP 服务不停止，也不再使用固定恢复等待时间；
+- [x] tunnel 只通过 supervisor 持有的 `ChildProcess` 句柄结束，不按裸 PID 调用 `taskkill`；第三方 VPN/TUN 进程、注册表、代理、网卡和路由保持只读；
+- [x] 首页把预期隔离显示为警告并跳过公网探测；普通错误连续两次确认后才转红，整轮刷新失败不保留陈旧红色；“最近操作”已移除；
+- [x] 只读诊断能够提示 EasyConnect 与第三方 TUN IPv4 默认路由竞争，并明确 DevSpace 未修改该外部状态；
+- [x] 文件差异与 Memories 完整内容使用可缩放、可最大化的独立窗口；差异窗口包含回退与恢复，日志页和 Memories 双栏支持拖动调整；
+- [x] 125% DPI 下以 1460×940 和最小 1180×780 检查主页、会话列表及 Memories 页面，未发现主窗口溢出；Memories 搜索/刷新和编辑滚动在最小尺寸仍可用；
+- [x] 完整源码与 Portable 回归全部通过；生产依赖审计曾完成并报告 0 漏洞，后续重复审计遇到 npm registry `ECONNRESET`，未改变锁文件或依赖树；
+- [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。
+
+## 1.1.26 厂商无关网络路径自适应
+
+- [x] tunnel supervisor 不包含任何 VPN/TUN 厂商、客户端进程、服务或网卡名称识别；第三方软件运行本身绝不触发暂停；
+- [x] ngrok/cloudflared 始终保持启用，并遵循 Windows 当前活动默认路径；稳定路径变化只重连 supervisor 自己持有的 tunnel child；
+- [x] 默认路径变化至少连续两次且跨越稳定时间后才生效；短暂切换后恢复原路径不得重连；
+- [x] 显式 ngrok 代理继续优先，未显式配置时隔离环境代理变量；不修改 WinINET/WinHTTP、注册表、路由、网卡或第三方进程；
+- [x] 多条活动默认路由仅显示为信息，不按软件名称判定冲突；公网检查持续运行，并在企业网络阻断时展示放行或独立代理/中继建议；
+- [x] 公网首次就绪超时时保留本地 MCP 和 tunnel supervisor 运行，网络恢复后可自行恢复公网访问；
+- [x] 完整源码回归、原生 UI 编译、Release 构建、更新清单校验和多尺寸 UI 验收全部通过；
+- [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。
+
+## 1.1.27 更新事务任务恢复与错误诊断
+
+- [x] 现场 `update-progress.json` 已确认失败发生在目标文件替换后的服务启动阶段，原始错误为两个 Portable 计划任务均不存在；任务文件创建时间确认它们是在失败后才重新部署；
+- [x] 配置完整时，Apply 在目标版本校验后固定执行 `install-tasks` 再执行 `start`，能够修复缺失、被清理或定义过期的 Portable 任务；
+- [x] 启动失败后先恢复旧文件，再使用恢复后的管理器重建任务并恢复旧服务；结果分别记录文件回滚、服务恢复、回滚错误和备份位置；
+- [x] 控制中心自动启动失败与程序事务解耦，不会撤销已经验证并成功启动服务的更新；
+- [x] PowerShell 输出结构化错误及兼容旧 `Update.exe` 的最终简明错误行；新版窗口过滤 `FullyQualifiedErrorId` 等 PowerShell 元数据并优先展示真实原因；
+- [x] 隔离 Apply 回归覆盖缺任务成功更新和强制启动失败回滚，确认旧文件、任务、服务及诊断信息全部恢复；
+- [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。
+
+## 1.1.28 即时状态与网络拓扑静默窗口
+
+- [x] 首页本地 HTTP/OAuth 探测不再被公网 curl 阻塞；慢代理故障注入下仍得到本地 `200/401`；
+- [x] 首页本地状态每 3 秒刷新；公网成功结果缓存 15 秒、失败结果仅缓存 2 秒；部署和详细信息完成后主动刷新，监听存在但传输观察未完成时不得直接标红；
+- [x] 任一已连接 IPv4 网卡、地址或活动路由变化时立即停止自有 tunnel 并暂停公网探测；本地 MCP 保持运行，拓扑连续稳定 15 秒后恢复；
+- [x] ngrok 只接受用户显式代理，不采用 WinINET/继承代理；公网诊断与 tunnel 使用同一出口，不跨显式代理/系统路由候选跳转；
+- [x] tunnel/manager 不包含具体 VPN/TUN 厂商识别，不修改 WinINET/WinHTTP、注册表、路由、网卡或第三方进程；
+- [x] 完整源码回归、原生 UI 编译、Release 构建、增量更新验证和实机部署探测全部通过；
+- [x] Portable Protocol 保持 1.5，顶层 MCP Schema 不变。
+
+验收证据：慢代理回归中公网请求约 5.3 秒超时但本地仍为 `200/401`；拓扑变化把运行中的公网探测在约 0.8 秒内取消。正式副本部署后连续 6 次主页采样全部为 `ready`，本地/公网均为 `200/401`，单次耗时不超过 2.5 秒；EasyConnect 与 v2rayN 相关 PID、WinINET 代理、默认路由以及 `config.json`/`auth.json` 哈希在部署前后保持一致。

@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import zipfile
@@ -13,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CHECKSUM_FILE = ROOT / "SHA256SUMS.txt"
 BUNDLED_PLUGIN_SOURCE = ROOT / "setup" / "bundled-plugins"
-RELEASE_PLUGIN_ROOT = ROOT / "plugins" / "installed"
+RELEASE_PLUGIN_PREFIX = Path("data/plugins/installed")
 EMPTY_RELEASE_DIRS = ("data/", "data/run/", "logs/", "reports/")
 EXCLUDED_TOP_LEVEL_DIRS = {
     "data",
@@ -34,6 +33,10 @@ EXCLUDED_TOP_LEVEL_FILES = {
     "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
     "package.json",
+    # A legacy updater UI self-test accidentally redirected its JSON result to
+    # this extensionless file in the 1.1.27 local build. Keep source-local
+    # diagnostics out of distributable payloads.
+    "true",
 }
 RELEASE_DIRECTORY_PREFIX = "DevSpacePortable-Windows-x64-"
 TEMP_NATIVE_UI_PATTERN = re.compile(r"^[0-9a-fA-F-]{36}_DevSpace-Portable\.exe$")
@@ -47,49 +50,38 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def prepare_release_plugins() -> list[Path]:
-    """Mirror bundled plugins into the user-visible release plugin layout.
+def release_plugin_entries() -> list[tuple[Path, Path]]:
+    """Map bundled plugin sources to their real installed path in the ZIP.
 
-    The maintained source of truth remains setup/bundled-plugins.  Release ZIPs
-    additionally expose the same versioned plugin trees at
-    plugins/installed/<plugin>/<version>/ so a freshly extracted Portable
-    distribution visibly contains its bundled plugins before first launch.
-    Runtime-installed/user-managed plugin state remains under data/plugins and
-    is still preserved across updates.
+    The source checkout keeps bundled plugin templates under
+    setup/bundled-plugins.  The distributable must additionally contain the
+    bundled bridge at data/plugins/installed/<plugin>/<version>/ so a fresh
+    extraction already has the plugin in the same location used by
+    PluginManager.  The mapping is virtual: build-release never writes into
+    the checkout's local data/ tree, which may contain developer credentials
+    and runtime state.
     """
-    if RELEASE_PLUGIN_ROOT.exists():
-        shutil.rmtree(RELEASE_PLUGIN_ROOT)
-    RELEASE_PLUGIN_ROOT.mkdir(parents=True, exist_ok=True)
-
-    mirrored: list[Path] = []
+    entries: list[tuple[Path, Path]] = []
     if not BUNDLED_PLUGIN_SOURCE.is_dir():
-        return mirrored
+        return entries
 
     for source in sorted(BUNDLED_PLUGIN_SOURCE.rglob("*")):
         if not source.is_file():
             continue
         relative = source.relative_to(BUNDLED_PLUGIN_SOURCE)
-        destination = RELEASE_PLUGIN_ROOT / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        mirrored.append(destination.relative_to(ROOT))
-    return mirrored
+        entries.append((source, RELEASE_PLUGIN_PREFIX / relative))
+    return entries
 
 
-def validate_release_plugins(files: list[Path], mirrored: list[Path]) -> None:
-    release_set = {item.as_posix() for item in files}
-    missing = [item.as_posix() for item in mirrored if item.as_posix() not in release_set]
-    if missing:
-        raise RuntimeError(f"Bundled plugin mirror is missing from release payload: {missing[:10]}")
-
-    codex_root = Path("plugins/installed/codex-runtime-bridge")
+def validate_release_plugins(entries: list[tuple[Path, Path]]) -> None:
+    codex_root = Path("data/plugins/installed/codex-runtime-bridge")
     codex_manifests = [
-        item for item in mirrored
-        if codex_root in item.parents and item.name == "manifest.json"
+        target for _, target in entries
+        if codex_root in target.parents and target.name == "manifest.json"
     ]
     if not codex_manifests:
         raise RuntimeError(
-            "Release payload must contain plugins/installed/codex-runtime-bridge/<version>/manifest.json"
+            "Release payload must contain data/plugins/installed/codex-runtime-bridge/<version>/manifest.json"
         )
 
 
@@ -136,11 +128,17 @@ def release_version() -> str:
     return release.removeprefix(prefix)
 
 
-def write_checksums(files: list[Path]) -> None:
+def write_checksums(files: list[Path], plugin_entries: list[tuple[Path, Path]]) -> None:
     lines: list[str] = []
-    total = len(files)
+    total = len(files) + len(plugin_entries)
+    index = 0
     for index, relative in enumerate(files, start=1):
         lines.append(f"{sha256_file(ROOT / relative)}  {relative.as_posix()}\n")
+        if index % 2000 == 0 or index == total:
+            print(f"[checksum] {index}/{total}", flush=True)
+    for source, target in plugin_entries:
+        index += 1
+        lines.append(f"{sha256_file(source)}  {target.as_posix()}\n")
         if index % 2000 == 0 or index == total:
             print(f"[checksum] {index}/{total}", flush=True)
     temporary = CHECKSUM_FILE.with_suffix(".txt.tmp")
@@ -148,13 +146,14 @@ def write_checksums(files: list[Path]) -> None:
     temporary.replace(CHECKSUM_FILE)
 
 
-def write_zip(files: list[Path], version: str) -> Path:
+def write_zip(files: list[Path], plugin_entries: list[tuple[Path, Path]], version: str) -> Path:
     output = ROOT / f"DevSpacePortable-Windows-x64-{version}.zip"
     temporary = output.with_suffix(".zip.tmp")
     temporary.unlink(missing_ok=True)
     output.unlink(missing_ok=True)
     archive_files = [*files, Path("SHA256SUMS.txt")]
-    total = len(archive_files)
+    total = len(archive_files) + len(plugin_entries)
+    index = 0
     with zipfile.ZipFile(
         temporary,
         mode="w",
@@ -170,6 +169,11 @@ def write_zip(files: list[Path], version: str) -> Path:
             archive.write(ROOT / relative, f"DevSpacePortable/{relative.as_posix()}")
             if index % 2000 == 0 or index == total:
                 print(f"[zip] {index}/{total}", flush=True)
+        for source, target in plugin_entries:
+            index += 1
+            archive.write(source, f"DevSpacePortable/{target.as_posix()}")
+            if index % 2000 == 0 or index == total:
+                print(f"[zip] {index}/{total}", flush=True)
     temporary.replace(output)
     return output
 
@@ -183,12 +187,12 @@ def main() -> int:
         raise RuntimeError(f"Native UI builder is missing: {native_ui_builder}")
     subprocess.run([str(node), str(native_ui_builder)], cwd=ROOT, check=True)
     version = release_version()
-    mirrored_plugins = prepare_release_plugins()
+    plugin_entries = release_plugin_entries()
+    validate_release_plugins(plugin_entries)
     files = release_files()
-    validate_release_plugins(files, mirrored_plugins)
-    print(f"Release {version}: {len(files)} payload files", flush=True)
-    write_checksums(files)
-    output = write_zip(files, version)
+    print(f"Release {version}: {len(files) + len(plugin_entries)} payload files", flush=True)
+    write_checksums(files, plugin_entries)
+    output = write_zip(files, plugin_entries, version)
     print(f"Created: {output}", flush=True)
     print(f"SHA-256: {sha256_file(output)}", flush=True)
     return 0

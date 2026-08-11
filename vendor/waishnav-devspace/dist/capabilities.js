@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.17";
+export const DEVSPACE_SERVER_VERSION = "1.1.27";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -73,6 +73,34 @@ const FEATURE_CATALOG = [
     { id: "bundled-plugin-release-layout", maturity: "stable", since: "1.1.17" },
     { id: "github-updater-bounded-network-retry", maturity: "stable", since: "1.1.17" },
     { id: "github-updater-curl-fallback", maturity: "stable", since: "1.1.17" },
+    { id: "native-ui-memory-scope-filter", maturity: "stable", since: "1.1.18" },
+    { id: "native-ui-memory-content-preview", maturity: "stable", since: "1.1.18" },
+    { id: "github-updater-live-progress", maturity: "stable", since: "1.1.19" },
+    { id: "github-updater-resumable-curl", maturity: "stable", since: "1.1.19" },
+    { id: "portable-nonrecursive-owned-process-stop", maturity: "stable", since: "1.1.19" },
+    { id: "portable-terminal-shutdown", maturity: "stable", since: "1.1.19" },
+    { id: "native-ui-stale-broker-pid-safety", maturity: "stable", since: "1.1.20" },
+    { id: "vpn-proxy-tunnel-coexistence", maturity: "stable", since: "1.1.21" },
+    { id: "non-invasive-vpn-proxy-network-policy", maturity: "stable", since: "1.1.22" },
+    { id: "proxy-aware-service-readiness", maturity: "stable", since: "1.1.22" },
+    { id: "github-updater-dead-proxy-skip", maturity: "stable", since: "1.1.22" },
+    { id: "github-updater-generated-drift-tolerance", maturity: "stable", since: "1.1.22" },
+    { id: "github-updater-launch-acknowledgement", maturity: "stable", since: "1.1.22" },
+    { id: "native-ui-live-status-indicators", maturity: "stable", since: "1.1.22" },
+    { id: "native-ui-diagnostics-details", maturity: "stable", since: "1.1.22" },
+    { id: "native-ui-collapsible-session-groups", maturity: "stable", since: "1.1.23" },
+    { id: "first-run-owner-password-copy-and-auth-path", maturity: "stable", since: "1.1.23" },
+    { id: "standalone-native-update-controller", maturity: "stable", since: "1.1.24" },
+    { id: "incremental-full-file-drift-tolerance", maturity: "stable", since: "1.1.24" },
+    { id: "temporary-out-of-tree-update-apply", maturity: "stable", since: "1.1.24" },
+    { id: "native-ui-dashboard-failure-debounce", maturity: "stable", since: "1.1.25" },
+    { id: "native-ui-resizable-review-dialogs", maturity: "stable", since: "1.1.25" },
+    { id: "vendor-neutral-network-path-adaptation", maturity: "stable", since: "1.1.26" },
+    { id: "owned-tunnel-route-change-reconnect", maturity: "stable", since: "1.1.26" },
+    { id: "public-tunnel-local-service-independent-readiness", maturity: "stable", since: "1.1.26" },
+    { id: "transactional-updater-task-reconciliation", maturity: "stable", since: "1.1.27" },
+    { id: "transactional-updater-rollback-task-recovery", maturity: "stable", since: "1.1.27" },
+    { id: "structured-updater-backend-errors", maturity: "stable", since: "1.1.27" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

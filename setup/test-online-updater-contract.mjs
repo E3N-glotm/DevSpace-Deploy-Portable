@@ -11,27 +11,72 @@ const deltaBuilder = readFileSync(join(root, "setup", "create-incremental-update
 
 assert.match(updater, /repos\/\$Repository\/releases\/latest/);
 assert.match(updater, /update-manifest\.json/);
+assert.match(updater, /Get-GitHubAssetSha256/);
+assert.match(updater, /github-release-asset-digest/);
+assert.match(updater, /Latest Release has neither asset SHA-256 digests nor update-manifest\.json/);
+assert.match(updater, /Get-LatestReleaseFromPublishedManifest/);
+assert.match(updater, /releases\/latest\/download\/update-manifest\.json/);
+assert.match(updater, /release-latest-update-manifest/);
+assert.match(updater, /Falling back to the published latest update manifest/);
+assert.match(updater, /Assert-ReleaseAssetMetadata/);
 assert.match(updater, /SecurityProtocolType\]::Tls12/);
-assert.match(updater, /Invoke-WithRetry/);
 assert.match(updater, /Invoke-GitHubJson/);
 assert.match(updater, /Invoke-GitHubDownload/);
-assert.match(updater, /curl\.exe fallback/);
 assert.match(updater, /runtime\\git\\mingw64\\bin\\curl\.exe/);
+assert.match(updater, /update-progress\.json/);
+assert.match(updater, /Write-UpdateProgress/);
+assert.match(updater, /--noproxy/);
+assert.match(updater, /--continue-at/);
+assert.match(updater, /--speed-limit/);
+assert.match(updater, /--speed-time/);
+assert.match(updater, /connect-timeout", "8"/);
+assert.match(updater, /Get-GitHubTransportCandidates/);
+assert.match(updater, /Skipping unavailable local proxy/);
+assert.match(updater, /Get-WindowsInternetProxyState/);
+assert.match(updater, /Invoke-DotNetJson/);
+assert.match(updater, /Invoke-DotNetDownload/);
+assert.match(updater, /GetSystemWebProxy\(\)/);
+assert.match(updater, /dotnet-direct/);
+assert.match(updater, /dotnet-system-proxy/);
+assert.match(updater, /transport = "dotnet-direct"; source = "direct-dotnet"/);
+assert.match(updater, /transport = "curl-direct"; source = "direct-or-transparent-tun"/);
+assert.match(updater, /for \(\$round = 1; \$round -le 2; \$round\+\+\)/);
+assert.match(updater, /refreshing proxy\/route state and retrying once/);
+assert.match(updater, /ReadWriteTimeout/);
+assert.match(updater, /AddRange\(\$existingBytes\)/);
+assert.match(updater, /--noproxy", "\*"/);
+assert.match(updater, /SetEnvironmentVariable\(\$name, \$null, "Process"\)/);
+assert.match(updater, /direct\/TUN/);
+assert.doesNotMatch(updater, /Invoke-WebRequest\s+-Uri\s+\$Uri[\s\S]*?-OutFile\s+\$OutFile/);
 assert.match(updater, /Get-FileHash[^\n]+SHA256/);
 assert.match(updater, /Get-IncrementalCandidate/);
 assert.match(updater, /Stage-IncrementalUpdate/);
 assert.match(updater, /automatically falling back to the full package/);
-assert.match(updater, /Incremental base file has local drift/);
+assert.match(updater, /acceptedBaseDrift/);
+assert.match(updater, /Accepting changed-file base drift/);
+assert.match(updater, /file-delta-v1 carries the complete target file/);
+assert.match(updater, /Incremental deleted file has local drift/);
 assert.match(updater, /updateMode = "incremental"/);
 assert.match(updater, /Unsafe archive entry/);
 assert.match(updater, /Online application update is disabled inside a Git source checkout/);
 assert.match(updater, /\.update-backup-/);
-assert.match(updater, /rolledBack = \$true/);
+assert.match(updater, /rolledBack = \$filesRestored/);
+assert.match(updater, /Repair-PortableTasksAndStart/);
+assert.match(updater, /Invoke-Manager "install-tasks"/);
+assert.match(updater, /servicesRecovered/);
+assert.match(updater, /rollbackErrors/);
+assert.match(updater, /DevSpace update error:/);
+assert.match(updater, /Write-JsonResult \(\[ordered\]@\{/);
 assert.match(updater, /\$persistent = @\("data", "logs", "reports"\)/);
 assert.match(manager, /command === "update-check"/);
 assert.match(manager, /command === "update-stage"/);
 assert.match(manager, /command === "update-launch"/);
 assert.match(manager, /detached: true/);
+assert.match(manager, /apply-launch-ack\.json/);
+assert.match(manager, /acknowledged/);
+assert.match(manager, /Detached updater failed to acknowledge launch/);
+assert.match(updater, /LaunchAckPath/);
+assert.match(updater, /apply-started/);
 assert.match(manifestBuilder, /incrementalAssets/);
 assert.match(manifestBuilder, /incremental-first-full-fallback/);
 assert.match(deltaBuilder, /file-delta-v1/);
@@ -39,16 +84,33 @@ assert.match(deltaBuilder, /baseSha256/);
 
 console.log(JSON.stringify({
   publicGitHubReleaseCheck: true,
+  releaseApiDigestMetadata: true,
+  releaseManifestFallbackWhenApiUnavailable: true,
   tls12Compatibility: true,
-  boundedNetworkRetry: true,
-  curlFallbackTransport: true,
+  boundedNetworkFailover: true,
+  directTransportFirst: true,
+  dotNetDirectTransport: true,
+  directCurlFallback: true,
+  resumableDownload: true,
+  liveDownloadProgress: true,
+  stalledDownloadDetection: true,
+  deadLoopbackProxySkipped: true,
+  windowsSystemProxyFallback: true,
+  dotNetStreamingProxyDownload: true,
+  metadataCandidateRefreshRetry: true,
+  explicitDirectTunFallback: true,
   incrementalFirst: true,
   automaticFullFallback: true,
-  baseFileDriftProtection: true,
+  changedFileFullReplacementDriftTolerance: true,
+  deletionDriftProtection: true,
+  updateLaunchAcknowledgement: true,
   deltaManifestGeneration: true,
   sizeAndSha256Validation: true,
   archiveTraversalProtection: true,
   sourceCheckoutProtection: true,
   transactionalRollback: true,
+  scheduledTaskRepairBeforeRestart: true,
+  rollbackTaskAndServiceRecovery: true,
+  structuredBackendFailure: true,
   persistentDataPreserved: true,
 }));

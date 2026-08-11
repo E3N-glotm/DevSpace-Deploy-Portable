@@ -20,7 +20,6 @@ reports/
 # Generated package and release artifacts.
 packages/*.tgz
 packages/staging/
-/plugins/installed/
 DevSpacePortable-Windows-x64-*.zip
 DevSpacePortable-Update-*.zip
 SHA256SUMS.txt
@@ -29,6 +28,7 @@ release-assets/*
 
 # Native build output and temporary replacement executables.
 /DevSpace-Portable.exe
+/Update.exe
 /*_DevSpace-Portable.exe
 
 # WebView2 runtime artifacts (restored from NuGet; see setup/native/lib/webview2/README.md).

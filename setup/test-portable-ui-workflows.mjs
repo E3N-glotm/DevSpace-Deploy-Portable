@@ -17,6 +17,7 @@ const configDir = join(temporary, "config");
 const stateDir = join(temporary, "state");
 const runDir = join(temporary, "run");
 const workspaceRoot = join(temporary, "workspace");
+const otherWorkspaceRoot = join(temporary, "other-workspace");
 const env = {
   ...process.env,
   DEVSPACE_PORTABLE_CONFIG_DIR: configDir,
@@ -40,10 +41,11 @@ function manager(command, payload = {}) {
 try {
   mkdirSync(configDir, { recursive: true });
   mkdirSync(workspaceRoot, { recursive: true });
+  mkdirSync(otherWorkspaceRoot, { recursive: true });
   writeFileSync(join(configDir, "config.json"), JSON.stringify({
     host: "127.0.0.1",
     port: 7676,
-    allowedRoots: [workspaceRoot],
+    allowedRoots: [workspaceRoot, otherWorkspaceRoot],
     stateDir,
     subagents: false,
     permissions: { profile: "workspace" },
@@ -70,6 +72,7 @@ try {
 
   // memory CRUD 测试依赖 vendor 包（@waishnav/devspace），未安装时跳过
   let memoryCrud = false;
+  let memoryScopeFiltering = false;
   let remainingMemories = null;
   try {
     assert.deepEqual(manager("memory-list").memories, []);
@@ -91,10 +94,27 @@ try {
     }).memory;
     assert.equal(createdGlobal.scope, "global");
 
+    const createdOtherWorkspace = manager("memory-upsert", {
+      scope: "workspace",
+      workspaceRoot: otherWorkspaceRoot,
+      title: "Other workspace preference",
+      content: "This record must stay out of the default current-workspace view.",
+      tags: ["memory", "scope"],
+    }).memory;
+    assert.equal(createdOtherWorkspace.scope, "workspace");
+
     const listed = manager("memory-list").memories;
-    assert.equal(listed.length, 2);
+    assert.equal(listed.length, 3);
     assert.ok(listed.some((memory) => memory.id === createdWorkspace.id));
     assert.ok(listed.some((memory) => memory.id === createdGlobal.id));
+    assert.ok(listed.some((memory) => memory.id === createdOtherWorkspace.id));
+
+    const scoped = manager("memory-list", { workspaceRoot, includeGlobal: true }).memories;
+    assert.equal(scoped.length, 2);
+    assert.ok(scoped.some((memory) => memory.id === createdWorkspace.id));
+    assert.ok(scoped.some((memory) => memory.id === createdGlobal.id));
+    assert.ok(!scoped.some((memory) => memory.id === createdOtherWorkspace.id));
+    memoryScopeFiltering = true;
 
     const updated = manager("memory-upsert", {
       id: createdWorkspace.id,
@@ -109,7 +129,7 @@ try {
 
     assert.equal(manager("memory-delete", { id: createdGlobal.id }).memory.id, createdGlobal.id);
     remainingMemories = manager("memory-list").memories.length;
-    assert.equal(remainingMemories, 1);
+    assert.equal(remainingMemories, 2);
     memoryCrud = true;
   } catch (error) {
     if (!/Memory runtime is missing|Cannot find module|is missing/i.test(error.message)) throw error;
@@ -122,6 +142,7 @@ try {
     computerUseQueue: true,
     trayCloseChoice: true,
     memoryCrud,
+    memoryScopeFiltering: memoryScopeFiltering,
     remainingMemories,
   }));
 } finally {

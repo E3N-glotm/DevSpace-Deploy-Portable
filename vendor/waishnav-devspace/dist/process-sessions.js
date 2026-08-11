@@ -9,8 +9,9 @@ const DEFAULT_POLL_YIELD_MS = 5_000;
 const MAX_COMMAND_YIELD_MS = 30_000;
 const MAX_POLL_YIELD_MS = 110_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
-const DEFAULT_BUFFER_CHARACTERS = 1_000_000;
+const DEFAULT_BUFFER_CHARACTERS = 512_000;
 const COMPLETED_SESSION_TTL_MS = 5 * 60 * 1_000;
+const MAX_LIVE_PROCESS_SESSIONS = 128;
 const DEFAULT_COLUMNS = 80;
 const DEFAULT_ROWS = 24;
 
@@ -70,10 +71,10 @@ function shouldUseHostPath(input) {
 }
 
 function codePointLength(value) {
-    return Array.from(value).length;
+    return value.length;
 }
 function sliceCodePoints(value, start, end) {
-    return Array.from(value).slice(start, end).join("");
+    return value.slice(start, end);
 }
 function takeHead(value, count) {
     if (count <= 0)
@@ -83,8 +84,7 @@ function takeHead(value, count) {
 function takeTail(value, count) {
     if (count <= 0)
         return "";
-    const characters = Array.from(value);
-    return characters.slice(Math.max(0, characters.length - count)).join("");
+    return value.slice(Math.max(0, value.length - count));
 }
 function splitBudget(maxCharacters) {
     return {
@@ -120,12 +120,18 @@ export class HeadTailBuffer {
         }
         const budget = splitBudget(this.maxCharacters);
         if (previousTotal <= this.maxCharacters) {
-            const fullOutput = this.head + output;
-            this.head = takeHead(fullOutput, budget.head);
-            this.tail = takeTail(fullOutput, budget.tail);
+            const previousHead = this.head;
+            this.head = previousHead.length >= budget.head
+                ? takeHead(previousHead, budget.head)
+                : takeHead(previousHead + output, budget.head);
+            this.tail = output.length >= budget.tail
+                ? takeTail(output, budget.tail)
+                : takeTail(previousHead + output, budget.tail);
             return;
         }
-        this.tail = takeTail(this.tail + output, budget.tail);
+        this.tail = output.length >= budget.tail
+            ? takeTail(output, budget.tail)
+            : takeTail(this.tail + output, budget.tail);
     }
     hasOutput() {
         return this.totalCharacters > 0;
@@ -200,6 +206,9 @@ export class ProcessSessionManager {
     }
     async start(input) {
         validateExecutionInput(input);
+        if (this.liveCount() >= MAX_LIVE_PROCESS_SESSIONS) {
+            throw new Error(`DevSpace refuses to retain more than ${MAX_LIVE_PROCESS_SESSIONS} live process sessions. Reuse or stop an existing process before starting another.`);
+        }
         const session = this.createSession(input);
         const existing = this.handles.get(session.processHandle);
         if (existing?.running) {

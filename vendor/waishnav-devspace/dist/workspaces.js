@@ -7,6 +7,11 @@ import { createManagedWorktree } from "./git-worktrees.js";
 import { assertAllowedPath, expandHomePath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 import { loadWorkspaceSkills, markSkillActivated, resolveSkillReadPath, } from "./skills.js";
 import { loadLocalAgentProfiles, } from "./local-agent-profiles.js";
+const MAX_CACHED_WORKSPACES = 64;
+const MAX_CONTEXT_SCAN_ENTRIES = 25_000;
+const MAX_CONTEXT_SCAN_DIRECTORIES = 2_048;
+const MAX_CONTEXT_SCAN_DEPTH = 16;
+const MAX_CONTEXT_SCAN_MS = 2_000;
 export class WorkspaceRegistry {
     config;
     store;
@@ -60,7 +65,7 @@ export class WorkspaceRegistry {
             activatedSkillDirs: new Set(),
         };
         this.store?.touchSession(workspaceId);
-        this.workspaces.set(restoredWorkspace.id, restoredWorkspace);
+        this.cacheWorkspace(restoredWorkspace);
         return restoredWorkspace;
     }
     listSessions(input = {}) {
@@ -105,7 +110,7 @@ export class WorkspaceRegistry {
             gitBranch: git.branch,
             gitOriginUrl: git.originUrl,
         });
-        this.workspaces.set(workspace.id, workspace);
+        this.cacheWorkspace(workspace);
         const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
         const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
         return { workspace, agentsFiles, availableAgentsFiles };
@@ -202,7 +207,7 @@ export class WorkspaceRegistry {
             gitBranch: git.branch,
             gitOriginUrl: git.originUrl,
         });
-        this.workspaces.set(workspace.id, workspace);
+        this.cacheWorkspace(workspace);
         const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
         const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
         return { workspace, agentsFiles, availableAgentsFiles };
@@ -213,6 +218,19 @@ export class WorkspaceRegistry {
             skills: result.skills,
             skillDiagnostics: result.diagnostics,
         };
+    }
+    cacheWorkspace(workspace) {
+        // Persisted workspace sessions remain authoritative. This Map is only a
+        // hot cache, so evicting an old entry is safe: getWorkspace() restores
+        // it from WorkspaceStore on demand.
+        this.workspaces.delete(workspace.id);
+        this.workspaces.set(workspace.id, workspace);
+        while (this.workspaces.size > MAX_CACHED_WORKSPACES) {
+            const oldestId = this.workspaces.keys().next().value;
+            if (!oldestId)
+                break;
+            this.workspaces.delete(oldestId);
+        }
     }
     assertWorkspaceRootAllowed(root, mode, sourceRoot) {
         if (this.config.permissions.allowExternalPaths) {
@@ -255,6 +273,12 @@ export class WorkspaceRegistry {
                 loadedRealPaths.add(realPath);
         }
         const discovered = [];
+        const scanBudget = {
+            entries: 0,
+            directories: 0,
+            deadline: Date.now() + MAX_CONTEXT_SCAN_MS,
+            truncated: false,
+        };
         await walkWorkspace(root, async (path, entry) => {
             if (!entry.isFile())
                 return;
@@ -266,7 +290,7 @@ export class WorkspaceRegistry {
             if (realPath && loadedRealPaths.has(realPath))
                 return;
             discovered.push({ path });
-        });
+        }, scanBudget, 0);
         return discovered.sort((a, b) => a.path.localeCompare(b.path));
     }
 }
@@ -350,7 +374,15 @@ async function tryRealpath(path) {
         return undefined;
     }
 }
-async function walkWorkspace(directory, visit) {
+async function walkWorkspace(directory, visit, budget, depth) {
+    if (budget && (budget.entries >= MAX_CONTEXT_SCAN_ENTRIES ||
+        budget.directories >= MAX_CONTEXT_SCAN_DIRECTORIES ||
+        depth > MAX_CONTEXT_SCAN_DEPTH || Date.now() >= budget.deadline)) {
+        budget.truncated = true;
+        return;
+    }
+    if (budget)
+        budget.directories += 1;
     let entries;
     try {
         entries = await opendir(directory);
@@ -359,10 +391,17 @@ async function walkWorkspace(directory, visit) {
         return;
     }
     for await (const entry of entries) {
+        if (budget) {
+            budget.entries += 1;
+            if (budget.entries > MAX_CONTEXT_SCAN_ENTRIES || Date.now() >= budget.deadline) {
+                budget.truncated = true;
+                break;
+            }
+        }
         const path = join(directory, entry.name);
         if (entry.isDirectory()) {
             if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) {
-                await walkWorkspace(path, visit);
+                await walkWorkspace(path, visit, budget, depth + 1);
             }
             continue;
         }

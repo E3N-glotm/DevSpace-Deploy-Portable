@@ -43,8 +43,14 @@ import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
 import { formatLocalAgentProviderAvailabilitySummary, getLocalAgentProviderAvailabilitySnapshot, } from "./local-agent-availability.js";
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
-const MCP_SESSION_IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
-const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
+// Each MCP transport owns a complete McpServer/tool registration graph. A
+// disconnected client is not guaranteed to send a close request, especially
+// across tunnels/VPN changes, so keeping abandoned sessions for a full day can
+// retain gigabytes of otherwise unreachable server state. Keep this cache
+// explicitly bounded instead of increasing V8's heap limit.
+const MCP_SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1_000;
+const MCP_SESSION_CLEANUP_INTERVAL_MS = 60 * 1_000;
+const MCP_SESSION_MAX_ACTIVE = 32;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 let structuredRuntimeState;
@@ -2286,7 +2292,7 @@ export function createServer(config = loadConfig(), options = {}) {
         host: config.host,
         ...(allowedHosts ? { allowedHosts } : {}),
     });
-    const transports = new McpSessionRegistry();
+    const transports = new McpSessionRegistry({ maxSessions: MCP_SESSION_MAX_ACTIVE });
     const mcpUrl = new URL("/mcp", config.publicBaseUrl);
     const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
     const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);

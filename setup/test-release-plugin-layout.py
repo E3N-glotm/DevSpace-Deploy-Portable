@@ -11,38 +11,47 @@ BUILD_RELEASE = ROOT / "setup" / "build-release.py"
 
 def main() -> int:
     module = runpy.run_path(str(BUILD_RELEASE))
-    prepare_release_plugins = module["prepare_release_plugins"]
+    release_plugin_entries = module["release_plugin_entries"]
     release_files = module["release_files"]
     validate_release_plugins = module["validate_release_plugins"]
 
-    mirrored = prepare_release_plugins()
-    files = release_files()
-    validate_release_plugins(files, mirrored)
+    entries = release_plugin_entries()
+    validate_release_plugins(entries)
 
-    codex_root = ROOT / "plugins" / "installed" / "codex-runtime-bridge"
-    versions = sorted(path.name for path in codex_root.iterdir() if path.is_dir())
-    assert versions, "codex-runtime-bridge must be mirrored into plugins/installed"
-    latest = codex_root / versions[-1]
+    targets = {target.as_posix(): source for source, target in entries}
+    prefix = "data/plugins/installed/codex-runtime-bridge/"
+    versions = sorted(
+        {
+            target[len(prefix):].split("/", 1)[0]
+            for target in targets
+            if target.startswith(prefix)
+        }
+    )
+    assert versions, "codex-runtime-bridge must be packaged under data/plugins/installed"
+    latest = versions[-1]
     required = [
-        latest / "manifest.json",
-        latest / "runtime.mjs",
-        latest / "keep-awake.ps1",
-        latest / "skills" / "codex-runtime-bridge" / "SKILL.md",
+        f"{prefix}{latest}/manifest.json",
+        f"{prefix}{latest}/runtime.mjs",
+        f"{prefix}{latest}/keep-awake.ps1",
+        f"{prefix}{latest}/skills/codex-runtime-bridge/SKILL.md",
     ]
-    for path in required:
-        assert path.is_file(), f"missing release plugin file: {path.relative_to(ROOT)}"
+    for target in required:
+        assert target in targets, f"missing release plugin mapping: {target}"
+        assert targets[target].is_file(), f"missing release plugin source: {targets[target]}"
 
-    release_paths = {path.as_posix() for path in files}
-    for path in required:
-        assert path.relative_to(ROOT).as_posix() in release_paths
+    wrong_root = [target for target in targets if target.startswith("plugins/installed/")]
+    assert not wrong_root, f"plugin must not be packaged at repository root: {wrong_root}"
+    assert Path("true") not in release_files(), "source-local updater test output leaked into release payload"
 
     print(
         json.dumps(
             {
-                "releasePluginRoot": "plugins/installed/codex-runtime-bridge",
+                "releasePluginRoot": "data/plugins/installed/codex-runtime-bridge",
                 "versions": versions,
                 "requiredFilesPresent": True,
-                "includedByReleaseScanner": True,
+                "wrongRootEntries": 0,
+                "virtualMappingKeepsLocalDataUntouched": True,
+                "sourceLocalTestOutputExcluded": True,
             },
             ensure_ascii=False,
         )

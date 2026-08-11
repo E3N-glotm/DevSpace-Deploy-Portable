@@ -49,8 +49,18 @@ $Tests = @(
     "setup/test-runtime-cards.mjs",
     "setup/test-runtime-log-ui.mjs",
     "setup/test-portable-ui-workflows.mjs",
+    "setup/test-standalone-updater.mjs",
     "setup/test-selected-file-diff.mjs",
     "setup/test-online-updater-contract.mjs",
+    "setup/test-updater-apply-recovery.mjs",
+    "setup/test-update-launch-ack.mjs",
+    "setup/test-dashboard-live-status.mjs",
+    "setup/test-dashboard-probe-concurrency.mjs",
+    "setup/test-strict-stop.mjs",
+    "setup/test-ui-open-process-safety.mjs",
+    "setup/test-tunnel-network-coexistence.mjs",
+    "setup/test-network-isolation-contract.mjs",
+    "setup/test-core-memory-bounds.mjs",
     "setup/test-native-ui-resilience.mjs",
     "setup/test-native-close-tray.mjs",
     "setup/test-session-capabilities.mjs",
@@ -61,8 +71,21 @@ $Tests = @(
 )
 foreach ($Test in $Tests) {
     Write-Host "==> $Test"
-    & $Node $Test
-    if ($LASTEXITCODE -ne 0) { throw "Test failed: $Test" }
+    # Windows PowerShell 5.1 can surface a native program's stderr as a
+    # NativeCommandError when ErrorActionPreference=Stop even if that program
+    # exits successfully. Git in particular emits harmless line-ending
+    # warnings from some regression fixtures. Let native stderr remain visible
+    # and use the process exit code as the authoritative test result.
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $NativeExitCode = 0
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Node $Test
+        $NativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($NativeExitCode -ne 0) { throw "Test failed: $Test" }
 }
 
 if (-not $SkipAudit) {

@@ -11,8 +11,16 @@ const REFERENCE_ROOT_CANDIDATES = [
   "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319",
   "C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319",
 ];
-const SOURCE = path.join(ROOT, "setup", "native", "DevSpacePortableApp.cs");
-const OUTPUT = path.join(ROOT, "DevSpace-Portable.exe");
+const TARGETS = [
+  {
+    source: path.join(ROOT, "setup", "native", "DevSpacePortableApp.cs"),
+    output: path.join(ROOT, "DevSpace-Portable.exe"),
+  },
+  {
+    source: path.join(ROOT, "setup", "native", "DevSpaceUpdaterApp.cs"),
+    output: path.join(ROOT, "Update.exe"),
+  },
+];
 const WEBVIEW2_LIB = path.join(ROOT, "setup", "native", "lib", "webview2", "lib", "net462");
 const WEBVIEW2_WINFORMS_DLL = path.join(WEBVIEW2_LIB, "Microsoft.Web.WebView2.WinForms.dll");
 const WEBVIEW2_CORE_DLL = path.join(WEBVIEW2_LIB, "Microsoft.Web.WebView2.Core.dll");
@@ -44,7 +52,9 @@ function run(file, args) {
   return String(result.stdout || "").trim();
 }
 
-if (!fs.existsSync(SOURCE)) throw new Error(`Native UI source was not found: ${SOURCE}`);
+for (const target of TARGETS) {
+  if (!fs.existsSync(target.source)) throw new Error(`Native UI source was not found: ${target.source}`);
+}
 if (!fs.existsSync(WEBVIEW2_WINFORMS_DLL)) {
   throw new Error(
     `Microsoft.Web.WebView2.WinForms.dll was not found at ${WEBVIEW2_WINFORMS_DLL}. ` +
@@ -112,19 +122,19 @@ const compilerArgs = [
 ];
 // /deterministic+ 仅 Roslyn 支持，.NET Framework 4 自带 csc.exe 不识别
 if (langVersion === "latest") compilerArgs.push("/deterministic+");
-compilerArgs.push(`/out:${OUTPUT}`, ...references.map((reference) => `/reference:${reference}`), SOURCE);
 
-run(compiler, compilerArgs);
+for (const target of TARGETS) {
+  const targetArgs = [...compilerArgs, `/out:${target.output}`, ...references.map((reference) => `/reference:${reference}`), target.source];
+  run(compiler, targetArgs);
+  const stat = fs.statSync(target.output);
+  console.log(`Created ${target.output} (${stat.size} bytes)`);
+}
 
 // 把 WebView2Loader.dll (本机) 复制到输出目录，否则 WebView2 运行时初始化失败。
 fs.copyFileSync(WEBVIEW2_LOADER_X64, path.join(ROOT, "WebView2Loader.dll"));
 // 把 WebView2 托管程序集复制到输出目录，运行时需要与 exe 同目录。
 fs.copyFileSync(WEBVIEW2_CORE_DLL, path.join(ROOT, "Microsoft.Web.WebView2.Core.dll"));
 fs.copyFileSync(WEBVIEW2_WINFORMS_DLL, path.join(ROOT, "Microsoft.Web.WebView2.WinForms.dll"));
-
-const stat = fs.statSync(OUTPUT);
-console.log(`Created ${OUTPUT} (${stat.size} bytes)`);
 console.log(`Copied WebView2Loader.dll -> ${path.join(ROOT, "WebView2Loader.dll")}`);
 console.log(`Copied Microsoft.Web.WebView2.Core.dll -> ${path.join(ROOT, "Microsoft.Web.WebView2.Core.dll")}`);
 console.log(`Copied Microsoft.Web.WebView2.WinForms.dll -> ${path.join(ROOT, "Microsoft.Web.WebView2.WinForms.dll")}`);
-

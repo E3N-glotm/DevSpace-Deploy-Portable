@@ -75,6 +75,7 @@ ${hiddenFields}
 function requestedScopesAllowed(requested, supported) {
     return requested.every((scope) => supported.includes(scope));
 }
+const MAX_PENDING_AUTHORIZATION_CODES = 256;
 export class SingleUserOAuthProvider {
     config;
     clientsStore;
@@ -88,6 +89,7 @@ export class SingleUserOAuthProvider {
         this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts);
     }
     async authorize(client, params, res) {
+        this.pruneAuthorizationCodes();
         if (!params.resource || !checkResourceAllowed({ requestedResource: params.resource, configuredResource: this.resourceServerUrl })) {
             throw new InvalidRequestError("Invalid or missing OAuth resource");
         }
@@ -117,6 +119,11 @@ export class SingleUserOAuthProvider {
             return;
         }
         const code = `code-${randomUUID()}`;
+        if (this.codes.size >= MAX_PENDING_AUTHORIZATION_CODES) {
+            const oldestCode = this.codes.keys().next().value;
+            if (oldestCode)
+                this.codes.delete(oldestCode);
+        }
         this.codes.set(code, {
             clientId: client.client_id,
             params,
@@ -180,11 +187,25 @@ export class SingleUserOAuthProvider {
         this.oauthStore.close();
     }
     validCodeRecord(client, authorizationCode) {
+        this.pruneAuthorizationCodes();
         const record = this.codes.get(authorizationCode);
         if (!record || record.clientId !== client.client_id || record.expiresAtMs < Date.now()) {
             throw new InvalidGrantError("Invalid authorization code");
         }
         return record;
+    }
+    pruneAuthorizationCodes() {
+        const now = Date.now();
+        for (const [code, record] of this.codes) {
+            if (record.expiresAtMs < now)
+                this.codes.delete(code);
+        }
+        while (this.codes.size > MAX_PENDING_AUTHORIZATION_CODES) {
+            const oldestCode = this.codes.keys().next().value;
+            if (!oldestCode)
+                break;
+            this.codes.delete(oldestCode);
+        }
     }
     issueTokens(clientId, scopes, resource, consumedRefreshTokenHash) {
         const now = Math.floor(Date.now() / 1000);

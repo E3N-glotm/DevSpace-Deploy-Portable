@@ -47,7 +47,7 @@ writing the credential to a temporary file. Install GitHub CLI first with
 `winget install --id GitHub.cli --exact --scope user`:
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.17 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.31 -BypassProxy
 ```
 
 `-BypassProxy` is optional. Use it when a local HTTP proxy makes large Release
@@ -63,4 +63,3 @@ The repository and Releases are public. Before each public binary Release:
 3. review third-party notices and generated SBOM;
 4. confirm no historical commit or Release contains credentials or local
    runtime state.
-
