@@ -118,12 +118,22 @@ namespace DevSpacePortable.NativeUI
                     StringBuilder text = new StringBuilder(256);
                     GetWindowText(hwnd, text, text.Capacity);
                     if (!string.Equals(text.ToString(), title, StringComparison.Ordinal)) return true;
-                    ShowWindow(hwnd, 9);
-                    SetForegroundWindow(hwnd);
+                    ActivateWindow(hwnd);
                     return false;
                 }, IntPtr.Zero);
             }
             catch { }
+        }
+
+        public static bool ActivateWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            try
+            {
+                ShowWindow(hwnd, 9);
+                return SetForegroundWindow(hwnd);
+            }
+            catch { return false; }
         }
     }
 
@@ -441,6 +451,7 @@ namespace DevSpacePortable.NativeUI
             get
             {
                 if (_state == "ready") return UiPalette.Success;
+                if (_state == "idle") return Color.FromArgb(232, 137, 35);
                 if (_state == "warning") return Color.FromArgb(222, 157, 30);
                 if (_state == "error") return UiPalette.Danger;
                 if (_state == "stopped") return Color.FromArgb(150, 159, 178);
@@ -2274,7 +2285,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.30 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.31 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -3050,7 +3061,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.30") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.31") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -3247,18 +3258,85 @@ namespace DevSpacePortable.NativeUI
                     MessageBoxIcon.Information);
                 return;
             }
-            string current = GetString(_currentConfig, "portableVersion", "1.1.30");
+            if (TryActivateExistingUpdater(updater))
+            {
+                SetOutput("检测到当前 Portable 的 Update.exe 已经在运行，已将更新窗口切换到前台。");
+                return;
+            }
+            string current = GetString(_currentConfig, "portableVersion", "1.1.31");
             string arguments = "--root \"" + _root.Replace("\"", "\\\"") + "\""
                 + " --current \"" + current.Replace("\"", "\\\"") + "\""
                 + " --parent-ui " + Process.GetCurrentProcess().Id;
-            Process.Start(new ProcessStartInfo
+            Process process = Process.Start(new ProcessStartInfo
             {
                 FileName = updater,
                 Arguments = arguments,
                 WorkingDirectory = _root,
-                UseShellExecute = false,
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Normal,
             });
-            SetOutput("已启动独立 Update.exe。\r\n\r\n检查、下载、校验和安装进度都会在独立更新窗口中显示；主控制中心在下载阶段保持运行，只有真正开始替换文件时才会关闭。");
+            if (process == null) throw new InvalidOperationException("Windows 没有返回 Update.exe 进程，更新窗口未启动。");
+            using (process)
+            {
+                IntPtr window = await WaitForVisibleUpdaterWindowAsync(process, 7000);
+                if (window != IntPtr.Zero) NativeWindowEffects.ActivateWindow(window);
+            }
+            SetOutput("已启动或切换到独立 Update.exe。\r\n\r\n检查、下载、校验和安装进度都会在独立更新窗口中显示；主控制中心在下载阶段保持运行，只有真正开始替换文件时才会关闭。");
+        }
+
+        private bool TryActivateExistingUpdater(string updater)
+        {
+            string expected;
+            try { expected = Path.GetFullPath(updater); }
+            catch { return false; }
+            foreach (Process process in Process.GetProcessesByName("Update"))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        if (process.HasExited) continue;
+                        string actual = Path.GetFullPath(process.MainModule.FileName);
+                        if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase)) continue;
+                        process.Refresh();
+                        if (process.MainWindowHandle == IntPtr.Zero) continue;
+                        NativeWindowEffects.ActivateWindow(process.MainWindowHandle);
+                        return true;
+                    }
+                    catch { }
+                }
+            }
+            return false;
+        }
+
+        private async Task<IntPtr> WaitForVisibleUpdaterWindowAsync(Process process, int timeoutMs)
+        {
+            if (process == null) throw new ArgumentNullException("process");
+            Stopwatch stopwatch = Stopwatch.StartNew();
+            try
+            {
+                await Task.Run(delegate
+                {
+                    try { process.WaitForInputIdle(Math.Min(timeoutMs, 5000)); }
+                    catch { }
+                });
+            }
+            catch { }
+            while (stopwatch.ElapsedMilliseconds < timeoutMs)
+            {
+                process.Refresh();
+                if (process.HasExited)
+                {
+                    if (TryActivateExistingUpdater(Path.Combine(_root, "Update.exe")))
+                        return IntPtr.Zero;
+                    throw new InvalidOperationException("Update.exe 启动后立即退出，退出码 " + process.ExitCode + "。请重新解压完整 Release 或查看 Windows 安全软件拦截记录。");
+                }
+                if (process.MainWindowHandle != IntPtr.Zero) return process.MainWindowHandle;
+                await Task.Delay(100);
+            }
+            if (TryActivateExistingUpdater(Path.Combine(_root, "Update.exe")))
+                return IntPtr.Zero;
+            throw new InvalidOperationException("Update.exe 已启动，但 7 秒内没有创建可见更新窗口。请检查 Windows 安全软件或应用程序事件日志。");
         }
 
         private async Task LoadPluginsAsync()

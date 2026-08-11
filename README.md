@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.30**
+当前稳定版本：**1.1.31**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.30.zip
+DevSpacePortable-Windows-x64-1.1.31.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.30 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.29 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.31 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.30 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -299,6 +299,15 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.31 主要变化
+
+- **检查更新窗口可见性修复。** 主 UI 点击“检查更新”后会确认 Update.exe 真实启动并创建可见窗口；同一 Portable 已经存在更新器时会直接恢复/前置现有窗口；启动立即退出或 7 秒内没有创建窗口会显示明确错误。
+- **更新链路与系统代理解耦。** updater 优先尝试显式 direct/TUN 的 .NET 与 curl 传输，再按当前 Windows/WinINET/PAC、环境代理动态 fallback；不硬编码 v2ray、Clash、sing-box 的进程名或代理端口。失效代理不会阻断可用直连；代理正常时可使用系统代理路径。
+- **减少 GitHub CDN 单点。** GitHub Release API 提供 asset `digest` 时直接使用官方 SHA-256/size/name 构造检查结果；只有旧 API 没有 digest 时才读取 `update-manifest.json`。下载后的完整包/增量包仍执行 SHA-256 与大小校验。
+- **公网隧道按需关闭使用琥珀色 idle。** 不再以绿色 Ready 表示“当前没有公网 tunnel”，也不会把用户主动关闭当作故障。
+- **修复概览 ReferenceError。** `statusText()` 现在独立获取只读 Windows 系统代理快照，“刷新概览”和“保存并部署”不再因为 `internetProxy` 未定义报错。
+- **Node 内存有界化。** MCP session/server 最多保留 32 个且 1 小时空闲回收；workspace/review 热缓存分别限制为 64/32；活动命令会话最多 128；文件 watcher 最多 64；待交换 OAuth code 最多 256；进程输出缓冲降至 512k 字符并移除高分配 Unicode 数组转换；大型目录的嵌套 AGENTS/CLAUDE 扫描加入 2 秒/25k entries/2048 directories/16 层预算。目标是从结构上阻止堆无限增长，而不是提高 Node heap 上限。
 
 ## 1.1.30 主要变化
 
@@ -488,7 +497,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.30
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.31
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -516,7 +525,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.30 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.31 -BypassProxy
 ```
 
 ## 在线更新

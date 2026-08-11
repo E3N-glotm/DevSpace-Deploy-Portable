@@ -32,6 +32,7 @@ const MAX_SESSION_DIRECTORIES = 30;
 const MAX_SAFETY_SNAPSHOTS = 5;
 const MAX_PATCH_BYTES = 20 * 1024 * 1024;
 const SAMPLE_BYTES = 64 * 1024;
+const MAX_CACHED_REVIEW_STATES = 32;
 const cleanupScheduled = new Set();
 
 export function createReviewCheckpointManager(options = {}) {
@@ -45,7 +46,17 @@ export function createReviewCheckpointManager(options = {}) {
         let state = states.get(workspaceId);
         if (!state || state.root !== absoluteRoot) {
             state = await loadOrCreateSession(stateDir, workspaceId, absoluteRoot);
-            states.set(workspaceId, state);
+        }
+        // Session JSON/object storage on disk is authoritative. Keep only a
+        // bounded LRU of hot review states so repeated workspace opens cannot
+        // grow the DevSpace Node heap without limit.
+        states.delete(workspaceId);
+        states.set(workspaceId, state);
+        while (states.size > MAX_CACHED_REVIEW_STATES) {
+            const oldestId = states.keys().next().value;
+            if (!oldestId)
+                break;
+            states.delete(oldestId);
         }
         return state;
     }

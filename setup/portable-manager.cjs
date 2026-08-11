@@ -65,7 +65,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.30";
+const PORTABLE_VERSION = "1.1.31";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -2745,6 +2745,7 @@ async function statusText() {
       `\nTunnel supervisor PID: ${tunnelNetwork.supervisorPid || "none"}`;
   }
   const networkPath = networkPathState();
+  const internetProxy = windowsInternetProxyState();
   tunnelDetails +=
     `\nActive IPv4 default routes: ${networkPath.defaultRouteCount}` +
     `\nRoute interfaces: ${networkPath.routes.length ? networkPath.routes.map((route) => `${route.interfaceAlias || route.ifIndex} (metric ${route.routeMetric + route.interfaceMetric})`).join(", ") : "unavailable"}` +
@@ -2896,7 +2897,7 @@ async function dashboardStatus() {
   const proxyUnavailable = tunnelNetwork?.paused === true
     && String(tunnelNetwork?.reason || "") === "explicit-local-proxy-unavailable";
   const tunnelState = tunnelIntentionallyOff
-    ? "ready"
+    ? "idle"
     : proxyUnavailable || networkPathQuiescing ? "warning" : tunnelReady ? (tunnelTaskEnabled ? "ready" : "warning") : (tunnel.running || tunnelSupervisor.running ? "warning" : "stopped");
   const tunnelTitle = tunnelIntentionallyOff
     ? "公网隧道已按需关闭"

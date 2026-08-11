@@ -34,7 +34,16 @@ assert.doesNotMatch(updaterSource, /schtasks/i);
 const checkFunction = mainSource.match(/private async Task CheckForUpdatesAsync\(\)[\s\S]*?\n        }/i)?.[0] || "";
 assert.match(checkFunction, /Path\.Combine\(_root, "Update\.exe"\)/);
 assert.match(checkFunction, /Process\.Start/);
+assert.match(checkFunction, /TryActivateExistingUpdater\(updater\)/);
+assert.match(checkFunction, /WaitForVisibleUpdaterWindowAsync\(process, 7000\)/);
+assert.match(checkFunction, /UseShellExecute = true/);
+assert.match(checkFunction, /WindowStyle = ProcessWindowStyle\.Normal/);
 assert.doesNotMatch(checkFunction, /update-check|update-stage|update-launch/);
+assert.match(mainSource, /private bool TryActivateExistingUpdater\(string updater\)/);
+assert.match(mainSource, /private async Task<IntPtr> WaitForVisibleUpdaterWindowAsync\(Process process, int timeoutMs\)/);
+assert.match(mainSource, /NativeWindowEffects\.ActivateWindow\(/);
+assert.match(mainSource, /Update\.exe 启动后立即退出/);
+assert.match(mainSource, /7 秒内没有创建可见更新窗口/);
 
 const temporary = mkdtempSync(join(tmpdir(), "devspace-updater-selftest-"));
 try {

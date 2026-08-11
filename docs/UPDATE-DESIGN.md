@@ -1,4 +1,12 @@
-# Application and network lifecycle design through 1.1.30
+# Application and network lifecycle design through 1.1.31
+
+## Implemented in 1.1.31: network-independent updater and bounded server memory
+
+The updater no longer treats the current system-proxy switch as its primary network dependency. Metadata requests begin with explicit direct/TUN transports and dynamically fall back to the current Windows system proxy, PAC/WinINET path, or supported environment proxy candidates. Proxy ports are discovered from current settings rather than hard-coded. When GitHub's Release API provides server-side asset SHA-256 digests, version checks use those values directly and do not require a second Release-CDN request for `update-manifest.json`.
+
+Long-lived Node state is now explicitly bounded. MCP transports retain at most 32 complete MCP server graphs and reap idle sessions after one hour; workspace and review hot caches are bounded and restored from their persistent stores on demand; live process sessions, file watchers and pending authorization codes have defensive limits. Process output buffering no longer converts retained strings to full code-point arrays on every append. Nested project-instruction discovery also has fixed time/entry/directory/depth budgets so opening a large data tree cannot recursively traverse without bound.
+
+The intentionally disabled public tunnel is represented by a neutral `idle` state in the native dashboard. `idle` is rendered amber and does not turn an otherwise healthy local-only DevSpace deployment into an overall warning.
 
 ## Implemented in 1.1.30: owned-only localhost inspection
 

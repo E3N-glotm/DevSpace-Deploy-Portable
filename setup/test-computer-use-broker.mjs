@@ -72,7 +72,7 @@ try {
   assert.equal(status.active, true);
   assert.equal(status.broker?.ready, true);
   assert.equal(status.broker?.pid, brokerPid);
-console.log("DevSpace 1.1.30 Computer Use broker protocol test passed.");
+console.log("DevSpace 1.1.31 Computer Use broker protocol test passed.");
 }
 finally {
   if (lease.leaseId) {

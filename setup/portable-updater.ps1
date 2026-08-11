@@ -186,6 +186,182 @@ function Test-LocalProxyHealthy([string]$ProxyUrl) {
     return [Regex]::IsMatch($netstat, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
 }
 
+function Get-WindowsInternetProxyState {
+    try {
+        $internetSettings = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction Stop
+        $proxyEnabled = [int]$internetSettings.ProxyEnable -ne 0
+        $proxyServer = [string]$internetSettings.ProxyServer
+        $autoConfigUrl = [string]$internetSettings.AutoConfigURL
+        return [pscustomobject]@{
+            configured = $proxyEnabled -or -not [string]::IsNullOrWhiteSpace($autoConfigUrl)
+            proxyEnabled = $proxyEnabled
+            proxyUrl = if ($proxyEnabled) { ConvertFrom-WindowsProxyServer $proxyServer } else { "" }
+            autoConfigUrl = $autoConfigUrl
+        }
+    } catch {
+        return [pscustomobject]@{
+            configured = $false
+            proxyEnabled = $false
+            proxyUrl = ""
+            autoConfigUrl = ""
+        }
+    }
+}
+
+function Set-WebRequestHeaders($Request, [hashtable]$Headers) {
+    foreach ($key in $Headers.Keys) {
+        $name = [string]$key
+        $value = [string]$Headers[$key]
+        if ($name.Equals("User-Agent", [StringComparison]::OrdinalIgnoreCase)) {
+            $Request.UserAgent = $value
+        } elseif ($name.Equals("Accept", [StringComparison]::OrdinalIgnoreCase)) {
+            $Request.Accept = $value
+        } elseif ($name.Equals("Content-Type", [StringComparison]::OrdinalIgnoreCase)) {
+            $Request.ContentType = $value
+        } else {
+            $Request.Headers[$name] = $value
+        }
+    }
+}
+
+function New-DotNetWebRequest {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSec = 30,
+        [ValidateSet("direct", "system")]
+        [string]$ProxyMode = "direct",
+        [switch]$Decompress
+    )
+    $request = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Uri)
+    $request.Method = "GET"
+    $request.AllowAutoRedirect = $true
+    $request.MaximumAutomaticRedirections = 10
+    $request.KeepAlive = $false
+    $request.Timeout = [Math]::Min(15000, [Math]::Max(3000, $TimeoutSec * 1000))
+    $request.ReadWriteTimeout = [Math]::Min(30000, [Math]::Max(5000, $TimeoutSec * 1000))
+    if ($ProxyMode -eq "system") {
+        $request.Proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+        if ($request.Proxy) { $request.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials }
+    } else {
+        $request.Proxy = $null
+    }
+    if ($Decompress) {
+        $request.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+    }
+    Set-WebRequestHeaders -Request $request -Headers $Headers
+    return $request
+}
+
+function Invoke-DotNetJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSec = 30,
+        [ValidateSet("direct", "system")]
+        [string]$ProxyMode = "direct",
+        [string]$Transport = "dotnet-direct"
+    )
+    $request = New-DotNetWebRequest -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec -ProxyMode $ProxyMode -Decompress
+    $response = $null
+    $reader = $null
+    try {
+        $response = [System.Net.HttpWebResponse]$request.GetResponse()
+        $status = [int]$response.StatusCode
+        if ($status -lt 200 -or $status -ge 300) { throw "$Transport GitHub request returned HTTP $status." }
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream(), [Text.Encoding]::UTF8, $true)
+        $json = $reader.ReadToEnd()
+        if ([string]::IsNullOrWhiteSpace($json)) { throw "$Transport GitHub request returned an empty response." }
+        try { return $json | ConvertFrom-Json }
+        catch { throw "$Transport GitHub response was not valid JSON: $($_.Exception.Message)" }
+    } catch {
+        throw "$Transport GitHub request failed: $($_.Exception.Message)"
+    } finally {
+        if ($reader) { $reader.Dispose() }
+        if ($response) { $response.Dispose() }
+        try { $request.Abort() } catch {}
+    }
+}
+
+function Invoke-DotNetDownload {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+        [Parameter(Mandatory = $true)]
+        [string]$OutFile,
+        [hashtable]$Headers = @{},
+        [int]$TimeoutSec = 1800,
+        [int64]$ExpectedBytes = 0,
+        [string]$Description = "GitHub download",
+        [ValidateSet("direct", "system")]
+        [string]$ProxyMode = "direct",
+        [string]$Transport = "dotnet-direct"
+    )
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutFile) | Out-Null
+    [int64]$existingBytes = if (Test-Path -LiteralPath $OutFile -PathType Leaf) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+    $request = New-DotNetWebRequest -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec -ProxyMode $ProxyMode
+    if ($existingBytes -gt 0) { $request.AddRange($existingBytes) }
+    $response = $null
+    $input = $null
+    $output = $null
+    $startedAt = Get-Date
+    try {
+        try {
+            $response = [System.Net.HttpWebResponse]$request.GetResponse()
+        } catch [System.Net.WebException] {
+            $webResponse = $_.Exception.Response -as [System.Net.HttpWebResponse]
+            if ($webResponse -and [int]$webResponse.StatusCode -eq 416 -and $ExpectedBytes -gt 0 -and $existingBytes -eq $ExpectedBytes) {
+                $webResponse.Dispose()
+                Write-UpdateProgress -Phase "downloaded" -Message "$Description completed" -BytesReceived $existingBytes -BytesTotal $ExpectedBytes -Transport $Transport
+                return
+            }
+            if ($webResponse) { $webResponse.Dispose() }
+            throw
+        }
+        $status = [int]$response.StatusCode
+        if ($status -ne 200 -and $status -ne 206) { throw "$Transport GitHub download returned HTTP $status." }
+        $resume = $existingBytes -gt 0 -and $status -eq 206
+        if (-not $resume) { $existingBytes = 0 }
+        $mode = if ($resume) { [IO.FileMode]::Append } else { [IO.FileMode]::Create }
+        $output = New-Object IO.FileStream($OutFile, $mode, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $input = $response.GetResponseStream()
+        [int64]$bytes = $existingBytes
+        [int64]$total = if ($ExpectedBytes -gt 0) { $ExpectedBytes } elseif ($response.ContentLength -gt 0) { $existingBytes + [int64]$response.ContentLength } else { 0 }
+        $buffer = New-Object byte[] (256 * 1024)
+        $lastAt = Get-Date
+        [int64]$lastBytes = $bytes
+        Write-UpdateProgress -Phase "downloading" -Message $Description -BytesReceived $bytes -BytesTotal $total -Transport $Transport
+        while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $output.Write($buffer, 0, $read)
+            $bytes += $read
+            $now = Get-Date
+            if (($now - $startedAt).TotalSeconds -gt $TimeoutSec) { throw "$Transport GitHub download exceeded the $TimeoutSec second limit." }
+            if (($now - $lastAt).TotalMilliseconds -ge 500) {
+                $seconds = [Math]::Max(0.001, ($now - $lastAt).TotalSeconds)
+                $speed = [Math]::Max(0, ($bytes - $lastBytes) / $seconds)
+                Write-UpdateProgress -Phase "downloading" -Message $Description -BytesReceived $bytes -BytesTotal $total -SpeedBytesPerSecond $speed -Transport $Transport
+                $lastAt = $now
+                $lastBytes = $bytes
+            }
+        }
+        $output.Flush()
+        $finalBytes = (Get-Item -LiteralPath $OutFile).Length
+        if ($ExpectedBytes -gt 0 -and $finalBytes -ne $ExpectedBytes) {
+            throw "$Transport GitHub download size mismatch: expected $ExpectedBytes bytes, got $finalBytes."
+        }
+        Write-UpdateProgress -Phase "downloaded" -Message "$Description completed" -BytesReceived $finalBytes -BytesTotal $(if ($ExpectedBytes -gt 0) { $ExpectedBytes } else { $finalBytes }) -Transport $Transport
+    } catch {
+        throw "$Transport GitHub download failed: $($_.Exception.Message)"
+    } finally {
+        if ($input) { $input.Dispose() }
+        if ($output) { $output.Dispose() }
+        if ($response) { $response.Dispose() }
+        try { $request.Abort() } catch {}
+    }
+}
+
 function Get-GitHubTransportCandidates {
     $items = New-Object System.Collections.ArrayList
     $seen = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
@@ -201,17 +377,20 @@ function Get-GitHubTransportCandidates {
         [void]$items.Add([pscustomobject]@{ proxyUrl = $normalized; transport = "curl-proxy"; source = $Name })
     }
 
-    try {
-        $internetSettings = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -ErrorAction Stop
-        if ([int]$internetSettings.ProxyEnable -ne 0) {
-            & $addProxy (ConvertFrom-WindowsProxyServer ([string]$internetSettings.ProxyServer)) "wininet"
-        }
-    } catch {}
+    # The updater must not become dependent on a third-party system-proxy
+    # switch. Try two explicit direct/TUN transports first; only then consult
+    # Windows/WinINET or environment proxy settings as independent fallbacks.
+    [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "dotnet-direct"; source = "direct-dotnet" })
+    [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "curl-direct"; source = "direct-or-transparent-tun" })
+    $windowsProxy = Get-WindowsInternetProxyState
+    if ($windowsProxy.configured) {
+        [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "dotnet-system-proxy"; source = "windows-system-proxy" })
+    }
+    if ($windowsProxy.proxyEnabled -and $windowsProxy.proxyUrl) { & $addProxy ([string]$windowsProxy.proxyUrl) "wininet" }
     foreach ($name in @("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")) {
         $value = [Environment]::GetEnvironmentVariable($name)
         if ($value) { & $addProxy $value "env:$name" }
     }
-    [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "curl-direct"; source = "direct-or-transparent-tun" })
     return $items.ToArray()
 }
 
@@ -273,18 +452,28 @@ function Invoke-GitHubJson {
         [string]$Description = "GitHub request"
     )
     $errors = New-Object System.Collections.Generic.List[string]
-    foreach ($candidate in @(Get-GitHubTransportCandidates)) {
-        try {
-            $label = if ($candidate.proxyUrl) { "$Description - $($candidate.source)" } else { "$Description - direct/TUN" }
-            Write-UpdateProgress -Phase "metadata" -Message $label -Transport ([string]$candidate.transport)
-            return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 25)) -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
-        } catch {
-            $message = $_.Exception.Message
-            [void]$errors.Add("$($candidate.source): $message")
-            Write-UpdateLog "$Description failed through $($candidate.source): $message"
+    for ($round = 1; $round -le 2; $round++) {
+        foreach ($candidate in @(Get-GitHubTransportCandidates)) {
+            try {
+                $label = if ($candidate.transport -eq "dotnet-system-proxy") { "$Description - Windows system proxy" } elseif ($candidate.proxyUrl) { "$Description - $($candidate.source)" } elseif ($candidate.transport -eq "dotnet-direct") { "$Description - direct/TUN (.NET)" } else { "$Description - direct/TUN (curl)" }
+                Write-UpdateProgress -Phase "metadata" -Message $label -Transport ([string]$candidate.transport)
+                if ($candidate.transport -eq "dotnet-system-proxy" -or $candidate.transport -eq "dotnet-direct") {
+                    $proxyMode = if ($candidate.transport -eq "dotnet-system-proxy") { "system" } else { "direct" }
+                    return Invoke-DotNetJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 10)) -ProxyMode $proxyMode -Transport ([string]$candidate.transport)
+                }
+                return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 12)) -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
+            } catch {
+                $message = $_.Exception.Message
+                [void]$errors.Add("round${round}/$($candidate.source): $message")
+                Write-UpdateLog "$Description failed through $($candidate.source) on round ${round}: $message"
+            }
+        }
+        if ($round -lt 2) {
+            Write-UpdateLog "$Description exhausted the current network candidates; refreshing proxy/route state and retrying once."
+            Start-Sleep -Milliseconds 900
         }
     }
-    throw "$Description failed through all healthy proxy candidates and the direct/TUN path. $($errors -join '; ')"
+    throw "$Description failed through Windows system proxy, configured proxy candidates, and the direct/TUN path. $($errors -join '; ')"
 }
 
 function Invoke-CurlDownload {
@@ -384,8 +573,13 @@ function Invoke-GitHubDownload {
     $errors = New-Object System.Collections.Generic.List[string]
     foreach ($candidate in @(Get-GitHubTransportCandidates)) {
         try {
-            $label = if ($candidate.proxyUrl) { "$Description - $($candidate.source)" } else { "$Description - direct/TUN" }
-            Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $label -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
+            $label = if ($candidate.transport -eq "dotnet-system-proxy") { "$Description - Windows system proxy" } elseif ($candidate.proxyUrl) { "$Description - $($candidate.source)" } elseif ($candidate.transport -eq "dotnet-direct") { "$Description - direct/TUN (.NET)" } else { "$Description - direct/TUN (curl)" }
+            if ($candidate.transport -eq "dotnet-system-proxy" -or $candidate.transport -eq "dotnet-direct") {
+                $proxyMode = if ($candidate.transport -eq "dotnet-system-proxy") { "system" } else { "direct" }
+                Invoke-DotNetDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $label -ProxyMode $proxyMode -Transport ([string]$candidate.transport)
+            } else {
+                Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $label -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
+            }
             return
         } catch {
             $message = $_.Exception.Message
@@ -402,7 +596,7 @@ function Invoke-GitHubDownload {
         return
     } catch {
         [void]$errors.Add("clean-direct: $($_.Exception.Message)")
-        throw "$Description failed through all healthy proxy candidates, direct/TUN, and a clean direct/TUN retry. $($errors -join '; ')"
+        throw "$Description failed through Windows system proxy, configured proxy candidates, direct/TUN, and a clean direct/TUN retry. $($errors -join '; ')"
     }
 }
 
@@ -418,29 +612,147 @@ function Compare-Version([string]$Left, [string]$Right) {
     return ([Version]$Left).CompareTo([Version]$Right)
 }
 
+function Get-GitHubAssetSha256([object]$Asset) {
+    $digest = ([string]$Asset.digest).Trim().ToLowerInvariant()
+    if ($digest -match '^sha256:([0-9a-f]{64})$') { return $Matches[1] }
+    return ""
+}
+
+function Assert-ReleaseAssetMetadata([object]$Asset, [string]$Version, [string]$ExpectedName) {
+    if (-not $Asset) { throw "Release metadata is missing asset $ExpectedName." }
+    if ([string]$Asset.name -ne $ExpectedName) { throw "Release metadata references an unexpected asset name." }
+    if ([int64]$Asset.size -le 0) { throw "Release metadata has an invalid asset size for $ExpectedName." }
+    $sha256 = ([string]$Asset.sha256).Trim().ToLowerInvariant()
+    if ($sha256 -notmatch '^[0-9a-f]{64}$') { throw "Release metadata has an invalid SHA-256 for $ExpectedName." }
+    $downloadUrl = ([string]$Asset.downloadUrl).Trim()
+    $expectedPrefix = "https://github.com/$Repository/releases/download/v$Version/"
+    if (-not $downloadUrl.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Release metadata has an unexpected download URL for $ExpectedName."
+    }
+}
+
+function Get-LatestReleaseFromPublishedManifest {
+    $manifestUrl = "https://github.com/$Repository/releases/latest/download/update-manifest.json"
+    $manifest = Invoke-GitHubJson -Uri $manifestUrl -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -TimeoutSec 45 -Description "GitHub latest published update-manifest request"
+    $version = ([string]$manifest.version).TrimStart('v')
+    Assert-Version $version "Release version"
+    if ([string]$manifest.repository -ne $Repository) { throw "Published update manifest repository does not match the configured repository." }
+    $zipName = "DevSpacePortable-Windows-x64-$version.zip"
+    Assert-ReleaseAssetMetadata -Asset $manifest.asset -Version $version -ExpectedName $zipName
+
+    $assets = New-Object System.Collections.ArrayList
+    $zipAsset = [pscustomobject]@{
+        name = [string]$manifest.asset.name
+        size = [int64]$manifest.asset.size
+        digest = "sha256:$(([string]$manifest.asset.sha256).ToLowerInvariant())"
+        browser_download_url = [string]$manifest.asset.downloadUrl
+    }
+    [void]$assets.Add($zipAsset)
+    foreach ($candidate in @($manifest.incrementalAssets)) {
+        $name = [string]$candidate.name
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        if ([string]$candidate.format -ne "file-delta-v1") { continue }
+        if ([string]$candidate.toVersion -ne $version) { continue }
+        Assert-ReleaseAssetMetadata -Asset $candidate -Version $version -ExpectedName $name
+        [void]$assets.Add([pscustomobject]@{
+            name = $name
+            size = [int64]$candidate.size
+            digest = "sha256:$(([string]$candidate.sha256).ToLowerInvariant())"
+            browser_download_url = [string]$candidate.downloadUrl
+        })
+    }
+    $release = [pscustomobject]@{
+        tag_name = "v$version"
+        html_url = "https://github.com/$Repository/releases/tag/v$version"
+        name = "DevSpace Portable $version"
+        published_at = [string]$manifest.publishedAt
+        assets = $assets.ToArray()
+    }
+    return [pscustomobject]@{
+        release = $release
+        version = $version
+        manifest = $manifest
+        manifestAsset = $null
+        manifestSource = "release-latest-update-manifest"
+        zipAsset = $zipAsset
+        zipName = $zipName
+    }
+}
+
 function Get-LatestRelease {
     $headers = @{
         Accept = "application/vnd.github+json"
         "X-GitHub-Api-Version" = "2022-11-28"
         "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion"
     }
-    $release = Invoke-GitHubJson -Uri "https://api.github.com/repos/$Repository/releases/latest" -Headers $headers -TimeoutSec 60 -Description "GitHub latest-release metadata request"
+    try {
+        $release = Invoke-GitHubJson -Uri "https://api.github.com/repos/$Repository/releases/latest" -Headers $headers -TimeoutSec 60 -Description "GitHub latest-release metadata request"
+    } catch {
+        Write-UpdateLog "GitHub Release API metadata path failed: $($_.Exception.Message). Falling back to the published latest update manifest."
+        return Get-LatestReleaseFromPublishedManifest
+    }
     $version = ([string]$release.tag_name).TrimStart('v')
     Assert-Version $version "Release version"
     $manifestAsset = @($release.assets) | Where-Object { $_.name -eq "update-manifest.json" } | Select-Object -First 1
     $zipName = "DevSpacePortable-Windows-x64-$version.zip"
     $zipAsset = @($release.assets) | Where-Object { $_.name -eq $zipName } | Select-Object -First 1
-    if (-not $manifestAsset) { throw "Latest Release has no update-manifest.json asset." }
     if (-not $zipAsset) { throw "Latest Release has no $zipName asset." }
-    $manifest = Invoke-GitHubJson -Uri $manifestAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -TimeoutSec 60 -Description "GitHub update-manifest request"
-    if ([string]$manifest.version -ne $version) { throw "Release tag and update manifest version do not match." }
-    if ([string]$manifest.asset.name -ne $zipName) { throw "Update manifest references an unexpected ZIP name." }
-    if ([string]$manifest.repository -ne $Repository) { throw "Update manifest repository does not match the configured repository." }
+    $zipSha256 = Get-GitHubAssetSha256 $zipAsset
+    $manifestSource = ""
+    $manifest = $null
+
+    # GitHub's Release API exposes a server-computed SHA-256 digest for uploaded
+    # assets. Prefer that API metadata so "check for updates" does not depend on
+    # a second request to the Release CDN just to read update-manifest.json.
+    # Older GitHub responses without asset digests still use the signed manifest.
+    if ($zipSha256) {
+        $incrementalAssets = @()
+        $deltaName = "DevSpacePortable-Update-$CurrentVersion-to-$version.zip"
+        $deltaAsset = @($release.assets) | Where-Object { $_.name -eq $deltaName } | Select-Object -First 1
+        if ($deltaAsset) {
+            $deltaSha256 = Get-GitHubAssetSha256 $deltaAsset
+            if ($deltaSha256) {
+                $incrementalAssets = @([pscustomobject]@{
+                    format = "file-delta-v1"
+                    fromVersion = $CurrentVersion
+                    toVersion = $version
+                    name = [string]$deltaAsset.name
+                    size = [int64]$deltaAsset.size
+                    sha256 = $deltaSha256
+                    downloadUrl = [string]$deltaAsset.browser_download_url
+                })
+            }
+        }
+        $manifest = [pscustomobject]@{
+            schemaVersion = 2
+            channel = "stable"
+            version = $version
+            repository = $Repository
+            restartRequired = $true
+            updateStrategy = "incremental-first-full-fallback"
+            asset = [pscustomobject]@{
+                name = $zipName
+                size = [int64]$zipAsset.size
+                sha256 = $zipSha256
+                downloadUrl = [string]$zipAsset.browser_download_url
+            }
+            incrementalAssets = $incrementalAssets
+        }
+        $manifestSource = "github-release-asset-digest"
+    } else {
+        if (-not $manifestAsset) { throw "Latest Release has neither asset SHA-256 digests nor update-manifest.json." }
+        $manifest = Invoke-GitHubJson -Uri $manifestAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -TimeoutSec 60 -Description "GitHub update-manifest request"
+        if ([string]$manifest.version -ne $version) { throw "Release tag and update manifest version do not match." }
+        if ([string]$manifest.asset.name -ne $zipName) { throw "Update manifest references an unexpected ZIP name." }
+        if ([string]$manifest.repository -ne $Repository) { throw "Update manifest repository does not match the configured repository." }
+        $manifestSource = "release-update-manifest"
+    }
     return [pscustomobject]@{
         release = $release
         version = $version
         manifest = $manifest
         manifestAsset = $manifestAsset
+        manifestSource = $manifestSource
         zipAsset = $zipAsset
         zipName = $zipName
     }
@@ -500,6 +812,7 @@ function Get-UpdateStatus {
         incrementalAssetSha256 = if ($incremental) { ([string]$incremental.manifest.sha256).ToLowerInvariant() } else { "" }
         incrementalFallbackReason = $incrementalFallbackReason
         fullAssetSize = [int64]$latest.manifest.asset.size
+        metadataSource = [string]$latest.manifestSource
         sourceCheckout = Test-Path (Join-Path $Root ".git")
         restartRequired = [bool]$latest.manifest.restartRequired
     }

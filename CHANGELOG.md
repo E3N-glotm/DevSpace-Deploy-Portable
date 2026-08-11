@@ -2,6 +2,16 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.31
+
+- 修复原生 UI“检查更新”点击后更新窗口可能没有被用户看到的问题：启动后等待并验证可见窗口；已有同一 Portable 的 Update.exe 时直接恢复并前置现有窗口；启动失败/立即退出/超时均在主 UI 明确报错，不再静默。
+- 重做更新网络容错：检查更新优先使用与系统代理无关的 direct/TUN 传输，动态读取 Windows/环境代理作为 fallback；支持 HTTP/SOCKS、PAC/WinINET 路径与代理端口变化；网络路径切换时刷新候选重试。GitHub Release API 提供 asset SHA-256 时直接使用，不再强制额外下载 update-manifest.json 才能完成版本检查。
+- 公网隧道“按需关闭”从绿色 ready 改为独立的琥珀色 `idle` 状态；这是正常用户选择，不计入整体 warning/error。
+- 修复 `statusText()` 缺少 `internetProxy` 局部变量导致“刷新概览”和“保存并部署”出现 `ReferenceError: internetProxy is not defined` 的回归。
+- 修复长期运行时 DevSpace Node 堆持续增长最终导致上游 502 的结构性风险：MCP transport/server 会话、workspace/review 热缓存、活动进程、文件 watcher 与待交换 OAuth code 全部增加明确上限/空闲回收；持续进程输出缓冲去除高分配 `Array.from()` 路径并减小 retention；大型数据目录的嵌套指令发现增加时间、条目、目录和深度预算。没有通过提高 V8 heap 上限掩盖问题。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.31.md)
+
 ## 1.1.30
 
 - 修复首页 `dashboard-status` 的 ngrok Agent 发现逻辑会无条件扫描 `127.0.0.1:4040-4049` 的 P0 兼容性问题。实机复验确认企业 VPN 的本地服务也可能监听这些端口，周期性 `/api/tunnels` 请求会干扰其会话并导致服务端注销。

@@ -11,6 +11,14 @@ const deltaBuilder = readFileSync(join(root, "setup", "create-incremental-update
 
 assert.match(updater, /repos\/\$Repository\/releases\/latest/);
 assert.match(updater, /update-manifest\.json/);
+assert.match(updater, /Get-GitHubAssetSha256/);
+assert.match(updater, /github-release-asset-digest/);
+assert.match(updater, /Latest Release has neither asset SHA-256 digests nor update-manifest\.json/);
+assert.match(updater, /Get-LatestReleaseFromPublishedManifest/);
+assert.match(updater, /releases\/latest\/download\/update-manifest\.json/);
+assert.match(updater, /release-latest-update-manifest/);
+assert.match(updater, /Falling back to the published latest update manifest/);
+assert.match(updater, /Assert-ReleaseAssetMetadata/);
 assert.match(updater, /SecurityProtocolType\]::Tls12/);
 assert.match(updater, /Invoke-GitHubJson/);
 assert.match(updater, /Invoke-GitHubDownload/);
@@ -24,6 +32,18 @@ assert.match(updater, /--speed-time/);
 assert.match(updater, /connect-timeout", "8"/);
 assert.match(updater, /Get-GitHubTransportCandidates/);
 assert.match(updater, /Skipping unavailable local proxy/);
+assert.match(updater, /Get-WindowsInternetProxyState/);
+assert.match(updater, /Invoke-DotNetJson/);
+assert.match(updater, /Invoke-DotNetDownload/);
+assert.match(updater, /GetSystemWebProxy\(\)/);
+assert.match(updater, /dotnet-direct/);
+assert.match(updater, /dotnet-system-proxy/);
+assert.match(updater, /transport = "dotnet-direct"; source = "direct-dotnet"/);
+assert.match(updater, /transport = "curl-direct"; source = "direct-or-transparent-tun"/);
+assert.match(updater, /for \(\$round = 1; \$round -le 2; \$round\+\+\)/);
+assert.match(updater, /refreshing proxy\/route state and retrying once/);
+assert.match(updater, /ReadWriteTimeout/);
+assert.match(updater, /AddRange\(\$existingBytes\)/);
 assert.match(updater, /--noproxy", "\*"/);
 assert.match(updater, /SetEnvironmentVariable\(\$name, \$null, "Process"\)/);
 assert.match(updater, /direct\/TUN/);
@@ -64,14 +84,20 @@ assert.match(deltaBuilder, /baseSha256/);
 
 console.log(JSON.stringify({
   publicGitHubReleaseCheck: true,
+  releaseApiDigestMetadata: true,
+  releaseManifestFallbackWhenApiUnavailable: true,
   tls12Compatibility: true,
   boundedNetworkFailover: true,
-  curlFirstTransport: true,
+  directTransportFirst: true,
+  dotNetDirectTransport: true,
   directCurlFallback: true,
   resumableDownload: true,
   liveDownloadProgress: true,
   stalledDownloadDetection: true,
   deadLoopbackProxySkipped: true,
+  windowsSystemProxyFallback: true,
+  dotNetStreamingProxyDownload: true,
+  metadataCandidateRefreshRetry: true,
   explicitDirectTunFallback: true,
   incrementalFirst: true,
   automaticFullFallback: true,

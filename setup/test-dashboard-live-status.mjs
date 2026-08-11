@@ -45,6 +45,12 @@ assert.doesNotMatch(ngrokAgentBlock, /4040\s*\+|Array\.from\(\{\s*length:\s*10/,
   "dashboard must never scan arbitrary localhost ports to discover ngrok");
 assert.match(ngrokAgentBlock, /verifiedOwnedNgrokProcesses\(\)/,
   "dashboard ngrok inspection must be ownership-gated");
+const statusTextStart = managerSource.indexOf("async function statusText()");
+const statusTextEnd = managerSource.indexOf("function cachedDashboardPublicProbes", statusTextStart);
+assert.ok(statusTextStart >= 0 && statusTextEnd > statusTextStart, "statusText block was not found");
+const statusTextBlock = managerSource.slice(statusTextStart, statusTextEnd);
+assert.match(statusTextBlock, /const internetProxy = windowsInternetProxyState\(\)/,
+  "statusText must define its own system-proxy snapshot before formatting it");
 assert.match(dashboard, /ActionButton\("详细信息"/);
 assert.doesNotMatch(dashboard, /ActionButton\("刷新状态"/);
 assert.doesNotMatch(dashboard, /ActionButton\("验证 HTTP"/);
@@ -86,10 +92,21 @@ const value = JSON.parse(result.stdout.trim());
 assert.ok(value.overall && typeof value.overall.state === "string");
 for (const key of ["service", "tunnel", "http", "files", "network"]) {
   assert.ok(value.indicators?.[key], `missing dashboard indicator: ${key}`);
-  assert.ok(["ready", "warning", "error", "stopped", "working"].includes(value.indicators[key].state));
+  assert.ok(["ready", "idle", "warning", "error", "stopped", "working"].includes(value.indicators[key].state));
   assert.equal(typeof value.indicators[key].title, "string");
-  assert.equal(typeof value.indicators[key].detail, "string");
+assert.equal(typeof value.indicators[key].detail, "string");
 }
+
+const statusResult = spawnSync(NODE, [MANAGER, "status"], {
+  cwd: ROOT,
+  env: process.env,
+  encoding: "utf8",
+  windowsHide: true,
+  timeout: 30_000,
+});
+assert.equal(statusResult.status, 0, statusResult.stderr || statusResult.stdout);
+assert.match(statusResult.stdout, /Windows system proxy:/);
+assert.doesNotMatch(statusResult.stderr, /ReferenceError:\s*internetProxy is not defined/);
 assert.equal(value.indicators.network.state, "ready");
 assert.match(value.indicators.network.title, /网络路径自适应正常/);
 assert.equal(value.indicators.network.networkPath.multipleDefaultRoutes, true);
@@ -116,6 +133,8 @@ assert.equal(routeOnlyResult.status, 0, routeOnlyResult.stderr || routeOnlyResul
 const routeOnlyValue = JSON.parse(routeOnlyResult.stdout.trim());
 assert.match(routeOnlyValue.indicators.network.title, /网络路径已读取，等待隧道运行/);
 assert.match(source, /连续两次确认后才会标记为异常/);
+assert.match(source, /_state == "idle"/);
+assert.match(managerSource, /const tunnelState = tunnelIntentionallyOff\s*\n\s*\? "idle"/);
 assert.doesNotMatch(dashboard, /NewGroup\("最近操作"\)/);
 
 console.log(JSON.stringify({
@@ -136,6 +155,7 @@ console.log(JSON.stringify({
   detailsRefreshesHomepage: true,
   multipleDefaultRoutesAreInformational: true,
   vendorNeutralNetworkDiagnostics: true,
+  intentionallyDisabledTunnelUsesIdleState: true,
   routeStateTitleConvergesWithoutTunnelState: true,
   recentOperationsRemoved: true,
 }));

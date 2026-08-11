@@ -56,6 +56,8 @@ assert.doesNotMatch(dashboard, /dashboardPublicProbes\(/,
   "homepage refresh must not create active public traffic");
 assert.match(dashboard, /cachedDashboardPublicProbes\(/,
   "homepage may consume only cached explicit public verification");
+assert.match(dashboard, /const tunnelState = tunnelIntentionallyOff[\s\S]*?\? "idle"/,
+  "an intentionally disabled tunnel must use a neutral idle state instead of green ready");
 assert.doesNotMatch(ngrokAgent, /4040\s*\+|4040-4049|Array\.from\(\{\s*length:\s*10/,
   "ngrok agent discovery must never scan guessed localhost ports");
 assert.match(ngrokAgent, /verifiedOwnedNgrokProcesses\(\)/,
@@ -99,6 +101,7 @@ console.log(JSON.stringify({
   publicTunnelOptInByDefault: true,
   updaterPreservesTunnelDisabledState: true,
   homepagePublicTrafficDisabled: true,
+  intentionallyDisabledTunnelIsNeutralIdle: true,
   ngrokAgentDiscoveryUsesOwnedPidOnly: true,
   arbitraryLocalhostAgentPortScanning: false,
   topologyChangesAreReadOnly: true,

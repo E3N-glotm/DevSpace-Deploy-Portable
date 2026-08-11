@@ -70,7 +70,7 @@ try {
   assert.match(nativeSource, /CloseChoiceDialog\.Show\(this\)/);
   assert.match(nativeSource, /private readonly NotifyIcon _notifyIcon/);
   assert.match(nativeSource, /Path\.Combine\(_root, "Update\.exe"\)/);
-  assert.match(nativeSource, /已启动独立 Update\.exe/);
+  assert.match(nativeSource, /已启动或切换到独立 Update\.exe/);
   assert.match(nativeSource, /只有真正开始替换文件时才会关闭/);
   assert.match(nativeSource, /OwnerPasswordDialog\.Show/);
   assert.match(nativeSource, /auth\.json 位置/);

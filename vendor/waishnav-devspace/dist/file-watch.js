@@ -1,5 +1,6 @@
 import { watch } from "node:fs";
 import { randomUUID } from "node:crypto";
+const MAX_ACTIVE_WATCHES = 64;
 
 export class FileWatchManager {
     runtimeState;
@@ -11,6 +12,8 @@ export class FileWatchManager {
         const watchId = input.watchId?.trim() || `watch_${randomUUID()}`;
         if (this.watches.has(watchId))
             throw new Error(`Watch is already active: ${watchId}`);
+        if (this.watches.size >= MAX_ACTIVE_WATCHES)
+            throw new Error(`DevSpace refuses to retain more than ${MAX_ACTIVE_WATCHES} active file watches.`);
         let watcher;
         try {
             watcher = watch(input.path, { recursive: input.recursive !== false, persistent: false }, (eventType, filename) => {
