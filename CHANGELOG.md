@@ -2,6 +2,15 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.30
+
+- 修复首页 `dashboard-status` 的 ngrok Agent 发现逻辑会无条件扫描 `127.0.0.1:4040-4049` 的 P0 兼容性问题。实机复验确认企业 VPN 的本地服务也可能监听这些端口，周期性 `/api/tunnels` 请求会干扰其会话并导致服务端注销。
+- ngrok Agent 状态检测改为严格所有权链：只接受当前 Portable 自带的 `runtime/ngrok/ngrok.exe`，并要求 PID 记录或当前 Portable 的 ngrok 配置路径能够证明进程归属；随后只枚举这些已验证 PID 自己的 TCP LISTEN 端口，再对这些端口查询 `/api/tunnels`。
+- 彻底移除“猜测 localhost 端口”的发现方式。任何不属于 DevSpace 的本地服务，无论占用 4040、4041、4042 或其他端口，首页、启动检查与 tunnel 健康判断都不会主动访问它。
+- 新增网络隔离回归契约，明确禁止 `4040-4049` 扫描，并要求 ngrok Agent 探测必须同时满足可执行文件路径、Portable 配置归属和监听 PID 所有权过滤；Portable Protocol 仍为 1.5，顶层 MCP Schema 不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.30.md)
+
 ## 1.1.29
 
 - 本地 MCP 与公网 tunnel 拆成真正独立的生命周期：保存/部署默认只安装并启动 `127.0.0.1` MCP，公网 tunnel 任务默认保持禁用，只有用户明确点击“启动公网隧道”才启用；本地启动不再要求 ngrok/cloudflared runtime 或 tunnel Token；更新/任务修复会保留已有 tunnel 的 enabled/disabled 状态，不会把用户关闭的 tunnel 自动重新打开。

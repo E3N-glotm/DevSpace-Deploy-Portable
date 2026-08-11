@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.29**
+当前稳定版本：**1.1.30**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.29.zip
+DevSpacePortable-Windows-x64-1.1.30.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.29 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.28 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.30 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.29 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -299,6 +299,14 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.30 主要变化
+
+- **修复 EasyConnect/企业 VPN 会话被 DevSpace 首页状态刷新干扰的根因。** 1.1.29 的 `dashboard-status` 会为了发现 ngrok Agent 扫描 `127.0.0.1:4040-4049` 并请求 `/api/tunnels`。实机重复验证发现企业 VPN 自身也可能占用其中端口，因此这种“猜端口”行为违反第三方隔离边界。
+- **ngrok Agent 发现改为严格所有权校验。** DevSpace 先确认进程可执行文件确为当前 Portable 的 `runtime\ngrok\ngrok.exe`，并通过当前 PID 记录或当前 Portable 的 ngrok 配置路径确认归属；然后只读取这些 PID 自己的 LISTEN 端口。只有已证明属于 DevSpace 的端口才允许访问 `/api/tunnels`。
+- **不再扫描任何任意 localhost 端口。** EasyConnect、v2ray、Clash、sing-box、浏览器、调试器或其他程序即使监听 4040/4041/任意其他本地端口，DevSpace 状态页都不会主动探测它们。
+- 这一修复同时覆盖首页 3 秒刷新、tunnel 启动前已有 Agent 判断、公共 tunnel 就绪检查和诊断状态文本，因为这些路径统一使用同一套 ownership-gated `ngrokAgentState()`。
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变，不需要重新 OAuth 或重新 Scan Tools。
 
 ## 1.1.29 主要变化
 
@@ -480,7 +488,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.29
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.30
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -508,7 +516,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.29 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.30 -BypassProxy
 ```
 
 ## 在线更新

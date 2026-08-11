@@ -20,6 +20,9 @@ const startLocal = functionBlock(managerSource, "async function startLocalOnly()
 const startTunnel = functionBlock(managerSource, "async function startTunnelOnly()", "async function startServices()");
 const startServices = functionBlock(managerSource, "async function startServices()", "async function enableServices()");
 const dashboard = functionBlock(managerSource, "async function dashboardStatus()", "async function testEndpoints()");
+const ngrokAgent = functionBlock(managerSource, "async function ngrokAgentState(", "async function statusText()");
+const ownedNgrokProcesses = functionBlock(managerSource, "function verifiedOwnedNgrokProcesses()", "function ownedLoopbackListenerPorts(");
+const ownedNgrokPorts = functionBlock(managerSource, "function ownedLoopbackListenerPorts(", "async function ngrokAgentState(");
 const reconcile = functionBlock(launcherSource, "function reconcile()", "function shutdown()");
 const childEnvironment = functionBlock(launcherSource, "function childEnvironment(network)", "function writeNetworkState");
 
@@ -53,6 +56,18 @@ assert.doesNotMatch(dashboard, /dashboardPublicProbes\(/,
   "homepage refresh must not create active public traffic");
 assert.match(dashboard, /cachedDashboardPublicProbes\(/,
   "homepage may consume only cached explicit public verification");
+assert.doesNotMatch(ngrokAgent, /4040\s*\+|4040-4049|Array\.from\(\{\s*length:\s*10/,
+  "ngrok agent discovery must never scan guessed localhost ports");
+assert.match(ngrokAgent, /verifiedOwnedNgrokProcesses\(\)/,
+  "ngrok agent discovery must begin from a verified DevSpace-owned ngrok process");
+assert.match(ngrokAgent, /ownedLoopbackListenerPorts\(ownedProcesses\)/,
+  "ngrok agent discovery may probe only listeners owned by the verified ngrok process");
+assert.match(ownedNgrokProcesses, /NGROK_EXE/,
+  "ngrok ownership must validate the exact bundled executable path");
+assert.match(ownedNgrokProcesses, /NGROK_CONFIG/,
+  "ngrok ownership fallback must require the Portable-owned config path");
+assert.match(ownedNgrokPorts, /allowedPids\.has\(pid\)/,
+  "listener discovery must filter netstat results by verified owned PID before probing");
 
 assert.match(reconcile, /topology-changed-no-restart/,
   "route and adapter changes must be observed without proactive tunnel restart");
@@ -84,6 +99,8 @@ console.log(JSON.stringify({
   publicTunnelOptInByDefault: true,
   updaterPreservesTunnelDisabledState: true,
   homepagePublicTrafficDisabled: true,
+  ngrokAgentDiscoveryUsesOwnedPidOnly: true,
+  arbitraryLocalhostAgentPortScanning: false,
   topologyChangesAreReadOnly: true,
   ambientProxyEnvironmentIsScrubbed: true,
   explicitTunnelProxyStillSupported: true,

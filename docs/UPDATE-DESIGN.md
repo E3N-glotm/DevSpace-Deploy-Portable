@@ -1,4 +1,10 @@
-# Application and network lifecycle design through 1.1.29
+# Application and network lifecycle design through 1.1.30
+
+## Implemented in 1.1.30: owned-only localhost inspection
+
+The dashboard and tunnel lifecycle must never discover ngrok by guessing localhost ports. `ngrokAgentState()` now begins from a verified process ownership chain: the executable must be the current Portable's bundled `runtime/ngrok/ngrok.exe`, and the process must be attributable to the current Portable through its recorded PID or Portable-owned ngrok config path. Only TCP listeners whose owning PID is one of those verified processes may receive `/api/tunnels` requests.
+
+This closes a P0 coexistence failure where unrelated software could legitimately bind ports in the historical ngrok Agent range. DevSpace no longer scans `127.0.0.1:4040-4049`, does not probe third-party localhost services, and fails closed to an unknown Agent state when ownership cannot be proven.
 
 ## Goal
 

@@ -2274,7 +2274,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.29 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.30 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -3050,7 +3050,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.29") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.30") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -3247,7 +3247,7 @@ namespace DevSpacePortable.NativeUI
                     MessageBoxIcon.Information);
                 return;
             }
-            string current = GetString(_currentConfig, "portableVersion", "1.1.29");
+            string current = GetString(_currentConfig, "portableVersion", "1.1.30");
             string arguments = "--root \"" + _root.Replace("\"", "\\\"") + "\""
                 + " --current \"" + current.Replace("\"", "\\\"") + "\""
                 + " --parent-ui " + Process.GetCurrentProcess().Id;

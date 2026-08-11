@@ -65,7 +65,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.29";
+const PORTABLE_VERSION = "1.1.30";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -2521,12 +2521,125 @@ function formatProbe(probe) {
   return `HTTP ${probe.status}${details.length ? ` (${details.join(", ")})` : ""}`;
 }
 
+function normalizeOwnedPath(value) {
+  if (!value) return "";
+  try {
+    return path.resolve(String(value)).replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
+  } catch {
+    return String(value).replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
+  }
+}
+
+function runningNgrokProcesses() {
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "[Console]::OutputEncoding=(New-Object System.Text.UTF8Encoding($false))",
+    "$OutputEncoding=[Console]::OutputEncoding",
+    "$items=@(Get-CimInstance Win32_Process -Filter \"Name='ngrok.exe'\" | Select-Object ProcessId,Name,ExecutablePath,CommandLine)",
+    "$items | ConvertTo-Json -Compress",
+  ].join(";");
+  const result = childProcess.spawnSync(POWERSHELL_EXE, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+  ], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 6_000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.status !== 0) return [];
+  const text = String(result.stdout || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return (Array.isArray(parsed) ? parsed : [parsed]).map((item) => ({
+      pid: Number(item.ProcessId),
+      name: String(item.Name || ""),
+      executablePath: String(item.ExecutablePath || ""),
+      commandLine: String(item.CommandLine || ""),
+    })).filter((item) => Number.isInteger(item.pid) && item.pid > 0);
+  } catch {
+    return [];
+  }
+}
+
+function verifiedOwnedNgrokProcesses() {
+  const expectedExecutable = normalizeOwnedPath(NGROK_EXE);
+  const expectedConfig = normalizeOwnedPath(NGROK_CONFIG);
+  const recordedPids = new Set([
+    readRecordedPid(TUNNEL_PID_FILE),
+    readRecordedPid(NGROK_PID_FILE),
+  ].filter((pid) => Number.isInteger(pid) && pid > 0));
+  return runningNgrokProcesses().filter((item) => {
+    if (item.name.toLowerCase() !== "ngrok.exe") return false;
+    if (normalizeOwnedPath(item.executablePath) !== expectedExecutable) return false;
+    const commandLine = String(item.commandLine || "").replace(/\\/g, "/").toLowerCase();
+    const configOwned = expectedConfig && commandLine.includes(expectedConfig);
+    return recordedPids.has(item.pid) || configOwned;
+  });
+}
+
+function ownedLoopbackListenerPorts(processes) {
+  const allowedPids = new Set(processes.map((item) => item.pid));
+  if (!allowedPids.size) return [];
+  const result = runProgram("netstat.exe", ["-ano", "-p", "TCP"], { ignoreExitCode: true, outputEncoding: "utf-8" });
+  if (result.status !== 0) return [];
+  const ports = new Set();
+  for (const line of String(result.output || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*TCP\s+(\S+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i);
+    if (!match) continue;
+    const pid = Number(match[2]);
+    if (!allowedPids.has(pid)) continue;
+    const endpoint = match[1];
+    let host = "";
+    let rawPort = "";
+    if (endpoint.startsWith("[")) {
+      const closing = endpoint.lastIndexOf("]:");
+      if (closing < 0) continue;
+      host = endpoint.slice(1, closing).toLowerCase();
+      rawPort = endpoint.slice(closing + 2);
+    } else {
+      const separator = endpoint.lastIndexOf(":");
+      if (separator < 0) continue;
+      host = endpoint.slice(0, separator).toLowerCase();
+      rawPort = endpoint.slice(separator + 1);
+    }
+    if (!["127.0.0.1", "0.0.0.0", "::1", "::"].includes(host)) continue;
+    const port = Number(rawPort);
+    if (Number.isInteger(port) && port > 0 && port <= 65535) ports.add(port);
+  }
+  return [...ports].sort((left, right) => left - right);
+}
+
 async function ngrokAgentState(expectedPublicUrl) {
   const tunnels = [];
   const apiPorts = [];
   const errors = [];
-  const observations = await Promise.all(Array.from({ length: 10 }, async (_unused, index) => {
-    const port = 4040 + index;
+  const ownedProcesses = verifiedOwnedNgrokProcesses();
+  const candidatePorts = ownedLoopbackListenerPorts(ownedProcesses);
+  if (!ownedProcesses.length) {
+    return {
+      reachable: false,
+      matchingTunnel: false,
+      tunnels: [],
+      apiPorts: [],
+      errors: [],
+      ownershipVerified: false,
+      reason: "no-verified-devspace-ngrok-process",
+    };
+  }
+  if (!candidatePorts.length) {
+    return {
+      reachable: false,
+      matchingTunnel: false,
+      tunnels: [],
+      apiPorts: [],
+      errors: [],
+      ownershipVerified: true,
+      ownedPids: ownedProcesses.map((item) => item.pid),
+      reason: "verified-ngrok-has-no-loopback-listener",
+    };
+  }
+  const observations = await Promise.all(candidatePorts.map(async (port) => {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/tunnels`, { signal: AbortSignal.timeout(750) });
       if (response.status !== 200) return { port, reachable: false, tunnels: [] };
@@ -2558,6 +2671,9 @@ async function ngrokAgentState(expectedPublicUrl) {
     tunnels,
     apiPorts,
     errors,
+    ownershipVerified: true,
+    ownedPids: ownedProcesses.map((item) => item.pid),
+    reason: apiPorts.length ? null : "verified-ngrok-agent-api-unreachable",
   };
 }
 
@@ -2604,7 +2720,7 @@ async function statusText() {
   if (provider === "ngrok") {
     const agent = await ngrokAgentState(publicUrl);
     tunnelDetails +=
-      `\nAgent API: ${agent.reachable ? `reachable on ${agent.apiPorts.join(", ")}` : "unreachable on 4040-4049"}` +
+      `\nAgent API: ${agent.reachable ? `verified DevSpace-owned listener on ${agent.apiPorts.join(", ")}` : `unavailable (${agent.reason || "no verified owned listener"})`}` +
       `\nConfigured public tunnel active: ${agent.matchingTunnel ? "yes" : "no"}` +
       `\nObserved tunnels: ${agent.tunnels.length ? agent.tunnels.map((item) => `${item.publicUrl} -> ${item.target}`).join("; ") : "none"}`;
   } else {

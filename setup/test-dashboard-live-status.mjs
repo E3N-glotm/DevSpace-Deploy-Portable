@@ -35,6 +35,16 @@ assert.doesNotMatch(dashboardManagerBlock, /dashboardPublicProbes\(/,
   "homepage status must never actively call the public DevSpace URL");
 assert.match(dashboardManagerBlock, /cachedDashboardPublicProbes\(/,
   "homepage may only consume a previously recorded explicit public verification");
+assert.doesNotMatch(managerSource, /unreachable on 4040-4049/,
+  "dashboard must not describe or implement a guessed ngrok localhost port range");
+const ngrokAgentStart = managerSource.indexOf("async function ngrokAgentState(");
+const ngrokAgentEnd = managerSource.indexOf("async function statusText()", ngrokAgentStart);
+assert.ok(ngrokAgentStart >= 0 && ngrokAgentEnd > ngrokAgentStart, "ngrok agent block was not found");
+const ngrokAgentBlock = managerSource.slice(ngrokAgentStart, ngrokAgentEnd);
+assert.doesNotMatch(ngrokAgentBlock, /4040\s*\+|Array\.from\(\{\s*length:\s*10/,
+  "dashboard must never scan arbitrary localhost ports to discover ngrok");
+assert.match(ngrokAgentBlock, /verifiedOwnedNgrokProcesses\(\)/,
+  "dashboard ngrok inspection must be ownership-gated");
 assert.match(dashboard, /ActionButton\("详细信息"/);
 assert.doesNotMatch(dashboard, /ActionButton\("刷新状态"/);
 assert.doesNotMatch(dashboard, /ActionButton\("验证 HTTP"/);
@@ -119,6 +129,8 @@ console.log(JSON.stringify({
   homepagePublicProbeDisabled: true,
   directLoopbackProbe: true,
   cachedExplicitPublicVerification: true,
+  ownedNgrokAgentProbeOnly: true,
+  guessedLocalhostPortScanRemoved: true,
   threeSecondLocalRefresh: true,
   dashboardRefreshesAfterDeployment: true,
   detailsRefreshesHomepage: true,
