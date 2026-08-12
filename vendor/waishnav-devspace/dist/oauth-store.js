@@ -9,9 +9,23 @@ function redirectHostAllowed(redirectUri, allowedHosts) {
     catch {
         return false;
     }
+    if (parsed.hash || parsed.username || parsed.password)
+        return false;
     if (["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname))
-        return true;
-    return allowedHosts.includes(parsed.hostname);
+        return parsed.protocol === "http:" || parsed.protocol === "https:";
+    if (parsed.protocol !== "https:") {
+        const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+        const unsafeSchemes = new Set(["http", "file", "data", "javascript", "vbscript", "ftp"]);
+        if (unsafeSchemes.has(scheme) || !scheme.includes(".") || !/^[a-z][a-z0-9+.-]*$/.test(scheme))
+            return false;
+    }
+    // Remote MCP clients are not limited to a fixed vendor list. Dynamic
+    // registration is safe to accept for arbitrary HTTPS callback hosts
+    // because the owner still has to approve the authorization request and
+    // the authorization handler requires an exact registered redirect URI.
+    // Keep the parameter for backwards-compatible store construction.
+    void allowedHosts;
+    return true;
 }
 export class SqliteOAuthStore {
     database;

@@ -65,7 +65,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.34";
+const PORTABLE_VERSION = "1.1.35";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -1401,6 +1401,146 @@ async function runMemoryAdmin(action, payload = {}) {
       return { memory: store.delete(String(payload.id || "")) };
     }
     throw new Error(`Unsupported memory admin action: ${action}`);
+  } finally {
+    database.close();
+  }
+}
+
+function normalizeOAuthRedirectUris(value) {
+  const input = Array.isArray(value) ? value : [value];
+  const result = [];
+  const seen = new Set();
+  for (const item of input) {
+    const text = String(item || "").trim();
+    if (!text) continue;
+    let parsed;
+    try {
+      parsed = new URL(text);
+    } catch {
+      throw new Error(`Invalid OAuth redirect URI: ${text}`);
+    }
+    if (parsed.hash || parsed.username || parsed.password) {
+      throw new Error(`OAuth redirect URI may not contain credentials or a fragment: ${text}`);
+    }
+    const loopback = new Set(["localhost", "127.0.0.1", "[::1]"]).has(parsed.hostname);
+    if (loopback) {
+      if (!new Set(["http:", "https:"]).has(parsed.protocol)) {
+        throw new Error(`Loopback OAuth redirect URI must use HTTP or HTTPS: ${text}`);
+      }
+    } else if (parsed.protocol !== "https:") {
+      const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+      const unsafeSchemes = new Set(["http", "file", "data", "javascript", "vbscript", "ftp"]);
+      if (unsafeSchemes.has(scheme) || !scheme.includes(".") || !/^[a-z][a-z0-9+.-]*$/.test(scheme)) {
+        throw new Error(`Remote OAuth redirect URI must use HTTPS or a reverse-domain private URI scheme: ${text}`);
+      }
+    }
+    const normalized = parsed.href;
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+  if (result.length < 1) throw new Error("At least one OAuth redirect URI is required.");
+  if (result.length > 16) throw new Error("At most 16 OAuth redirect URIs may be registered for one client.");
+  return result;
+}
+
+function safeOAuthClientRecord(client, issuedAt) {
+  const clientId = String(client?.client_id || "");
+  return {
+    clientId,
+    clientName: String(client?.client_name || clientId || "Unnamed MCP client"),
+    redirectUris: Array.isArray(client?.redirect_uris) ? client.redirect_uris.map((value) => String(value)) : [],
+    tokenEndpointAuthMethod: String(client?.token_endpoint_auth_method || "none"),
+    grantTypes: Array.isArray(client?.grant_types) ? client.grant_types.map((value) => String(value)) : [],
+    responseTypes: Array.isArray(client?.response_types) ? client.response_types.map((value) => String(value)) : [],
+    issuedAt: Number(client?.client_id_issued_at || issuedAt || 0),
+    secretPresent: Boolean(client?.client_secret),
+    manual: clientId.startsWith("devspace-manual-"),
+  };
+}
+
+async function runOAuthClientAdmin(action, payload = {}) {
+  if (!fs.existsSync(DATABASE_CLIENT_FILE)) {
+    throw new Error("OAuth client database runtime is missing from the bundled DevSpace package.");
+  }
+  const databaseModule = await import(`${pathToFileURL(DATABASE_CLIENT_FILE).href}?mtime=${fs.statSync(DATABASE_CLIENT_FILE).mtimeMs}`);
+  const database = databaseModule.openDatabase(STATE_DIR);
+  try {
+    if (action === "list") {
+      const rows = database.sqlite
+        .prepare("select client_id, client_json, issued_at from oauth_clients order by issued_at desc limit 500")
+        .all();
+      return {
+        clients: rows.map((row) => {
+          let client;
+          try { client = JSON.parse(String(row.client_json || "{}")); }
+          catch { client = { client_id: row.client_id, client_name: "Invalid OAuth client record" }; }
+          return safeOAuthClientRecord(client, row.issued_at);
+        }),
+      };
+    }
+    if (action === "create") {
+      const clientName = String(payload.clientName || "External MCP client").trim();
+      if (!clientName || clientName.length > 120) throw new Error("OAuth client name must contain 1-120 characters.");
+      const redirectUris = normalizeOAuthRedirectUris(payload.redirectUris || payload.redirectUri);
+      const now = Math.floor(Date.now() / 1000);
+      const clientSecret = crypto.randomBytes(32).toString("base64url");
+      const client = {
+        client_id: `devspace-manual-${crypto.randomUUID()}`,
+        client_secret: clientSecret,
+        client_id_issued_at: now,
+        client_secret_expires_at: 0,
+        client_name: clientName,
+        redirect_uris: redirectUris,
+        token_endpoint_auth_method: "client_secret_post",
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+      };
+      database.sqlite
+        .prepare("insert into oauth_clients (client_id, client_json, issued_at) values (?, ?, ?)")
+        .run(client.client_id, JSON.stringify(client), now);
+      return {
+        client: safeOAuthClientRecord(client, now),
+        clientSecret,
+        secretShownOnce: true,
+      };
+    }
+    if (action === "rotate-secret") {
+      const clientId = String(payload.clientId || "").trim();
+      if (!clientId.startsWith("devspace-manual-")) {
+        throw new Error("Only manually managed OAuth clients may rotate their secret from the Portable UI.");
+      }
+      const row = database.sqlite
+        .prepare("select client_json, issued_at from oauth_clients where client_id = ?")
+        .get(clientId);
+      if (!row) throw new Error("OAuth client was not found.");
+      const client = JSON.parse(String(row.client_json || "{}"));
+      const clientSecret = crypto.randomBytes(32).toString("base64url");
+      client.client_secret = clientSecret;
+      client.client_secret_expires_at = 0;
+      client.token_endpoint_auth_method = "client_secret_post";
+      const rotate = database.sqlite.transaction(() => {
+        database.sqlite.prepare("update oauth_clients set client_json = ? where client_id = ?").run(JSON.stringify(client), clientId);
+        database.sqlite.prepare("delete from oauth_access_tokens where client_id = ?").run(clientId);
+        database.sqlite.prepare("delete from oauth_refresh_tokens where client_id = ?").run(clientId);
+      });
+      rotate.immediate();
+      return {
+        client: safeOAuthClientRecord(client, row.issued_at),
+        clientSecret,
+        secretShownOnce: true,
+        tokensRevoked: true,
+      };
+    }
+    if (action === "delete") {
+      const clientId = String(payload.clientId || "").trim();
+      if (!clientId) throw new Error("OAuth client ID is required.");
+      const result = database.sqlite.prepare("delete from oauth_clients where client_id = ?").run(clientId);
+      if (result.changes !== 1) throw new Error("OAuth client was not found.");
+      return { deleted: true, clientId, tokensRevoked: true };
+    }
+    throw new Error(`Unsupported OAuth client admin action: ${action}`);
   } finally {
     database.close();
   }
@@ -3336,6 +3476,14 @@ async function main() {
       stdoutJson(await runMemoryAdmin("upsert", await readStdinJson()));
     } else if (command === "memory-delete") {
       stdoutJson(await runMemoryAdmin("delete", await readStdinJson()));
+    } else if (command === "oauth-client-list") {
+      stdoutJson(await runOAuthClientAdmin("list", await readStdinJson()));
+    } else if (command === "oauth-client-create") {
+      stdoutJson(await runOAuthClientAdmin("create", await readStdinJson()));
+    } else if (command === "oauth-client-rotate-secret") {
+      stdoutJson(await runOAuthClientAdmin("rotate-secret", await readStdinJson()));
+    } else if (command === "oauth-client-delete") {
+      stdoutJson(await runOAuthClientAdmin("delete", await readStdinJson()));
     } else if (command === "log-paths") {
       const provider = selectedTunnelProvider();
       stdoutJson({
@@ -3348,7 +3496,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete oauth-client-list oauth-client-create oauth-client-rotate-secret oauth-client-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);

@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.34**
+当前稳定版本：**1.1.35**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.34.zip
+DevSpacePortable-Windows-x64-1.1.35.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,20 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.34 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.33 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.35 没有修改 Portable Protocol 或顶层 MCP Schema，已有 ChatGPT OAuth 客户端不需要重建。
+
+## Gemini、Claude 和其它 MCP 客户端
+
+DevSpace Portable 的公网 MCP/OAuth 层不绑定 ChatGPT。1.1.35 起，支持标准 OAuth Dynamic Client Registration 的客户端可以使用任意安全的 HTTPS 回调地址自动注册；本机原生客户端也支持 loopback HTTP(S) 与符合反向域名格式的 private URI scheme。
+
+如果 Gemini、Claude、IDE 或其它客户端提示“服务器不能自动注册 OAuth 客户端”，打开 DevSpace **配置与权限 → AI / MCP OAuth 客户端**：
+
+1. 从目标 AI 客户端复制它显示的 Redirect URI；
+2. 在 DevSpace 中创建一个手动 OAuth 客户端；
+3. 将生成的 Client ID 和本次显示的 Client Secret 填回目标客户端；
+4. 继续 OAuth，在 DevSpace Owner Password 页面核对 Client、Resource 和 Redirect URI 后授权。
+
+Client Secret 不会在之后的客户端列表中重新显示；遗失时应执行“轮换 Secret”，轮换会同时撤销旧 Access/Refresh Token。远程 redirect 必须使用 HTTPS，只有 loopback 地址允许 HTTP。
 
 ---
 
@@ -299,6 +312,13 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.35 主要变化
+
+- **OAuth 客户端不再绑定厂商白名单。** DCR 支持任意 HTTPS redirect、localhost/loopback HTTP(S) 与 native private URI scheme，因此 Gemini、Claude、Cursor、IDE 及其它标准 MCP 客户端可以使用同一 DevSpace 服务。
+- **为无 DCR 客户端提供 Client ID / Secret。** “配置与权限”新增“AI / MCP OAuth 客户端”，可以预注册机密客户端、复制 Client ID、一次性获取 Client Secret、轮换 Secret、删除客户端并撤销 Token。
+- **授权前显示 Redirect URI。** Owner Password 页面明确展示授权码的回调目标；远程 HTTP、带凭据或 fragment 的 redirect 继续拒绝，授权端点仍要求 redirect 与注册记录精确匹配。
+- **现有 ChatGPT 兼容路径保留。** ChatGPT 等支持 DCR 的客户端仍可自动注册，不要求手工生成 Client ID/Secret；Portable Protocol 仍为 1.5，顶层 MCP tool schema 不变。
 
 ## 1.1.34 主要变化
 
@@ -521,7 +541,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.34
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.35
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -549,7 +569,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.34 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.35 -BypassProxy
 ```
 
 ## 在线更新

@@ -1283,6 +1283,414 @@ namespace DevSpacePortable.NativeUI
         private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
     }
 
+    internal sealed class OAuthClientsDialog : Form
+    {
+        private readonly ManagerClient _manager;
+        private readonly DataGridView _grid = new DataGridView();
+        private readonly TextBox _clientName = new TextBox();
+        private readonly TextBox _redirectUris = new TextBox();
+        private readonly TextBox _clientId = new TextBox();
+        private readonly TextBox _clientSecret = new TextBox();
+        private readonly Label _status = new Label();
+        private string _secretForClientId = "";
+
+        public OAuthClientsDialog(ManagerClient manager)
+        {
+            _manager = manager;
+            Text = "AI / MCP OAuth 客户端";
+            Icon = BrandIconFactory.Create(64);
+            StartPosition = FormStartPosition.CenterParent;
+            MinimumSize = new Size(980, 650);
+            Size = new Size(1180, 760);
+            BackColor = UiPalette.Background;
+            ForeColor = UiPalette.Text;
+            Font = UiTypography.Ui(9.25F);
+            BuildUi();
+            Shown += async delegate { await LoadClientsAsync(); };
+        }
+
+        private void BuildUi()
+        {
+            TableLayoutPanel root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                Padding = new Padding(20),
+                BackColor = UiPalette.Background,
+            };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+
+            Panel intro = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+            Label title = new Label
+            {
+                Text = "通用 AI / MCP OAuth 客户端",
+                Font = UiTypography.Display(16F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                AutoSize = true,
+                Location = new Point(4, 4),
+            };
+            Label hint = new Label
+            {
+                Text = "支持 Gemini、Claude、IDE 和其它标准 MCP 客户端。支持 DCR 的客户端可自动注册；不支持时，把客户端提供的 Redirect URI 粘贴到右侧创建 Client ID / Secret。",
+                Font = UiTypography.Ui(9F),
+                ForeColor = UiPalette.TextMuted,
+                AutoSize = false,
+                AutoEllipsis = true,
+                Location = new Point(6, 42),
+                Size = new Size(1080, 34),
+                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
+            };
+            intro.Controls.Add(title);
+            intro.Controls.Add(hint);
+            root.Controls.Add(intro, 0, 0);
+
+            SplitContainer split = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Vertical,
+                SplitterDistance = 610,
+                Panel1MinSize = 420,
+                Panel2MinSize = 390,
+                SplitterWidth = 12,
+                BackColor = UiPalette.Background,
+            };
+            ConfigureGrid();
+            split.Panel1.Padding = new Padding(0, 0, 8, 0);
+            split.Panel1.Controls.Add(_grid);
+
+            TableLayoutPanel form = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 10,
+                Padding = new Padding(8, 0, 0, 0),
+                BackColor = UiPalette.Background,
+                AutoScroll = true,
+            };
+            for (int i = 0; i < 10; i++) form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            form.Controls.Add(FieldLabel("客户端名称"), 0, 0);
+            StyleTextBox(_clientName);
+            _clientName.Text = "Gemini / MCP client";
+            form.Controls.Add(_clientName, 0, 1);
+            form.Controls.Add(FieldLabel("Redirect URI（每行一个）"), 0, 2);
+            StyleTextBox(_redirectUris);
+            _redirectUris.Multiline = true;
+            _redirectUris.ScrollBars = ScrollBars.Vertical;
+            _redirectUris.Height = 104;
+            form.Controls.Add(_redirectUris, 0, 3);
+            FlowLayoutPanel createActions = ButtonBar();
+            createActions.Controls.Add(ActionButton("创建客户端", async delegate { await CreateClientAsync(); }, true));
+            createActions.Controls.Add(ActionButton("刷新列表", async delegate { await LoadClientsAsync(); }, false));
+            form.Controls.Add(createActions, 0, 4);
+            form.Controls.Add(FieldLabel("Client ID"), 0, 5);
+            StyleTextBox(_clientId);
+            _clientId.ReadOnly = true;
+            form.Controls.Add(_clientId, 0, 6);
+            form.Controls.Add(FieldLabel("Client Secret（只在创建/轮换后提供）"), 0, 7);
+            StyleTextBox(_clientSecret);
+            _clientSecret.ReadOnly = true;
+            _clientSecret.UseSystemPasswordChar = true;
+            form.Controls.Add(_clientSecret, 0, 8);
+            FlowLayoutPanel manageActions = ButtonBar();
+            manageActions.Controls.Add(ActionButton("复制 Client ID", delegate { CopyText(_clientId.Text, "Client ID"); }, false));
+            manageActions.Controls.Add(ActionButton("复制 Client Secret", delegate { CopyText(_clientSecret.Text, "Client Secret"); }, false));
+            manageActions.Controls.Add(ActionButton("轮换 Secret", async delegate { await RotateSecretAsync(); }, false));
+            manageActions.Controls.Add(ActionButton("删除并撤销", async delegate { await DeleteClientAsync(); }, false));
+            form.Controls.Add(manageActions, 0, 9);
+            split.Panel2.Controls.Add(form);
+            root.Controls.Add(split, 0, 1);
+
+            _status.Dock = DockStyle.Fill;
+            _status.ForeColor = UiPalette.TextMuted;
+            _status.TextAlign = ContentAlignment.MiddleLeft;
+            _status.Text = "准备读取 OAuth 客户端。";
+            root.Controls.Add(_status, 0, 2);
+            Controls.Add(root);
+        }
+
+        private void ConfigureGrid()
+        {
+            _grid.Dock = DockStyle.Fill;
+            _grid.BackgroundColor = UiPalette.Surface;
+            _grid.BorderStyle = BorderStyle.FixedSingle;
+            _grid.AllowUserToAddRows = false;
+            _grid.AllowUserToDeleteRows = false;
+            _grid.AllowUserToResizeRows = false;
+            _grid.MultiSelect = false;
+            _grid.ReadOnly = true;
+            _grid.RowHeadersVisible = false;
+            _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            _grid.AutoGenerateColumns = false;
+            _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            _grid.ColumnHeadersHeight = 36;
+            _grid.RowTemplate.Height = 34;
+            _grid.EnableHeadersVisualStyles = false;
+            _grid.ColumnHeadersDefaultCellStyle.BackColor = UiPalette.SurfaceMuted;
+            _grid.ColumnHeadersDefaultCellStyle.ForeColor = UiPalette.TextMuted;
+            _grid.DefaultCellStyle.BackColor = UiPalette.Surface;
+            _grid.DefaultCellStyle.ForeColor = UiPalette.Text;
+            _grid.DefaultCellStyle.SelectionBackColor = UiPalette.PrimarySoft;
+            _grid.DefaultCellStyle.SelectionForeColor = UiPalette.Text;
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ClientName", HeaderText = "客户端", FillWeight = 27 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Kind", HeaderText = "类型", FillWeight = 12 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Auth", HeaderText = "认证", FillWeight = 16 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Redirect", HeaderText = "Redirect URI", FillWeight = 45 });
+            _grid.SelectionChanged += delegate { SelectCurrentClient(); };
+        }
+
+        private async Task LoadClientsAsync()
+        {
+            try
+            {
+                _status.Text = "正在读取 OAuth 客户端……";
+                Dictionary<string, object> result = await _manager.RunJsonAsync("oauth-client-list");
+                _grid.Rows.Clear();
+                foreach (Dictionary<string, object> client in Dictionaries(result, "clients"))
+                {
+                    string id = ValueText(client, "clientId");
+                    string redirect = Strings(client, "redirectUris").FirstOrDefault() ?? "";
+                    int rowIndex = _grid.Rows.Add(
+                        ValueText(client, "clientName"),
+                        Bool(client, "manual") ? "手动" : "DCR",
+                        ValueText(client, "tokenEndpointAuthMethod"),
+                        redirect);
+                    _grid.Rows[rowIndex].Tag = client;
+                    _grid.Rows[rowIndex].Cells[0].ToolTipText = id;
+                }
+                _status.Text = "已读取 " + _grid.Rows.Count + " 个 OAuth 客户端。DCR 客户端由 ChatGPT/Gemini 等支持动态注册的工具自动创建。";
+                if (_grid.Rows.Count > 0)
+                {
+                    _grid.ClearSelection();
+                    _grid.Rows[0].Selected = true;
+                    _grid.CurrentCell = _grid.Rows[0].Cells[0];
+                }
+                else ClearSelectionFields();
+            }
+            catch (Exception ex)
+            {
+                _status.Text = "读取失败：" + ex.Message;
+            }
+        }
+
+        private async Task CreateClientAsync()
+        {
+            string[] redirects = _redirectUris.Lines.Select(value => value.Trim()).Where(value => value.Length > 0).ToArray();
+            if (redirects.Length == 0)
+            {
+                MessageBox.Show(this, "请先从 Gemini、Claude 或其它客户端复制 Redirect URI，并粘贴到这里。", "需要 Redirect URI", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            try
+            {
+                Dictionary<string, object> result = await _manager.RunJsonAsync("oauth-client-create", new
+                {
+                    clientName = _clientName.Text.Trim(),
+                    redirectUris = redirects,
+                });
+                Dictionary<string, object> client = Dictionary(result, "client");
+                string createdId = ValueText(client, "clientId");
+                string createdSecret = ValueText(result, "clientSecret");
+                _clientId.Text = createdId;
+                _clientSecret.Text = createdSecret;
+                _secretForClientId = createdId;
+                _status.Text = "客户端已创建。Client Secret 只在本次创建/轮换结果中提供，请立即复制到目标 AI 客户端。";
+                await LoadClientsAsync();
+                _secretForClientId = createdId;
+                _clientSecret.Text = createdSecret;
+                SelectClientById(createdId);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "创建 OAuth 客户端失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async Task RotateSecretAsync()
+        {
+            string id = SelectedClientId();
+            if (string.IsNullOrWhiteSpace(id)) return;
+            Dictionary<string, object> selected = SelectedClient();
+            if (!Bool(selected, "manual"))
+            {
+                MessageBox.Show(this, "动态注册客户端的凭据由对应 AI 客户端管理。需要手动密钥时，请新建一个手动 OAuth 客户端。", "不能轮换 DCR 客户端", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            if (MessageBox.Show(this, "轮换 Secret 会立即撤销这个客户端现有的 Access/Refresh Token，需要在 AI 客户端重新授权。继续吗？", "轮换 Client Secret", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            try
+            {
+                Dictionary<string, object> result = await _manager.RunJsonAsync("oauth-client-rotate-secret", new { clientId = id });
+                string rotatedSecret = ValueText(result, "clientSecret");
+                _clientId.Text = id;
+                _clientSecret.Text = rotatedSecret;
+                _secretForClientId = id;
+                _status.Text = "Client Secret 已轮换，旧 Token 已撤销。请把新 Secret 更新到目标 AI 客户端。";
+                await LoadClientsAsync();
+                _secretForClientId = id;
+                _clientSecret.Text = rotatedSecret;
+                SelectClientById(id);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "轮换失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async Task DeleteClientAsync()
+        {
+            string id = SelectedClientId();
+            if (string.IsNullOrWhiteSpace(id)) return;
+            if (MessageBox.Show(this, "删除此 OAuth 客户端会同时撤销它现有的 Access/Refresh Token。确定继续吗？", "删除 OAuth 客户端", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            try
+            {
+                await _manager.RunJsonAsync("oauth-client-delete", new { clientId = id });
+                ClearSelectionFields();
+                _status.Text = "OAuth 客户端及其 Token 已删除。";
+                await LoadClientsAsync();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "删除失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void SelectCurrentClient()
+        {
+            Dictionary<string, object> client = SelectedClient();
+            if (client.Count == 0) return;
+            string id = ValueText(client, "clientId");
+            _clientId.Text = id;
+            if (!string.Equals(_secretForClientId, id, StringComparison.Ordinal)) _clientSecret.Text = "";
+            _redirectUris.Text = string.Join(Environment.NewLine, Strings(client, "redirectUris"));
+            _clientName.Text = ValueText(client, "clientName");
+        }
+
+        private void SelectClientById(string clientId)
+        {
+            foreach (DataGridViewRow row in _grid.Rows)
+            {
+                Dictionary<string, object> client = row.Tag as Dictionary<string, object>;
+                if (client != null && string.Equals(ValueText(client, "clientId"), clientId, StringComparison.Ordinal))
+                {
+                    _grid.ClearSelection();
+                    row.Selected = true;
+                    _grid.CurrentCell = row.Cells[0];
+                    SelectCurrentClient();
+                    break;
+                }
+            }
+        }
+
+        private Dictionary<string, object> SelectedClient()
+        {
+            if (_grid.SelectedRows.Count != 1) return new Dictionary<string, object>();
+            return _grid.SelectedRows[0].Tag as Dictionary<string, object> ?? new Dictionary<string, object>();
+        }
+
+        private string SelectedClientId() { return ValueText(SelectedClient(), "clientId"); }
+
+        private void ClearSelectionFields()
+        {
+            _clientId.Text = "";
+            _clientSecret.Text = "";
+            _secretForClientId = "";
+        }
+
+        private void CopyText(string value, string label)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                MessageBox.Show(this, label + " 当前不可用。Client Secret 只在创建或轮换后提供。", "没有可复制内容", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            Clipboard.SetText(value);
+            _status.Text = label + " 已复制到剪贴板。";
+        }
+
+        private static Label FieldLabel(string text)
+        {
+            return new Label { Text = text, AutoSize = true, Font = UiTypography.Ui(9F, FontStyle.Bold), ForeColor = UiPalette.TextMuted, Margin = new Padding(3, 8, 3, 3) };
+        }
+
+        private static void StyleTextBox(TextBox box)
+        {
+            box.Dock = DockStyle.Top;
+            box.Font = UiTypography.Ui(9.25F);
+            box.BackColor = UiPalette.Surface;
+            box.ForeColor = UiPalette.Text;
+            box.BorderStyle = BorderStyle.FixedSingle;
+            box.Margin = new Padding(3, 2, 3, 8);
+        }
+
+        private static FlowLayoutPanel ButtonBar()
+        {
+            return new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, BackColor = Color.Transparent, Margin = new Padding(0, 4, 0, 8) };
+        }
+
+        private static Button ActionButton(string text, EventHandler handler, bool primary)
+        {
+            Button button = new Button
+            {
+                Text = text,
+                AutoSize = true,
+                Height = 36,
+                Padding = new Padding(12, 0, 12, 0),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = primary ? UiPalette.Primary : UiPalette.Surface,
+                ForeColor = primary ? Color.White : UiPalette.Text,
+                Margin = new Padding(3),
+                Cursor = Cursors.Hand,
+            };
+            button.FlatAppearance.BorderColor = primary ? UiPalette.Primary : UiPalette.Border;
+            button.Click += handler;
+            return button;
+        }
+
+        private static Dictionary<string, object> Dictionary(Dictionary<string, object> source, string key)
+        {
+            object value;
+            return source != null && source.TryGetValue(key, out value) ? value as Dictionary<string, object> ?? new Dictionary<string, object>() : new Dictionary<string, object>();
+        }
+
+        private static IEnumerable<Dictionary<string, object>> Dictionaries(Dictionary<string, object> source, string key)
+        {
+            object value;
+            if (source == null || !source.TryGetValue(key, out value) || value == null || value is string) yield break;
+            IEnumerable items = value as IEnumerable;
+            if (items == null) yield break;
+            foreach (object item in items)
+            {
+                Dictionary<string, object> dictionary = item as Dictionary<string, object>;
+                if (dictionary != null) yield return dictionary;
+            }
+        }
+
+        private static string ValueText(Dictionary<string, object> source, string key)
+        {
+            object value;
+            return source != null && source.TryGetValue(key, out value) && value != null ? Convert.ToString(value) : "";
+        }
+
+        private static bool Bool(Dictionary<string, object> source, string key)
+        {
+            object value;
+            return source != null && source.TryGetValue(key, out value) && value != null && Convert.ToBoolean(value);
+        }
+
+        private static List<string> Strings(Dictionary<string, object> source, string key)
+        {
+            object value;
+            List<string> values = new List<string>();
+            if (source == null || !source.TryGetValue(key, out value) || value == null || value is string) return values;
+            IEnumerable items = value as IEnumerable;
+            if (items == null) return values;
+            foreach (object item in items) values.Add(Convert.ToString(item));
+            return values;
+        }
+    }
+
     internal sealed class DiagnosticsDetailsDialog : Form
     {
         private readonly ManagerClient _manager;
@@ -2285,7 +2693,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.34 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.35 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2460,6 +2868,7 @@ namespace DevSpacePortable.NativeUI
             layout.Controls.Add(access, 1, 0);
             FlowLayoutPanel actions = NewButtonBar();
             actions.Controls.Add(ActionButton("添加工作目录", delegate { AddWorkspaceRoot(); }));
+            actions.Controls.Add(ActionButton("AI / MCP OAuth 客户端", delegate { OpenOAuthClientsDialog(); }));
             actions.Controls.Add(ActionButton("只保存设置", async delegate { await SaveConfigurationAsync(false); }, true));
             actions.Controls.Add(ActionButton("保存并部署本地 MCP", async delegate { await DeployAsync(); }));
             actions.Controls.Add(ActionButton("重新加载", async delegate { await LoadConfigurationAsync(); }));
@@ -2497,6 +2906,14 @@ namespace DevSpacePortable.NativeUI
             };
             page.Controls.Add(scroll);
             return page;
+        }
+
+        private void OpenOAuthClientsDialog()
+        {
+            using (OAuthClientsDialog dialog = new OAuthClientsDialog(_manager))
+            {
+                dialog.ShowDialog(this);
+            }
         }
 
         private TabPage BuildPluginsTab()
@@ -3065,7 +3482,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.34") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.35") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }

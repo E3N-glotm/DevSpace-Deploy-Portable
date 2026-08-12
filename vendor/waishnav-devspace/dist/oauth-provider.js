@@ -24,6 +24,7 @@ function htmlEscape(value) {
 function formHtml(params) {
     const scopeText = params.scopes.length > 0 ? params.scopes.join(" ") : "devspace";
     const resourceText = params.resource?.href ?? "DevSpace MCP endpoint";
+    const redirectText = params.redirectUri || "Unknown redirect URI";
     const error = params.error
         ? `<p class="error">${htmlEscape(params.error)}</p>`
         : "";
@@ -55,12 +56,13 @@ function formHtml(params) {
   <body>
     <main>
       <h1>Connect DevSpace</h1>
-      <p class="warning">Only approve this if you are intentionally connecting your own ChatGPT or MCP client to this local machine.</p>
+      <p class="warning">Only approve this if you are intentionally connecting your own AI or MCP client to this local machine. Verify the redirect URI before entering the Owner password.</p>
       ${error}
       <dl>
         <dt>Client</dt><dd>${htmlEscape(params.clientName)}</dd>
         <dt>Scope</dt><dd>${htmlEscape(scopeText)}</dd>
         <dt>Resource</dt><dd>${htmlEscape(resourceText)}</dd>
+        <dt>Redirect URI</dt><dd>${htmlEscape(redirectText)}</dd>
       </dl>
       <form method="post">
 ${hiddenFields}
@@ -102,6 +104,7 @@ export class SingleUserOAuthProvider {
                 clientName: client.client_name ?? client.client_id,
                 scopes: params.scopes ?? this.config.scopes,
                 resource: params.resource,
+                redirectUri: params.redirectUri,
                 fields: authorizationFormFields(client, params),
             }));
             return;
@@ -114,6 +117,7 @@ export class SingleUserOAuthProvider {
                 clientName: client.client_name ?? client.client_id,
                 scopes: params.scopes ?? this.config.scopes,
                 resource: params.resource,
+                redirectUri: params.redirectUri,
                 fields: authorizationFormFields(client, params),
             }));
             return;

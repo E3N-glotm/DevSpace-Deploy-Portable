@@ -2,6 +2,15 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.35
+
+- OAuth Dynamic Client Registration 不再把远程回调域名写死为 `chatgpt.com`：标准 HTTPS 回调、localhost/loopback HTTP(S) 和符合反向域名格式的 native private URI scheme 均可注册，因此 Gemini、Claude、Cursor、IDE 和未来其它标准 MCP 客户端不再需要 DevSpace 维护厂商白名单。
+- Owner Password 授权页新增明确的 Redirect URI 展示；即使开放厂商无关 DCR，用户仍能在授权前核对授权码将返回到哪里，服务端继续要求授权请求与已注册 redirect 精确匹配。
+- 原生“配置与权限”新增 **AI / MCP OAuth 客户端** 管理入口，为不支持 DCR 或要求显式 Client ID/Client Secret 的客户端提供本地预注册：支持创建、列表、复制 ID、一次性 Secret、轮换 Secret、删除并撤销 Token。已有 Secret 不通过列表接口回显。
+- 远程明文 HTTP redirect 继续拒绝；Secret 轮换与客户端删除都会撤销该客户端已有 Access/Refresh Token。Portable Protocol 仍为 `1.5`，顶层 MCP tool schema 不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.35.md)
+
 ## 1.1.34
 
 - 彻底修复“会话与回退”旧记录随未来文件状态变化重新变成 `0` 的语义问题：成功的结构化文件修改结束后立即冻结本轮历史 summary/files/diff；后续会话即使继续修改同一文件或把它改回 baseline，旧会话仍显示自己当时真实发生的修改。

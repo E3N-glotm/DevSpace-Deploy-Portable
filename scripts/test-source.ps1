@@ -49,6 +49,7 @@ $Tests = @(
     "setup/test-runtime-cards.mjs",
     "setup/test-runtime-log-ui.mjs",
     "setup/test-portable-ui-workflows.mjs",
+    "setup/test-oauth-client-compatibility.mjs",
     "setup/test-standalone-updater.mjs",
     "setup/test-selected-file-diff.mjs",
     "setup/test-online-updater-contract.mjs",
