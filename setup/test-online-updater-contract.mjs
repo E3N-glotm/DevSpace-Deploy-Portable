@@ -17,7 +17,7 @@ assert.match(updater, /Latest Release has neither asset SHA-256 digests nor upda
 assert.match(updater, /Get-LatestReleaseFromPublishedManifest/);
 assert.match(updater, /releases\/latest\/download\/update-manifest\.json/);
 assert.match(updater, /release-latest-update-manifest/);
-assert.match(updater, /Falling back to the published latest update manifest/);
+assert.match(updater, /Falling back to the official published latest update manifest/);
 assert.match(updater, /Assert-ReleaseAssetMetadata/);
 assert.match(updater, /SecurityProtocolType\]::Tls12/);
 assert.match(updater, /Invoke-GitHubJson/);
@@ -31,6 +31,12 @@ assert.match(updater, /--speed-limit/);
 assert.match(updater, /--speed-time/);
 assert.match(updater, /connect-timeout", "8"/);
 assert.match(updater, /Get-GitHubTransportCandidates/);
+assert.match(updater, /Get-GitHubMirrorPrefixes/);
+assert.match(updater, /Get-GitHubEndpointCandidates/);
+assert.match(updater, /Get-GitHubMirrorTransportCandidates/);
+assert.match(updater, /\[switch\]\$AllowMirrors/);
+assert.match(updater, /DEVSPACE_GITHUB_MIRRORS/);
+assert.match(updater, /https:\/\/ghproxy\.net\//);
 assert.match(updater, /Skipping unavailable local proxy/);
 assert.match(updater, /Get-WindowsInternetProxyState/);
 assert.match(updater, /Invoke-DotNetJson/);
@@ -82,13 +88,41 @@ assert.match(manifestBuilder, /incremental-first-full-fallback/);
 assert.match(deltaBuilder, /file-delta-v1/);
 assert.match(deltaBuilder, /baseSha256/);
 
+const transportBlock = updater.slice(
+  updater.indexOf("function Get-GitHubTransportCandidates"),
+  updater.indexOf("function Invoke-CurlJson"),
+);
+assert.ok(
+  transportBlock.indexOf('transport = "dotnet-system-proxy"') < transportBlock.indexOf('transport = "dotnet-direct"'),
+  "an enabled Windows system proxy must be attempted before direct/TUN transports",
+);
+const endpointBlock = updater.slice(
+  updater.indexOf("function Get-GitHubEndpointCandidates"),
+  updater.indexOf("function Set-WebRequestHeaders"),
+);
+assert.ok(
+  endpointBlock.indexOf("Get-GitHubMirrorPrefixes") < endpointBlock.indexOf('source = "official"'),
+  "GitHub Release mirror endpoints must be emitted before the official origin",
+);
+const latestReleaseBlock = updater.slice(
+  updater.indexOf("function Get-LatestRelease {"),
+  updater.indexOf("function ConvertTo-SafeRelativePath"),
+);
+assert.ok(
+  latestReleaseBlock.indexOf("https://api.github.com/repos/$Repository/releases/latest") < latestReleaseBlock.indexOf("return Get-LatestReleaseFromPublishedManifest"),
+  "trusted update metadata must come from official GitHub before the official published-manifest fallback",
+);
+
 console.log(JSON.stringify({
   publicGitHubReleaseCheck: true,
   releaseApiDigestMetadata: true,
   releaseManifestFallbackWhenApiUnavailable: true,
   tls12Compatibility: true,
   boundedNetworkFailover: true,
-  directTransportFirst: true,
+  mirrorEndpointFirst: true,
+  boundedMirrorFailover: true,
+  officialMetadataTrustAnchor: true,
+  systemProxyBeforeDirectWhenEnabled: true,
   dotNetDirectTransport: true,
   directCurlFallback: true,
   resumableDownload: true,

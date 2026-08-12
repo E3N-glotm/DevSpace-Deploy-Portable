@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.34
+
+- 彻底修复“会话与回退”旧记录随未来文件状态变化重新变成 `0` 的语义问题：成功的结构化文件修改结束后立即冻结本轮历史 summary/files/diff；后续会话即使继续修改同一文件或把它改回 baseline，旧会话仍显示自己当时真实发生的修改。
+- 纯只读 workspace 打开、SSH/GPU 监控与 shell-only 轮次不再创建持久 review 目录；原生 UI 默认隐藏空会话，并新增“显示空会话”诊断开关。升级后会自动清理 1.1.33 及更早版本留下的可丢弃空记录。
+- 保留 512 MiB 全局回退状态硬上限，但达到存储压力时不再优先删除整轮历史：先释放旧会话的 rollback object/safety snapshot，保留轻量历史 summary/files/diff；被释放快照的会话仍可审阅，但明确标记为不可回退，从而同时控制空间并长期保留历史记录。
+- 更新下载改为“官方元数据 + 镜像优先传输”：版本、大小和 SHA-256 只信任官方 GitHub；ZIP 默认优先 `ghproxy.net`，失败后快速切回官方 Release URL。系统代理开启时优先使用系统代理，没有可用代理时自动使用 direct/TUN；镜像只负责传输，最终仍以官方 SHA-256 验证。
+- 已在线实测 `1.1.32 -> 1.1.33` 的 5.8 MiB 增量包经 `ghproxy.net + Windows system proxy` 下载并通过官方 SHA-256；同时用不可达镜像验证了两次有界失败后自动回落官方源。
+- DevSpace server capability version 更新为 `1.1.34`，Portable Protocol 仍为 `1.5`，顶层 MCP tool schema 不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.34.md)
+
 ## 1.1.33
 
 - 修复“会话与回退”中旧修改记录偶发变成 `0` 或直接消失的问题。根因是 `review-sessions-v4` 把所有会话统一限制为 30 个，而 VGSP/LC-PiSA-SR 等高频只读监控会话同样占用这个数量配额，最终会把更旧但真正保存了 tracked baseline/rollback 数据的会话目录删除。1.1.33 改为只对无 tracked baseline、无 safety snapshot、无 shell mutation、无实际修改且未置顶的空会话执行 30 轮数量淘汰；真实修改会话不再因为后续空会话数量增长而被删除，512 MiB 全局 review-state 上限仍然作为硬存储边界。

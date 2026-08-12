@@ -2014,6 +2014,7 @@ namespace DevSpacePortable.NativeUI
         private TextBox _sessionSearch;
         private CheckBox _showHidden;
         private CheckBox _showArchived;
+        private CheckBox _showEmptySessions;
         private Label _sessionSummary;
         private Label _sessionDetailTitle;
         private Label _sessionDetailMeta;
@@ -2284,7 +2285,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.33 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.34 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2659,8 +2660,10 @@ namespace DevSpacePortable.NativeUI
             _sessionSearch = new TextBox { Height = 34 };
             StyleField(_sessionSearch);
             _sessionSearch.TextChanged += delegate { RenderSessionList(); };
+            _showEmptySessions = new ModernToggle { Text = "显示空会话", Width = 132, Margin = new Padding(8, 3, 2, 0) };
             _showHidden = new ModernToggle { Text = "显示隐藏", Width = 122, Margin = new Padding(8, 3, 2, 0) };
             _showArchived = new ModernToggle { Text = "显示归档", Width = 122, Margin = new Padding(8, 3, 2, 0) };
+            _showEmptySessions.CheckedChanged += async delegate { await RunUiActionAsync(LoadSessionsAsync); };
             _showHidden.CheckedChanged += async delegate { await RunUiActionAsync(LoadSessionsAsync); };
             _showArchived.CheckedChanged += async delegate { await RunUiActionAsync(LoadSessionsAsync); };
             Control searchHost = WrapField(_sessionSearch);
@@ -2669,6 +2672,7 @@ namespace DevSpacePortable.NativeUI
             searchRow.Controls.Add(ToolbarLabel("搜索"), 0, 0);
             searchRow.Controls.Add(searchHost, 1, 0);
             searchRow.Controls.Add(ActionButton("刷新", async delegate { await LoadSessionsAsync(); }, true), 2, 0);
+            optionRow.Controls.Add(_showEmptySessions);
             optionRow.Controls.Add(_showHidden);
             optionRow.Controls.Add(_showArchived);
             optionRow.Controls.Add(ActionButton("全部折叠", CollapseAllSessionGroups));
@@ -3061,7 +3065,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.33") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.34") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -3462,7 +3466,12 @@ namespace DevSpacePortable.NativeUI
 
         private async Task LoadSessionsAsync()
         {
-            Dictionary<string, object> value = await _manager.RunJsonAsync("review-list", new { includeHidden = _showHidden.Checked, includeArchived = _showArchived.Checked });
+            Dictionary<string, object> value = await _manager.RunJsonAsync("review-list", new
+            {
+                includeEmpty = _showEmptySessions != null && _showEmptySessions.Checked,
+                includeHidden = _showHidden.Checked,
+                includeArchived = _showArchived.Checked,
+            });
             _allSessions = GetDictionaryList(value, "sessions");
             RenderSessionList();
         }

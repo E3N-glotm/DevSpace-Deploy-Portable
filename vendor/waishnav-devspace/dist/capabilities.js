@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.33";
+export const DEVSPACE_SERVER_VERSION = "1.1.34";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -103,6 +103,10 @@ const FEATURE_CATALOG = [
     { id: "structured-updater-backend-errors", maturity: "stable", since: "1.1.27" },
     { id: "review-history-retention-under-session-churn", maturity: "stable", since: "1.1.33" },
     { id: "native-ui-plugin-package-export", maturity: "stable", since: "1.1.33" },
+    { id: "frozen-review-history-records", maturity: "stable", since: "1.1.34" },
+    { id: "lazy-readonly-review-session-persistence", maturity: "stable", since: "1.1.34" },
+    { id: "bounded-review-history-degradation", maturity: "stable", since: "1.1.34" },
+    { id: "verified-mirror-first-release-downloads", maturity: "stable", since: "1.1.34" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

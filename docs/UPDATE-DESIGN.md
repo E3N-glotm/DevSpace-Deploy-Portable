@@ -1,4 +1,13 @@
-# Application and network lifecycle design through 1.1.33
+# Application and network lifecycle design through 1.1.34
+
+## Implemented in 1.1.34: frozen review history and verified mirror-first downloads
+
+- Historical review is no longer recomputed from an old baseline against the current live workspace. Successful structured mutations freeze a bounded session-owned summary/file list/patch, so later work cannot make an older session silently become `0`.
+- Read-only workspace opens and shell-only monitoring rounds remain memory-only unless the session later acquires a structured tracked baseline. The native UI hides empty sessions by default and offers an explicit diagnostic toggle.
+- The 512 MiB aggregate review-state limit remains hard, but storage pressure now degrades rollback payload before deleting history: rollback objects and safety snapshots may be released while lightweight historical metadata remains reviewable. Sessions whose rollback payload was pruned are explicitly non-rollback-capable.
+- Update trust and transport are separated. Version/asset size/SHA-256 metadata comes only from official GitHub. Large Release ZIPs use `ghproxy.net` first by default, then the official GitHub URL; every downloaded asset must match the official size and SHA-256 before staging.
+- When Windows system proxy is enabled, updater transports respect it before direct/TUN fallbacks. Mirror failure is bounded to at most one preferred proxy attempt plus one direct attempt before switching to the official endpoint.
+- `DEVSPACE_GITHUB_MIRRORS` may override the default HTTPS mirror prefix list without changing the official metadata trust anchor.
 
 ## Implemented in 1.1.33: review-history retention and plugin package export
 

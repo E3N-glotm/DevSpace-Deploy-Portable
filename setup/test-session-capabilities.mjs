@@ -210,25 +210,34 @@ async function testReadOnlySessionsCannotEvictRollbackHistory() {
   writeAffectedBuildEmptyReviewSession(stateDir, "new-read-only-monitor", root);
   writeAffectedBuildEmptyReviewSession(stateDir, "explicitly-pinned-empty", root, { pinned: true });
 
-  // Fresh read-only opens remain visible as recent session history, but only
-  // the empty/read-only subset is count-bounded. Meaningful rollback history
-  // and an explicitly pinned empty session must survive the churn.
+  // Fresh read-only opens must stay memory-only. Meaningful rollback history
+  // and an explicitly pinned empty session survive, while affected-build
+  // monitor clutter is cleaned from persisted review state.
   const afterRestart = createReviewCheckpointManager({ stateDir, sessionReviewEnabled: true });
   await afterRestart.initializeWorkspace({ workspaceId: "new-read-only-monitor", root });
   for (let index = 0; index < 40; index += 1) {
     await afterRestart.initializeWorkspace({ workspaceId: `new-read-only-${index}`, root });
   }
 
+  assert.equal(await waitUntil(async () => {
+    const all = await reviewAdmin({
+      stateDir,
+      action: "list",
+      payload: { includeEmpty: true, includeHidden: true, includeArchived: true },
+    });
+    return all.sessions.length <= 2;
+  }), true);
+
   const listed = await reviewAdmin({
     stateDir,
     action: "list",
-    payload: { includeHidden: true, includeArchived: true },
+    payload: { includeEmpty: true, includeHidden: true, includeArchived: true },
   });
   const retainedIds = new Set(listed.sessions.map((session) => session.sessionId));
   assert.equal(retainedIds.has("valuable-session"), true);
   assert.equal(retainedIds.has("explicitly-pinned-empty"), true);
-  assert.ok(listed.sessions.length <= 32, `expected at most 30 disposable sessions plus pinned and changed history, got ${listed.sessions.length}`);
-  assert.equal(retainedIds.has("new-read-only-39"), true);
+  assert.equal(listed.sessions.length, 2);
+  assert.equal(retainedIds.has("new-read-only-39"), false);
 
   const details = await reviewAdmin({
     stateDir,
@@ -238,6 +247,40 @@ async function testReadOnlySessionsCannotEvictRollbackHistory() {
   assert.equal(details.summary.files, 1);
   assert.equal(details.canRollback, true);
   assert.deepEqual(details.files.map((file) => file.path), ["valuable.txt"]);
+}
+
+async function testHistoricalReviewIsFrozenAfterMutation() {
+  const root = join(temporaryRoot, "frozen-history-workspace");
+  const stateDir = join(temporaryRoot, "frozen-history-state");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "history.txt"), "before\n", "utf8");
+
+  const manager = createReviewCheckpointManager({ stateDir, sessionReviewEnabled: true });
+  await manager.initializeWorkspace({ workspaceId: "history-session", root });
+  await manager.beforeMutation({ workspaceId: "history-session", root, paths: ["history.txt"] });
+  writeFileSync(join(root, "history.txt"), "before\nsession-change\n", "utf8");
+  await manager.afterMutation({ workspaceId: "history-session", root, paths: ["history.txt"], success: true });
+
+  // A later session/external actor changes the same live file again. Historical
+  // details for history-session must continue to show its own recorded result.
+  writeFileSync(join(root, "history.txt"), "before\n", "utf8");
+  const details = await reviewAdmin({
+    stateDir,
+    action: "details",
+    payload: { sessionId: "history-session" },
+  });
+  assert.equal(details.summary.files, 1);
+  assert.equal(details.summary.additions, 1);
+  assert.match(details.patch, /session-change/);
+
+  const listed = await reviewAdmin({
+    stateDir,
+    action: "list",
+    payload: { includeHidden: true, includeArchived: true },
+  });
+  const historical = listed.sessions.find((session) => session.sessionId === "history-session");
+  assert.equal(historical.summary.files, 1);
+  assert.ok(historical.recordedAt);
 }
 
 function testMemories() {
@@ -334,10 +377,11 @@ try {
   await testGitRollbackPreservesIndex();
   await testSparseReviewStorageAndLegacyCleanup();
   await testReadOnlySessionsCannotEvictRollbackHistory();
+  await testHistoricalReviewIsFrozenAfterMutation();
   testMemories();
   await testHooks();
   testUiLease();
-console.log("DevSpace 1.1.33 sparse session capability tests passed.");
+console.log("DevSpace 1.1.34 sparse historical session capability tests passed.");
 }
 finally {
   rmSync(temporaryRoot, { recursive: true, force: true });

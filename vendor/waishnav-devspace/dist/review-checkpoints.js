@@ -28,9 +28,10 @@ const MAX_TRACKED_FILES = 2048;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_SESSION_STORED_BYTES = 32 * 1024 * 1024;
 const MAX_TOTAL_STATE_BYTES = 512 * 1024 * 1024;
-const MAX_EMPTY_SESSION_DIRECTORIES = 30;
+const MAX_EMPTY_SESSION_DIRECTORIES = 0;
 const MAX_SAFETY_SNAPSHOTS = 5;
 const MAX_PATCH_BYTES = 20 * 1024 * 1024;
+const MAX_RECORDED_PATCH_BYTES = 1 * 1024 * 1024;
 const SAMPLE_BYTES = 64 * 1024;
 const MAX_CACHED_REVIEW_STATES = 32;
 const cleanupScheduled = new Set();
@@ -66,7 +67,15 @@ export function createReviewCheckpointManager(options = {}) {
             const state = await ensureState(workspaceId, root);
             state.status = "active";
             state.updatedAt = new Date().toISOString();
-            await saveSession(stateDir, state);
+            if (sessionWorthPersisting(state)) {
+                await saveSession(stateDir, state);
+            }
+            else {
+                // Read-only opens are intentionally memory-only. Older builds
+                // persisted one directory per monitor/reconnect operation,
+                // which made the history page look full of empty sessions.
+                await rm(sessionDirectory(stateDir, state.sessionId), { recursive: true, force: true });
+            }
             await pruneReviewState(stateDir, state.sessionId);
             return publicSession(state);
         },
@@ -90,8 +99,15 @@ export function createReviewCheckpointManager(options = {}) {
                         "An arbitrary shell mutation was allowed without declared paths. " +
                         "Review and rollback cover only paths explicitly captured by structured file tools.");
                     state.updatedAt = new Date().toISOString();
-                    await saveSession(stateDir, state);
-                    await pruneReviewState(stateDir, state.sessionId);
+                    // A shell command may be read-only and DevSpace cannot
+                    // reliably infer arbitrary command side effects. Keep the
+                    // warning in memory, but do not create a durable empty
+                    // review session until a structured baseline actually
+                    // exists in this workspace session.
+                    if (sessionWorthPersisting(state)) {
+                        await saveSession(stateDir, state);
+                        await pruneReviewState(stateDir, state.sessionId);
+                    }
                 }
                 return { ...sessionIdentity(state), trackedPaths: Object.keys(state.tracked ?? {}).length };
             }
@@ -117,6 +133,26 @@ export function createReviewCheckpointManager(options = {}) {
             return { ...sessionIdentity(state), trackedPaths: Object.keys(state.tracked).length };
         },
 
+        async afterMutation({ workspaceId, root, paths = [], kind = "structured", success = true }) {
+            if (!sessionReviewEnabled || !success || kind === "shell")
+                return;
+            const state = await ensureState(workspaceId, root);
+            const requestedPaths = [...new Set((Array.isArray(paths) ? paths : [])
+                .map((item) => normalizeTrackedPath(state.root, item))
+                .filter(Boolean))];
+            if (requestedPaths.length === 0 || Object.keys(state.tracked ?? {}).length === 0)
+                return;
+            // Freeze the session's own historical result immediately after a
+            // successful structured mutation. Later sessions may change the
+            // same files, but this recorded diff must never silently become 0.
+            const comparison = await compareTrackedPaths(stateDir, state, "baseline", false);
+            state.recordedReview = compactRecordedReview(comparison);
+            state.recordedAt = new Date().toISOString();
+            state.updatedAt = state.recordedAt;
+            await saveSession(stateDir, state);
+            await pruneReviewState(stateDir, state.sessionId);
+        },
+
         async reviewChanges({ workspaceId, root, since = "last_shown", markReviewed = true }) {
             const state = await ensureState(workspaceId, root);
             const comparison = await compareTrackedPaths(
@@ -130,7 +166,15 @@ export function createReviewCheckpointManager(options = {}) {
                 await pruneObjects(stateDir, state);
             }
             state.lastReview = comparison.summary;
-            await saveSession(stateDir, state);
+            if (comparison.summary.files > 0 && Object.keys(state.tracked ?? {}).length > 0) {
+                const historical = since === "workspace_open"
+                    ? comparison
+                    : await compareTrackedPaths(stateDir, state, "baseline", false);
+                state.recordedReview = compactRecordedReview(historical);
+                state.recordedAt = new Date().toISOString();
+            }
+            if (sessionWorthPersisting(state))
+                await saveSession(stateDir, state);
             return reviewResult(comparison, since);
         },
 
@@ -141,7 +185,12 @@ export function createReviewCheckpointManager(options = {}) {
             const comparison = await compareTrackedPaths(stateDir, state, "baseline", false);
             state.lastReview = comparison.summary;
             state.updatedAt = new Date().toISOString();
-            await saveSession(stateDir, state);
+            if (comparison.summary.files > 0 && Object.keys(state.tracked ?? {}).length > 0) {
+                state.recordedReview = compactRecordedReview(comparison);
+                state.recordedAt = state.updatedAt;
+            }
+            if (sessionWorthPersisting(state))
+                await saveSession(stateDir, state);
             return sessionReviewResult(state, comparison);
         },
 
@@ -163,6 +212,7 @@ export async function reviewAdmin({ stateDir, action, payload = {} }) {
             sessions: sessions
                 .filter((item) => payload.includeHidden || !item.hidden)
                 .filter((item) => payload.includeArchived || item.status !== "archived")
+                .filter((item) => payload.includeEmpty || !displayEmptySession(item))
                 .sort(sessionSort)
                 .map(publicSession),
         };
@@ -174,12 +224,26 @@ export async function reviewAdmin({ stateDir, action, payload = {} }) {
     if (!state)
         throw new Error(`Review session not found: ${sessionId}`);
     if (action === "details") {
-        const comparison = existsSync(state.root)
-            ? await compareTrackedPaths(stateDir, state, "baseline", false)
-            : emptyComparison(state.limitations ?? []);
-        state.lastReview = comparison.summary;
-        state.updatedAt = new Date().toISOString();
-        await saveSession(stateDir, state);
+        let comparison = recordedComparison(state);
+        if (!comparison && existsSync(state.root)) {
+            comparison = await compareTrackedPaths(stateDir, state, "baseline", false);
+            if (comparison.summary.files === 0 && Number(state.lastReview?.files || 0) > 0) {
+                // 1.1.33 and earlier did not freeze historical file details.
+                // Preserve the last known non-zero summary rather than making
+                // a previously modified session appear empty after migration.
+                comparison = {
+                    ...comparison,
+                    summary: { ...state.lastReview },
+                    patch: "[Historical summary retained from an older DevSpace build; file-level diff was not persisted by that build.]",
+                };
+            }
+            if (Object.keys(state.tracked ?? {}).length > 0) {
+                state.recordedReview = compactRecordedReview(comparison);
+                state.recordedAt = new Date().toISOString();
+                await saveSession(stateDir, state);
+            }
+        }
+        comparison ??= emptyComparison(state.limitations ?? []);
         const review = sessionReviewResult(state, comparison);
         return {
             session: publicSession(state),
@@ -224,6 +288,9 @@ export async function reviewAdmin({ stateDir, action, payload = {} }) {
 async function rollbackState(stateDir, state, confirmation, forcePartial) {
     if (confirmation !== confirmationToken(state))
         throw new Error(`Confirmation must exactly equal: ${confirmationToken(state)}`);
+    if (state.rollbackStoragePruned) {
+        throw new Error("This historical session is retained for review, but its bounded rollback snapshot content has been pruned.");
+    }
     const comparison = await compareTrackedPaths(stateDir, state, "baseline", false);
     if (comparison.summary.files === 0) {
         return { restored: 0, paths: [], partial: false, checkpointId: state.sessionId };
@@ -316,7 +383,6 @@ async function loadOrCreateSession(stateDir, workspaceId, root) {
         storedBytes: 0,
         shellMutationObserved: false,
     });
-    await saveSession(stateDir, state);
     return state;
 }
 
@@ -329,6 +395,23 @@ function normalizeState(state) {
         safetySnapshots: Array.isArray(state.safetySnapshots) ? state.safetySnapshots : [],
         storedBytes: Number(state.storedBytes || 0),
         shellMutationObserved: Boolean(state.shellMutationObserved),
+        recordedReview: normalizeRecordedReview(state.recordedReview),
+        rollbackStoragePruned: Boolean(state.rollbackStoragePruned),
+    };
+}
+
+function normalizeRecordedReview(value) {
+    if (!value || typeof value !== "object")
+        return null;
+    return {
+        summary: {
+            files: Number(value.summary?.files || 0),
+            additions: Number(value.summary?.additions || 0),
+            removals: Number(value.summary?.removals || 0),
+        },
+        files: Array.isArray(value.files) ? value.files : [],
+        patch: typeof value.patch === "string" ? value.patch : "",
+        limitations: Array.isArray(value.limitations) ? value.limitations : [],
     };
 }
 
@@ -794,9 +877,10 @@ async function pruneReviewState(stateDir, currentSessionId) {
         return;
 
     // The 512 MiB aggregate cap remains a hard safety boundary. Under genuine
-    // storage pressure, prefer evicting the oldest unpinned meaningful session;
-    // pinned sessions are considered only as a last resort. The current session
-    // is never removed by its own initialization/mutation path.
+    // storage pressure, preserve the lightweight historical record and only
+    // release rollback objects from the oldest sessions. This keeps the user's
+    // previous change summaries/diffs visible without allowing review snapshots
+    // to grow without bound. Pinned sessions are degraded only as a last resort.
     const retained = records
         .filter((record) => !removed.has(record.session.sessionId))
         .filter((record) => record.session.sessionId !== currentSessionId)
@@ -810,17 +894,49 @@ async function pruneReviewState(stateDir, currentSessionId) {
     for (const record of retained) {
         if (total <= MAX_TOTAL_STATE_BYTES)
             break;
-        await rm(record.directory, { recursive: true, force: true });
-        total -= record.size;
+        const before = record.size;
+        await pruneRollbackObjectsFromSession(stateDir, record.session);
+        const after = await directorySize(record.directory);
+        total -= Math.max(0, before - after);
     }
+}
+
+async function pruneRollbackObjectsFromSession(stateDir, state) {
+    const directory = sessionDirectory(stateDir, state.sessionId);
+    const objects = join(directory, "objects");
+    await rm(objects, { recursive: true, force: true });
+    state.storedBytes = 0;
+    state.safetySnapshots = [];
+    state.rollbackStoragePruned = true;
+    state.rollbackStoragePrunedAt = new Date().toISOString();
+    if (state.recordedReview?.patch && Buffer.byteLength(state.recordedReview.patch, "utf8") > 64 * 1024) {
+        state.recordedReview.patch = "[Historical diff detail was compacted under review-storage pressure; file and line statistics are retained.]";
+    }
+    addLimitation(state,
+        "Rollback snapshot content was pruned by the bounded review-storage policy; historical change metadata is still retained.");
+    await saveSession(stateDir, state);
 }
 
 function countPrunableEmptySession(state) {
     return !state?.pinned
         && Object.keys(state?.tracked ?? {}).length === 0
         && (state?.safetySnapshots ?? []).length === 0
-        && !Boolean(state?.shellMutationObserved)
-        && Number(state?.lastReview?.files || 0) === 0;
+        && Number(state?.recordedReview?.summary?.files || state?.lastReview?.files || 0) === 0;
+}
+
+function displayEmptySession(state) {
+    if (state?.pinned)
+        return false;
+    return Object.keys(state?.tracked ?? {}).length === 0
+        && (state?.safetySnapshots ?? []).length === 0
+        && Number(state?.recordedReview?.summary?.files || state?.lastReview?.files || 0) === 0;
+}
+
+function sessionWorthPersisting(state) {
+    return Boolean(state?.pinned)
+        || Object.keys(state?.tracked ?? {}).length > 0
+        || (state?.safetySnapshots ?? []).length > 0
+        || Number(state?.recordedReview?.summary?.files || state?.lastReview?.files || 0) > 0;
 }
 
 function storagePressurePriority(state) {
@@ -865,6 +981,35 @@ function summarizeFiles(files) {
     }), { files: 0, additions: 0, removals: 0 });
 }
 
+function compactRecordedReview(comparison) {
+    let patch = typeof comparison?.patch === "string" ? comparison.patch : "";
+    if (Buffer.byteLength(patch, "utf8") > MAX_RECORDED_PATCH_BYTES) {
+        patch = `[Historical diff omitted because it exceeded ${MAX_RECORDED_PATCH_BYTES} bytes. File and line statistics are retained.]`;
+    }
+    return {
+        summary: {
+            files: Number(comparison?.summary?.files || 0),
+            additions: Number(comparison?.summary?.additions || 0),
+            removals: Number(comparison?.summary?.removals || 0),
+        },
+        files: Array.isArray(comparison?.files) ? comparison.files : [],
+        patch,
+        limitations: Array.isArray(comparison?.limitations) ? comparison.limitations : [],
+    };
+}
+
+function recordedComparison(state) {
+    const recorded = normalizeRecordedReview(state?.recordedReview);
+    if (!recorded)
+        return null;
+    return {
+        summary: { ...recorded.summary },
+        files: [...recorded.files],
+        patch: recorded.patch,
+        limitations: [...recorded.limitations, ...(state?.limitations ?? [])],
+    };
+}
+
 function sessionIdentity(state) {
     return {
         active: true,
@@ -880,6 +1025,7 @@ function sessionReviewResult(state, comparison) {
     const unsupported = comparison.files
         .filter((file) => !descriptorRestorable(state.tracked?.[file.path]?.baseline))
         .map((file) => file.path);
+    const rollbackStorageAvailable = !Boolean(state.rollbackStoragePruned);
     return {
         ...sessionIdentity(state),
         startedAt: state.createdAt,
@@ -887,13 +1033,14 @@ function sessionReviewResult(state, comparison) {
         shadowRepository: false,
         shellRollbackUnsafe: Boolean(state.shellMutationObserved),
         rollbackCoverage: state.shellMutationObserved ? "tracked-paths-only" : "complete-for-tracked-paths",
-        canRollback: comparison.summary.files > 0 && unsupported.length === 0,
+        canRollback: rollbackStorageAvailable && comparison.summary.files > 0 && unsupported.length === 0,
         summary: comparison.summary,
         files: comparison.files,
         patch: comparison.patch,
         limitations: [
             ...(comparison.limitations ?? []),
             ...(unsupported.length ? [`Rollback snapshots are unavailable for: ${unsupported.join(", ")}`] : []),
+            ...(!rollbackStorageAvailable ? ["Rollback snapshot content has been pruned; historical review data remains available."] : []),
         ],
         safetySnapshots: (state.safetySnapshots ?? []).map((item) => ({
             id: item.id,
@@ -905,6 +1052,7 @@ function sessionReviewResult(state, comparison) {
             sessionLimitBytes: MAX_SESSION_STORED_BYTES,
             totalStateLimitBytes: MAX_TOTAL_STATE_BYTES,
             trackedPaths: Object.keys(state.tracked ?? {}).length,
+            rollbackStoragePruned: Boolean(state.rollbackStoragePruned),
         },
     };
 }
@@ -914,6 +1062,7 @@ function confirmationToken(state) {
 }
 
 function publicSession(state) {
+    const summary = state.recordedReview?.summary ?? state.lastReview ?? { files: 0, additions: 0, removals: 0 };
     return {
         sessionId: state.sessionId,
         workspaceId: state.workspaceId,
@@ -926,7 +1075,8 @@ function publicSession(state) {
         updatedAt: state.updatedAt,
         baselineCreatedAt: state.baselineCreatedAt ?? null,
         hasBaseline: Object.keys(state.tracked ?? {}).length > 0,
-        summary: state.lastReview ?? { files: 0, additions: 0, removals: 0 },
+        summary,
+        recordedAt: state.recordedAt ?? null,
         safetySnapshots: (state.safetySnapshots ?? []).map((item) => ({
             id: item.id,
             createdAt: item.createdAt,
@@ -936,6 +1086,7 @@ function publicSession(state) {
         trackedPaths: Object.keys(state.tracked ?? {}).length,
         storedBytes: Number(state.storedBytes || 0),
         shellMutationObserved: Boolean(state.shellMutationObserved),
+        rollbackStoragePruned: Boolean(state.rollbackStoragePruned),
     };
 }
 

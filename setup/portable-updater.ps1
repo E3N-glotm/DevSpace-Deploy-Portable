@@ -208,6 +208,46 @@ function Get-WindowsInternetProxyState {
     }
 }
 
+function Get-GitHubMirrorPrefixes {
+    $configured = [Environment]::GetEnvironmentVariable("DEVSPACE_GITHUB_MIRRORS")
+    $values = if ([string]::IsNullOrWhiteSpace($configured)) {
+        @(
+            "https://ghproxy.net/"
+        )
+    } else {
+        @($configured -split '[;,\r\n]')
+    }
+    $result = New-Object System.Collections.Generic.List[string]
+    $seen = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+    foreach ($value in $values) {
+        $text = ([string]$value).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        try { $uri = [Uri]$text } catch { continue }
+        if ($uri.Scheme -ne "https" -or [string]::IsNullOrWhiteSpace($uri.Host) -or -not [string]::IsNullOrWhiteSpace($uri.UserInfo)) { continue }
+        $prefix = $uri.AbsoluteUri
+        if (-not $prefix.EndsWith('/')) { $prefix += '/' }
+        if ($seen.Add($prefix)) { [void]$result.Add($prefix) }
+    }
+    return $result.ToArray()
+}
+
+function Get-GitHubEndpointCandidates([string]$Uri) {
+    $items = New-Object System.Collections.ArrayList
+    try { $parsed = [Uri]$Uri } catch { throw "Invalid GitHub URI: $Uri" }
+    $mirrorable = $parsed.Scheme -eq "https" -and $parsed.Host.Equals("github.com", [StringComparison]::OrdinalIgnoreCase)
+    if ($mirrorable) {
+        foreach ($prefix in @(Get-GitHubMirrorPrefixes)) {
+            [void]$items.Add([pscustomobject]@{
+                uri = "$prefix$Uri"
+                source = "mirror:$(([Uri]$prefix).Host)"
+                mirrored = $true
+            })
+        }
+    }
+    [void]$items.Add([pscustomobject]@{ uri = $Uri; source = "official"; mirrored = $false })
+    return $items.ToArray()
+}
+
 function Set-WebRequestHeaders($Request, [hashtable]$Headers) {
     foreach ($key in $Headers.Keys) {
         $name = [string]$key
@@ -377,11 +417,10 @@ function Get-GitHubTransportCandidates {
         [void]$items.Add([pscustomobject]@{ proxyUrl = $normalized; transport = "curl-proxy"; source = $Name })
     }
 
-    # The updater must not become dependent on a third-party system-proxy
-    # switch. Try two explicit direct/TUN transports first; only then consult
-    # Windows/WinINET or environment proxy settings as independent fallbacks.
-    [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "dotnet-direct"; source = "direct-dotnet" })
-    [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "curl-direct"; source = "direct-or-transparent-tun" })
+    # Respect an explicitly enabled Windows/system proxy first. If no usable
+    # proxy is configured, or it fails, fall back to direct/TUN transports.
+    # Endpoint ordering (mirror first, official GitHub second) is handled
+    # separately by Get-GitHubEndpointCandidates.
     $windowsProxy = Get-WindowsInternetProxyState
     if ($windowsProxy.configured) {
         [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "dotnet-system-proxy"; source = "windows-system-proxy" })
@@ -390,6 +429,29 @@ function Get-GitHubTransportCandidates {
     foreach ($name in @("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")) {
         $value = [Environment]::GetEnvironmentVariable($name)
         if ($value) { & $addProxy $value "env:$name" }
+    }
+    [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "dotnet-direct"; source = "direct-dotnet" })
+    [void]$items.Add([pscustomobject]@{ proxyUrl = ""; transport = "curl-direct"; source = "direct-or-transparent-tun" })
+    return $items.ToArray()
+}
+
+function Get-GitHubMirrorTransportCandidates {
+    $all = @(Get-GitHubTransportCandidates)
+    $items = New-Object System.Collections.ArrayList
+    $preferredProxy = $all | Where-Object {
+        $_.transport -eq "dotnet-system-proxy" -or -not [string]::IsNullOrWhiteSpace([string]$_.proxyUrl)
+    } | Select-Object -First 1
+    if ($preferredProxy) { [void]$items.Add($preferredProxy) }
+
+    $directDotNet = $all | Where-Object { $_.transport -eq "dotnet-direct" } | Select-Object -First 1
+    if ($directDotNet) { [void]$items.Add($directDotNet) }
+
+    # With no proxy configured, keep curl as the second independent direct/TUN
+    # implementation. With a system proxy, two mirror attempts are enough;
+    # failures should move quickly to the official GitHub endpoint.
+    if (-not $preferredProxy) {
+        $directCurl = $all | Where-Object { $_.transport -eq "curl-direct" } | Select-Object -First 1
+        if ($directCurl) { [void]$items.Add($directCurl) }
     }
     return $items.ToArray()
 }
@@ -449,31 +511,46 @@ function Invoke-GitHubJson {
         [string]$Uri,
         [hashtable]$Headers = @{},
         [int]$TimeoutSec = 30,
-        [string]$Description = "GitHub request"
+        [string]$Description = "GitHub request",
+        [switch]$AllowMirrors
     )
     $errors = New-Object System.Collections.Generic.List[string]
     for ($round = 1; $round -le 2; $round++) {
-        foreach ($candidate in @(Get-GitHubTransportCandidates)) {
-            try {
-                $label = if ($candidate.transport -eq "dotnet-system-proxy") { "$Description - Windows system proxy" } elseif ($candidate.proxyUrl) { "$Description - $($candidate.source)" } elseif ($candidate.transport -eq "dotnet-direct") { "$Description - direct/TUN (.NET)" } else { "$Description - direct/TUN (curl)" }
-                Write-UpdateProgress -Phase "metadata" -Message $label -Transport ([string]$candidate.transport)
-                if ($candidate.transport -eq "dotnet-system-proxy" -or $candidate.transport -eq "dotnet-direct") {
-                    $proxyMode = if ($candidate.transport -eq "dotnet-system-proxy") { "system" } else { "direct" }
-                    return Invoke-DotNetJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 10)) -ProxyMode $proxyMode -Transport ([string]$candidate.transport)
+        $endpoints = if ($AllowMirrors) {
+            @(Get-GitHubEndpointCandidates $Uri)
+        } else {
+            @([pscustomobject]@{ uri = $Uri; source = "official"; mirrored = $false })
+        }
+        foreach ($endpoint in $endpoints) {
+            $transportCandidates = if ($endpoint.mirrored) { @(Get-GitHubMirrorTransportCandidates) } else { @(Get-GitHubTransportCandidates) }
+            foreach ($candidate in $transportCandidates) {
+                try {
+                    $route = if ($endpoint.mirrored) { "$($endpoint.source)" } else { "official GitHub" }
+                    $transportLabel = if ($candidate.transport -eq "dotnet-system-proxy") { "Windows system proxy" } elseif ($candidate.proxyUrl) { $candidate.source } elseif ($candidate.transport -eq "dotnet-direct") { "direct/TUN (.NET)" } else { "direct/TUN (curl)" }
+                    $label = "$Description - $route via $transportLabel"
+                    Write-UpdateProgress -Phase "metadata" -Message $label -Transport ([string]$candidate.transport)
+                    if ($candidate.transport -eq "dotnet-system-proxy" -or $candidate.transport -eq "dotnet-direct") {
+                        $proxyMode = if ($candidate.transport -eq "dotnet-system-proxy") { "system" } else { "direct" }
+                        $result = Invoke-DotNetJson -Uri ([string]$endpoint.uri) -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 10)) -ProxyMode $proxyMode -Transport ([string]$candidate.transport)
+                        Write-UpdateLog "$Description succeeded through $($endpoint.source) / $($candidate.source)."
+                        return $result
+                    }
+                    $result = Invoke-CurlJson -Uri ([string]$endpoint.uri) -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 12)) -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
+                    Write-UpdateLog "$Description succeeded through $($endpoint.source) / $($candidate.source)."
+                    return $result
+                } catch {
+                    $message = $_.Exception.Message
+                    [void]$errors.Add("round${round}/$($endpoint.source)/$($candidate.source): $message")
+                    Write-UpdateLog "$Description failed through $($endpoint.source) / $($candidate.source) on round ${round}: $message"
                 }
-                return Invoke-CurlJson -Uri $Uri -Headers $Headers -TimeoutSec ([Math]::Min($TimeoutSec, 12)) -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
-            } catch {
-                $message = $_.Exception.Message
-                [void]$errors.Add("round${round}/$($candidate.source): $message")
-                Write-UpdateLog "$Description failed through $($candidate.source) on round ${round}: $message"
             }
         }
         if ($round -lt 2) {
-            Write-UpdateLog "$Description exhausted the current network candidates; refreshing proxy/route state and retrying once."
+            Write-UpdateLog "$Description exhausted the current official/proxy network candidates; refreshing proxy/route state and retrying once."
             Start-Sleep -Milliseconds 900
         }
     }
-    throw "$Description failed through Windows system proxy, configured proxy candidates, and the direct/TUN path. $($errors -join '; ')"
+    throw "$Description failed through Windows/configured proxies and official direct/TUN fallbacks. $($errors -join '; ')"
 }
 
 function Invoke-CurlDownload {
@@ -571,20 +648,26 @@ function Invoke-GitHubDownload {
         [int64]$ExpectedBytes = 0
     )
     $errors = New-Object System.Collections.Generic.List[string]
-    foreach ($candidate in @(Get-GitHubTransportCandidates)) {
-        try {
-            $label = if ($candidate.transport -eq "dotnet-system-proxy") { "$Description - Windows system proxy" } elseif ($candidate.proxyUrl) { "$Description - $($candidate.source)" } elseif ($candidate.transport -eq "dotnet-direct") { "$Description - direct/TUN (.NET)" } else { "$Description - direct/TUN (curl)" }
-            if ($candidate.transport -eq "dotnet-system-proxy" -or $candidate.transport -eq "dotnet-direct") {
-                $proxyMode = if ($candidate.transport -eq "dotnet-system-proxy") { "system" } else { "direct" }
-                Invoke-DotNetDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $label -ProxyMode $proxyMode -Transport ([string]$candidate.transport)
-            } else {
-                Invoke-CurlDownload -Uri $Uri -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $label -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
+    foreach ($endpoint in @(Get-GitHubEndpointCandidates $Uri)) {
+        $transportCandidates = if ($endpoint.mirrored) { @(Get-GitHubMirrorTransportCandidates) } else { @(Get-GitHubTransportCandidates) }
+        foreach ($candidate in $transportCandidates) {
+            try {
+                $route = if ($endpoint.mirrored) { "$($endpoint.source)" } else { "official GitHub" }
+                $transportLabel = if ($candidate.transport -eq "dotnet-system-proxy") { "Windows system proxy" } elseif ($candidate.proxyUrl) { $candidate.source } elseif ($candidate.transport -eq "dotnet-direct") { "direct/TUN (.NET)" } else { "direct/TUN (curl)" }
+                $label = "$Description - $route via $transportLabel"
+                if ($candidate.transport -eq "dotnet-system-proxy" -or $candidate.transport -eq "dotnet-direct") {
+                    $proxyMode = if ($candidate.transport -eq "dotnet-system-proxy") { "system" } else { "direct" }
+                    Invoke-DotNetDownload -Uri ([string]$endpoint.uri) -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $label -ProxyMode $proxyMode -Transport ([string]$candidate.transport)
+                } else {
+                    Invoke-CurlDownload -Uri ([string]$endpoint.uri) -OutFile $OutFile -Headers $Headers -TimeoutSec $TimeoutSec -ExpectedBytes $ExpectedBytes -Description $label -ProxyUrl ([string]$candidate.proxyUrl) -Transport ([string]$candidate.transport)
+                }
+                Write-UpdateLog "$Description succeeded through $($endpoint.source) / $($candidate.source)."
+                return
+            } catch {
+                $message = $_.Exception.Message
+                [void]$errors.Add("$($endpoint.source)/$($candidate.source): $message")
+                Write-UpdateLog "$Description failed through $($endpoint.source) / $($candidate.source): $message"
             }
-            return
-        } catch {
-            $message = $_.Exception.Message
-            [void]$errors.Add("$($candidate.source): $message")
-            Write-UpdateLog "$Description failed through $($candidate.source): $message"
         }
     }
     # A CDN may reject resuming a partial file after the outbound path changes.
@@ -596,7 +679,7 @@ function Invoke-GitHubDownload {
         return
     } catch {
         [void]$errors.Add("clean-direct: $($_.Exception.Message)")
-        throw "$Description failed through Windows system proxy, configured proxy candidates, direct/TUN, and a clean direct/TUN retry. $($errors -join '; ')"
+        throw "$Description failed through mirror-first endpoints, proxy candidates, official direct/TUN, and a clean official retry. $($errors -join '; ')"
     }
 }
 
@@ -688,7 +771,7 @@ function Get-LatestRelease {
     try {
         $release = Invoke-GitHubJson -Uri "https://api.github.com/repos/$Repository/releases/latest" -Headers $headers -TimeoutSec 60 -Description "GitHub latest-release metadata request"
     } catch {
-        Write-UpdateLog "GitHub Release API metadata path failed: $($_.Exception.Message). Falling back to the published latest update manifest."
+        Write-UpdateLog "GitHub Release API metadata path failed: $($_.Exception.Message). Falling back to the official published latest update manifest."
         return Get-LatestReleaseFromPublishedManifest
     }
     $version = ([string]$release.tag_name).TrimStart('v')

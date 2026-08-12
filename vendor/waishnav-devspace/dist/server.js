@@ -364,7 +364,14 @@ async function prepareMutation(reviewCheckpoints, hookManager, context) {
     }, { strict: true });
 }
 
-async function finishMutation(hookManager, context) {
+async function finishMutation(reviewCheckpoints, hookManager, context) {
+    await reviewCheckpoints.afterMutation({
+        workspaceId: context.workspaceId,
+        root: context.workspaceRoot,
+        paths: context.paths ?? [],
+        kind: context.kind ?? "structured",
+        success: context.success,
+    });
     await hookManager.runEvent("after_mutation", {
         workspaceId: context.workspaceId,
         workspaceRoot: context.workspaceRoot,
@@ -844,7 +851,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
             toolName: "exec_command",
             success: snapshot.running || snapshot.exitCode === 0,
         });
-        await finishMutation(hookManager, {
+        await finishMutation(reviewCheckpoints, hookManager, {
             workspaceId,
             workspaceRoot: workspace.root,
             toolName: "exec_command",
@@ -1660,7 +1667,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 allowExternalPaths: config.permissions.allowExternalPaths,
             });
             if (response.isError) {
-                await finishMutation(runtimeServices.hookManager, {
+                await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                     workspaceId,
                     workspaceRoot: workspace.root,
                     toolName: toolNames.write,
@@ -1680,9 +1687,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 lines: contentLineCount(input.content),
                 characters: input.content.length,
             };
-            await finishMutation(runtimeServices.hookManager, {
+            await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                 workspaceId,
                 workspaceRoot: workspace.root,
+                paths: [input.path],
                 toolName: toolNames.write,
                 success: true,
             });
@@ -1752,7 +1760,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 allowExternalPaths: config.permissions.allowExternalPaths,
             });
             if (response.isError) {
-                await finishMutation(runtimeServices.hookManager, {
+                await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                     workspaceId,
                     workspaceRoot: workspace.root,
                     toolName: toolNames.edit,
@@ -1772,9 +1780,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             };
             const editResultText = `Edited ${input.path} (+${stats.additions} -${stats.removals}).`;
             const editContent = [textBlock(editResultText)];
-            await finishMutation(runtimeServices.hookManager, {
+            await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                 workspaceId,
                 workspaceRoot: workspace.root,
+                paths: [input.path],
                 toolName: toolNames.edit,
                 success: true,
             });
@@ -1848,9 +1857,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const displayPath = applied.files.length === 1
                 ? applied.files[0]?.path
                 : `${applied.files.length} files`;
-            await finishMutation(runtimeServices.hookManager, {
+            await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                 workspaceId,
                 workspaceRoot: workspace.root,
+                paths: mutationPaths,
                 toolName: "apply_patch",
                 success: true,
             });
@@ -2212,7 +2222,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     toolName: toolNames.shell,
                     success: false,
                 });
-                await finishMutation(runtimeServices.hookManager, {
+                await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                     workspaceId,
                     workspaceRoot: workspace.root,
                     toolName: toolNames.shell,
@@ -2238,7 +2248,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 toolName: toolNames.shell,
                 success: true,
             });
-            await finishMutation(runtimeServices.hookManager, {
+            await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                 workspaceId,
                 workspaceRoot: workspace.root,
                 toolName: toolNames.shell,
