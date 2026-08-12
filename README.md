@@ -8,9 +8,9 @@ Portable Protocol：**1.5**
 
 > 本仓库只维护源码、构建脚本、测试、文档和体积可控的 Portable 核心分支。Node、Git、cloudflared、ngrok、完整 `node_modules`、运行状态与发行 ZIP 不进入 Git 历史；完整 Windows 便携包发布在 GitHub Releases。
 
-![DevSpace Portable 控制中心示意图](docs/assets/devspace-portable-ui.svg)
+![DevSpace Portable 控制中心](docs/assets/devspace-portable-control-center.png)
 
-> 文档中的界面图只使用脱敏示意数据，不展示真实公网域名、Token、Owner Password、本机用户名或实际项目路径。
+> 上图为 DevSpace Portable Windows 原生控制中心的实际界面截图；公开文档中的截图不展示 Token、Owner Password 等敏感认证信息。
 
 控制中心左侧主要页面分别用于：**状态与部署**（服务/隧道/更新/诊断）、**配置与权限**（公网域名、Token、工作目录和权限）、**插件管理**、**会话与回退**、**显式 Memories**、**日志与诊断**；右上角的 Computer Use 开关只控制桌面操作能力，不会替代目录/命令权限配置。
 
