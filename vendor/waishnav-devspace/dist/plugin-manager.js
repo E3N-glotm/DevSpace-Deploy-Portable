@@ -545,6 +545,66 @@ export class PluginManager {
             rmSync(stage, { recursive: true, force: true });
         }
     }
+    exportToPath(pluginId, version, destinationPath) {
+        assertPluginId(pluginId);
+        const requestedVersion = String(version ?? "").trim();
+        if (requestedVersion && (requestedVersion.includes("/") || requestedVersion.includes("\\") || requestedVersion === "." || requestedVersion === ".."))
+            throw new Error("Plugin version cannot contain path separators.");
+        const selected = requestedVersion
+            ? this.database.sqlite.prepare("select * from plugin_versions where plugin_id=? and version=?").get(pluginId, requestedVersion)
+            : undefined;
+        if (requestedVersion && !selected)
+            throw new Error(`Unknown plugin version: ${pluginId}@${requestedVersion}`);
+        const pluginVersion = selected ? rowToVersion(selected) : this.selectedVersion(pluginId);
+        const source = dirname(pluginVersion.manifestPath);
+        const destination = resolve(String(destinationPath ?? ""));
+        if (!destinationPath || extname(destination).toLowerCase() !== ".zip")
+            throw new Error("Plugin export destination must be a .zip file.");
+        if (pathIsInside(this.root, destination))
+            throw new Error("Plugin export destination must be outside data/plugins/installed.");
+        const packageStats = scanPluginTree(source);
+        mkdirSync(dirname(destination), { recursive: true });
+        const temporary = join(dirname(destination), `.${basename(destination)}.${randomUUID()}.tmp.zip`);
+        try {
+            rmSync(temporary, { force: true });
+            runTar(["-a", "-cf", temporary, "-C", source, "."], "Plugin archive export");
+            const entries = runTar(["-tf", temporary], "Plugin archive verification")
+                .split(/\r?\n/)
+                .filter((entry) => entry && !/^\.\/?$/.test(entry));
+            if (!entries.some((entry) => entry.replaceAll("\\", "/").replace(/^\.\//, "") === "manifest.json"))
+                throw new Error("Exported plugin archive does not contain manifest.json at its package root.");
+            const unsafe = entries.find((entry) => !archiveEntryIsSafe(entry));
+            if (unsafe)
+                throw new Error(`Exported plugin archive contains an unsafe path: ${unsafe}`);
+            const archiveBytes = statSync(temporary).size;
+            const archiveSha256 = sha256(readFileSync(temporary));
+            rmSync(destination, { force: true });
+            renameSync(temporary, destination);
+            this.runtimeState?.appendEvent({
+                kind: "plugin.exported",
+                subject: pluginId,
+                payload: {
+                    version: pluginVersion.version,
+                    destination,
+                    files: packageStats.files,
+                    bytes: packageStats.bytes,
+                    archiveBytes,
+                    sha256: archiveSha256,
+                },
+            });
+            return {
+                pluginId,
+                version: pluginVersion.version,
+                destinationPath: destination,
+                packageStats,
+                archiveBytes,
+                sha256: archiveSha256,
+            };
+        }
+        finally {
+            rmSync(temporary, { force: true });
+        }
+    }
     uninstall(pluginId, version) {
         assertPluginId(pluginId);
         const pluginRoot = resolve(this.root, pluginId);

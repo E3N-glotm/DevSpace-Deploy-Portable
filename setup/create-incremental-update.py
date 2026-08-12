@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PORTABLE_PREFIX = "DevSpacePortable/"
 DELTA_PREFIX = "DevSpacePortableDelta/"
 PERSISTENT_ROOTS = ("data", "logs", "reports")
+REQUIRED_BUNDLED_PREFIXES = (
+    "setup/bundled-plugins/codex-runtime-bridge/",
+)
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -132,10 +135,20 @@ def main() -> int:
             path for path in target_infos
             if target_hashes.get(path) != base_hashes.get(path)
         )
+        required_bundled_paths = sorted(
+            path for path in target_infos
+            if any(path.startswith(prefix) for prefix in REQUIRED_BUNDLED_PREFIXES)
+        )
+        for prefix in REQUIRED_BUNDLED_PREFIXES:
+            if not any(path.startswith(prefix) for path in required_bundled_paths):
+                raise ValueError(
+                    f"Target release ZIP is missing mandatory bundled plugin payload under {prefix}"
+                )
+        included_paths = sorted(set(changed_paths) | set(required_bundled_paths))
         deleted_paths = sorted(path for path in base_infos if path not in target_infos)
 
         changed_files: list[dict[str, object]] = []
-        for relative in changed_paths:
+        for relative in included_paths:
             info = target_infos[relative]
             target_hash = target_hashes.get(relative) or entry_sha256(target_archive, info)
             base_hash = base_hashes.get(relative)
@@ -173,6 +186,7 @@ def main() -> int:
                 "sha256": sha256_file(target_zip),
             },
             "persistentRoots": list(PERSISTENT_ROOTS),
+            "alwaysIncludedPrefixes": list(REQUIRED_BUNDLED_PREFIXES),
             "changedFiles": changed_files,
             "deletedFiles": deleted_files,
         }
@@ -194,14 +208,14 @@ def main() -> int:
                 DELTA_PREFIX + "delta-manifest.json",
                 json.dumps(delta_manifest, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
             )
-            for index, relative in enumerate(changed_paths, start=1):
+            for index, relative in enumerate(included_paths, start=1):
                 info = target_infos[relative]
                 delta.writestr(
                     DELTA_PREFIX + "files/" + relative,
                     target_archive.read(info),
                 )
-                if index % 500 == 0 or index == len(changed_paths):
-                    print(f"[delta] {index}/{len(changed_paths)} changed files", flush=True)
+                if index % 500 == 0 or index == len(included_paths):
+                    print(f"[delta] {index}/{len(included_paths)} update files", flush=True)
         temporary.replace(output)
 
     print(
@@ -210,6 +224,8 @@ def main() -> int:
                 "fromVersion": base_version,
                 "toVersion": target_version,
                 "changedFiles": len(changed_paths),
+                "includedFiles": len(included_paths),
+                "requiredBundledFiles": len(required_bundled_paths),
                 "deletedFiles": len(deleted_paths),
                 "output": str(output),
                 "bytes": output.stat().st_size,

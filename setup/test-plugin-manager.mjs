@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -98,6 +98,15 @@ try {
   callAdmin("plugin-slot-bind", { slot: 16, pluginId: "admin-plugin", toolName: "probe" });
   const listed = callAdmin("plugin-list");
   if (listed.plugins.length !== 1 || listed.slots[15].status !== "ready") throw new Error("portable manager plugin interface failed");
+  const exportedPath = join(base, "exports", "admin-plugin-1.0.0.zip");
+  const exported = callAdmin("plugin-export", { pluginId: "admin-plugin", version: "1.0.0", destinationPath: exportedPath });
+  if (!existsSync(exportedPath) || exported.result?.version !== "1.0.0" || !/^[a-f0-9]{64}$/.test(String(exported.result?.sha256 ?? ""))) {
+    throw new Error("portable manager plugin export failed");
+  }
+  callAdmin("plugin-uninstall", { pluginId: "admin-plugin" });
+  callAdmin("plugin-install", { sourcePath: exportedPath });
+  const reinstalled = callAdmin("plugin-list");
+  if (reinstalled.plugins.length !== 1 || reinstalled.plugins[0].id !== "admin-plugin") throw new Error("exported plugin package did not round-trip through installer");
   callAdmin("plugin-uninstall", { pluginId: "admin-plugin" });
 
   console.log(JSON.stringify({
@@ -108,6 +117,8 @@ try {
     versionHashPin: true,
     failClosed: true,
     portableManagerInterface: true,
+    pluginPackageExport: true,
+    pluginPackageExportRoundTrip: true,
     uninstall: true,
   }));
 }

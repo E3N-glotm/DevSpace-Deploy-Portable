@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.32**
+当前稳定版本：**1.1.33**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.32.zip
+DevSpacePortable-Windows-x64-1.1.33.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.32 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.31 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.33 没有修改 Portable Protocol 或顶层 MCP Schema，因此从 1.1.32 或更早版本升级不要求重复 OAuth 或重新 Scan Tools。
 
 ---
 
@@ -299,6 +299,14 @@ https://你的域名/mcp
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.33 主要变化
+
+- **修复真实修改历史被高频空会话挤掉的问题。** 旧版把 `review-sessions-v4` 的目录总数统一限制为 30；监控、只读检查和重连同样会生成 0 文件会话，因此大量 VGSP/LC-PiSA-SR 轮次会把更旧但真正保存了修改 baseline 的会话 GC 掉。现在 30 轮上限只约束“无 tracked baseline、无 safety snapshot、无 shell mutation、无实际修改且未置顶”的空会话；真正可审阅/回退的历史不参与这个数量淘汰。
+- **仍保持有界存储。** 每轮 32 MiB、全部 review state 512 MiB 的硬上限没有放宽；发生真实存储压力时仍会优先清理空会话，再按旧→新顺序处理未置顶历史，避免重新出现早期 shadow Git 导致几十/上百 GB 的 P0 问题。
+- **插件管理可导出完整插件包。** 选择插件和版本后点击“导出当前选中插件包”，得到可直接通过“安装插件”重新导入的 ZIP；导出采用临时文件、ZIP 条目验证和 SHA-256，并覆盖“导出 → 卸载 → 从导出包重新安装”的回归测试。
+- **所有正式 ZIP 默认携带 Codex Runtime Bridge。** 完整 Portable ZIP 强制包含 `data/plugins/installed/codex-runtime-bridge/<version>/`；增量 ZIP 即使插件未发生变化，也会携带 `setup/bundled-plugins/codex-runtime-bridge/` seed payload。构建缺失必要 manifest/runtime/keep-awake/Skill 文件时直接失败。
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变，不需要重新 OAuth 或重新 Scan Tools。
 
 ## 1.1.32 主要变化
 
@@ -504,7 +512,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.32
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.33
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -532,7 +540,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.32 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.33 -BypassProxy
 ```
 
 ## 在线更新

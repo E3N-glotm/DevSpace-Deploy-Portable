@@ -2284,7 +2284,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.32 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.33 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2518,6 +2518,7 @@ namespace DevSpacePortable.NativeUI
             FlowLayoutPanel actions = NewButtonBar();
             actions.Controls.Add(ActionButton("刷新插件", async delegate { await LoadPluginsAsync(); }, true));
             actions.Controls.Add(ActionButton("安装插件", async delegate { await InstallPluginAsync(); }));
+            actions.Controls.Add(ActionButton("导出当前选中插件包", async delegate { await ExportPluginAsync(); }));
             actions.Controls.Add(ActionButton("启用", async delegate { await PluginActionAsync("plugin-enable"); }));
             actions.Controls.Add(ActionButton("禁用", async delegate { await PluginActionAsync("plugin-disable"); }));
             actions.Controls.Add(ActionButton("卸载所选版本", async delegate { await UninstallPluginAsync(false); }, false, true));
@@ -3060,7 +3061,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.32") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.33") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -3389,6 +3390,38 @@ namespace DevSpacePortable.NativeUI
             {
                 if (file.ShowDialog(this) != DialogResult.OK) return;
                 await ExecuteBusyAsync(async delegate { await _manager.RunJsonAsync("plugin-install", new { sourcePath = file.FileName, replace = false }); await LoadPluginsAsync(); });
+            }
+        }
+
+        private async Task ExportPluginAsync()
+        {
+            Dictionary<string, object> plugin = SelectedPlugin();
+            string id = GetString(plugin, "id");
+            string version = Convert.ToString(_pluginVersion.SelectedItem ?? GetString(plugin, "selectedVersion"));
+            string suggested = id + "-" + version + ".zip";
+            foreach (char invalid in Path.GetInvalidFileNameChars()) suggested = suggested.Replace(invalid, '_');
+            using (SaveFileDialog file = new SaveFileDialog
+            {
+                Filter = "DevSpace 插件包|*.zip",
+                DefaultExt = "zip",
+                AddExtension = true,
+                FileName = suggested,
+                OverwritePrompt = true,
+                Title = "导出当前选中插件包",
+            })
+            {
+                if (file.ShowDialog(this) != DialogResult.OK) return;
+                await ExecuteBusyAsync(async delegate
+                {
+                    Dictionary<string, object> exported = await _manager.RunJsonAsync("plugin-export", new
+                    {
+                        pluginId = id,
+                        version = version,
+                        destinationPath = file.FileName,
+                    });
+                    Dictionary<string, object> result = GetDictionary(exported, "result");
+                    SetOutput("插件包已导出：\r\n" + GetString(result, "destinationPath") + "\r\n\r\n版本：" + GetString(result, "version") + "\r\nSHA-256：" + GetString(result, "sha256"));
+                });
             }
         }
 

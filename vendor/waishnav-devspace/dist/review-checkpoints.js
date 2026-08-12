@@ -28,7 +28,7 @@ const MAX_TRACKED_FILES = 2048;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_SESSION_STORED_BYTES = 32 * 1024 * 1024;
 const MAX_TOTAL_STATE_BYTES = 512 * 1024 * 1024;
-const MAX_SESSION_DIRECTORIES = 30;
+const MAX_EMPTY_SESSION_DIRECTORIES = 30;
 const MAX_SAFETY_SNAPSHOTS = 5;
 const MAX_PATCH_BYTES = 20 * 1024 * 1024;
 const SAMPLE_BYTES = 64 * 1024;
@@ -91,6 +91,7 @@ export function createReviewCheckpointManager(options = {}) {
                         "Review and rollback cover only paths explicitly captured by structured file tools.");
                     state.updatedAt = new Date().toISOString();
                     await saveSession(stateDir, state);
+                    await pruneReviewState(stateDir, state.sessionId);
                 }
                 return { ...sessionIdentity(state), trackedPaths: Object.keys(state.tracked ?? {}).length };
             }
@@ -112,6 +113,7 @@ export function createReviewCheckpointManager(options = {}) {
             state.updatedAt = new Date().toISOString();
             await pruneObjects(stateDir, state);
             await saveSession(stateDir, state);
+            await pruneReviewState(stateDir, state.sessionId);
             return { ...sessionIdentity(state), trackedPaths: Object.keys(state.tracked).length };
         },
 
@@ -768,16 +770,65 @@ async function pruneReviewState(stateDir, currentSessionId) {
     }
     records.sort((left, right) => String(left.session.updatedAt || "").localeCompare(String(right.session.updatedAt || "")));
     let total = records.reduce((sum, item) => sum + item.size, 0);
-    let count = records.length;
+
+    const removed = new Set();
+    let emptyCount = records.filter((record) => countPrunableEmptySession(record.session)).length;
+
+    // Keep recent read-only history visible, but bound only those disposable
+    // sessions by count. Meaningful review/rollback sessions are deliberately
+    // excluded so monitor/reconnect churn can no longer evict real changes.
     for (const record of records) {
-        if (count <= MAX_SESSION_DIRECTORIES && total <= MAX_TOTAL_STATE_BYTES)
+        if (emptyCount <= MAX_EMPTY_SESSION_DIRECTORIES)
             break;
         if (record.session.sessionId === currentSessionId)
             continue;
+        if (!countPrunableEmptySession(record.session))
+            continue;
+        await rm(record.directory, { recursive: true, force: true });
+        removed.add(record.session.sessionId);
+        total -= record.size;
+        emptyCount -= 1;
+    }
+
+    if (total <= MAX_TOTAL_STATE_BYTES)
+        return;
+
+    // The 512 MiB aggregate cap remains a hard safety boundary. Under genuine
+    // storage pressure, prefer evicting the oldest unpinned meaningful session;
+    // pinned sessions are considered only as a last resort. The current session
+    // is never removed by its own initialization/mutation path.
+    const retained = records
+        .filter((record) => !removed.has(record.session.sessionId))
+        .filter((record) => record.session.sessionId !== currentSessionId)
+        .sort((left, right) => {
+            const leftPriority = storagePressurePriority(left.session);
+            const rightPriority = storagePressurePriority(right.session);
+            if (leftPriority !== rightPriority)
+                return leftPriority - rightPriority;
+            return String(left.session.updatedAt || "").localeCompare(String(right.session.updatedAt || ""));
+        });
+    for (const record of retained) {
+        if (total <= MAX_TOTAL_STATE_BYTES)
+            break;
         await rm(record.directory, { recursive: true, force: true });
         total -= record.size;
-        count -= 1;
     }
+}
+
+function countPrunableEmptySession(state) {
+    return !state?.pinned
+        && Object.keys(state?.tracked ?? {}).length === 0
+        && (state?.safetySnapshots ?? []).length === 0
+        && !Boolean(state?.shellMutationObserved)
+        && Number(state?.lastReview?.files || 0) === 0;
+}
+
+function storagePressurePriority(state) {
+    if (countPrunableEmptySession(state))
+        return 0;
+    if (!state?.pinned)
+        return 1;
+    return 2;
 }
 
 async function directorySize(directory) {

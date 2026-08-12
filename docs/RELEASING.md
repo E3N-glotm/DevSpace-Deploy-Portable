@@ -17,6 +17,19 @@ python setup/create-incremental-update.py --base-zip <previous-full.zip> --targe
 python setup/create-update-manifest.py --repository E3N-glotm/DevSpace-Deploy-Portable --incremental DevSpacePortable-Update-<previous>-to-<version>.zip
 ```
 
+Every full `DevSpacePortable-Windows-x64-<version>.zip` must include the bundled
+`codex-runtime-bridge` plugin under
+`data/plugins/installed/codex-runtime-bridge/<version>/`. This is a mandatory
+release invariant, not an optional extra. `setup/build-release.py` validates
+the manifest, runtime, keep-awake helper, and Skill payload and fails the build
+if the bundled plugin is absent or incomplete.
+
+Incremental `DevSpacePortable-Update-<from>-to-<version>.zip` packages also
+always carry the `setup/bundled-plugins/codex-runtime-bridge/` seed payload,
+even when that plugin is byte-identical to the base release. This keeps every
+official DevSpace ZIP self-contained with the bridge payload while still
+excluding user-persistent `data/`, `logs/`, and `reports/` roots from deltas.
+
 ## Tag release
 
 Commit the release state, then create an annotated tag:
@@ -47,7 +60,7 @@ writing the credential to a temporary file. Install GitHub CLI first with
 `winget install --id GitHub.cli --exact --scope user`:
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.32 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.33 -BypassProxy
 ```
 
 `-BypassProxy` is optional. Use it when a local HTTP proxy makes large Release

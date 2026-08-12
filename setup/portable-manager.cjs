@@ -65,7 +65,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.32";
+const PORTABLE_VERSION = "1.1.33";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -3308,6 +3308,8 @@ async function main() {
       stdoutJson(seedBundledPlugins());
     } else if (command === "plugin-install") {
       stdoutJson(runPluginAdmin("install", await readStdinJson()));
+    } else if (command === "plugin-export") {
+      stdoutJson(runPluginAdmin("export", await readStdinJson()));
     } else if (command === "plugin-enable") {
       stdoutJson(runPluginAdmin("enable", await readStdinJson()));
     } else if (command === "plugin-disable") {
@@ -3346,7 +3348,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);

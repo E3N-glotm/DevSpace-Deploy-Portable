@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DIST = join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist");
-const { createReviewCheckpointManager } = await import(new URL(`file:///${join(DIST, "review-checkpoints.js").replace(/\\/g, "/")}`));
+const { createReviewCheckpointManager, reviewAdmin } = await import(new URL(`file:///${join(DIST, "review-checkpoints.js").replace(/\\/g, "/")}`));
 const { openDatabase } = await import(new URL(`file:///${join(DIST, "db", "client.js").replace(/\\/g, "/")}`));
 const { MemoryStore } = await import(new URL(`file:///${join(DIST, "memory-store.js").replace(/\\/g, "/")}`));
 const { HookManager } = await import(new URL(`file:///${join(DIST, "hook-manager.js").replace(/\\/g, "/")}`));
@@ -153,6 +154,92 @@ async function testSparseReviewStorageAndLegacyCleanup() {
   assert.equal(existsSync(join(stateDir, "review-repositories-v3")), false);
 }
 
+function persistedReviewDirectory(stateDir, sessionId) {
+  const key = createHash("sha256").update(String(sessionId)).digest("hex");
+  return join(stateDir, "review-sessions-v4", key);
+}
+
+function writeAffectedBuildEmptyReviewSession(stateDir, sessionId, root, options = {}) {
+  const directory = persistedReviewDirectory(stateDir, sessionId);
+  mkdirSync(directory, { recursive: true });
+  const timestamp = options.updatedAt || new Date().toISOString();
+  writeFileSync(join(directory, "session.json"), `${JSON.stringify({
+    formatVersion: 4,
+    sessionId,
+    workspaceId: sessionId,
+    root,
+    title: options.title || "Read-only monitor",
+    status: "active",
+    pinned: Boolean(options.pinned),
+    hidden: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    tracked: {},
+    limitations: [],
+    safetySnapshots: [],
+    storedBytes: 0,
+    shellMutationObserved: false,
+    lastReview: { files: 0, additions: 0, removals: 0 },
+  }, null, 2)}\n`, "utf8");
+}
+
+async function testReadOnlySessionsCannotEvictRollbackHistory() {
+  const root = join(temporaryRoot, "retention-workspace");
+  const stateDir = join(temporaryRoot, "retention-state");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, "valuable.txt"), "before\n", "utf8");
+
+  const manager = createReviewCheckpointManager({ stateDir, sessionReviewEnabled: true });
+  await manager.initializeWorkspace({ workspaceId: "valuable-session", root });
+  await manager.beforeMutation({ workspaceId: "valuable-session", root, paths: ["valuable.txt"] });
+  writeFileSync(join(root, "valuable.txt"), "before\nafter\n", "utf8");
+  const valuableReview = await manager.sessionReview({ workspaceId: "valuable-session", root });
+  assert.equal(valuableReview.summary.files, 1);
+  assert.equal(valuableReview.canRollback, true);
+
+  // Reproduce metadata left by affected builds: many read-only monitor opens
+  // that were persisted even though no mutation baseline existed.
+  for (let index = 0; index < 40; index += 1) {
+    writeAffectedBuildEmptyReviewSession(
+      stateDir,
+      `legacy-read-only-${index}`,
+      root,
+      { updatedAt: new Date(Date.now() + index * 1000).toISOString() },
+    );
+  }
+  writeAffectedBuildEmptyReviewSession(stateDir, "new-read-only-monitor", root);
+  writeAffectedBuildEmptyReviewSession(stateDir, "explicitly-pinned-empty", root, { pinned: true });
+
+  // Fresh read-only opens remain visible as recent session history, but only
+  // the empty/read-only subset is count-bounded. Meaningful rollback history
+  // and an explicitly pinned empty session must survive the churn.
+  const afterRestart = createReviewCheckpointManager({ stateDir, sessionReviewEnabled: true });
+  await afterRestart.initializeWorkspace({ workspaceId: "new-read-only-monitor", root });
+  for (let index = 0; index < 40; index += 1) {
+    await afterRestart.initializeWorkspace({ workspaceId: `new-read-only-${index}`, root });
+  }
+
+  const listed = await reviewAdmin({
+    stateDir,
+    action: "list",
+    payload: { includeHidden: true, includeArchived: true },
+  });
+  const retainedIds = new Set(listed.sessions.map((session) => session.sessionId));
+  assert.equal(retainedIds.has("valuable-session"), true);
+  assert.equal(retainedIds.has("explicitly-pinned-empty"), true);
+  assert.ok(listed.sessions.length <= 32, `expected at most 30 disposable sessions plus pinned and changed history, got ${listed.sessions.length}`);
+  assert.equal(retainedIds.has("new-read-only-39"), true);
+
+  const details = await reviewAdmin({
+    stateDir,
+    action: "details",
+    payload: { sessionId: "valuable-session" },
+  });
+  assert.equal(details.summary.files, 1);
+  assert.equal(details.canRollback, true);
+  assert.deepEqual(details.files.map((file) => file.path), ["valuable.txt"]);
+}
+
 function testMemories() {
   const database = openDatabase(join(temporaryRoot, "memory-state"));
   try {
@@ -246,10 +333,11 @@ try {
   await testNonGitShellBoundedCoverage();
   await testGitRollbackPreservesIndex();
   await testSparseReviewStorageAndLegacyCleanup();
+  await testReadOnlySessionsCannotEvictRollbackHistory();
   testMemories();
   await testHooks();
   testUiLease();
-console.log("DevSpace 1.1.32 sparse session capability tests passed.");
+console.log("DevSpace 1.1.33 sparse session capability tests passed.");
 }
 finally {
   rmSync(temporaryRoot, { recursive: true, force: true });

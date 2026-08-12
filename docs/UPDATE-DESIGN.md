@@ -1,4 +1,11 @@
-# Application and network lifecycle design through 1.1.32
+# Application and network lifecycle design through 1.1.33
+
+## Implemented in 1.1.33: review-history retention and plugin package export
+
+- Review state no longer applies the 30-directory count cap to every workspace session. Only empty/read-only sessions without tracked baselines, safety snapshots, shell mutation observations, recorded file changes, or a pin consume the 30-session disposable-history budget.
+- Sessions with real tracked baselines therefore survive arbitrarily many later read-only monitor/reconnect sessions; the existing 32 MiB per-session and 512 MiB aggregate review-state byte caps remain unchanged.
+- The native plugin manager can export the currently selected plugin/version as a validated installable ZIP. Export uses a temporary archive, verifies its entries and root `manifest.json`, reports SHA-256, and is covered by an export/uninstall/reinstall round-trip regression.
+- Portable Protocol remains 1.5 and no top-level MCP tool schema changes are introduced.
 
 ## Implemented in 1.1.32: standalone updater launch quoting and native branding
 

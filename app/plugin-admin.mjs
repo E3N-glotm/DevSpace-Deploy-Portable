@@ -40,6 +40,15 @@ async function main() {
       });
       return;
     }
+    if (command === "export") {
+      output({
+        result: manager.exportToPath(input.pluginId, input.version, input.destinationPath),
+        plugins: manager.list(),
+        slots: manager.slots(),
+        reconnectRequired: false,
+      });
+      return;
+    }
     if (command === "enable" || command === "disable") {
       const enabled = command === "enable";
       output({

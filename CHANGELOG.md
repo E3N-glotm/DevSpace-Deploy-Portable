@@ -2,6 +2,15 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.33
+
+- 修复“会话与回退”中旧修改记录偶发变成 `0` 或直接消失的问题。根因是 `review-sessions-v4` 把所有会话统一限制为 30 个，而 VGSP/LC-PiSA-SR 等高频只读监控会话同样占用这个数量配额，最终会把更旧但真正保存了 tracked baseline/rollback 数据的会话目录删除。1.1.33 改为只对无 tracked baseline、无 safety snapshot、无 shell mutation、无实际修改且未置顶的空会话执行 30 轮数量淘汰；真实修改会话不再因为后续空会话数量增长而被删除，512 MiB 全局 review-state 上限仍然作为硬存储边界。
+- 插件管理新增“导出当前选中插件包”。导出的是所选插件**所选版本**的完整可安装 ZIP，而不是单独的 `manifest.json`；导出过程使用临时文件、ZIP 内容校验和 SHA-256，导出的包已加入“卸载后重新安装”往返回归测试。
+- 将 `codex-runtime-bridge` 固化为所有正式 ZIP 的强制内置插件：完整 Portable ZIP 构建会校验其 manifest/runtime/keep-awake/Skill 文件，缺失即失败；增量更新 ZIP 即使插件相对基线未变化，也会携带 `setup/bundled-plugins/codex-runtime-bridge/` seed payload。
+- DevSpace server capability version 更新为 `1.1.33`，Portable Protocol 仍为 `1.5`，顶层 MCP tool schema 不变，因此本次升级不要求重新 OAuth 或重新 Scan Tools。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.33.md)
+
 ## 1.1.32
 
 - 修复 1.1.31 “检查更新”按钮启动 `Update.exe` 后立即以 CLR 未处理异常退出的问题。Windows `.NET Runtime 1026` 证实旧主 UI 将带尾部反斜杠的 Portable 根目录手工拼成 `--root "D:\\DevSpacePortable\\"`，Windows 命令行解析会吞掉闭合引号，最终让 `ResolveRoot()` 收到损坏参数并在 `Path.GetFullPath()` 抛 `System.ArgumentException`。1.1.32 主 UI 不再向同目录 Update.exe 传冗余 `--root/--current`，只传必要的 `parent-ui` PID；更新器内部其余子进程参数统一使用完整 Windows quoting 规则，并增加顶层异常提示，避免再次以 CLR 崩溃码静默退出。

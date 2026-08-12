@@ -13,6 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 CHECKSUM_FILE = ROOT / "SHA256SUMS.txt"
 BUNDLED_PLUGIN_SOURCE = ROOT / "setup" / "bundled-plugins"
 RELEASE_PLUGIN_PREFIX = Path("data/plugins/installed")
+REQUIRED_BUNDLED_PLUGIN_FILES = {
+    "codex-runtime-bridge": {
+        "manifest.json",
+        "runtime.mjs",
+        "keep-awake.ps1",
+        "skills/codex-runtime-bridge/SKILL.md",
+    },
+}
 EMPTY_RELEASE_DIRS = ("data/", "data/run/", "logs/", "reports/")
 EXCLUDED_TOP_LEVEL_DIRS = {
     "data",
@@ -74,15 +82,31 @@ def release_plugin_entries() -> list[tuple[Path, Path]]:
 
 
 def validate_release_plugins(entries: list[tuple[Path, Path]]) -> None:
-    codex_root = Path("data/plugins/installed/codex-runtime-bridge")
-    codex_manifests = [
-        target for _, target in entries
-        if codex_root in target.parents and target.name == "manifest.json"
-    ]
-    if not codex_manifests:
-        raise RuntimeError(
-            "Release payload must contain data/plugins/installed/codex-runtime-bridge/<version>/manifest.json"
+    targets = {target.as_posix() for _, target in entries}
+    for plugin_id, required_files in REQUIRED_BUNDLED_PLUGIN_FILES.items():
+        prefix = f"{RELEASE_PLUGIN_PREFIX.as_posix()}/{plugin_id}/"
+        versions = sorted(
+            {
+                target[len(prefix):].split("/", 1)[0]
+                for target in targets
+                if target.startswith(prefix) and "/" in target[len(prefix):]
+            }
         )
+        if not versions:
+            raise RuntimeError(
+                f"Release payload must contain bundled plugin {plugin_id} under "
+                f"{prefix}<version>/"
+            )
+        for version in versions:
+            missing = sorted(
+                relative
+                for relative in required_files
+                if f"{prefix}{version}/{relative}" not in targets
+            )
+            if missing:
+                raise RuntimeError(
+                    f"Bundled plugin {plugin_id}@{version} is incomplete; missing: {', '.join(missing)}"
+                )
 
 
 def release_files() -> list[Path]:

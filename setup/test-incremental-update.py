@@ -42,6 +42,10 @@ def main() -> int:
                 "VERSION-MANIFEST.json": b'{"runtime":{"devspacePortable":"1.1.15"}}\n',
                 "setup/a.txt": b"old\n",
                 "runtime/keep.bin": b"same-runtime",
+                "setup/bundled-plugins/codex-runtime-bridge/1.1.1/manifest.json": b'{"id":"codex-runtime-bridge","version":"1.1.1"}\n',
+                "setup/bundled-plugins/codex-runtime-bridge/1.1.1/runtime.mjs": b"export const runtime = true;\n",
+                "setup/bundled-plugins/codex-runtime-bridge/1.1.1/keep-awake.ps1": b"Write-Output keep-awake\n",
+                "setup/bundled-plugins/codex-runtime-bridge/1.1.1/skills/codex-runtime-bridge/SKILL.md": b"# Codex Runtime Bridge\n",
                 "obsolete.txt": b"delete-me",
                 "data/user-state.txt": b"persistent-old",
             },
@@ -53,6 +57,10 @@ def main() -> int:
                 "setup/a.txt": b"new\n",
                 "setup/new.txt": b"brand-new\n",
                 "runtime/keep.bin": b"same-runtime",
+                "setup/bundled-plugins/codex-runtime-bridge/1.1.1/manifest.json": b'{"id":"codex-runtime-bridge","version":"1.1.1"}\n',
+                "setup/bundled-plugins/codex-runtime-bridge/1.1.1/runtime.mjs": b"export const runtime = true;\n",
+                "setup/bundled-plugins/codex-runtime-bridge/1.1.1/keep-awake.ps1": b"Write-Output keep-awake\n",
+                "setup/bundled-plugins/codex-runtime-bridge/1.1.1/skills/codex-runtime-bridge/SKILL.md": b"# Codex Runtime Bridge\n",
                 "data/user-state.txt": b"persistent-new-should-not-be-delta",
             },
         )
@@ -87,6 +95,17 @@ def main() -> int:
         assert "SHA256SUMS.txt" in changed
         assert "runtime/keep.bin" not in changed
         assert "data/user-state.txt" not in changed
+        bundled_prefix = "setup/bundled-plugins/codex-runtime-bridge/1.1.1/"
+        for relative in [
+            "manifest.json",
+            "runtime.mjs",
+            "keep-awake.ps1",
+            "skills/codex-runtime-bridge/SKILL.md",
+        ]:
+            path = bundled_prefix + relative
+            assert path in changed, f"mandatory bundled plugin file missing from delta manifest: {path}"
+            assert "DevSpacePortableDelta/files/" + path in names
+        assert manifest["alwaysIncludedPrefixes"] == ["setup/bundled-plugins/codex-runtime-bridge/"]
         assert "obsolete.txt" in deleted
         assert "DevSpacePortableDelta/files/setup/a.txt" in names
         assert "DevSpacePortableDelta/files/setup/new.txt" in names
@@ -98,10 +117,11 @@ def main() -> int:
             json.dumps(
                 {
                     "fileDeltaV1": True,
-                    "changedFilesOnly": True,
+                    "changedFilesPlusMandatoryBundledPlugins": True,
                     "deleteManifest": True,
                     "persistentRootsExcluded": True,
                     "baseHashPreflight": True,
+                    "codexRuntimeBridgeAlwaysIncluded": True,
                 }
             )
         )
