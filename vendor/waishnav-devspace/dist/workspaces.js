@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import { createManagedWorktree } from "./git-worktrees.js";
-import { assertAllowedPath, expandHomePath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
+import { AccessDeniedError, assertAllowedPath, expandHomePath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
 import { loadWorkspaceSkills, markSkillActivated, resolveSkillReadPath, } from "./skills.js";
 import { loadLocalAgentProfiles, } from "./local-agent-profiles.js";
 const MAX_CACHED_WORKSPACES = 64;
@@ -16,17 +16,98 @@ export class WorkspaceRegistry {
     config;
     store;
     workspaces = new Map();
+    pendingCheckoutOpens = new Map();
     constructor(config, store) {
         this.config = config;
         this.store = store;
     }
-    async openWorkspace(input) {
+    async openWorkspace(input, openOptions = {}) {
         const options = typeof input === "string" ? { path: input } : input;
+        const conversationScopeId = openOptions.conversationScopeId;
+        if (!conversationScopeId || !this.store) {
+            return this.openNewWorkspace(options);
+        }
         const mode = options.mode ?? "checkout";
         if (mode === "worktree") {
-            return this.openWorktreeWorkspace(options.path, options.baseRef);
+            const context = await this.openWorktreeWorkspace(options.path, options.baseRef);
+            return { ...context, workspaceReused: false, includeBootstrapContext: true };
         }
+        const projectKey = await this.conversationProjectKey(options);
+        const targetKey = this.conversationCheckoutTargetKey(projectKey);
+        const operationKey = JSON.stringify([conversationScopeId, targetKey]);
+        const pending = this.pendingCheckoutOpens.get(operationKey);
+        if (pending) {
+            const context = await pending;
+            return { ...context, workspaceReused: true, includeBootstrapContext: false };
+        }
+        const open = this.openConversationCheckout(options, conversationScopeId, targetKey);
+        this.pendingCheckoutOpens.set(operationKey, open);
+        try {
+            return await open;
+        }
+        finally {
+            if (this.pendingCheckoutOpens.get(operationKey) === open)
+                this.pendingCheckoutOpens.delete(operationKey);
+        }
+    }
+    async openNewWorkspace(options) {
+        const mode = options.mode ?? "checkout";
+        if (mode === "worktree")
+            return this.openWorktreeWorkspace(options.path, options.baseRef);
         return this.openCheckoutWorkspace(options.path);
+    }
+    async openConversationCheckout(input, conversationScopeId, targetKey) {
+        const binding = this.store?.getConversationBinding(conversationScopeId, targetKey);
+        if (binding) {
+            const reusableWorkspace = await this.findReusableCheckoutWorkspace(binding);
+            if (reusableWorkspace) {
+                const context = await this.reusedWorkspaceContext(reusableWorkspace);
+                this.store?.touchConversationBinding(conversationScopeId, targetKey);
+                return { ...context, workspaceReused: true, includeBootstrapContext: false };
+            }
+            this.workspaces.delete(binding.workspaceSessionId);
+            this.store?.deleteConversationBinding(conversationScopeId, targetKey);
+        }
+        const context = await this.openCheckoutWorkspace(input.path);
+        this.store?.setConversationBinding({ conversationScopeId, targetKey, workspaceSessionId: context.workspace.id });
+        return { ...context, workspaceReused: false, includeBootstrapContext: true };
+    }
+    async findReusableCheckoutWorkspace(binding) {
+        const session = this.store?.getSession(binding.workspaceSessionId);
+        if (!session || session.status !== "active" || session.mode !== "checkout")
+            return undefined;
+        let root;
+        try {
+            root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
+            const rootStats = await stat(root);
+            if (!rootStats.isDirectory())
+                return undefined;
+        }
+        catch (error) {
+            if (error instanceof AccessDeniedError ||
+                (isErrnoException(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")))
+                return undefined;
+            throw error;
+        }
+        const workspace = this.getWorkspace(binding.workspaceSessionId);
+        if (workspace.mode !== "checkout" || workspace.root !== root)
+            return undefined;
+        return workspace;
+    }
+    async conversationProjectKey(input) {
+        const candidate = this.config.permissions.allowExternalPaths
+            ? resolve(expandHomePath(input.path))
+            : assertAllowedPath(input.path, this.config.allowedRoots);
+        return canonicalPath(candidate);
+    }
+    conversationCheckoutTargetKey(projectKey) {
+        return JSON.stringify(["checkout", projectKey, null]);
+    }
+    async reusedWorkspaceContext(workspace) {
+        workspace.agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
+        const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
+        const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+        return { workspace, agentsFiles, availableAgentsFiles, workspaceReused: true, includeBootstrapContext: false };
     }
     getWorkspace(workspaceId) {
         const workspace = this.workspaces.get(workspaceId);
@@ -36,7 +117,7 @@ export class WorkspaceRegistry {
         }
         const session = this.store?.getSession(workspaceId);
         if (!session) {
-            throw new Error(`Unknown workspaceId: ${workspaceId}. Call open_workspace first.`);
+            throw new Error(`Unknown workspaceId: ${workspaceId}. Open the target project or worktree again and continue with the new workspaceId.`);
         }
         const root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
         const restoredWorkspace = {
@@ -183,7 +264,7 @@ export class WorkspaceRegistry {
     async createWorkspaceContext(input) {
         const git = inspectGitMetadata(input.root);
         const workspace = {
-            id: `ws_${randomUUID()}`,
+            id: `ws_${randomBytes(5).toString("hex")}`,
             root: input.root,
             mode: input.mode,
             sourceRoot: input.sourceRoot,
@@ -210,7 +291,7 @@ export class WorkspaceRegistry {
         this.cacheWorkspace(workspace);
         const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
         const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
-        return { workspace, agentsFiles, availableAgentsFiles };
+        return { workspace, agentsFiles, availableAgentsFiles, workspaceReused: false, includeBootstrapContext: true };
     }
     loadSkillsForWorkspace(root) {
         const result = loadWorkspaceSkills(this.config, root);
@@ -292,6 +373,25 @@ export class WorkspaceRegistry {
             discovered.push({ path });
         }, scanBudget, 0);
         return discovered.sort((a, b) => a.path.localeCompare(b.path));
+    }
+}
+
+async function canonicalPath(path) {
+    const missingSegments = [];
+    let candidate = path;
+    while (true) {
+        try {
+            return resolve(await realpath(candidate), ...missingSegments.slice().reverse());
+        }
+        catch (error) {
+            if (!isErrnoException(error) || (error.code !== "ENOENT" && error.code !== "ENOTDIR"))
+                throw error;
+            const parent = dirname(candidate);
+            if (parent === candidate)
+                return path;
+            missingSegments.push(basename(candidate));
+            candidate = parent;
+        }
     }
 }
 

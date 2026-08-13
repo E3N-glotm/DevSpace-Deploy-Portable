@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -11,6 +12,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[1]
 PORTABLE_PREFIX = "DevSpacePortable/"
 PERSISTENT_ROOTS = ("data", "logs", "reports")
+CORE_ARCHIVE_PATTERN = re.compile(r"^packages/waishnav-devspace-(\d+\.\d+\.\d+)\.tgz$")
 
 
 def sha256_file(path: Path) -> str:
@@ -43,6 +45,18 @@ def normalize_relative(value: str) -> str:
 def is_persistent(relative: str) -> bool:
     parts = PurePosixPath(relative).parts
     return bool(parts) and parts[0] in PERSISTENT_ROOTS
+
+
+def is_safe_obsolete_core_archive(relative: str, target_paths: set[str]) -> bool:
+    match = CORE_ARCHIVE_PATTERN.fullmatch(relative)
+    if not match:
+        return False
+    old_version = match.group(1)
+    return any(
+        (target_match := CORE_ARCHIVE_PATTERN.fullmatch(candidate)) is not None
+        and target_match.group(1) != old_version
+        for candidate in target_paths
+    )
 
 
 def file_infos(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
@@ -112,8 +126,14 @@ def main() -> int:
             if target_hashes.get(relative) != base_hashes.get(relative)
         )
         deleted_paths = sorted(relative for relative in base_infos if relative not in target_infos)
-        if deleted_paths:
-            preview = ", ".join(deleted_paths[:12])
+        ignored_obsolete_files = sorted(
+            relative
+            for relative in deleted_paths
+            if is_safe_obsolete_core_archive(relative, set(target_infos))
+        )
+        unsafe_deleted_paths = sorted(set(deleted_paths) - set(ignored_obsolete_files))
+        if unsafe_deleted_paths:
+            preview = ", ".join(unsafe_deleted_paths[:12])
             raise SystemExit(
                 "Direct-extract rescue overlay is not safe because the target removes files from the base release: "
                 + preview
@@ -144,6 +164,7 @@ def main() -> int:
             "persistentRootsExcluded": list(PERSISTENT_ROOTS),
             "changedFiles": changed_paths,
             "deletedFiles": [],
+            "ignoredObsoleteFiles": ignored_obsolete_files,
         }
         readme = f"""DevSpace Portable {from_version} -> {to_version} rescue overlay
 
@@ -156,6 +177,7 @@ def main() -> int:
 4. 重新启动 DevSpace-Portable.exe；VERSION-MANIFEST.json 应显示 {to_version}。
 
 本救援包不包含 data、logs、reports，因此不会覆盖 Owner Password、OAuth、Token、插件运行状态、SQLite、用户配置和日志。
+如果基础版本残留旧 packages/waishnav-devspace-<version>.tgz，且目标版本已携带新的 core TGZ，本救援包允许该旧归档继续留在 packages 目录；它不会被运行时加载，app/package.json 与 lockfile 只指向目标版本 core。
 本包只允许从 {from_version} 使用；不要用于其他基础版本。
 """
 
@@ -191,6 +213,7 @@ def main() -> int:
                 "toVersion": to_version,
                 "changedFiles": len(changed_paths),
                 "deletedFiles": 0,
+                "ignoredObsoleteFiles": ignored_obsolete_files,
                 "persistentRootsExcluded": list(PERSISTENT_ROOTS),
                 "output": str(output),
                 "bytes": output.stat().st_size,

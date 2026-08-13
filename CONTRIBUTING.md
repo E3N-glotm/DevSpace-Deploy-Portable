@@ -22,7 +22,7 @@ vendor/waishnav-devspace/
 npm run core:pack
 ```
 
-该命令会生成被 Git 忽略的 `packages/waishnav-devspace-1.0.5.tgz`。随后运行 `scripts/bootstrap-dev.ps1` 或 `npm ci --prefix app` 安装到本地运行目录。
+该命令会生成被 Git 忽略的 `packages/waishnav-devspace-1.0.7.tgz`。随后运行 `scripts/bootstrap-dev.ps1` 或 `npm ci --prefix app` 安装到本地运行目录。
 
 ## 版本变更
 

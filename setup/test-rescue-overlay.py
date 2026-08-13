@@ -24,7 +24,14 @@ def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def write_release(path: Path, version: str, marker: str, *, omit: set[str] | None = None) -> None:
+def write_release(
+    path: Path,
+    version: str,
+    marker: str,
+    *,
+    omit: set[str] | None = None,
+    extra_files: dict[str, bytes] | None = None,
+) -> None:
     omit = omit or set()
     files: dict[str, bytes] = {
         "DevSpace-Portable.exe": f"ui-{marker}".encode(),
@@ -38,6 +45,7 @@ def write_release(path: Path, version: str, marker: str, *, omit: set[str] | Non
     }
     for relative in omit:
         files.pop(relative, None)
+    files.update(extra_files or {})
     checksums = "".join(
         f"{digest(content)}  {relative}\n"
         for relative, content in sorted(files.items())
@@ -80,7 +88,40 @@ with tempfile.TemporaryDirectory(prefix="devspace-rescue-test-") as raw:
         assert manifest["fromVersion"] == "1.1.33"
         assert manifest["toVersion"] == "1.1.36"
         assert manifest["deletedFiles"] == []
+        assert manifest["ignoredObsoleteFiles"] == []
         assert manifest["persistentRootsExcluded"] == ["data", "logs", "reports"]
+
+    core_base_dir = temporary / "core-base"
+    core_target_dir = temporary / "core-target"
+    core_base_dir.mkdir()
+    core_target_dir.mkdir()
+    core_base = core_base_dir / "DevSpacePortable-Windows-x64-1.1.33.zip"
+    core_target = core_target_dir / "DevSpacePortable-Windows-x64-1.1.36.zip"
+    core_output = temporary / "core-upgrade-rescue.zip"
+    write_release(
+        core_base,
+        "1.1.33",
+        "base",
+        extra_files={"packages/waishnav-devspace-1.0.5.tgz": b"old-core"},
+    )
+    write_release(
+        core_target,
+        "1.1.36",
+        "target",
+        extra_files={"packages/waishnav-devspace-1.0.7.tgz": b"new-core"},
+    )
+    core_result = subprocess.run(
+        ["python", str(BUILDER), "--base-zip", str(core_base), "--target-zip", str(core_target), "--output", str(core_output)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert core_result.returncode == 0, core_result.stderr or core_result.stdout
+    with zipfile.ZipFile(core_output, "r") as archive:
+        manifest = json.loads(archive.read("RESCUE-MANIFEST.json"))
+        assert manifest["ignoredObsoleteFiles"] == ["packages/waishnav-devspace-1.0.5.tgz"]
+        assert "packages/waishnav-devspace-1.0.7.tgz" in archive.namelist()
 
     deletion_target = temporary / "DevSpacePortable-Windows-x64-1.1.36-deletion-fixture.zip"
     # The builder infers the version from the filename, so use a valid release
@@ -114,6 +155,7 @@ print(
             "directExtractOverlay": True,
             "persistentRootsExcluded": True,
             "mandatoryUpdaterFilesReplaced": True,
+            "obsoleteCoreArchiveMayRemainInert": True,
             "deletedBaseFilesRejected": True,
         }
     )

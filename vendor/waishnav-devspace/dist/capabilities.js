@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.37";
+export const DEVSPACE_SERVER_VERSION = "1.1.38";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -115,6 +115,11 @@ const FEATURE_CATALOG = [
     { id: "updater-apply-failure-full-fallback", maturity: "stable", since: "1.1.36" },
     { id: "legacy-1.1.33-rescue-overlay", maturity: "stable", since: "1.1.36" },
     { id: "native-ui-safe-splitcontainer-layout", maturity: "stable", since: "1.1.37" },
+    { id: "upstream-devspace-1.0.7-selective-sync", maturity: "stable", since: "1.1.38" },
+    { id: "conversation-aware-checkout-reuse", maturity: "stable", since: "1.1.38" },
+    { id: "sqlite-conversation-workspace-bindings", maturity: "stable", since: "1.1.38" },
+    { id: "concurrent-checkout-open-coalescing", maturity: "stable", since: "1.1.38" },
+    { id: "compact-workspace-ids", maturity: "stable", since: "1.1.38" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

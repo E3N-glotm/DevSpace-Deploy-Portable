@@ -1,7 +1,7 @@
 DevSpace Deploy Portable
 Copyright (c) 2026 E3N-glotm contributors
 
-This repository contains a maintained Portable fork of DevSpace 1.0.5.
+This repository contains a maintained Portable fork based on DevSpace 1.0.7.
 The upstream project is Waishnav/devspace and is distributed under the MIT
 License. The pinned upstream release commit is recorded in
 VERSION-MANIFEST.json and vendor/waishnav-devspace/UPSTREAM.md.

@@ -32,6 +32,18 @@ export const loadedAgentFiles = sqliteTable("loaded_agent_files", {
     primaryKey({ columns: [table.workspaceSessionId, table.path] }),
     index("loaded_agent_files_path_idx").on(table.path),
 ]);
+export const workspaceConversationBindings = sqliteTable("workspace_conversation_bindings", {
+    conversationScopeId: text("conversation_scope_id").notNull(),
+    targetKey: text("target_key").notNull(),
+    workspaceSessionId: text("workspace_session_id")
+        .notNull()
+        .references(() => workspaceSessions.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+    lastUsedAt: text("last_used_at").notNull(),
+}, (table) => [
+    primaryKey({ columns: [table.conversationScopeId, table.targetKey] }),
+    index("workspace_conversation_bindings_workspace_idx").on(table.workspaceSessionId),
+]);
 export const oauthClients = sqliteTable("oauth_clients", {
     clientId: text("client_id").primaryKey(),
     clientJson: text("client_json").notNull(),

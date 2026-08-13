@@ -68,6 +68,7 @@ $Tests = @(
     "setup/test-core-memory-bounds.mjs",
     "setup/test-native-ui-resilience.mjs",
     "setup/test-native-close-tray.mjs",
+    "setup/test-upstream-workspace-reuse.mjs",
     "setup/test-session-capabilities.mjs",
     "setup/test-portable-ui-heartbeat.mjs",
     "setup/test-plugin-manager.mjs",

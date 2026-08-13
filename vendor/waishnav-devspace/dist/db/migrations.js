@@ -39,6 +39,11 @@ const migrations = [
         name: "reserved-plugin-slots",
         up: migrateReservedPluginSlots,
     },
+    {
+        version: 9,
+        name: "workspace-conversation-bindings",
+        up: migrateWorkspaceConversationBindings,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -333,6 +338,24 @@ function migrateReservedPluginSlots(sqlite) {
 
     create index if not exists plugin_slots_plugin_idx
       on plugin_slots(plugin_id, tool_name);
+  `);
+}
+function migrateWorkspaceConversationBindings(sqlite) {
+    sqlite.exec(`
+    create table if not exists workspace_conversation_bindings (
+      conversation_scope_id text not null,
+      target_key text not null,
+      workspace_session_id text not null,
+      created_at text not null,
+      last_used_at text not null,
+      primary key (conversation_scope_id, target_key),
+      foreign key (workspace_session_id)
+        references workspace_sessions(id)
+        on delete cascade
+    );
+
+    create index if not exists workspace_conversation_bindings_workspace_idx
+      on workspace_conversation_bindings(workspace_session_id);
   `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

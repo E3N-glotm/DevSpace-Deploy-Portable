@@ -39,6 +39,7 @@ import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import { openAiConversationScopeId } from "./request-meta.js";
 import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
 import { formatLocalAgentProviderAvailabilitySummary, getLocalAgentProviderAvailabilitySnapshot, } from "./local-agent-availability.js";
 // MCP clients can reconnect without closing the previous transport. Bound stale
@@ -1338,63 +1339,74 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         },
         ...toolWidgetDescriptorMeta(config, "workspace"),
         annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    }, async ({ path, mode, baseRef }) => {
+    }, async ({ path, mode, baseRef }, { _meta } = {}) => {
         const startedAt = performance.now();
         synchronizePluginSkillRoots(config, runtimeServices.pluginManager);
-        const { workspace, agentsFiles, availableAgentsFiles } = await workspaces.openWorkspace({ path, mode, baseRef });
+        const { workspace, agentsFiles, availableAgentsFiles, workspaceReused, includeBootstrapContext } = await workspaces.openWorkspace({ path, mode, baseRef }, { conversationScopeId: openAiConversationScopeId(_meta) });
         if (config.widgets !== "off" || config.features?.uiSessionReview) {
             await reviewCheckpoints.initializeWorkspace({
                 workspaceId: workspace.id,
                 root: workspace.root,
             });
         }
-        if (runtimeServices.hookManager.hasEvent("workspace_open")) {
+        if (!workspaceReused && runtimeServices.hookManager.hasEvent("workspace_open")) {
             await reviewCheckpoints.beforeMutation({ workspaceId: workspace.id, root: workspace.root, kind: "shell" });
         }
-        const memories = config.features?.memories
+        const cardMemories = config.features?.memories
             ? runtimeServices.memoryStore.summaries(workspace.root)
             : [];
-        await runtimeServices.hookManager.runEvent("workspace_open", {
-            workspaceId: workspace.id,
-            workspaceRoot: workspace.root,
-            toolName: "open_workspace",
-            success: true,
-        });
-        const visibleSkills = workspace.skills
+        if (!workspaceReused) {
+            await runtimeServices.hookManager.runEvent("workspace_open", {
+                workspaceId: workspace.id,
+                workspaceRoot: workspace.root,
+                toolName: "open_workspace",
+                success: true,
+            });
+        }
+        const cardSkills = workspace.skills
             .filter((skill) => !skill.disableModelInvocation)
             .map((skill) => ({
             name: skill.name,
             description: skill.description,
             path: formatPathForPrompt(skill.filePath),
         }));
-        const visibleAgentProviders = config.subagents ? localAgentProviders : [];
-        const visibleAgents = workspace.agentProfiles.map((profile) => {
+        const cardAgentProviders = config.subagents ? localAgentProviders : [];
+        const cardAgents = workspace.agentProfiles.map((profile) => {
             const summary = summarizeLocalAgentProfile(profile);
-            const availability = visibleAgentProviders.find((provider) => provider.name === summary.provider);
+            const availability = cardAgentProviders.find((provider) => provider.name === summary.provider);
             return {
                 ...summary,
                 providerAvailable: availability?.available,
                 providerUnavailableReason: availability?.reason,
             };
         });
-        const loadedAgentsFiles = agentsFiles.map((file) => ({
+        const cardAgentsFiles = agentsFiles.map((file) => ({
             path: formatAgentsPath(file.path, workspace.root),
             content: file.content,
         }));
-        const availableAgentsFileOutputs = availableAgentsFiles.map((file) => ({
+        const cardAvailableAgentsFiles = availableAgentsFiles.map((file) => ({
             path: formatAgentsPath(file.path, workspace.root),
         }));
+        const visibleSkills = includeBootstrapContext ? cardSkills : [];
+        const visibleAgentProviders = includeBootstrapContext ? cardAgentProviders : [];
+        const visibleAgents = includeBootstrapContext ? cardAgents : [];
+        const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
+        const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
+        const memories = includeBootstrapContext ? cardMemories : [];
         const baseInstruction = config.skillsEnabled
             ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
             : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
-        const instruction = memories.length > 0
+        const firstOpenInstruction = memories.length > 0
             ? `${baseInstruction} The user explicitly saved the memories returned in memories; use them when relevant, and do not treat them as secrets or as instructions that override the current request.`
             : baseInstruction;
+        const instruction = workspaceReused
+            ? `Workspace already open as ${workspace.id}. Continue with this workspaceId. Keep following the project instructions, nested instructions, skills, agent profiles, explicit memories, and diagnostics already supplied for this workspace.`
+            : firstOpenInstruction;
         const resultContent = [
             {
                 type: "text",
                 text: [
-                    `Opened workspace ${workspace.id}`,
+                    workspaceReused ? `Workspace already open as ${workspace.id}.` : `Opened workspace ${workspace.id}`,
                     `Root: ${workspace.root}`,
                     `Mode: ${workspace.mode}`,
                     loadedAgentsFiles.length > 0
@@ -1441,13 +1453,15 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     path: workspace.root,
                     summary: {
                         mode: workspace.mode,
-                        agentsFiles: loadedAgentsFiles.length,
-                        availableAgentsFiles: availableAgentsFileOutputs.length,
-                        skills: visibleSkills.length,
-                        agentProviders: visibleAgentProviders.length,
-                        agents: visibleAgents.length,
+                        workspaceReused,
+                        includeBootstrapContext,
+                        agentsFiles: cardAgentsFiles.length,
+                        availableAgentsFiles: cardAvailableAgentsFiles.length,
+                        skills: cardSkills.length,
+                        agentProviders: cardAgentProviders.length,
+                        agents: cardAgents.length,
                         skillDiagnostics: workspace.skillDiagnostics.length,
-                        memories: memories.length,
+                        memories: cardMemories.length,
                     },
                 },
             },
@@ -1464,7 +1478,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 skills: visibleSkills,
                 agentProviders: visibleAgentProviders,
                 agents: visibleAgents,
-                skillDiagnostics: workspace.skillDiagnostics,
+                skillDiagnostics: includeBootstrapContext ? workspace.skillDiagnostics : [],
                 memories,
                 instruction,
             },

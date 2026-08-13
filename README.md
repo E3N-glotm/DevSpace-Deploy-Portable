@@ -2,9 +2,9 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.37**
+当前稳定版本：**1.1.38**
 Portable Protocol：**1.5**  
-上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
+上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
 > 本仓库只维护源码、构建脚本、测试、文档和体积可控的 Portable 核心分支。Node、Git、cloudflared、ngrok、完整 `node_modules`、运行状态与发行 ZIP 不进入 Git 历史；完整 Windows 便携包发布在 GitHub Releases。
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.37.zip
+DevSpacePortable-Windows-x64-1.1.38.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.37 没有修改 Portable Protocol 或顶层 MCP Schema，已有 ChatGPT OAuth 客户端不需要重建。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.38 没有修改 Portable Protocol 或顶层 MCP Schema，已有 ChatGPT OAuth 客户端不需要重建。
 
 ## Gemini、Claude 和其它 MCP 客户端
 
@@ -314,6 +314,18 @@ https://你的域名/mcp
 - 当前发行链还提供 `DevSpacePortable-Rescue-1.1.33-to-<当前版本>.zip`。这是**不调用旧 Update.exe 的直接覆盖救援包**：先关闭/停止旧 Portable，再把 ZIP 内容直接解压到原安装目录并选择全部替换即可；包内不包含 `data`、`logs`、`reports`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.38 主要变化
+
+- **选择性同步上游 DevSpace 1.0.6 / 1.0.7，而不是直接覆盖 Portable fork。** 上游从 1.0.5 到 1.0.7 对 workspace/review/UI 有大量改动；1.1.38 只移植与长期会话稳定性直接相关、且能与 Portable 扩展安全共存的部分，保留本项目自己的 sparse review journal、OAuth、权限、插件、Memories、Computer Use、会话历史、更新器和原生控制中心。
+- **同一 ChatGPT 对话自动复用 checkout workspace。** 当宿主提供标准 `_meta["openai/session"]` 时，同一 conversation + 同一项目 checkout 会继续返回同一个 `workspaceId`，不用每次重新创建工作区；首次 open 才发送完整 AGENTS/skills/agents/Memories bootstrap，重复 open 只返回简短“继续使用现有 workspaceId”提示，减少上下文和空会话噪声。
+- **conversation → workspace 绑定持久化到 SQLite。** MCP 断线、DevSpace 重启或热缓存丢失后，只要原 workspace session 和目录仍有效，同一 ChatGPT conversation 再次打开项目会恢复原 `workspaceId`。归档、目录不存在、权限变化等 stale binding 会被安全清理并创建新的 workspace，而不是继续返回坏引用。
+- **并发重复 open 自动合并。** 同一个 conversation 在短时间内并发发出多个相同 checkout open 时共享同一个 pending open，不再同时创建多条重复 session。
+- **新 workspaceId 改为紧凑格式。** 新建工作区使用 `ws_` + 10 位随机十六进制 ID，减少模型上下文占用；数据库中已有的旧 UUID workspaceId 仍然可以读取、恢复和回退，不做破坏性迁移。
+- **unknown workspaceId 的恢复提示更可执行。** 如果 workspaceId 已失效，会明确要求重新打开目标项目/工作树并继续使用新的 ID，而不是只提示“Call open_workspace first”。
+- **review 上游改动不做整文件覆盖。** 上游 1.0.6 的 checkpoint 修复与本项目已经演化出的有界 sparse-journal-v4 数据模型冲突，因此继续保留 Portable 的历史冻结、512 MiB 总上限、空监控会话抑制、rollback payload 分层和 safety snapshot 语义；只通过现有回归确保 root/session 恢复边界不倒退。
+- **1.1.33 Rescue 继续可直接解压覆盖。** core 包名从 `1.0.5.tgz` 切到 `1.0.7.tgz` 时，旧的 `packages/waishnav-devspace-1.0.5.tgz` 可能作为无执行意义的归档残留在老安装中；Rescue 只对这种已被新 core TGZ 替代的旧 `packages/waishnav-devspace-<版本>.tgz` 允许惰性残留，任何其它目标侧删除仍然 fail-closed。实际运行的 `app/node_modules`、`app/package.json` 和 lockfile 全部切到 1.0.7。
+- Portable Protocol 仍为 1.5，顶层 MCP tool schema 不变；已有 OAuth 客户端、插件和历史 session 不需要重建。
 
 ## 1.1.37 主要变化
 
@@ -519,7 +531,7 @@ https://你的域名/mcp
 
 ```text
 app/                       Portable Node 应用入口、锁文件和插件调度器
-vendor/waishnav-devspace/  受控的 DevSpace 1.0.5 Portable 核心包
+vendor/waishnav-devspace/  受控的 DevSpace 1.0.7 基线 Portable 核心包
 setup/                     原生 WinForms、部署、隧道、测试和发行脚本
 scripts/                   开发引导、核心打包、运行时恢复和仓库检查
 docs/releases/             每个版本的完整 HOTFIX 更新说明
@@ -527,7 +539,7 @@ docs/acceptance/            历史验收记录
 .github/workflows/         CI 与标签发行流程
 ```
 
-`app/node_modules` 不是源码，不提交。当前 Portable 核心的可维护副本位于 `vendor/waishnav-devspace`；构建前由脚本将其打包为 `packages/waishnav-devspace-1.0.5.tgz`，再按 `app/package-lock.json` 安装。
+`app/node_modules` 不是源码，不提交。当前 Portable 核心的可维护副本位于 `vendor/waishnav-devspace`；构建前由脚本将其打包为 `packages/waishnav-devspace-1.0.7.tgz`，再按 `app/package-lock.json` 安装。这里的 `1.0.7` 表示上游兼容基线；最终内容仍包含本项目维护的 Portable 扩展，不能用 npm 上的原版包直接覆盖。
 
 ## 开发环境
 
@@ -560,7 +572,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.37
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.38
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -588,7 +600,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.37 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.38 -BypassProxy
 ```
 
 ## 在线更新

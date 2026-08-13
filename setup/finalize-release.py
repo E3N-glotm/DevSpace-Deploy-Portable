@@ -8,7 +8,9 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_TGZ = ROOT / "packages" / "waishnav-devspace-1.0.5.tgz"
+CORE_PACKAGE_JSON = ROOT / "vendor" / "waishnav-devspace" / "package.json"
+CORE_VERSION = json.loads(CORE_PACKAGE_JSON.read_text(encoding="utf-8"))["version"]
+PACKAGE_TGZ = ROOT / "packages" / f"waishnav-devspace-{CORE_VERSION}.tgz"
 LOCK_FILE = ROOT / "app" / "package-lock.json"
 MANIFEST_FILE = ROOT / "VERSION-MANIFEST.json"
 
@@ -42,6 +44,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
     manifest["release"] = f"DevSpacePortable-Windows-x64-{version}"
     manifest["builtAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
     manifest.setdefault("runtime", {})["devspacePortable"] = version
+    manifest["runtime"]["devspace"] = CORE_VERSION
 
     key_files: dict[str, str] = manifest.setdefault("keyFiles", {})
     candidates = {
@@ -54,7 +57,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
     key_files.clear()
     candidates.update(
         {
-            "packages/waishnav-devspace-1.0.5.tgz",
+            f"packages/waishnav-devspace-{CORE_VERSION}.tgz",
             "app/package-lock.json",
             "app/package.json",
             "app/node_modules/@earendil-works/pi-coding-agent/package.json",
@@ -91,6 +94,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "setup/test-portable-ui-heartbeat.mjs",
             "setup/test-native-ui-resilience.mjs",
             "setup/test-native-close-tray.mjs",
+            "setup/test-upstream-workspace-reuse.mjs",
             "setup/test-portable-ui-workflows.mjs",
             "setup/test-oauth-client-compatibility.mjs",
             "setup/test-standalone-updater.mjs",
@@ -127,6 +131,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "app/node_modules/@waishnav/devspace/dist/db/schema.js",
             "app/node_modules/@waishnav/devspace/dist/workspace-store.js",
             "app/node_modules/@waishnav/devspace/dist/workspaces.js",
+            "app/node_modules/@waishnav/devspace/dist/request-meta.js",
             "app/node_modules/@waishnav/devspace/dist/redaction.js",
             "app/node_modules/@waishnav/devspace/dist/runtime-state.js",
             "app/node_modules/@waishnav/devspace/dist/file-watch.js",

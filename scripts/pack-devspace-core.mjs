@@ -61,6 +61,7 @@ const lock = JSON.parse(readFileSync(lockPath, "utf8"));
 const dependency = lock.packages?.["node_modules/@waishnav/devspace"];
 if (!dependency) throw new Error("app/package-lock.json has no @waishnav/devspace package entry.");
 dependency.resolved = `file:../packages/${expectedName}`;
+dependency.version = packageJson.version;
 dependency.integrity = integrity;
 lock.packages[""].dependencies["@waishnav/devspace"] = `file:../packages/${expectedName}`;
 writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, "utf8");

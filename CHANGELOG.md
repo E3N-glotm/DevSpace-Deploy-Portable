@@ -2,6 +2,18 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.38
+
+- 将维护版 `@waishnav/devspace` 上游兼容基线从 1.0.5 选择性同步到 1.0.7；不直接覆盖 Portable fork，保留现有 sparse review、OAuth、full-access 权限、插件、Memories、Computer Use、会话管理、更新器和原生 UI 扩展。
+- 移植上游 1.0.6 的 ChatGPT conversation-aware checkout reuse：宿主提供 `_meta["openai/session"]` 时，同一 conversation + 同一 checkout 项目复用同一个 workspaceId；首次 open 返回完整 bootstrap，重复 open 只返回简化续用信息。
+- 新增 SQLite `workspace_conversation_bindings` migration，使 conversation → workspace 绑定跨 MCP 重连和 DevSpace 重启保持；绑定指向归档 session、丢失目录或失效 root 时自动清理并重建。
+- 同一 conversation/target 的并发重复 open 共享一个 pending operation，避免竞态创建多个 workspace；worktree 模式仍保持每次请求创建新的隔离 worktree。
+- 新创建 workspaceId 改为 `ws_` + 10 位随机十六进制；已有长 UUID workspaceId 不迁移、不失效，仍由持久 session store 恢复。
+- unknown workspaceId 错误改为明确要求重新打开目标项目/worktree并继续使用新 ID；上游 review-checkpoint 文件没有整包覆盖，本项目现有 sparse-journal-v4 的历史冻结、空间上限、rollback/snapshot 语义继续作为权威实现。
+- 新增 conversation metadata、同会话复用、并发合并、重启恢复、stale/archived binding 恢复、compact ID 与 unknown-ID 指引回归；Portable Protocol 仍为 `1.5`，顶层 MCP tool schema 不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.38.md)
+
 ## 1.1.37
 
 - 修复原生控制中心 `AI / MCP OAuth 客户端` 页面首次打开时的 WinForms `SplitContainer` 约束异常：不再在容器真实尺寸稳定前写死 `SplitterDistance` 与 Panel MinSize。
