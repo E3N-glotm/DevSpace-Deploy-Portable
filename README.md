@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.35**
+当前稳定版本：**1.1.36**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.35.zip
+DevSpacePortable-Windows-x64-1.1.36.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.35 没有修改 Portable Protocol 或顶层 MCP Schema，已有 ChatGPT OAuth 客户端不需要重建。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.36 没有修改 Portable Protocol 或顶层 MCP Schema，已有 ChatGPT OAuth 客户端不需要重建。
 
 ## Gemini、Claude 和其它 MCP 客户端
 
@@ -310,8 +310,19 @@ https://你的域名/mcp
 ## Release 文件说明
 
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
+- 精确基础版本存在时会发布 `DevSpacePortable-Update-<旧版本>-to-<新版本>.zip` 增量包；1.1.36 额外保留 `1.1.33 -> 1.1.36` 增量资产，避免 1.1.33 被迫下载 500+ MiB 完整包。
+- 1.1.36 还提供 `DevSpacePortable-Rescue-1.1.33-to-1.1.36.zip`。这是**不调用旧 Update.exe 的直接覆盖救援包**：先关闭/停止旧 Portable，再把 ZIP 内容直接解压到原安装目录并选择全部替换即可；包内不包含 `data`、`logs`、`reports`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.36 主要变化
+
+- **修复“完整包已经下载完成，但 Apply 阶段仍失败”的事务边界。** 旧 updater 在调用 `portable-manager stop` 失败时仍可能继续替换程序目录；1.1.36 改为 stop 必须成功才允许触碰任何程序文件，失败时直接中止，并明确声明旧程序文件未被修改。
+- **程序版本提交与网络/任务恢复解耦。** 新程序文件完成替换并通过 `VERSION-MANIFEST.json` 校验后即视为更新提交；后续计划任务、MCP 服务或公网 tunnel 因当前网络环境暂时无法恢复时，只记录 `servicesRecovered=false` 与具体错误，不再把已经正确安装的新版本整包回滚。
+- **补齐 Apply 级兜底。** 新版 Update.exe 在增量 Apply 失败且后端明确确认旧版本已安全回滚后，会强制重新 Stage 一次完整包并进行最后一次 Apply；不会无限循环 fallback。
+- **1.1.33 专项升级路径。** Release 同时发布 `DevSpacePortable-Update-1.1.33-to-1.1.36.zip` 和 `DevSpacePortable-Rescue-1.1.33-to-1.1.36.zip`。救援包是 direct-overlay-v1，只携带发生变化的非持久程序文件；构建时若发现目标版本要求删除旧文件，会直接拒绝生成，避免“解压覆盖后仍残留不兼容文件”。
+- **发行产物继续保留在源码根目录。** 本地构建完成后，完整包、标准增量包、1.1.33 专项增量包和救援覆盖包都保存在 `E:\program\Python\DevSpaceDeploy`，便于直接分发和归档。
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变，不要求重新 OAuth 或重新 Scan Tools。
 
 ## 1.1.35 主要变化
 
@@ -541,7 +552,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.35
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.36
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -569,7 +580,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.35 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.36 -BypassProxy
 ```
 
 ## 在线更新

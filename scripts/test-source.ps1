@@ -41,6 +41,10 @@ Write-Host "==> setup/test-incremental-update.py"
 & python setup\test-incremental-update.py
 if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-incremental-update.py" }
 
+Write-Host "==> setup/test-rescue-overlay.py"
+& python setup\test-rescue-overlay.py
+if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-rescue-overlay.py" }
+
 Write-Host "==> setup/test-release-plugin-layout.py"
 & python setup\test-release-plugin-layout.py
 if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-release-plugin-layout.py" }

@@ -25,6 +25,7 @@ def main() -> int:
     parser.add_argument("--repository", default="E3N-glotm/DevSpace-Deploy-Portable")
     parser.add_argument("--zip")
     parser.add_argument("--incremental", action="append", default=[])
+    parser.add_argument("--rescue", action="append", default=[])
     parser.add_argument("--channel", default="stable", choices=("stable", "beta", "nightly"))
     args = parser.parse_args()
 
@@ -63,6 +64,29 @@ def main() -> int:
                 "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{delta.name}",
             }
         )
+    rescue_assets = []
+    rescue_pattern = re.compile(r"^DevSpacePortable-Rescue-(\d+\.\d+\.\d+)-to-(\d+\.\d+\.\d+)\.zip$")
+    for raw in args.rescue:
+        rescue = Path(raw).resolve()
+        if not rescue.is_file():
+            raise SystemExit(f"Rescue overlay ZIP not found: {rescue}")
+        match = rescue_pattern.fullmatch(rescue.name)
+        if not match:
+            raise SystemExit(f"Invalid rescue overlay asset name: {rescue.name}")
+        from_version, to_version = match.groups()
+        if to_version != version:
+            raise SystemExit(f"Rescue overlay target {to_version} does not match release {version}")
+        rescue_assets.append(
+            {
+                "format": "direct-overlay-v1",
+                "fromVersion": from_version,
+                "toVersion": to_version,
+                "name": rescue.name,
+                "size": rescue.stat().st_size,
+                "sha256": sha256_file(rescue),
+                "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{rescue.name}",
+            }
+        )
     manifest = {
         "schemaVersion": 2,
         "channel": args.channel,
@@ -84,6 +108,7 @@ def main() -> int:
             "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{asset_name}",
         },
         "incrementalAssets": incremental_assets,
+        "rescueAssets": rescue_assets,
         "releaseNotes": f"docs/releases/HOTFIX-{version}.md",
     }
 
@@ -95,6 +120,7 @@ def main() -> int:
     )
     checksum_lines = [f"{digest}  {asset_name}\n"]
     checksum_lines.extend(f"{item['sha256']}  {item['name']}\n" for item in incremental_assets)
+    checksum_lines.extend(f"{item['sha256']}  {item['name']}\n" for item in rescue_assets)
     (OUTPUT_DIRECTORY / "SHA256SUMS-release.txt").write_text(
         "".join(checksum_lines),
         encoding="utf-8",

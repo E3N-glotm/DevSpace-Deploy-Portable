@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.36
+
+- 修复 1.1.33 起暴露出的完整包 Apply 事务边界问题：更新前 `portable-manager stop` 不再以 ignore-failure 方式执行；旧 Portable 未能完全停止时直接中止，任何程序文件都不移动，避免带锁目录进入半更新状态后再依赖脆弱回滚。
+- 将“程序文件提交”与“任务/服务/公网 tunnel 恢复”拆成两个阶段。目标程序文件替换完成并通过 `VERSION-MANIFEST.json` 校验后即提交新版本；后续 `install-tasks/start` 失败只返回 `servicesRecovered=false` 与错误详情，不再把已经正确安装的新版本回滚。
+- 新版 Update.exe 增加 Apply 级 full fallback：增量 Apply 失败且后端明确记录 `rolledBack=true` 时，强制 Stage 一次完整包并再 Apply 一次；不在回滚不完整时继续，不无限循环。
+- Release pipeline 除常规“上一稳定版 → 1.1.36”增量包外，固定生成 `DevSpacePortable-Update-1.1.33-to-1.1.36.zip`，让 1.1.33 用户优先下载小型增量资产而不是 500+ MiB 完整包。
+- 新增 `DevSpacePortable-Rescue-1.1.33-to-1.1.36.zip` direct-overlay-v1 救援包：关闭旧 Portable 后可直接解压到安装目录并覆盖；`data`、`logs`、`reports` 永不进入该包。构建器如果发现目标版本需要删除 1.1.33 中的旧文件会拒绝生成，避免“只覆盖不删除”留下不兼容残留。
+- 本地 Release 构建继续将完整包、增量包和救援包保存在源码根目录 `E:\program\Python\DevSpaceDeploy`；Portable Protocol 仍为 `1.5`，顶层 MCP tool schema 不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.36.md)
+
 ## 1.1.35
 
 - OAuth Dynamic Client Registration 不再把远程回调域名写死为 `chatgpt.com`：标准 HTTPS 回调、localhost/loopback HTTP(S) 和符合反向域名格式的 native private URI scheme 均可注册，因此 Gemini、Claude、Cursor、IDE 和未来其它标准 MCP 客户端不再需要 DevSpace 维护厂商白名单。

@@ -8,6 +8,7 @@ const updater = readFileSync(join(root, "setup", "portable-updater.ps1"), "utf8"
 const manager = readFileSync(join(root, "setup", "portable-manager.cjs"), "utf8");
 const manifestBuilder = readFileSync(join(root, "setup", "create-update-manifest.py"), "utf8");
 const deltaBuilder = readFileSync(join(root, "setup", "create-incremental-update.py"), "utf8");
+const rescueBuilder = readFileSync(join(root, "setup", "create-rescue-overlay.py"), "utf8");
 
 assert.match(updater, /repos\/\$Repository\/releases\/latest/);
 assert.match(updater, /update-manifest\.json/);
@@ -58,6 +59,8 @@ assert.match(updater, /Get-FileHash[^\n]+SHA256/);
 assert.match(updater, /Get-IncrementalCandidate/);
 assert.match(updater, /Stage-IncrementalUpdate/);
 assert.match(updater, /automatically falling back to the full package/);
+assert.match(updater, /\[switch\]\$ForceFull/);
+assert.match(updater, /Forced full-package fallback after a previous incremental apply failure/);
 assert.match(updater, /acceptedBaseDrift/);
 assert.match(updater, /Accepting changed-file base drift/);
 assert.match(updater, /file-delta-v1 carries the complete target file/);
@@ -69,7 +72,11 @@ assert.match(updater, /\.update-backup-/);
 assert.match(updater, /rolledBack = \$filesRestored/);
 assert.match(updater, /Repair-PortableTasksAndStart/);
 assert.match(updater, /Invoke-Manager "install-tasks"/);
+assert.match(updater, /Stop-PortableBeforeApply/);
+assert.match(updater, /No program files were changed/);
+assert.match(updater, /Program files were updated successfully, but post-update service recovery is incomplete/);
 assert.match(updater, /servicesRecovered/);
+assert.match(updater, /serviceRecoveryError/);
 assert.match(updater, /rollbackErrors/);
 assert.match(updater, /DevSpace update error:/);
 assert.match(updater, /Write-JsonResult \(\[ordered\]@\{/);
@@ -84,9 +91,13 @@ assert.match(manager, /Detached updater failed to acknowledge launch/);
 assert.match(updater, /LaunchAckPath/);
 assert.match(updater, /apply-started/);
 assert.match(manifestBuilder, /incrementalAssets/);
+assert.match(manifestBuilder, /rescueAssets/);
 assert.match(manifestBuilder, /incremental-first-full-fallback/);
 assert.match(deltaBuilder, /file-delta-v1/);
 assert.match(deltaBuilder, /baseSha256/);
+assert.match(rescueBuilder, /direct-overlay-v1/);
+assert.match(rescueBuilder, /PERSISTENT_ROOTS = \("data", "logs", "reports"\)/);
+assert.match(rescueBuilder, /Direct-extract rescue overlay is not safe/);
 
 const transportBlock = updater.slice(
   updater.indexOf("function Get-GitHubTransportCandidates"),
@@ -135,15 +146,21 @@ console.log(JSON.stringify({
   explicitDirectTunFallback: true,
   incrementalFirst: true,
   automaticFullFallback: true,
+  forcedFullFallbackAfterApplyFailure: true,
   changedFileFullReplacementDriftTolerance: true,
   deletionDriftProtection: true,
   updateLaunchAcknowledgement: true,
   deltaManifestGeneration: true,
+  directExtractRescueOverlayGeneration: true,
+  rescuePersistentRootsExcluded: true,
+  rescueDeletionSafetyGate: true,
   sizeAndSha256Validation: true,
   archiveTraversalProtection: true,
   sourceCheckoutProtection: true,
   transactionalRollback: true,
   scheduledTaskRepairBeforeRestart: true,
+  preApplyStopMustSucceed: true,
+  programCommitIndependentOfServiceRecovery: true,
   rollbackTaskAndServiceRecovery: true,
   structuredBackendFailure: true,
   persistentDataPreserved: true,

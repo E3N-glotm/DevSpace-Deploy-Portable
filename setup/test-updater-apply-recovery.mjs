@@ -34,7 +34,7 @@ function installNode(target) {
   catch { copyFileSync(SOURCE_NODE, target); }
 }
 
-function createFixture({ failFirstStart = false } = {}) {
+function createFixture({ failFirstStart = false, badTargetManifest = false, failStop = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devspace-updater-apply-"));
   const state = join(root, "data", "state");
   const config = join(root, "data", "config");
@@ -64,6 +64,10 @@ const starts = path.join(state, "mock-start-count");
 const command = process.argv[2] || "";
 fs.appendFileSync(events, JSON.stringify({ command, at: new Date().toISOString() }) + "\n");
 if (command === "stop") {
+  if (process.env.DEVSPACE_TEST_FAIL_STOP === "1") {
+    process.stderr.write("simulated pre-update stop failure\n");
+    process.exit(6);
+  }
   process.stdout.write("mock services stopped\n");
   process.exit(0);
 }
@@ -91,14 +95,16 @@ process.exit(9);
 `, "utf8");
 
   copyFileSync(NOOP_EXE, join(payload, "DevSpace-Portable.exe"));
-  writeJson(join(payload, "VERSION-MANIFEST.json"), { runtime: { devspacePortable: "1.1.27" } });
+  writeJson(join(payload, "VERSION-MANIFEST.json"), {
+    runtime: { devspacePortable: badTargetManifest ? "9.9.9" : "1.1.27" },
+  });
   copyFileSync(SOURCE_UPDATER, join(stage, "portable-updater.ps1"));
   writeJson(join(stage, "stage-info.json"), {
     targetVersion: "1.1.27",
     updateMode: "full",
     payloadRoot: payload,
   });
-  return { root, stage, failFirstStart };
+  return { root, stage, failFirstStart, badTargetManifest, failStop };
 }
 
 function runApply(fixture) {
@@ -119,6 +125,7 @@ function runApply(fixture) {
     env: {
       ...process.env,
       DEVSPACE_TEST_FAIL_FIRST_START: fixture.failFirstStart ? "1" : "0",
+      DEVSPACE_TEST_FAIL_STOP: fixture.failStop ? "1" : "0",
     },
   });
 }
@@ -129,7 +136,9 @@ function managerCommands(root) {
 }
 
 const successFixture = createFixture();
-const rollbackFixture = createFixture({ failFirstStart: true });
+const serviceRecoveryFixture = createFixture({ failFirstStart: true });
+const rollbackFixture = createFixture({ badTargetManifest: true });
+const stopFailureFixture = createFixture({ failStop: true });
 try {
   const success = runApply(successFixture);
   assert.equal(success.status, 0, success.stderr || success.stdout);
@@ -142,8 +151,18 @@ try {
   assert.equal(existsSync(join(successFixture.root, "data", "state", "mock-tasks-installed")), true);
   assert.deepEqual(managerCommands(successFixture.root), ["stop", "install-tasks", "start"]);
 
+  const serviceRecovery = runApply(serviceRecoveryFixture);
+  assert.equal(serviceRecovery.status, 0, serviceRecovery.stderr || serviceRecovery.stdout);
+  const serviceRecoveryManifest = readJson(join(serviceRecoveryFixture.root, "VERSION-MANIFEST.json"));
+  const serviceRecoveryResult = readJson(join(serviceRecoveryFixture.root, "data", "state", "update-result.json"));
+  assert.equal(serviceRecoveryManifest.runtime.devspacePortable, "1.1.27");
+  assert.equal(serviceRecoveryResult.success, true);
+  assert.equal(serviceRecoveryResult.servicesRecovered, false);
+  assert.match(serviceRecoveryResult.serviceRecoveryError, /simulated post-update start failure/i);
+  assert.deepEqual(managerCommands(serviceRecoveryFixture.root), ["stop", "install-tasks", "start"]);
+
   const rollback = runApply(rollbackFixture);
-  assert.notEqual(rollback.status, 0, "forced post-update start failure should exercise rollback");
+  assert.notEqual(rollback.status, 0, "forced target-manifest mismatch should exercise file rollback");
   const rollbackManifest = readJson(join(rollbackFixture.root, "VERSION-MANIFEST.json"));
   const rollbackResult = readJson(join(rollbackFixture.root, "data", "state", "update-result.json"));
   assert.equal(rollbackManifest.runtime.devspacePortable, "1.1.26");
@@ -151,18 +170,27 @@ try {
   assert.equal(rollbackResult.rolledBack, true);
   assert.equal(rollbackResult.servicesRecovered, true);
   assert.deepEqual(rollbackResult.rollbackErrors, []);
-  assert.deepEqual(managerCommands(rollbackFixture.root), [
-    "stop", "install-tasks", "start", "stop", "install-tasks", "start",
-  ]);
-  assert.match(`${rollback.stdout}\n${rollback.stderr}`, /DevSpace update error:.*simulated post-update start failure/is);
+  assert.deepEqual(managerCommands(rollbackFixture.root), ["stop", "stop", "install-tasks", "start"]);
+  assert.match(`${rollback.stdout}\n${rollback.stderr}`, /DevSpace update error:.*Applied version manifest does not report 1\.1\.27/is);
   assert.doesNotMatch(`${rollback.stdout}\n${rollback.stderr}`.trim().split(/\r?\n/).at(-1) || "", /FullyQualifiedErrorId/i);
+
+  const stopFailure = runApply(stopFailureFixture);
+  assert.notEqual(stopFailure.status, 0, "failed pre-update stop must abort before moving program files");
+  const stopFailureManifest = readJson(join(stopFailureFixture.root, "VERSION-MANIFEST.json"));
+  assert.equal(stopFailureManifest.runtime.devspacePortable, "1.1.26");
+  assert.equal(existsSync(join(stopFailureFixture.root, ".update-backup-1.1.27")), false);
+  assert.deepEqual(managerCommands(stopFailureFixture.root), ["stop", "stop", "stop"]);
+  assert.match(`${stopFailure.stdout}\n${stopFailure.stderr}`, /No program files were changed/i);
 
   console.log(JSON.stringify({
     missingTasksReinstalledBeforeStart: true,
     updatedServicesStartedAfterTaskRepair: true,
-    failedUpdateRestoresPreviousFiles: true,
+    postUpdateServiceFailureDoesNotRollbackValidProgramFiles: true,
+    serviceRecoveryFailureIsReportedSeparately: true,
+    fileTransactionFailureRestoresPreviousFiles: true,
     rollbackReinstallsTasksBeforeRestart: true,
     rollbackRecoversPreviousServices: true,
+    failedPreUpdateStopDoesNotTouchProgramFiles: true,
     conciseBackendFailurePreservedForOlderUpdaterUi: true,
   }));
 } finally {
@@ -170,5 +198,7 @@ try {
   // brief opportunity to release its image section before removing fixtures.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
   rmSync(successFixture.root, { recursive: true, force: true });
+  rmSync(serviceRecoveryFixture.root, { recursive: true, force: true });
   rmSync(rollbackFixture.root, { recursive: true, force: true });
+  rmSync(stopFailureFixture.root, { recursive: true, force: true });
 }

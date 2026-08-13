@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.35";
+export const DEVSPACE_SERVER_VERSION = "1.1.36";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -110,6 +110,10 @@ const FEATURE_CATALOG = [
     { id: "vendor-neutral-oauth-dynamic-client-registration", maturity: "stable", since: "1.1.35" },
     { id: "manual-confidential-oauth-client-management", maturity: "stable", since: "1.1.35" },
     { id: "oauth-owner-redirect-uri-review", maturity: "stable", since: "1.1.35" },
+    { id: "updater-preapply-stop-gate", maturity: "stable", since: "1.1.36" },
+    { id: "updater-program-commit-independent-service-recovery", maturity: "stable", since: "1.1.36" },
+    { id: "updater-apply-failure-full-fallback", maturity: "stable", since: "1.1.36" },
+    { id: "legacy-1.1.33-rescue-overlay", maturity: "stable", since: "1.1.36" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

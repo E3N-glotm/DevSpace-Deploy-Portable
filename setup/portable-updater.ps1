@@ -12,7 +12,8 @@ param(
     [string]$StagingPath = "",
     [int]$UiPid = 0,
     [string]$LaunchAckPath = "",
-    [string]$UpdateTaskName = ""
+    [string]$UpdateTaskName = "",
+    [switch]$ForceFull
 )
 
 $ErrorActionPreference = "Stop"
@@ -1118,6 +1119,11 @@ function Stage-Update {
         }
     }
     Remove-OldStagingDirectories
+    if ($ForceFull) {
+        $reason = "Forced full-package fallback after a previous incremental apply failure."
+        Write-UpdateLog $reason
+        return Stage-FullUpdate $latest $reason
+    }
     $incremental = $null
     try { $incremental = Get-IncrementalCandidate $latest }
     catch {
@@ -1147,6 +1153,24 @@ function Invoke-Manager([string]$Command, [switch]$IgnoreFailure) {
     $output = & $node $manager $Command 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -and -not $IgnoreFailure) { throw "Portable manager $Command failed: $output" }
     return $output.Trim()
+}
+
+function Stop-PortableBeforeApply {
+    try {
+        $output = Invoke-WithRetry -Description "Portable pre-update stop" -Attempts 3 -Operation {
+            Invoke-Manager "stop"
+        }
+        Write-UpdateLog "Portable pre-update stop completed successfully."
+        return $output
+    } catch {
+        # Never begin moving program files after a failed stop. The old updater
+        # ignored this failure and could continue into locked directories,
+        # turning a recoverable stop problem into a partially applied full
+        # package plus a fragile rollback.
+        $message = $_.Exception.Message
+        Write-UpdateLog "Portable pre-update stop failed; no program files were changed: $message"
+        throw "Portable could not be stopped safely before the update. No program files were changed. $message"
+    }
 }
 
 function Repair-PortableTasksAndStart([switch]$IgnoreFailure) {
@@ -1232,15 +1256,17 @@ function Apply-StagedUpdate {
         Wait-Process -Id $UiPid -Timeout 90 -ErrorAction SilentlyContinue
     }
 
-    $backup = Join-Path $Root (".update-backup-{0}-{1}" -f $targetVersion, [guid]::NewGuid().ToString("N"))
     $shouldRestartServices = (Test-Path (Join-Path $Root "data\config\config.json")) -and (Test-Path (Join-Path $Root "data\config\auth.json"))
+    Write-UpdateProgress -Phase "applying" -Message "Stopping Portable-owned processes before applying $targetVersion"
+    Write-UpdateLog "Stopping Portable services before applying $targetVersion."
+    Stop-PortableBeforeApply | Out-Null
+
+    $backup = Join-Path $Root (".update-backup-{0}-{1}" -f $targetVersion, [guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $backup | Out-Null
     $movedOld = New-Object System.Collections.Generic.List[string]
     $movedNew = New-Object System.Collections.Generic.List[string]
     try {
-        Write-UpdateProgress -Phase "applying" -Message "Stopping Portable-owned processes and applying $targetVersion"
-        Write-UpdateLog "Stopping Portable services before applying $targetVersion."
-        Invoke-Manager "stop" -IgnoreFailure | Out-Null
+        Write-UpdateProgress -Phase "applying" -Message "Applying DevSpace Portable $targetVersion program files"
 
         if ($updateMode -eq "incremental") {
             foreach ($entry in @($deltaManifest.changedFiles)) {
@@ -1294,10 +1320,22 @@ function Apply-StagedUpdate {
         if ([string]$newManifest.runtime.devspacePortable -ne $targetVersion) { throw "Applied version manifest does not report $targetVersion." }
         $taskOutput = "Portable is not configured; task reconciliation was skipped."
         $startOutput = "Portable is not configured; service restart was skipped."
+        $servicesRecovered = -not $shouldRestartServices
+        $serviceRecoveryError = ""
         if ($shouldRestartServices) {
-            $serviceRecovery = Repair-PortableTasksAndStart
+            # Program-file replacement is the update transaction. Task/tunnel
+            # recovery happens after the new manifest has already been
+            # validated and must not roll back a valid installation merely
+            # because the current network path, tunnel provider, or task host
+            # is temporarily unavailable.
+            $serviceRecovery = Repair-PortableTasksAndStart -IgnoreFailure
             $taskOutput = [string]$serviceRecovery.tasks
             $startOutput = [string]$serviceRecovery.services
+            $servicesRecovered = [bool]$serviceRecovery.success
+            $serviceRecoveryError = [string]$serviceRecovery.error
+            if (-not $servicesRecovered) {
+                Write-UpdateLog "Program files were updated successfully, but post-update service recovery is incomplete: $serviceRecoveryError"
+            }
         }
         $uiStarted = $false
         $uiStartError = ""
@@ -1317,13 +1355,20 @@ function Apply-StagedUpdate {
             appliedAt = (Get-Date).ToUniversalTime().ToString("o")
             tasks = $taskOutput
             services = $startOutput
+            servicesRecovered = $servicesRecovered
+            serviceRecoveryError = $serviceRecoveryError
             uiStarted = $uiStarted
             uiStartError = $uiStartError
             backupRemoved = $true
         }
         Write-UpdateResult $result
-        Write-UpdateLog "Update $targetVersion applied successfully."
-        Write-UpdateProgress -Phase "completed" -Message "DevSpace Portable $targetVersion update completed"
+        Write-UpdateLog "Update $targetVersion program files applied successfully. servicesRecovered=$servicesRecovered"
+        $completionMessage = if ($servicesRecovered) {
+            "DevSpace Portable $targetVersion update completed"
+        } else {
+            "DevSpace Portable $targetVersion files updated; service recovery needs attention"
+        }
+        Write-UpdateProgress -Phase "completed" -Message $completionMessage
         Remove-TransientUpdateTask
         Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue

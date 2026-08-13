@@ -71,6 +71,23 @@ jobs:
           "BASE_VERSION=$($metadata.version)" >> $env:GITHUB_ENV
           "BASE_ZIP=$namedBase" >> $env:GITHUB_ENV
 
+      - name: Download 1.1.33 rescue base
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $legacyName = "DevSpacePortable-Windows-x64-1.1.33.zip"
+          $legacyZip = Join-Path $env:RUNNER_TEMP $legacyName
+          gh release download v1.1.33 `
+            --repo "${{ github.repository }}" `
+            --pattern $legacyName `
+            --dir $env:RUNNER_TEMP `
+            --clobber
+          if (-not (Test-Path -LiteralPath $legacyZip)) {
+            throw "Missing 1.1.33 rescue base: $legacyZip"
+          }
+          "LEGACY_113_ZIP=$legacyZip" >> $env:GITHUB_ENV
+
       - name: Verify tag and source version
         shell: pwsh
         run: |
@@ -103,8 +120,16 @@ jobs:
           python setup/build-release.py
           $targetZip = Join-Path $PWD "DevSpacePortable-Windows-x64-$env:VERSION.zip"
           $deltaZip = Join-Path $PWD "DevSpacePortable-Update-$env:BASE_VERSION-to-$env:VERSION.zip"
+          $legacyDeltaZip = Join-Path $PWD "DevSpacePortable-Update-1.1.33-to-$env:VERSION.zip"
+          $rescueZip = Join-Path $PWD "DevSpacePortable-Rescue-1.1.33-to-$env:VERSION.zip"
           python setup/create-incremental-update.py --base-zip "$env:BASE_ZIP" --target-zip "$targetZip" --output "$deltaZip"
-          python setup/create-update-manifest.py --repository "${{ github.repository }}" --incremental "$deltaZip"
+          python setup/create-incremental-update.py --base-zip "$env:LEGACY_113_ZIP" --target-zip "$targetZip" --output "$legacyDeltaZip"
+          python setup/create-rescue-overlay.py --base-zip "$env:LEGACY_113_ZIP" --target-zip "$targetZip" --output "$rescueZip"
+          python setup/create-update-manifest.py `
+            --repository "${{ github.repository }}" `
+            --incremental "$deltaZip" `
+            --incremental "$legacyDeltaZip" `
+            --rescue "$rescueZip"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -118,6 +143,7 @@ jobs:
           files: |
             DevSpacePortable-Windows-x64-${{ steps.version.outputs.version }}.zip
             DevSpacePortable-Update-*-to-${{ steps.version.outputs.version }}.zip
+            DevSpacePortable-Rescue-*-to-${{ steps.version.outputs.version }}.zip
             release-assets/update-manifest.json
             release-assets/SHA256SUMS-release.txt
 

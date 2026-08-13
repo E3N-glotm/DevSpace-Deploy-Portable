@@ -14,7 +14,9 @@ python setup/finalize-release.py <version> --hotfix docs/releases/HOTFIX-<versio
 PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/test-source.ps1
 python setup/build-release.py
 python setup/create-incremental-update.py --base-zip <previous-full.zip> --target-zip DevSpacePortable-Windows-x64-<version>.zip
-python setup/create-update-manifest.py --repository E3N-glotm/DevSpace-Deploy-Portable --incremental DevSpacePortable-Update-<previous>-to-<version>.zip
+python setup/create-incremental-update.py --base-zip DevSpacePortable-Windows-x64-1.1.33.zip --target-zip DevSpacePortable-Windows-x64-<version>.zip --output DevSpacePortable-Update-1.1.33-to-<version>.zip
+python setup/create-rescue-overlay.py --base-zip DevSpacePortable-Windows-x64-1.1.33.zip --target-zip DevSpacePortable-Windows-x64-<version>.zip --output DevSpacePortable-Rescue-1.1.33-to-<version>.zip
+python setup/create-update-manifest.py --repository E3N-glotm/DevSpace-Deploy-Portable --incremental DevSpacePortable-Update-<previous>-to-<version>.zip --incremental DevSpacePortable-Update-1.1.33-to-<version>.zip --rescue DevSpacePortable-Rescue-1.1.33-to-<version>.zip
 ```
 
 Every full `DevSpacePortable-Windows-x64-<version>.zip` must include the bundled
@@ -29,6 +31,13 @@ always carry the `setup/bundled-plugins/codex-runtime-bridge/` seed payload,
 even when that plugin is byte-identical to the base release. This keeps every
 official DevSpace ZIP self-contained with the bridge payload while still
 excluding user-persistent `data/`, `logs/`, and `reports/` roots from deltas.
+
+For 1.1.36 and later releases that retain the 1.1.33 recovery contract, the
+release pipeline also builds a direct-extract
+`DevSpacePortable-Rescue-1.1.33-to-<version>.zip`. Rescue overlays contain only
+changed non-persistent target files at installation-root-relative ZIP paths.
+The builder fails if the target requires deleting any old 1.1.33 program file,
+because a plain Explorer extraction cannot express deletions safely.
 
 ## Tag release
 
@@ -45,6 +54,8 @@ runs tests, rebuilds the Portable ZIP, and uploads:
 
 - `DevSpacePortable-Windows-x64-<version>.zip`
 - `DevSpacePortable-Update-<previous>-to-<version>.zip`
+- `DevSpacePortable-Update-1.1.33-to-<version>.zip`
+- `DevSpacePortable-Rescue-1.1.33-to-<version>.zip`
 - `release-assets/update-manifest.json`
 - `release-assets/SHA256SUMS-release.txt`
 
@@ -60,7 +71,7 @@ writing the credential to a temporary file. Install GitHub CLI first with
 `winget install --id GitHub.cli --exact --scope user`:
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.35 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.36 -BypassProxy
 ```
 
 `-BypassProxy` is optional. Use it when a local HTTP proxy makes large Release

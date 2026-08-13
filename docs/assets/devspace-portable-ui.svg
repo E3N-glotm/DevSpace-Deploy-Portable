@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-labelledby="title desc">
+  <title id="title">DevSpace Portable control center compatibility artwork</title>
+  <desc id="desc">A non-sensitive documentation asset retained for direct-overlay upgrade compatibility.</desc>
+  <rect width="1200" height="675" fill="#f6f8fc"/>
+  <rect x="48" y="48" width="1104" height="579" rx="28" fill="#ffffff" stroke="#d9e1ef" stroke-width="2"/>
+  <rect x="84" y="82" width="72" height="72" rx="20" fill="#495bf6"/>
+  <text x="120" y="132" text-anchor="middle" font-family="Segoe UI, sans-serif" font-size="44" font-weight="700" fill="#ffffff">D</text>
+  <text x="182" y="118" font-family="Segoe UI, sans-serif" font-size="34" font-weight="700" fill="#182033">DevSpace Portable</text>
+  <text x="182" y="148" font-family="Segoe UI, sans-serif" font-size="16" fill="#6d7895">Control center documentation asset</text>
+  <rect x="84" y="190" width="220" height="385" rx="22" fill="#f7f9fc" stroke="#d9e1ef"/>
+  <rect x="332" y="190" width="784" height="385" rx="22" fill="#f7f9fc" stroke="#d9e1ef"/>
+  <rect x="364" y="226" width="340" height="138" rx="18" fill="#ffffff" stroke="#d9e1ef"/>
+  <rect x="736" y="226" width="348" height="138" rx="18" fill="#ffffff" stroke="#d9e1ef"/>
+  <rect x="364" y="396" width="720" height="143" rx="18" fill="#ffffff" stroke="#d9e1ef"/>
+  <text x="388" y="263" font-family="Segoe UI, sans-serif" font-size="20" font-weight="600" fill="#182033">Local MCP</text>
+  <text x="760" y="263" font-family="Segoe UI, sans-serif" font-size="20" font-weight="600" fill="#182033">Tunnel</text>
+  <text x="388" y="433" font-family="Segoe UI, sans-serif" font-size="20" font-weight="600" fill="#182033">Configuration, plugins, review and diagnostics</text>
+  <circle cx="388" cy="315" r="8" fill="#18a477"/>
+  <circle cx="760" cy="315" r="8" fill="#e2b73f"/>
+  <text x="408" y="321" font-family="Segoe UI, sans-serif" font-size="16" fill="#6d7895">127.0.0.1</text>
+  <text x="780" y="321" font-family="Segoe UI, sans-serif" font-size="16" fill="#6d7895">ngrok / Cloudflare</text>
+  <text x="84" y="610" font-family="Segoe UI, sans-serif" font-size="13" fill="#6d7895">Compatibility documentation asset; contains no real credentials, domains, or local paths.</text>
+</svg>

@@ -22,6 +22,7 @@ packages/*.tgz
 packages/staging/
 DevSpacePortable-Windows-x64-*.zip
 DevSpacePortable-Update-*.zip
+DevSpacePortable-Rescue-*.zip
 SHA256SUMS.txt
 release-assets/*
 !release-assets/README.md

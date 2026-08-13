@@ -46,6 +46,9 @@ namespace DevSpacePortableUpdater
                     ["structuredBackendErrors"] = true,
                     ["taskRepairBeforeRestart"] = true,
                     ["rollbackTaskRepair"] = true,
+                    ["incrementalApplyFullFallback"] = true,
+                    ["programCommitIndependentOfServiceRecovery"] = true,
+                    ["preApplyStopMustSucceed"] = true,
                     ["backendErrorParser"] = parsedBackendError == "scheduled tasks are missing",
                     ["brandIcon"] = brandIcon,
                     ["windowsArgumentQuoting"] = windowsArgumentQuoting,
@@ -419,18 +422,53 @@ namespace DevSpacePortableUpdater
 
                 string stagedUpdater = Path.Combine(staging, "portable-updater.ps1");
                 if (!File.Exists(stagedUpdater)) throw new InvalidOperationException("暂存目录缺少 portable-updater.ps1。");
+                string initialMode = ReadStagedUpdateMode(staging);
                 _progressTimer.Start();
-                BackendResult result = await RunPowerShellAsync(stagedUpdater, "Apply", new[]
+                Dictionary<string, object> applied;
+                try
                 {
-                    "-StagingPath", staging,
-                    "-UiPid", "0",
-                }, 3900000);
+                    BackendResult result = await RunPowerShellAsync(stagedUpdater, "Apply", new[]
+                    {
+                        "-StagingPath", staging,
+                        "-UiPid", "0",
+                    }, 3900000);
+                    applied = ParseLastJsonObject(result.Output);
+                }
+                catch (Exception incrementalError)
+                {
+                    if (!string.Equals(initialMode, "incremental", StringComparison.OrdinalIgnoreCase)
+                        || !CanAttemptFullFallbackAfterApplyFailure())
+                        throw;
+
+                    AppendLog("增量安装失败，但旧版本已完成事务回滚。开始一次完整包安装兜底：" + incrementalError.Message);
+                    _summary.Text = "增量安装失败，正在切换完整包兜底";
+                    _detail.Text = "旧版本已经恢复；完整包只重试一次，不会循环安装。";
+                    BackendResult fallbackStageBackend = await RunPortableUpdaterAsync("Stage", new[] { "-ForceFull" }, 3900000, true);
+                    Dictionary<string, object> fallbackStage = ParseLastJsonObject(fallbackStageBackend.Output);
+                    if (!GetBool(fallbackStage, "staged"))
+                        throw new InvalidOperationException("完整包兜底没有生成可安装的 staging。", incrementalError);
+                    string fallbackStaging = GetString(fallbackStage, "stagingPath", "");
+                    ValidateStagingPath(fallbackStaging);
+                    string fallbackUpdater = Path.Combine(fallbackStaging, "portable-updater.ps1");
+                    if (!File.Exists(fallbackUpdater))
+                        throw new InvalidOperationException("完整包兜底 staging 缺少 portable-updater.ps1。", incrementalError);
+                    AppendLog("完整包兜底已完成下载和校验，开始第二次且最后一次安装。 staging=" + fallbackStaging);
+                    BackendResult fallbackApply = await RunPowerShellAsync(fallbackUpdater, "Apply", new[]
+                    {
+                        "-StagingPath", fallbackStaging,
+                        "-UiPid", "0",
+                    }, 3900000);
+                    applied = ParseLastJsonObject(fallbackApply.Output);
+                }
                 _progressTimer.Stop();
                 RenderProgressFile();
-                Dictionary<string, object> applied = ParseLastJsonObject(result.Output);
                 if (!GetBool(applied, "success")) throw new InvalidOperationException("更新控制器没有返回成功结果。");
                 _summary.Text = "DevSpace Portable " + target + " 更新完成";
-                _detail.Text = "实际更新方式：" + GetString(applied, "updateMode", "unknown") + " · 新控制中心已启动。";
+                bool servicesRecovered = GetBool(applied, "servicesRecovered");
+                string serviceRecoveryError = GetString(applied, "serviceRecoveryError", "");
+                _detail.Text = "实际更新方式：" + GetString(applied, "updateMode", "unknown")
+                    + (servicesRecovered ? " · 服务已恢复。" : " · 程序已更新；服务恢复需要稍后重试。")
+                    + (string.IsNullOrWhiteSpace(serviceRecoveryError) ? "" : " " + serviceRecoveryError);
                 _progress.Value = 1000;
                 AppendLog("更新完成。临时 Update.exe 即将退出。");
                 await Task.Delay(2200);
@@ -444,6 +482,34 @@ namespace DevSpacePortableUpdater
                 _closeButton.Enabled = true;
             }
             finally { _busy = false; }
+        }
+
+        private string ReadStagedUpdateMode(string staging)
+        {
+            try
+            {
+                string file = Path.Combine(staging, "stage-info.json");
+                object parsed = _json.DeserializeObject(File.ReadAllText(file, Encoding.UTF8));
+                Dictionary<string, object> value = parsed as Dictionary<string, object>;
+                return GetString(value, "updateMode", "full");
+            }
+            catch { return "full"; }
+        }
+
+        private bool CanAttemptFullFallbackAfterApplyFailure()
+        {
+            try
+            {
+                string file = Path.Combine(_root, "data", "state", "update-result.json");
+                if (!File.Exists(file)) return false;
+                object parsed = _json.DeserializeObject(File.ReadAllText(file, Encoding.UTF8));
+                Dictionary<string, object> value = parsed as Dictionary<string, object>;
+                return value != null
+                    && !GetBool(value, "success")
+                    && GetBool(value, "rolledBack")
+                    && string.Equals(GetString(value, "updateMode", ""), "incremental", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
         }
 
         private void ValidateStagingPath(string staging)
