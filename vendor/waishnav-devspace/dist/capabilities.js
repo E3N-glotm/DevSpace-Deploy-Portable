@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.36";
+export const DEVSPACE_SERVER_VERSION = "1.1.37";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -114,6 +114,7 @@ const FEATURE_CATALOG = [
     { id: "updater-program-commit-independent-service-recovery", maturity: "stable", since: "1.1.36" },
     { id: "updater-apply-failure-full-fallback", maturity: "stable", since: "1.1.36" },
     { id: "legacy-1.1.33-rescue-overlay", maturity: "stable", since: "1.1.36" },
+    { id: "native-ui-safe-splitcontainer-layout", maturity: "stable", since: "1.1.37" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

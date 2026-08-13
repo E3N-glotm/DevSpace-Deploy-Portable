@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.36**
+当前稳定版本：**1.1.37**
 Portable Protocol：**1.5**  
 上游核心：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.5`
 
@@ -39,7 +39,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.36.zip
+DevSpacePortable-Windows-x64-1.1.37.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +191,7 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.36 没有修改 Portable Protocol 或顶层 MCP Schema，已有 ChatGPT OAuth 客户端不需要重建。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.37 没有修改 Portable Protocol 或顶层 MCP Schema，已有 ChatGPT OAuth 客户端不需要重建。
 
 ## Gemini、Claude 和其它 MCP 客户端
 
@@ -310,10 +310,18 @@ https://你的域名/mcp
 ## Release 文件说明
 
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
-- 精确基础版本存在时会发布 `DevSpacePortable-Update-<旧版本>-to-<新版本>.zip` 增量包；1.1.36 额外保留 `1.1.33 -> 1.1.36` 增量资产，避免 1.1.33 被迫下载 500+ MiB 完整包。
-- 1.1.36 还提供 `DevSpacePortable-Rescue-1.1.33-to-1.1.36.zip`。这是**不调用旧 Update.exe 的直接覆盖救援包**：先关闭/停止旧 Portable，再把 ZIP 内容直接解压到原安装目录并选择全部替换即可；包内不包含 `data`、`logs`、`reports`。
+- 精确基础版本存在时会发布 `DevSpacePortable-Update-<旧版本>-to-<新版本>.zip` 增量包；当前发行链额外保留 `1.1.33 -> 当前版本` 增量资产，避免 1.1.33 被迫下载 500+ MiB 完整包。
+- 当前发行链还提供 `DevSpacePortable-Rescue-1.1.33-to-<当前版本>.zip`。这是**不调用旧 Update.exe 的直接覆盖救援包**：先关闭/停止旧 Portable，再把 ZIP 内容直接解压到原安装目录并选择全部替换即可；包内不包含 `data`、`logs`、`reports`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.37 主要变化
+
+- **修复 AI / MCP OAuth 客户端页面的 `SplitterDistance` 崩溃。** 旧页面在 WinForms 完成 Dock/DPI 布局前就写死 `SplitterDistance=610`、`Panel1MinSize=420`、`Panel2MinSize=390`，当临时 `ClientSize` 小于这些约束时会直接抛出“SplitterDistance 必须在 Panel1MinSize 和 Width - Panel2MinSize 之间”。
+- 新增统一 `SafeSplitLayout`：根据实时 `ClientSize` 计算可用空间并 clamp 分隔位置；窗口创建、DPI 缩放或 Dock 布局暂时过窄时先安全放宽 Panel MinSize，尺寸稳定后再恢复设计最小宽度。
+- OAuth 客户端窗口启用 `AutoScaleMode.Dpi`，并加入 120 / 240 / 480 / 820 / 940 / 1180 / 1800 px 临时宽度回归，保证首次打开和窗口缩放不再抛异常。
+- 插件管理、显式 Memories、日志与诊断页的 SplitContainer 同步切换到同一安全布局逻辑，避免同类问题在其它页面复现。
+- Portable Protocol 仍为 1.5，顶层 MCP Schema 不变，不需要重新创建 OAuth 客户端。
 
 ## 1.1.36 主要变化
 
@@ -552,7 +560,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.36
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.37
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -580,7 +588,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.36 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.37 -BypassProxy
 ```
 
 ## 在线更新

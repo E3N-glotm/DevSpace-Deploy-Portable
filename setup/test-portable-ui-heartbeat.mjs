@@ -23,6 +23,10 @@ assert.match(nativeSource, /会话与回退/);
 assert.match(nativeSource, /显式 Memories/);
 assert.match(nativeSource, /日志与诊断/);
 assert.match(nativeSource, /正在执行，请稍候/);
+assert.match(nativeSource, /internal static class SafeSplitLayout/);
+assert.match(nativeSource, /SafeSplitLayout\.Bind\(split, 420, 390, 0\.55D\)/);
+assert.match(nativeSource, /AutoScaleMode\s*=\s*AutoScaleMode\.Dpi/);
+assert.doesNotMatch(nativeSource, /SplitterDistance\s*=\s*610/);
 
 const temporary = await mkdtemp(join(tmpdir(), "devspace-native-ui-test-"));
 try {
@@ -39,6 +43,11 @@ try {
   });
   const report = JSON.parse((await readFile(reportFile, "utf8")).replace(/^\uFEFF/, ""));
   assert.equal(report.passed, true);
+  assert.equal(report.splitterLayout?.passed, true);
+  assert.equal(report.splitterLayout?.oauthDialog, true);
+  assert.equal(report.splitterLayout?.dpiSafeDeferredLayout, true);
+  assert.deepEqual(report.splitterLayout?.verticalWidths, [120, 240, 480, 820, 940, 1180, 1800]);
+  assert.deepEqual(report.splitterLayout?.horizontalHeights, [90, 180, 360, 520, 700, 980]);
   assert.deepEqual(report.uiTabs, ["状态与部署", "配置与权限", "插件管理", "会话与回退", "显式 Memories", "日志与诊断", "会话列表", "会话详情"]);
   const requiredButtons = [
     "添加工作目录", "安装插件", "刷新插件", "启用", "禁用",
@@ -52,7 +61,14 @@ try {
   for (const button of requiredButtons) {
     assert.ok(report.uiButtons.includes(button), `native UI button is missing: ${button}`);
   }
-  console.log(JSON.stringify({ nativeExe: true, browserUi: false, tabs: report.uiTabs.length, buttons: report.uiButtons.length }));
+  console.log(JSON.stringify({
+    nativeExe: true,
+    browserUi: false,
+    splitterLayout: true,
+    oauthClientDialogLayout: true,
+    tabs: report.uiTabs.length,
+    buttons: report.uiButtons.length,
+  }));
 }
 finally {
   await rm(temporary, { recursive: true, force: true });

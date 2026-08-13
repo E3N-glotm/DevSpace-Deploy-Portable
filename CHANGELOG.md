@@ -2,6 +2,16 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.37
+
+- 修复原生控制中心 `AI / MCP OAuth 客户端` 页面首次打开时的 WinForms `SplitContainer` 约束异常：不再在容器真实尺寸稳定前写死 `SplitterDistance` 与 Panel MinSize。
+- 新增共享 `SafeSplitLayout`，按实时 `ClientSize`、`SplitterWidth` 和目标比例动态 clamp；临时尺寸不足时安全放宽 Panel MinSize，尺寸恢复后再恢复设计约束。
+- OAuth 客户端窗口启用 DPI autoscaling；原生 UI 自检覆盖 120–1800 px 的瞬时宽度，以及横向分栏 90–980 px 的瞬时高度。
+- 插件、Memories、日志分栏同步采用安全布局路径，防止同类异常扩散到其它页面。
+- Portable Protocol 仍为 `1.5`，顶层 MCP tool schema 不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.37.md)
+
 ## 1.1.36
 
 - 修复 1.1.33 起暴露出的完整包 Apply 事务边界问题：更新前 `portable-manager stop` 不再以 ignore-failure 方式执行；旧 Portable 未能完全停止时直接中止，任何程序文件都不移动，避免带锁目录进入半更新状态后再依赖脆弱回滚。

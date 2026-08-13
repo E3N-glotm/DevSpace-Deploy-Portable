@@ -167,6 +167,87 @@ namespace DevSpacePortable.NativeUI
         }
     }
 
+    internal static class SafeSplitLayout
+    {
+        public static void Bind(SplitContainer split, int panel1MinSize, int panel2MinSize, double panel1Ratio)
+        {
+            if (split == null) throw new ArgumentNullException("split");
+            split.Panel1MinSize = 0;
+            split.Panel2MinSize = 0;
+            EventHandler apply = delegate { Apply(split, panel1MinSize, panel2MinSize, panel1Ratio); };
+            split.HandleCreated += apply;
+            split.ParentChanged += apply;
+            split.SizeChanged += apply;
+            Apply(split, panel1MinSize, panel2MinSize, panel1Ratio);
+        }
+
+        public static void Apply(SplitContainer split, int panel1MinSize, int panel2MinSize, double panel1Ratio)
+        {
+            if (split == null || split.IsDisposed) return;
+            int extent = split.Orientation == Orientation.Vertical ? split.ClientSize.Width : split.ClientSize.Height;
+            int splitterWidth = Math.Max(1, split.SplitterWidth);
+            int usable = extent - splitterWidth;
+            if (usable <= 2)
+            {
+                ResetMinimums(split);
+                return;
+            }
+
+            int desiredMin1 = Math.Max(0, panel1MinSize);
+            int desiredMin2 = Math.Max(0, panel2MinSize);
+            bool hasRoomForDesiredMinimums = usable >= desiredMin1 + desiredMin2;
+            int effectiveMin1 = hasRoomForDesiredMinimums ? desiredMin1 : 0;
+            int effectiveMin2 = hasRoomForDesiredMinimums ? desiredMin2 : 0;
+            double safeRatio = Math.Max(0.05D, Math.Min(0.95D, panel1Ratio));
+            int desiredDistance = (int)Math.Round(usable * safeRatio);
+            int lower = Math.Max(1, effectiveMin1);
+            int upper = Math.Max(lower, usable - effectiveMin2);
+            int distance = Math.Max(lower, Math.Min(desiredDistance, upper));
+
+            try
+            {
+                // Clear old minimums before changing the distance. During WinForms
+                // handle creation, DPI scaling and Dock layout can temporarily make
+                // ClientSize much smaller than the eventual dialog size. Keeping old
+                // minimums in that transient state is what causes SplitterDistance to
+                // throw before the page is even shown.
+                ResetMinimums(split);
+                if (split.SplitterDistance != distance) split.SplitterDistance = distance;
+                if (hasRoomForDesiredMinimums)
+                {
+                    split.Panel1MinSize = desiredMin1;
+                    split.Panel2MinSize = desiredMin2;
+                }
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                ApplyFallback(split, usable, safeRatio);
+            }
+            catch (InvalidOperationException)
+            {
+                ApplyFallback(split, usable, safeRatio);
+            }
+        }
+
+        private static void ResetMinimums(SplitContainer split)
+        {
+            if (split.Panel1MinSize != 0) split.Panel1MinSize = 0;
+            if (split.Panel2MinSize != 0) split.Panel2MinSize = 0;
+        }
+
+        private static void ApplyFallback(SplitContainer split, int usable, double ratio)
+        {
+            try
+            {
+                ResetMinimums(split);
+                if (usable <= 2) return;
+                int distance = Math.Max(1, Math.Min((int)Math.Round(usable * ratio), usable));
+                if (split.SplitterDistance != distance) split.SplitterDistance = distance;
+            }
+            catch { }
+        }
+    }
+
     internal class ModernButton : Button
     {
         private bool _hover;
@@ -1189,6 +1270,7 @@ namespace DevSpacePortable.NativeUI
             report["memories"] = manager.RunJson("memory-list", new { limit = 200 });
             report["logs"] = manager.RunJson("log-paths");
             report["processes"] = manager.RunJson("portable-processes");
+            report["splitterLayout"] = RunSplitterLayoutSelfTest(manager);
             using (MainForm form = new MainForm(root))
             {
                 form.CreateControl();
@@ -1200,6 +1282,68 @@ namespace DevSpacePortable.NativeUI
             report["passed"] = true;
             Directory.CreateDirectory(Path.GetDirectoryName(output));
             File.WriteAllText(output, new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(report), Encoding.UTF8);
+        }
+
+        private static Dictionary<string, object> RunSplitterLayoutSelfTest(ManagerClient manager)
+        {
+            Dictionary<string, object> report = new Dictionary<string, object>();
+            int[] transientWidths = new[] { 120, 240, 480, 820, 940, 1180, 1800 };
+            int[] transientHeights = new[] { 90, 180, 360, 520, 700, 980 };
+
+            using (SplitContainer vertical = new SplitContainer { Orientation = Orientation.Vertical, SplitterWidth = 12 })
+            {
+                SafeSplitLayout.Bind(vertical, 420, 390, 0.55D);
+                foreach (int width in transientWidths)
+                {
+                    vertical.Size = new Size(width, 600);
+                    vertical.PerformLayout();
+                    AssertSplitterBounds(vertical);
+                }
+            }
+
+            using (SplitContainer horizontal = new SplitContainer { Orientation = Orientation.Horizontal, SplitterWidth = 12 })
+            {
+                SafeSplitLayout.Bind(horizontal, 180, 160, 0.62D);
+                foreach (int height in transientHeights)
+                {
+                    horizontal.Size = new Size(900, height);
+                    horizontal.PerformLayout();
+                    AssertSplitterBounds(horizontal);
+                }
+            }
+
+            using (OAuthClientsDialog oauth = new OAuthClientsDialog(manager))
+            {
+                oauth.CreateControl();
+                oauth.PerformLayout();
+                SplitContainer oauthSplit = FindControls<SplitContainer>(oauth).Single();
+                oauthSplit.Dock = DockStyle.None;
+                foreach (int width in transientWidths)
+                {
+                    oauthSplit.Size = new Size(width, 520);
+                    oauthSplit.PerformLayout();
+                    AssertSplitterBounds(oauthSplit);
+                }
+            }
+
+            report["passed"] = true;
+            report["verticalWidths"] = transientWidths;
+            report["horizontalHeights"] = transientHeights;
+            report["oauthDialog"] = true;
+            report["dpiSafeDeferredLayout"] = true;
+            return report;
+        }
+
+        private static void AssertSplitterBounds(SplitContainer split)
+        {
+            int extent = split.Orientation == Orientation.Vertical ? split.ClientSize.Width : split.ClientSize.Height;
+            int usable = Math.Max(0, extent - Math.Max(1, split.SplitterWidth));
+            int distance = split.SplitterDistance;
+            if (usable <= 2) return;
+            if (distance < split.Panel1MinSize)
+                throw new InvalidOperationException("SplitterDistance fell below Panel1MinSize during native UI layout self-test.");
+            if (distance > usable - split.Panel2MinSize)
+                throw new InvalidOperationException("SplitterDistance exceeded the safe Panel2MinSize bound during native UI layout self-test.");
         }
 
         private static IEnumerable<T> FindControls<T>(Control root) where T : Control
@@ -1302,6 +1446,7 @@ namespace DevSpacePortable.NativeUI
             StartPosition = FormStartPosition.CenterParent;
             MinimumSize = new Size(980, 650);
             Size = new Size(1180, 760);
+            AutoScaleMode = AutoScaleMode.Dpi;
             BackColor = UiPalette.Background;
             ForeColor = UiPalette.Text;
             Font = UiTypography.Ui(9.25F);
@@ -1351,12 +1496,10 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Vertical,
-                SplitterDistance = 610,
-                Panel1MinSize = 420,
-                Panel2MinSize = 390,
                 SplitterWidth = 12,
                 BackColor = UiPalette.Background,
             };
+            SafeSplitLayout.Bind(split, 420, 390, 0.55D);
             ConfigureGrid();
             split.Panel1.Padding = new Padding(0, 0, 8, 0);
             split.Panel1.Controls.Add(_grid);
@@ -2693,7 +2836,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.36 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.37 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -2923,15 +3066,10 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Horizontal,
-                SplitterDistance = 350,
                 BorderStyle = BorderStyle.None,
                 BackColor = UiPalette.Background,
             };
-            split.SizeChanged += delegate
-            {
-                if (split.Height > 620 && split.SplitterDistance > split.Height - 280)
-                    split.SplitterDistance = split.Height - 280;
-            };
+            SafeSplitLayout.Bind(split, 260, 240, 0.55D);
             TableLayoutPanel top = NewTable(1, 2);
             FlowLayoutPanel actions = NewButtonBar();
             actions.Controls.Add(ActionButton("刷新插件", async delegate { await LoadPluginsAsync(); }, true));
@@ -3180,19 +3318,11 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 Size = new Size(1080, 680),
-                SplitterDistance = 500,
-                Panel1MinSize = 380,
-                Panel2MinSize = 380,
                 SplitterWidth = 14,
                 BorderStyle = BorderStyle.None,
                 BackColor = UiPalette.Background,
             };
-            split.SizeChanged += delegate
-            {
-                int available = Math.Max(0, split.ClientSize.Width - split.SplitterWidth);
-                if (available < split.Panel1MinSize + split.Panel2MinSize) return;
-                split.SplitterDistance = Math.Max(split.Panel1MinSize, Math.Min((int)(available * 0.48), available - split.Panel2MinSize));
-            };
+            SafeSplitLayout.Bind(split, 380, 380, 0.48D);
 
             TableLayoutPanel list = NewTable(1, 5);
             list.AutoScroll = false;
@@ -3332,12 +3462,10 @@ namespace DevSpacePortable.NativeUI
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Horizontal,
                 Size = new Size(1000, 640),
-                SplitterDistance = 390,
-                Panel1MinSize = 180,
-                Panel2MinSize = 160,
                 SplitterWidth = 12,
                 BackColor = UiPalette.Background,
             };
+            SafeSplitLayout.Bind(logSplit, 180, 160, 0.62D);
             GroupBox dev = NewGroup("DevSpace 日志 · 可拖动分隔条调整大小");
             dev.Controls.Add(_devspaceLog);
             GroupBox tunnel = NewGroup("隧道日志");
@@ -3482,7 +3610,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.36") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.37") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
