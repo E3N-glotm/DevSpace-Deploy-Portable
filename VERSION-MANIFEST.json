@@ -1,8 +1,11 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.39",
-  "builtAt": "2026-08-18T18:01:01+08:00",
+  "builtAt": "2026-08-18T18:40:08+08:00",
   "platform": "win32-x64",
+  "releaseMetadata": {
+    "requiresToolSchemaRefresh": true
+  },
   "runtime": {
     "node": "24.18.1",
     "gitForWindows": "2.51.2.windows.1",
@@ -643,8 +646,8 @@
     "setup/bundled-plugins/codex-runtime-bridge/1.1.1/skills/codex-runtime-bridge/SKILL.md.sha256": "9256b3d0783e5c58692be4b8db0d86c42ee7f57cf3b7ae446c3cd8718b0226dc",
     "setup/computer-use-broker.cjs.sha256": "6a886a4f9a0bbc49c17668392ed1ec0322bf76a4f22d1be547ef7f36d7f70d55",
     "setup/create-incremental-update.py.sha256": "ee6e7fa564a06295fdd2f5d08b2de6561e78a0fe0682d33055c6be353d6b07f1",
-    "setup/create-rescue-overlay.py.sha256": "e92275b1a0c07b4fc1b243db3bbe2775fa9f123bca22ad4fc934272f3d2fe1ac",
-    "setup/create-update-manifest.py.sha256": "b191f11e2ea2ed9e3f10cdb852d387fee8efa8e5e27cd5e4f5058e86077cd92a",
+    "setup/create-rescue-overlay.py.sha256": "8c0c78c586186d2f914805aed3c4154df7934cda951bde0fdef745f7931e29fd",
+    "setup/create-update-manifest.py.sha256": "669954b2305b1afa19211542567784bb20dcd808ac21386ee16fd3cc46c8378a",
     "setup/finalize-release.py.sha256": "237a4494897ddda052944030a0130dde1c84bf49a841a6822cc771ce545d3f0b",
     "setup/harden-nested-dependencies.mjs.sha256": "cd6fc4ee071b1444f0dcf96bdae2640ca2bd0e8686a8a86fed457421bb8c457f",
     "setup/legacy/Portable-Setup-1.1.8.hta.sha256": "32bcbb26ab133e51afc03f63c3966534244937dceac7a73c146699ffe1b7d16f",
@@ -678,7 +681,7 @@
     "setup/test-portable-ui-workflows.mjs.sha256": "8f868eda03882b37ba8fe8a5557d07ff1e8f627fb890a088401583393a8a46cf",
     "setup/test-release-plugin-layout.py.sha256": "1ecb02208b17a1da8f5cc6f47a57462c108b0f37e0f19e3ab96243fa44b4b501",
     "setup/test-remote-workspace-backend.mjs.sha256": "238c3bdbe447c0cb00555c60082467d434ff7a6fde076fbd97747a5b7c91dce7",
-    "setup/test-rescue-overlay.py.sha256": "e0a7a245813a8c6bf52a054947c2ce5279049d3f77db3a40cf3d2756ad0ea2d2",
+    "setup/test-rescue-overlay.py.sha256": "d7989582c3163b36af2d67ed38052165aca973afba971a887a2c3b69818a9cb8",
     "setup/test-runtime-cards.mjs.sha256": "012ed0421e5f46995995b5085d42d6908ee7fe4de40c4c1a0b3ebecad59d9afc",
     "setup/test-runtime-log-ui.mjs.sha256": "a653dd2f3d50c4bb43b64038ca9356bdced38e198ac8c2fe58847db2a222f8ac",
     "setup/test-selected-file-diff.mjs.sha256": "1ed95d7171abcf933f33012eb09ff5fed043390311a3a62e83b13e1ee3a888d0",

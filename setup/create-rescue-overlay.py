@@ -59,6 +59,51 @@ def is_safe_obsolete_core_archive(relative: str, target_paths: set[str]) -> bool
     )
 
 
+def hoisted_nested_dependency_path(relative: str) -> str | None:
+    """Return the target hoisted path for one nested node_modules file.
+
+    Example:
+      app/node_modules/pkg/node_modules/ws/lib/x.js
+      -> app/node_modules/ws/lib/x.js
+
+    Scoped parents/dependencies are handled naturally by taking the suffix
+    after the final nested `/node_modules/` boundary.
+    """
+    prefix = "app/node_modules/"
+    if not relative.startswith(prefix):
+        return None
+    marker = "/node_modules/"
+    nested_at = relative.rfind(marker)
+    if nested_at < len(prefix):
+        return None
+    suffix = relative[nested_at + len(marker):]
+    if not suffix:
+        return None
+    return prefix + suffix
+
+
+def is_safe_redundant_nested_dependency(
+    relative: str,
+    *,
+    base_hashes: dict[str, str],
+    target_hashes: dict[str, str],
+) -> bool:
+    """Allow a deleted nested dependency file only when target hoists an
+    exact byte-identical copy.
+
+    A direct-extract overlay cannot delete the old nested file. Leaving it is
+    safe only if Node resolving that stale nested path would obtain the exact
+    same bytes as the target's hoisted dependency. Any missing or different
+    target file remains fail-closed.
+    """
+    hoisted = hoisted_nested_dependency_path(relative)
+    if not hoisted:
+        return False
+    base_digest = base_hashes.get(relative)
+    target_digest = target_hashes.get(hoisted)
+    return bool(base_digest and target_digest and base_digest == target_digest)
+
+
 def file_infos(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     result: dict[str, zipfile.ZipInfo] = {}
     for info in archive.infolist():
@@ -130,6 +175,11 @@ def main() -> int:
             relative
             for relative in deleted_paths
             if is_safe_obsolete_core_archive(relative, set(target_infos))
+            or is_safe_redundant_nested_dependency(
+                relative,
+                base_hashes=base_hashes,
+                target_hashes=target_hashes,
+            )
         )
         unsafe_deleted_paths = sorted(set(deleted_paths) - set(ignored_obsolete_files))
         if unsafe_deleted_paths:
@@ -178,6 +228,7 @@ def main() -> int:
 
 本救援包不包含 data、logs、reports，因此不会覆盖 Owner Password、OAuth、Token、插件运行状态、SQLite、用户配置和日志。
 如果基础版本残留旧 packages/waishnav-devspace-<version>.tgz，且目标版本已携带新的 core TGZ，本救援包允许该旧归档继续留在 packages 目录；它不会被运行时加载，app/package.json 与 lockfile 只指向目标版本 core。
+如果基础版本残留已被 npm 提升到 app/node_modules 的嵌套依赖文件，本救援包只会在旧嵌套文件与目标 hoisted 文件 SHA-256 完全一致时允许其继续留存；任何字节差异仍会拒绝生成 Rescue。
 本包只允许从 {from_version} 使用；不要用于其他基础版本。
 """
 

@@ -123,6 +123,68 @@ with tempfile.TemporaryDirectory(prefix="devspace-rescue-test-") as raw:
         assert manifest["ignoredObsoleteFiles"] == ["packages/waishnav-devspace-1.0.5.tgz"]
         assert "packages/waishnav-devspace-1.0.7.tgz" in archive.namelist()
 
+    nested_base_dir = temporary / "nested-base"
+    nested_target_dir = temporary / "nested-target"
+    nested_base_dir.mkdir()
+    nested_target_dir.mkdir()
+    nested_base = nested_base_dir / "DevSpacePortable-Windows-x64-1.1.33.zip"
+    nested_target = nested_target_dir / "DevSpacePortable-Windows-x64-1.1.36.zip"
+    nested_output = temporary / "nested-hoist-rescue.zip"
+    nested_file = "app/node_modules/parent/node_modules/ws/index.js"
+    hoisted_file = "app/node_modules/ws/index.js"
+    write_release(
+        nested_base,
+        "1.1.33",
+        "base",
+        extra_files={nested_file: b"byte-identical-ws"},
+    )
+    write_release(
+        nested_target,
+        "1.1.36",
+        "target",
+        extra_files={hoisted_file: b"byte-identical-ws"},
+    )
+    nested_result = subprocess.run(
+        ["python", str(BUILDER), "--base-zip", str(nested_base), "--target-zip", str(nested_target), "--output", str(nested_output)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert nested_result.returncode == 0, nested_result.stderr or nested_result.stdout
+    with zipfile.ZipFile(nested_output, "r") as archive:
+        manifest = json.loads(archive.read("RESCUE-MANIFEST.json"))
+        assert nested_file in manifest["ignoredObsoleteFiles"]
+        assert hoisted_file in archive.namelist()
+
+    mismatched_target_dir = temporary / "nested-mismatch"
+    mismatched_target_dir.mkdir()
+    mismatched_target = mismatched_target_dir / "DevSpacePortable-Windows-x64-1.1.36.zip"
+    write_release(
+        mismatched_target,
+        "1.1.36",
+        "target",
+        extra_files={hoisted_file: b"different-ws-bytes"},
+    )
+    mismatched = subprocess.run(
+        [
+            "python",
+            str(BUILDER),
+            "--base-zip",
+            str(nested_base),
+            "--target-zip",
+            str(mismatched_target),
+            "--output",
+            str(temporary / "nested-mismatch-must-not-exist.zip"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert mismatched.returncode != 0
+    assert nested_file in (mismatched.stderr + mismatched.stdout)
+
     deletion_target = temporary / "DevSpacePortable-Windows-x64-1.1.36-deletion-fixture.zip"
     # The builder infers the version from the filename, so use a valid release
     # name in a child directory for the deletion-negative case.
@@ -156,6 +218,8 @@ print(
             "persistentRootsExcluded": True,
             "mandatoryUpdaterFilesReplaced": True,
             "obsoleteCoreArchiveMayRemainInert": True,
+            "byteIdenticalNestedDependencyMayRemainInert": True,
+            "mismatchedNestedDependencyRejected": True,
             "deletedBaseFilesRejected": True,
         }
     )

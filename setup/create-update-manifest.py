@@ -30,6 +30,7 @@ def main() -> int:
     args = parser.parse_args()
 
     version_manifest = json.loads(VERSION_MANIFEST.read_text(encoding="utf-8"))
+    release_metadata = version_manifest.get("releaseMetadata", {})
     release_name = str(version_manifest["release"])
     prefix = "DevSpacePortable-Windows-x64-"
     if not release_name.startswith(prefix):
@@ -99,7 +100,7 @@ def main() -> int:
         "minimumUpdaterVersion": "1.0.0",
         "mandatory": False,
         "restartRequired": True,
-        "requiresToolSchemaRefresh": False,
+        "requiresToolSchemaRefresh": bool(release_metadata.get("requiresToolSchemaRefresh", False)),
         "updateStrategy": "incremental-first-full-fallback",
         "asset": {
             "name": asset_name,
