@@ -298,6 +298,32 @@ export function registerFeatureTools(server, services) {
         return jsonResult(rollback, { rollback });
     });
 
+    registerAppTool(server, "session_restore_safety", {
+        title: "Restore rollback safety snapshot",
+        description: "Restore a pre-rollback safety snapshot created by session_rollback. Works for local and active Linux-agent workspaces and requires exact confirmation RESTORE <snapshotId>.",
+        inputSchema: {
+            workspaceId: z.string(),
+            snapshotId: z.string(),
+            confirmation: z.string(),
+        },
+        outputSchema: { result: z.string(), restore: z.unknown() },
+        ...toolMeta("write"),
+        annotations: WRITE_ANNOTATIONS,
+    }, async ({ workspaceId, snapshotId, confirmation }) => {
+        requireFeature(config, "uiSessionReview", "UI session review");
+        const workspace = workspaces.getWorkspace(workspaceId);
+        await hookManager.runEvent("before_rollback", { workspaceId, workspaceRoot: workspace.root, toolName: "session_restore_safety" }, { strict: true });
+        const restore = await reviewCheckpoints.restoreSafetySnapshot({
+            workspaceId,
+            root: workspace.root,
+            snapshotId,
+            confirmation,
+        });
+        await hookManager.runEvent("after_rollback", { workspaceId, workspaceRoot: workspace.root, toolName: "session_restore_safety", success: true });
+        runtimeState.appendEvent({ kind: "review.safety.restored", subject: snapshotId, workspaceId, payload: restore });
+        return jsonResult(restore, { restore });
+    });
+
     registerAppTool(server, "computer_snapshot", {
         title: "Capture desktop",
         description: "Capture the current Windows virtual desktop. Requires explicit Computer Use enablement, permission, and an active local Portable UI heartbeat.",

@@ -12,12 +12,43 @@ export const workspaceSessions = sqliteTable("workspace_sessions", {
     gitSha: text("git_sha"),
     gitBranch: text("git_branch"),
     gitOriginUrl: text("git_origin_url"),
+    backend: text("backend").notNull().default("local"),
+    backendId: text("backend_id"),
     archivedAt: text("archived_at"),
     createdAt: text("created_at").notNull(),
     lastUsedAt: text("last_used_at").notNull(),
 }, (table) => [
     index("workspace_sessions_root_idx").on(table.root, table.lastUsedAt),
     index("workspace_sessions_status_idx").on(table.status, table.lastUsedAt),
+]);
+export const remoteAgents = sqliteTable("remote_agents", {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    status: text("status").notNull().default("offline"),
+    allowedRootsJson: text("allowed_roots_json").notNull(),
+    hostname: text("hostname"),
+    platform: text("platform"),
+    agentVersion: text("agent_version"),
+    capabilitiesJson: text("capabilities_json").notNull().default("{}"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull(),
+    connectedAt: text("connected_at"),
+    lastSeenAt: text("last_seen_at"),
+    revokedAt: text("revoked_at"),
+}, (table) => [
+    index("remote_agents_name_idx").on(table.name),
+    index("remote_agents_status_idx").on(table.status, table.lastSeenAt),
+]);
+export const remoteAgentEnrollments = sqliteTable("remote_agent_enrollments", {
+    tokenHash: text("token_hash").primaryKey(),
+    name: text("name").notNull(),
+    allowedRootsJson: text("allowed_roots_json").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull(),
+    usedAt: text("used_at"),
+}, (table) => [
+    index("remote_agent_enrollments_expires_idx").on(table.expiresAt),
 ]);
 export const loadedAgentFiles = sqliteTable("loaded_agent_files", {
     workspaceSessionId: text("workspace_session_id")

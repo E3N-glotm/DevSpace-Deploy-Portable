@@ -1268,6 +1268,7 @@ namespace DevSpacePortable.NativeUI
             report["plugins"] = manager.RunJson("plugin-list");
             report["sessions"] = manager.RunJson("review-list", new { includeHidden = true, includeArchived = true });
             report["memories"] = manager.RunJson("memory-list", new { limit = 200 });
+            report["remoteAgents"] = manager.RunJson("remote-agent-list");
             report["logs"] = manager.RunJson("log-paths");
             report["processes"] = manager.RunJson("portable-processes");
             report["splitterLayout"] = RunSplitterLayoutSelfTest(manager);
@@ -1326,10 +1327,19 @@ namespace DevSpacePortable.NativeUI
                 }
             }
 
+            using (RemoteAgentsDialog agents = new RemoteAgentsDialog(manager))
+            {
+                agents.CreateControl();
+                agents.PerformLayout();
+                report["remoteAgentsDialog"] = FindControls<DataGridView>(agents).Count() == 1
+                    && FindControls<TextBox>(agents).Count() >= 3;
+            }
+
             report["passed"] = true;
             report["verticalWidths"] = transientWidths;
             report["horizontalHeights"] = transientHeights;
             report["oauthDialog"] = true;
+            report["remoteAgentsDialog"] = true;
             report["dpiSafeDeferredLayout"] = true;
             return report;
         }
@@ -1831,6 +1841,325 @@ namespace DevSpacePortable.NativeUI
             if (items == null) return values;
             foreach (object item in items) values.Add(Convert.ToString(item));
             return values;
+        }
+    }
+
+    internal sealed class RemoteAgentsDialog : Form
+    {
+        private readonly ManagerClient _manager;
+        private readonly DataGridView _grid = new DataGridView();
+        private readonly TextBox _name = new TextBox();
+        private readonly TextBox _roots = new TextBox();
+        private readonly TextBox _installCommand = new TextBox();
+        private readonly Label _status = new Label();
+
+        public RemoteAgentsDialog(ManagerClient manager)
+        {
+            _manager = manager;
+            Text = "远程服务器 / Linux Agent";
+            Icon = BrandIconFactory.Create(64);
+            StartPosition = FormStartPosition.CenterParent;
+            MinimumSize = new Size(980, 680);
+            Size = new Size(1180, 790);
+            AutoScaleMode = AutoScaleMode.Dpi;
+            BackColor = UiPalette.Background;
+            ForeColor = UiPalette.Text;
+            Font = UiTypography.Ui(9.25F);
+            BuildUi();
+            Shown += async delegate { await LoadAgentsAsync(); };
+        }
+
+        private void BuildUi()
+        {
+            TableLayoutPanel root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 4,
+                Padding = new Padding(20),
+                BackColor = UiPalette.Background,
+            };
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+
+            Panel intro = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+            Label title = new Label
+            {
+                Text = "Linux Remote Workspace Agents",
+                Font = UiTypography.Display(16F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                AutoSize = true,
+                Location = new Point(4, 4),
+            };
+            Label hint = new Label
+            {
+                Text = "Ubuntu 只运行轻量出站 Agent；MCP/OAuth、审阅和权限控制仍由本机 DevSpace 负责。Agent 自己还有一层 allowedRoots 和 Linux 用户权限边界。",
+                Font = UiTypography.Ui(9F),
+                ForeColor = UiPalette.TextMuted,
+                AutoSize = false,
+                AutoEllipsis = true,
+                Location = new Point(6, 42),
+                Size = new Size(1080, 32),
+                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
+            };
+            intro.Controls.Add(title);
+            intro.Controls.Add(hint);
+            root.Controls.Add(intro, 0, 0);
+
+            ConfigureGrid();
+            root.Controls.Add(_grid, 0, 1);
+
+            SurfacePanel formSurface = new SurfacePanel { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 12, 0, 6) };
+            TableLayoutPanel form = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 5,
+                BackColor = Color.Transparent,
+            };
+            form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+            form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
+            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            form.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            form.Controls.Add(FieldLabel("服务器显示名"), 0, 0);
+            form.Controls.Add(FieldLabel("Linux allowedRoots（每行一个）"), 1, 0);
+            StyleTextBox(_name);
+            _name.Text = "gpu-server";
+            form.Controls.Add(_name, 0, 1);
+            StyleTextBox(_roots);
+            _roots.Multiline = true;
+            _roots.ScrollBars = ScrollBars.Vertical;
+            _roots.Height = 64;
+            _roots.Text = "/home/ubuntu/workspace";
+            form.Controls.Add(_roots, 1, 1);
+            FlowLayoutPanel actions = ButtonBar();
+            actions.Controls.Add(ActionButton("生成一次性安装命令", async delegate { await CreateEnrollmentAsync(); }, true));
+            actions.Controls.Add(ActionButton("刷新列表", async delegate { await LoadAgentsAsync(); }, false));
+            actions.Controls.Add(ActionButton("撤销选中 Agent", async delegate { await RevokeSelectedAsync(); }, false));
+            actions.Controls.Add(ActionButton("删除选中记录", async delegate { await DeleteSelectedAsync(); }, false));
+            form.Controls.Add(actions, 0, 2);
+            form.SetColumnSpan(actions, 2);
+            StyleTextBox(_installCommand);
+            _installCommand.Multiline = true;
+            _installCommand.ScrollBars = ScrollBars.Vertical;
+            _installCommand.ReadOnly = true;
+            _installCommand.Dock = DockStyle.Fill;
+            form.Controls.Add(_installCommand, 0, 3);
+            form.SetColumnSpan(_installCommand, 2);
+            FlowLayoutPanel copyBar = ButtonBar();
+            copyBar.Controls.Add(ActionButton("复制安装命令", delegate { CopyInstallCommand(); }, false));
+            copyBar.Controls.Add(new Label
+            {
+                Text = "Enrollment Token 只在本次生成结果中出现，默认 15 分钟有效且只能使用一次。安装后改用独立 Agent Secret。",
+                AutoSize = true,
+                ForeColor = UiPalette.TextMuted,
+                Padding = new Padding(8, 10, 0, 0),
+            });
+            form.Controls.Add(copyBar, 0, 4);
+            form.SetColumnSpan(copyBar, 2);
+            formSurface.Controls.Add(form);
+            root.Controls.Add(formSurface, 0, 2);
+
+            _status.Dock = DockStyle.Fill;
+            _status.ForeColor = UiPalette.TextMuted;
+            _status.TextAlign = ContentAlignment.MiddleLeft;
+            _status.Text = "准备读取远程 Agent。";
+            root.Controls.Add(_status, 0, 3);
+            Controls.Add(root);
+        }
+
+        private void ConfigureGrid()
+        {
+            _grid.Dock = DockStyle.Fill;
+            _grid.BackgroundColor = UiPalette.Surface;
+            _grid.BorderStyle = BorderStyle.FixedSingle;
+            _grid.AllowUserToAddRows = false;
+            _grid.AllowUserToDeleteRows = false;
+            _grid.AllowUserToResizeRows = false;
+            _grid.MultiSelect = false;
+            _grid.ReadOnly = true;
+            _grid.RowHeadersVisible = false;
+            _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            _grid.AutoGenerateColumns = false;
+            _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            _grid.ColumnHeadersHeight = 36;
+            _grid.RowTemplate.Height = 34;
+            _grid.EnableHeadersVisualStyles = false;
+            _grid.ColumnHeadersDefaultCellStyle.BackColor = UiPalette.SurfaceMuted;
+            _grid.ColumnHeadersDefaultCellStyle.ForeColor = UiPalette.TextMuted;
+            _grid.DefaultCellStyle.BackColor = UiPalette.Surface;
+            _grid.DefaultCellStyle.ForeColor = UiPalette.Text;
+            _grid.DefaultCellStyle.SelectionBackColor = UiPalette.PrimarySoft;
+            _grid.DefaultCellStyle.SelectionForeColor = UiPalette.Text;
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "服务器", FillWeight = 17 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "State", HeaderText = "状态", FillWeight = 12 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Host", HeaderText = "主机", FillWeight = 18 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "AgentId", HeaderText = "Agent ID", FillWeight = 20 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Version", HeaderText = "版本", FillWeight = 10 });
+            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Roots", HeaderText = "allowedRoots", FillWeight = 33 });
+        }
+
+        private async Task LoadAgentsAsync()
+        {
+            try
+            {
+                Dictionary<string, object> result = await _manager.RunJsonAsync("remote-agent-list");
+                _grid.Rows.Clear();
+                foreach (Dictionary<string, object> agent in Dictionaries(result, "agents"))
+                {
+                    int row = _grid.Rows.Add(
+                        ValueText(agent, "name"),
+                        ValueText(agent, "status"),
+                        ValueText(agent, "hostname"),
+                        ValueText(agent, "id"),
+                        ValueText(agent, "agentVersion"),
+                        string.Join("; ", Strings(agent, "allowedRoots")));
+                    _grid.Rows[row].Tag = agent;
+                }
+                _status.Text = "已登记 " + _grid.Rows.Count + " 个 Linux Agent。在线状态由持久连接 heartbeat 更新。";
+            }
+            catch (Exception ex)
+            {
+                _status.Text = "读取 Agent 失败：" + ex.Message;
+            }
+        }
+
+        private async Task CreateEnrollmentAsync()
+        {
+            string[] roots = _roots.Lines.Select(value => value.Trim()).Where(value => value.Length > 0).ToArray();
+            if (string.IsNullOrWhiteSpace(_name.Text) || roots.Length == 0)
+            {
+                MessageBox.Show(this, "请填写服务器显示名，并至少填写一个 Linux allowedRoot。", "信息不完整", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            try
+            {
+                Dictionary<string, object> result = await _manager.RunJsonAsync("remote-agent-create-enrollment", new
+                {
+                    name = _name.Text.Trim(),
+                    allowedRoots = roots,
+                    ttlMinutes = 15,
+                });
+                _installCommand.Text = ValueText(result, "installCommand");
+                _status.Text = string.IsNullOrWhiteSpace(_installCommand.Text)
+                    ? "Enrollment 已生成，但当前 publicBaseUrl 不完整，因此没有生成公网安装命令。"
+                    : "一次性安装命令已生成。复制到目标 Ubuntu 执行即可；DevSpace 不需要 SSH 密码。";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "生成 Linux Agent 安装命令失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async Task RevokeSelectedAsync()
+        {
+            Dictionary<string, object> agent = SelectedAgent();
+            string id = ValueText(agent, "id");
+            if (string.IsNullOrWhiteSpace(id)) return;
+            if (MessageBox.Show(this, "撤销 " + ValueText(agent, "name") + " 后，该 Agent 的现有 Secret 将不能再连接。继续吗？", "撤销 Linux Agent", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            await _manager.RunJsonAsync("remote-agent-revoke", new { agentId = id });
+            await LoadAgentsAsync();
+        }
+
+        private async Task DeleteSelectedAsync()
+        {
+            Dictionary<string, object> agent = SelectedAgent();
+            string id = ValueText(agent, "id");
+            if (string.IsNullOrWhiteSpace(id)) return;
+            if (MessageBox.Show(this, "永久删除此 Agent 的控制端登记记录？远端 systemd 服务不会被远程删除。", "删除 Agent 记录", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            await _manager.RunJsonAsync("remote-agent-delete", new { agentId = id });
+            await LoadAgentsAsync();
+        }
+
+        private Dictionary<string, object> SelectedAgent()
+        {
+            if (_grid.SelectedRows.Count != 1) return new Dictionary<string, object>();
+            return _grid.SelectedRows[0].Tag as Dictionary<string, object> ?? new Dictionary<string, object>();
+        }
+
+        private void CopyInstallCommand()
+        {
+            if (string.IsNullOrWhiteSpace(_installCommand.Text))
+            {
+                MessageBox.Show(this, "请先生成一次性安装命令。", "没有可复制内容", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            Clipboard.SetText(_installCommand.Text);
+            _status.Text = "Linux Agent 安装命令已复制到剪贴板。";
+        }
+
+        private static Label FieldLabel(string text)
+        {
+            return new Label { Text = text, AutoSize = true, Font = UiTypography.Ui(9F, FontStyle.Bold), ForeColor = UiPalette.TextMuted, Margin = new Padding(3, 8, 3, 3) };
+        }
+
+        private static void StyleTextBox(TextBox box)
+        {
+            box.Dock = DockStyle.Fill;
+            box.Font = UiTypography.Ui(9.25F);
+            box.BackColor = UiPalette.Surface;
+            box.ForeColor = UiPalette.Text;
+            box.BorderStyle = BorderStyle.FixedSingle;
+            box.Margin = new Padding(3, 2, 8, 8);
+        }
+
+        private static FlowLayoutPanel ButtonBar()
+        {
+            return new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, BackColor = Color.Transparent, Margin = new Padding(0, 4, 0, 8) };
+        }
+
+        private static Button ActionButton(string text, EventHandler handler, bool primary)
+        {
+            Button button = new Button
+            {
+                Text = text,
+                AutoSize = true,
+                Height = 36,
+                Padding = new Padding(12, 0, 12, 0),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = primary ? UiPalette.Primary : UiPalette.Surface,
+                ForeColor = primary ? Color.White : UiPalette.Text,
+                Margin = new Padding(3),
+                Cursor = Cursors.Hand,
+            };
+            button.FlatAppearance.BorderColor = primary ? UiPalette.Primary : UiPalette.Border;
+            button.Click += handler;
+            return button;
+        }
+
+        private static IEnumerable<Dictionary<string, object>> Dictionaries(Dictionary<string, object> source, string key)
+        {
+            object value;
+            if (source == null || !source.TryGetValue(key, out value) || value == null || value is string) yield break;
+            IEnumerable items = value as IEnumerable;
+            if (items == null) yield break;
+            foreach (object item in items)
+            {
+                Dictionary<string, object> dictionary = item as Dictionary<string, object>;
+                if (dictionary != null) yield return dictionary;
+            }
+        }
+
+        private static List<string> Strings(Dictionary<string, object> source, string key)
+        {
+            object value;
+            List<string> values = new List<string>();
+            if (source == null || !source.TryGetValue(key, out value) || value == null || value is string) return values;
+            IEnumerable items = value as IEnumerable;
+            if (items == null) return values;
+            foreach (object item in items) values.Add(Convert.ToString(item));
+            return values;
+        }
+
+        private static string ValueText(Dictionary<string, object> source, string key)
+        {
+            object value;
+            return source != null && source.TryGetValue(key, out value) && value != null ? Convert.ToString(value) : "";
         }
     }
 
@@ -2836,7 +3165,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.38 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.39 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -3012,6 +3341,7 @@ namespace DevSpacePortable.NativeUI
             FlowLayoutPanel actions = NewButtonBar();
             actions.Controls.Add(ActionButton("添加工作目录", delegate { AddWorkspaceRoot(); }));
             actions.Controls.Add(ActionButton("AI / MCP OAuth 客户端", delegate { OpenOAuthClientsDialog(); }));
+            actions.Controls.Add(ActionButton("远程服务器 / Linux Agent", delegate { OpenRemoteAgentsDialog(); }));
             actions.Controls.Add(ActionButton("只保存设置", async delegate { await SaveConfigurationAsync(false); }, true));
             actions.Controls.Add(ActionButton("保存并部署本地 MCP", async delegate { await DeployAsync(); }));
             actions.Controls.Add(ActionButton("重新加载", async delegate { await LoadConfigurationAsync(); }));
@@ -3054,6 +3384,14 @@ namespace DevSpacePortable.NativeUI
         private void OpenOAuthClientsDialog()
         {
             using (OAuthClientsDialog dialog = new OAuthClientsDialog(_manager))
+            {
+                dialog.ShowDialog(this);
+            }
+        }
+
+        private void OpenRemoteAgentsDialog()
+        {
+            using (RemoteAgentsDialog dialog = new RemoteAgentsDialog(_manager))
             {
                 dialog.ShowDialog(this);
             }
@@ -3610,7 +3948,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.38") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.39") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -4607,6 +4945,12 @@ namespace DevSpacePortable.NativeUI
         {
             string id = SelectedSessionId();
             if (_selectedSessionDetails.Count == 0 || GetString(GetDictionary(_selectedSessionDetails, "session"), "sessionId") != id) await LoadSelectedSessionDetailsAsync();
+            Dictionary<string, object> selectedSession = GetDictionary(_selectedSessionDetails, "session");
+            if (GetString(selectedSession, "executionBackend") == "remote-agent")
+            {
+                MessageBox.Show(this, "远程 Linux 会话的回退必须通过当前在线的 MCP 会话执行 session_rollback，因为只有正在运行的 DevSpace 服务持有已认证 Agent 连接。这里保留审阅历史，但不会绕过 Agent 身份验证直接恢复远端文件。", "远程会话回退", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             if (!GetBool(_selectedSessionDetails, "canRollback")) { MessageBox.Show(this, "当前会话没有可回退的修改。", "回退", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             string typed = PromptDialog.Show(this, "确认回退", "输入 ROLLBACK 确认恢复到会话基线。执行前会自动保存回退前安全快照。", "");
             if (typed != "ROLLBACK") { MessageBox.Show(this, "确认文字不匹配，未执行回退。", "已取消", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
@@ -4623,6 +4967,12 @@ namespace DevSpacePortable.NativeUI
         private async Task RestoreSafetySnapshotAsync()
         {
             if (_selectedSessionDetails.Count == 0) await LoadSelectedSessionDetailsAsync();
+            Dictionary<string, object> selectedSession = GetDictionary(_selectedSessionDetails, "session");
+            if (GetString(selectedSession, "executionBackend") == "remote-agent")
+            {
+                MessageBox.Show(this, "远程 Linux 会话的安全快照恢复必须通过当前在线的 MCP 会话执行 session_restore_safety。控制中心不会在缺少已认证 Agent 连接时直接修改远端文件。", "远程安全快照", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             List<Dictionary<string, object>> snapshots = GetDictionaryList(_selectedSessionDetails, "safetySnapshots");
             if (snapshots.Count == 0) { MessageBox.Show(this, "当前会话没有回退前安全快照。", "安全快照", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             Dictionary<string, object> snapshot = snapshots[0];

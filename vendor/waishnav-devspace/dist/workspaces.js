@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import { createManagedWorktree } from "./git-worktrees.js";
 import { AccessDeniedError, assertAllowedPath, expandHomePath, isPathInsideRoot, resolveAllowedPath } from "./roots.js";
@@ -15,11 +15,13 @@ const MAX_CONTEXT_SCAN_MS = 2_000;
 export class WorkspaceRegistry {
     config;
     store;
+    remoteAgents;
     workspaces = new Map();
     pendingCheckoutOpens = new Map();
-    constructor(config, store) {
+    constructor(config, store, remoteAgents) {
         this.config = config;
         this.store = store;
+        this.remoteAgents = remoteAgents;
     }
     async openWorkspace(input, openOptions = {}) {
         const options = typeof input === "string" ? { path: input } : input;
@@ -29,7 +31,10 @@ export class WorkspaceRegistry {
         }
         const mode = options.mode ?? "checkout";
         if (mode === "worktree") {
-            const context = await this.openWorktreeWorkspace(options.path, options.baseRef);
+            const remote = parseRemoteWorkspaceUri(options.path);
+            const context = remote
+                ? await this.openRemoteWorkspace(remote, mode, options.baseRef)
+                : await this.openWorktreeWorkspace(options.path, options.baseRef);
             return { ...context, workspaceReused: false, includeBootstrapContext: true };
         }
         const projectKey = await this.conversationProjectKey(options);
@@ -51,6 +56,9 @@ export class WorkspaceRegistry {
         }
     }
     async openNewWorkspace(options) {
+        const remote = parseRemoteWorkspaceUri(options.path);
+        if (remote)
+            return this.openRemoteWorkspace(remote, options.mode ?? "checkout", options.baseRef);
         const mode = options.mode ?? "checkout";
         if (mode === "worktree")
             return this.openWorktreeWorkspace(options.path, options.baseRef);
@@ -68,7 +76,10 @@ export class WorkspaceRegistry {
             this.workspaces.delete(binding.workspaceSessionId);
             this.store?.deleteConversationBinding(conversationScopeId, targetKey);
         }
-        const context = await this.openCheckoutWorkspace(input.path);
+        const remote = parseRemoteWorkspaceUri(input.path);
+        const context = remote
+            ? await this.openRemoteWorkspace(remote, "checkout")
+            : await this.openCheckoutWorkspace(input.path);
         this.store?.setConversationBinding({ conversationScopeId, targetKey, workspaceSessionId: context.workspace.id });
         return { ...context, workspaceReused: false, includeBootstrapContext: true };
     }
@@ -76,6 +87,23 @@ export class WorkspaceRegistry {
         const session = this.store?.getSession(binding.workspaceSessionId);
         if (!session || session.status !== "active" || session.mode !== "checkout")
             return undefined;
+        if (session.backend === "remote-agent") {
+            try {
+                const agent = this.remoteAgents?.resolveAgent(session.backendId, true);
+                if (!agent)
+                    return undefined;
+                const inspected = await this.remoteAgents.inspectWorkspace(agent.id, session.root, { mode: "checkout" });
+                const workspace = this.getWorkspace(binding.workspaceSessionId);
+                if (workspace.backend !== "remote-agent" || workspace.backendId !== agent.id || workspace.root !== inspected.root)
+                    return undefined;
+                workspace.git = inspected.git ?? workspace.git;
+                workspace.title = inspected.title ?? workspace.title;
+                return workspace;
+            }
+            catch {
+                return undefined;
+            }
+        }
         let root;
         try {
             root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
@@ -95,6 +123,13 @@ export class WorkspaceRegistry {
         return workspace;
     }
     async conversationProjectKey(input) {
+        const remote = parseRemoteWorkspaceUri(input.path);
+        if (remote) {
+            const agent = this.remoteAgents?.resolveAgent(remote.agent, true);
+            if (!agent)
+                throw new Error(`Remote workspace agent is unavailable: ${remote.agent}`);
+            return `remote-agent:${agent.id}:${normalizeRemoteAbsolutePath(remote.path)}`;
+        }
         const candidate = this.config.permissions.allowExternalPaths
             ? resolve(expandHomePath(input.path))
             : assertAllowedPath(input.path, this.config.allowedRoots);
@@ -104,6 +139,18 @@ export class WorkspaceRegistry {
         return JSON.stringify(["checkout", projectKey, null]);
     }
     async reusedWorkspaceContext(workspace) {
+        if (workspace.backend === "remote-agent") {
+            const inspected = await this.remoteAgents.inspectWorkspace(workspace.backendId, workspace.root, { mode: workspace.mode });
+            workspace.git = inspected.git ?? workspace.git;
+            workspace.title = inspected.title ?? workspace.title;
+            return {
+                workspace,
+                agentsFiles: normalizeRemoteContextFiles(inspected.agentsFiles),
+                availableAgentsFiles: normalizeRemoteAvailableFiles(inspected.availableAgentsFiles),
+                workspaceReused: true,
+                includeBootstrapContext: false,
+            };
+        }
         workspace.agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
         const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
         const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
@@ -119,10 +166,17 @@ export class WorkspaceRegistry {
         if (!session) {
             throw new Error(`Unknown workspaceId: ${workspaceId}. Open the target project or worktree again and continue with the new workspaceId.`);
         }
-        const root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
+        const isRemote = session.backend === "remote-agent";
+        const root = isRemote
+            ? normalizeRemoteAbsolutePath(session.root)
+            : this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
+        if (isRemote)
+            this.remoteAgents?.resolveAgent(session.backendId, true);
         const restoredWorkspace = {
             id: session.id,
             root,
+            backend: session.backend ?? "local",
+            backendId: session.backendId,
             mode: session.mode,
             sourceRoot: session.sourceRoot,
             title: session.title ?? basename(root),
@@ -141,7 +195,7 @@ export class WorkspaceRegistry {
                     managed: session.managed,
                 }
                 : undefined,
-            ...this.loadSkillsForWorkspace(root),
+            ...(isRemote ? { skills: [], skillDiagnostics: [] } : this.loadSkillsForWorkspace(root)),
             agentProfiles: [],
             activatedSkillDirs: new Set(),
         };
@@ -162,11 +216,27 @@ export class WorkspaceRegistry {
         if (!session)
             throw new Error(`Unknown workspace session: ${workspaceId}`);
         this.store?.activateSession(workspaceId);
-        const root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
-        const git = inspectGitMetadata(root);
+        const isRemote = session.backend === "remote-agent";
+        let root;
+        let git;
+        let remoteContext;
+        if (isRemote) {
+            const agent = this.remoteAgents?.resolveAgent(session.backendId, true);
+            if (!agent)
+                throw new Error(`Remote agent is unavailable for workspace ${workspaceId}.`);
+            remoteContext = await this.remoteAgents.inspectWorkspace(agent.id, session.root, { mode: "checkout" });
+            root = remoteContext.root;
+            git = remoteContext.git ?? {};
+        }
+        else {
+            root = this.assertWorkspaceRootAllowed(session.root, session.mode, session.sourceRoot);
+            git = inspectGitMetadata(root);
+        }
         const workspace = {
             id: session.id,
             root,
+            backend: session.backend ?? "local",
+            backendId: session.backendId,
             mode: session.mode,
             sourceRoot: session.sourceRoot,
             title: session.title ?? basename(root),
@@ -181,8 +251,8 @@ export class WorkspaceRegistry {
                     managed: session.managed,
                 }
                 : undefined,
-            ...this.loadSkillsForWorkspace(root),
-            agentProfiles: await loadLocalAgentProfiles(this.config, root),
+            ...(isRemote ? { skills: [], skillDiagnostics: [] } : this.loadSkillsForWorkspace(root)),
+            agentProfiles: isRemote ? [] : await loadLocalAgentProfiles(this.config, root),
             activatedSkillDirs: new Set(),
         };
         this.store?.touchSession(workspaceId, {
@@ -192,11 +262,17 @@ export class WorkspaceRegistry {
             gitOriginUrl: git.originUrl,
         });
         this.cacheWorkspace(workspace);
-        const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
-        const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+        const agentsFiles = isRemote
+            ? normalizeRemoteContextFiles(remoteContext?.agentsFiles)
+            : await this.loadInitialAgentsFiles(workspace.root);
+        const availableAgentsFiles = isRemote
+            ? normalizeRemoteAvailableFiles(remoteContext?.availableAgentsFiles)
+            : await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
         return { workspace, agentsFiles, availableAgentsFiles };
     }
     resolvePath(workspace, inputPath) {
+        if (workspace.backend === "remote-agent")
+            return resolveRemoteWorkspacePath(workspace.root, inputPath);
         if (this.config.permissions.allowExternalPaths) {
             return resolve(workspace.root, expandHomePath(inputPath));
         }
@@ -207,6 +283,13 @@ export class WorkspaceRegistry {
         return absolutePath;
     }
     resolveReadPath(workspace, inputPath) {
+        if (workspace.backend === "remote-agent") {
+            return {
+                absolutePath: this.resolvePath(workspace, inputPath),
+                readRoots: [workspace.root],
+                remote: true,
+            };
+        }
         try {
             return {
                 absolutePath: this.resolvePath(workspace, inputPath),
@@ -230,6 +313,8 @@ export class WorkspaceRegistry {
         }
     }
     resolveWorkingDirectory(workspace, workingDirectory) {
+        if (workspace.backend === "remote-agent")
+            return workingDirectory ? this.resolvePath(workspace, workingDirectory) : workspace.root;
         if (this.config.permissions.allowExternalPaths) {
             return workingDirectory
                 ? resolve(workspace.root, expandHomePath(workingDirectory))
@@ -247,6 +332,12 @@ export class WorkspaceRegistry {
             throw new Error(`Workspace root must be a directory: ${path}`);
         }
         return this.createWorkspaceContext({ root, mode: "checkout" });
+    }
+    async openRemoteWorkspace(remote, mode, baseRef) {
+        if (!this.remoteAgents)
+            throw new Error("Remote Workspace Backend is unavailable in this DevSpace runtime.");
+        const context = await this.remoteAgents.inspectWorkspace(remote.agent, remote.path, { mode, baseRef });
+        return this.createRemoteWorkspaceContext(context, mode, baseRef);
     }
     async openWorktreeWorkspace(path, baseRef) {
         const worktree = await createManagedWorktree({
@@ -266,6 +357,8 @@ export class WorkspaceRegistry {
         const workspace = {
             id: `ws_${randomBytes(5).toString("hex")}`,
             root: input.root,
+            backend: "local",
+            backendId: undefined,
             mode: input.mode,
             sourceRoot: input.sourceRoot,
             title: basename(input.root),
@@ -287,11 +380,55 @@ export class WorkspaceRegistry {
             gitSha: git.sha,
             gitBranch: git.branch,
             gitOriginUrl: git.originUrl,
+            backend: workspace.backend,
+            backendId: workspace.backendId,
         });
         this.cacheWorkspace(workspace);
         const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
         const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
         return { workspace, agentsFiles, availableAgentsFiles, workspaceReused: false, includeBootstrapContext: true };
+    }
+    async createRemoteWorkspaceContext(input, mode, baseRef) {
+        const workspace = {
+            id: `ws_${randomBytes(5).toString("hex")}`,
+            root: normalizeRemoteAbsolutePath(input.root),
+            backend: "remote-agent",
+            backendId: input.agent.id,
+            mode,
+            sourceRoot: input.sourceRoot ? normalizeRemoteAbsolutePath(input.sourceRoot) : undefined,
+            title: input.title ?? posix.basename(input.root) ?? input.agent.name,
+            git: input.git ?? {},
+            worktree: input.worktree
+                ? { ...input.worktree, baseRef: input.worktree.baseRef ?? baseRef ?? "HEAD" }
+                : undefined,
+            skills: [],
+            skillDiagnostics: [],
+            agentProfiles: [],
+            activatedSkillDirs: new Set(),
+        };
+        this.store?.createSession({
+            id: workspace.id,
+            root: workspace.root,
+            backend: workspace.backend,
+            backendId: workspace.backendId,
+            mode: workspace.mode,
+            sourceRoot: workspace.sourceRoot,
+            baseRef: workspace.worktree?.baseRef,
+            baseSha: workspace.worktree?.baseSha,
+            managed: workspace.worktree?.managed,
+            title: workspace.title,
+            gitSha: workspace.git?.sha,
+            gitBranch: workspace.git?.branch,
+            gitOriginUrl: workspace.git?.originUrl,
+        });
+        this.cacheWorkspace(workspace);
+        return {
+            workspace,
+            agentsFiles: normalizeRemoteContextFiles(input.agentsFiles),
+            availableAgentsFiles: normalizeRemoteAvailableFiles(input.availableAgentsFiles),
+            workspaceReused: false,
+            includeBootstrapContext: true,
+        };
     }
     loadSkillsForWorkspace(root) {
         const result = loadWorkspaceSkills(this.config, root);
@@ -376,6 +513,62 @@ export class WorkspaceRegistry {
     }
 }
 
+export function isRemoteWorkspace(workspace) {
+    return workspace?.backend === "remote-agent" && Boolean(workspace?.backendId);
+}
+
+export function parseRemoteWorkspaceUri(value) {
+    const text = String(value ?? "").trim();
+    if (!/^devspace:\/\//i.test(text))
+        return undefined;
+    let parsed;
+    try {
+        parsed = new URL(text);
+    }
+    catch {
+        throw new Error(`Invalid remote workspace URI: ${text}`);
+    }
+    const agent = decodeURIComponent(parsed.hostname || "").trim();
+    if (!agent)
+        throw new Error("Remote workspace URI must include an agent id or name, for example devspace://gpu-01/home/ubuntu/workspace/project.");
+    const path = normalizeRemoteAbsolutePath(decodeURIComponent(parsed.pathname || "/"));
+    return { agent, path };
+}
+
+export function normalizeRemoteAbsolutePath(value) {
+    const text = String(value ?? "").replace(/\\/g, "/");
+    if (!text.startsWith("/"))
+        throw new Error(`Remote Linux path must be absolute: ${value}`);
+    const normalized = posix.normalize(text);
+    if (!normalized.startsWith("/"))
+        throw new Error(`Remote Linux path must be absolute: ${value}`);
+    return normalized;
+}
+
+export function resolveRemoteWorkspacePath(root, inputPath) {
+    const normalizedRoot = normalizeRemoteAbsolutePath(root);
+    const input = String(inputPath ?? "").replace(/\\/g, "/");
+    const candidate = input.startsWith("/")
+        ? normalizeRemoteAbsolutePath(input)
+        : normalizeRemoteAbsolutePath(posix.join(normalizedRoot, input || "."));
+    const relationship = posix.relative(normalizedRoot, candidate);
+    if (relationship === ".." || relationship.startsWith("../") || posix.isAbsolute(relationship))
+        throw new Error(`Path is outside remote workspace root: ${inputPath}`);
+    return candidate;
+}
+
+function normalizeRemoteContextFiles(value) {
+    return (Array.isArray(value) ? value : [])
+        .filter((item) => item && typeof item.path === "string")
+        .map((item) => ({ path: normalizeRemoteAbsolutePath(item.path), content: String(item.content ?? "") }));
+}
+
+function normalizeRemoteAvailableFiles(value) {
+    return (Array.isArray(value) ? value : [])
+        .filter((item) => item && typeof item.path === "string")
+        .map((item) => ({ path: normalizeRemoteAbsolutePath(item.path) }));
+}
+
 async function canonicalPath(path) {
     const missingSegments = [];
     let candidate = path;
@@ -441,6 +634,12 @@ const SKIPPED_CONTEXT_DIRS = new Set([
 export function formatAgentsPath(path, workspaceRoot) {
     if (!workspaceRoot)
         return path.split(sep).join("/");
+    if (String(workspaceRoot).startsWith("/") && String(path).startsWith("/")) {
+        const relationship = posix.relative(workspaceRoot, path);
+        if (relationship === "" || relationship === ".." || relationship.startsWith("../"))
+            return String(path).replace(/\\/g, "/");
+        return relationship;
+    }
     const relationship = relative(workspaceRoot, path);
     if (relationship === "" ||
         relationship.startsWith("..") ||

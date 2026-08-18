@@ -194,7 +194,7 @@ function findSequence(haystack, needle, from, endOfFile = false) {
     }
     return -1;
 }
-function applyHunks(path, content, hunks) {
+export function applyHunks(path, content, hunks) {
     const file = splitFile(content);
     const lines = [...file.lines];
     let cursor = 0;
@@ -369,7 +369,7 @@ async function writeTextFile(destination, content, mode) {
         throw error;
     }
 }
-function unifiedFilePatch(oldPath, newPath, oldContent, newContent) {
+export function unifiedFilePatch(oldPath, newPath, oldContent, newContent) {
     const oldFileName = oldContent === null ? "/dev/null" : `a/${oldPath}`;
     const newFileName = newContent === null ? "/dev/null" : `b/${newPath}`;
     const body = createTwoFilesPatch(oldFileName, newFileName, oldContent ?? "", newContent ?? "", "", "", { context: 3, headerOptions: FILE_HEADERS_ONLY });
@@ -389,7 +389,7 @@ function stripFinalNewline(value) {
         return value.slice(0, -1);
     return value;
 }
-function countPatchStats(patch) {
+export function countPatchStats(patch) {
     let additions = 0;
     let removals = 0;
     for (const line of patch.split("\n")) {

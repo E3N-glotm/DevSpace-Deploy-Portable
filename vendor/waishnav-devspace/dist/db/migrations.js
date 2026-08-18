@@ -44,6 +44,11 @@ const migrations = [
         name: "workspace-conversation-bindings",
         up: migrateWorkspaceConversationBindings,
     },
+    {
+        version: 10,
+        name: "remote-workspace-backend",
+        up: migrateRemoteWorkspaceBackend,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -356,6 +361,46 @@ function migrateWorkspaceConversationBindings(sqlite) {
 
     create index if not exists workspace_conversation_bindings_workspace_idx
       on workspace_conversation_bindings(workspace_session_id);
+  `);
+}
+function migrateRemoteWorkspaceBackend(sqlite) {
+    addColumnIfMissing(sqlite, "workspace_sessions", "backend", "text not null default 'local'");
+    addColumnIfMissing(sqlite, "workspace_sessions", "backend_id", "text");
+    sqlite.exec(`
+    create index if not exists workspace_sessions_backend_idx
+      on workspace_sessions(backend, backend_id, last_used_at desc);
+
+    create table if not exists remote_agents (
+      id text primary key,
+      name text not null,
+      secret_hash text not null,
+      status text not null default 'offline',
+      allowed_roots_json text not null,
+      hostname text,
+      platform text,
+      agent_version text,
+      capabilities_json text not null default '{}',
+      metadata_json text not null default '{}',
+      created_at text not null,
+      connected_at text,
+      last_seen_at text,
+      revoked_at text
+    );
+
+    create index if not exists remote_agents_name_idx on remote_agents(name);
+    create index if not exists remote_agents_status_idx on remote_agents(status, last_seen_at desc);
+
+    create table if not exists remote_agent_enrollments (
+      token_hash text primary key,
+      name text not null,
+      allowed_roots_json text not null,
+      expires_at text not null,
+      created_at text not null,
+      used_at text
+    );
+
+    create index if not exists remote_agent_enrollments_expires_idx
+      on remote_agent_enrollments(expires_at);
   `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

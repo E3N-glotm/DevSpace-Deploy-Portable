@@ -171,7 +171,7 @@ async function serve() {
     }
     const { createServer } = await import("./server.js");
     const config = loadConfig();
-    const { app, close, localAgentProviders } = createServer(config);
+    const { app, close, localAgentProviders, attachAgentHttpServer } = createServer(config);
     const httpServer = app.listen(config.port, config.host, () => {
         console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
         console.log(`public base url: ${config.publicBaseUrl}`);
@@ -186,6 +186,7 @@ async function serve() {
             console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
         }
     });
+    attachAgentHttpServer(httpServer);
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown)

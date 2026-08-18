@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.38**
+当前稳定版本：**1.1.39**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -26,6 +26,8 @@ flowchart LR
     B --> C[DevSpace MCP<br/>127.0.0.1:7676]
     C --> D[允许的 Windows 工作目录]
     C --> E[插件 / Computer Use / Memories]
+    C -->|Outbound WebSocket RPC| F[Linux Agent]
+    F --> G[Ubuntu allowedRoots]
 ```
 
 默认情况下，ChatGPT **不会直接连接 `127.0.0.1`**。你需要先用 ngrok 或 Cloudflare Tunnel 给本机 DevSpace 提供一个公网 HTTPS 地址，再把这个地址的 `/mcp` 端点添加到 ChatGPT 的自定义 MCP App 中。
@@ -39,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.38.zip
+DevSpacePortable-Windows-x64-1.1.39.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -191,7 +193,32 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。1.1.38 没有修改 Portable Protocol 或顶层 MCP Schema，已有 ChatGPT OAuth 客户端不需要重建。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。**1.1.39 新增远程 Linux Workspace 能力和 `session_restore_safety`，因此升级后应重新 Refresh / Scan Tools。** Portable Protocol 仍为 1.5，现有 OAuth 客户端身份本身不需要重建。
+
+## Linux Remote Workspace
+
+1.1.39 起，Windows DevSpace 可以继续作为唯一 MCP/OAuth Control Plane，同时把一台或多台 Ubuntu/Linux 服务器登记为远程 Workspace Backend。Linux 主机不需要暴露新的 MCP 服务，也不需要把 SSH 密码交给 ChatGPT；它只运行一个依赖 Python 标准库的轻量 Agent，并主动连接回当前 DevSpace 的 `/agent/v1/connect` WebSocket。
+
+在 **配置与权限 → 远程服务器 / Linux Agent** 中填写服务器显示名和允许访问的 Linux 父目录，例如：
+
+```text
+服务器：gpu-01
+allowedRoots：/home/ubuntu/workspace
+```
+
+点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256；Enrollment Token 默认 15 分钟有效且只能消费一次。完成后 Agent 使用独立随机 Secret 建立长期出站连接，systemd 服务以普通 Linux 用户运行，不以 root 身份运行。
+
+之后可以直接让 MCP 打开：
+
+```text
+devspace://gpu-01/home/ubuntu/workspace/MyProject
+```
+
+也可以使用 Agent ID 代替显示名。`open_workspace` 返回远程 backend、Agent/主机信息和可用的 GPU 状态；后续 `read`、`write/edit/apply_patch`、grep/glob/ls、`exec_command`、PTY/持续进程、file watch、`show_changes`、`session_rollback` 等继续复用同一个 `workspaceId`，不需要另外创建 SSH/SFTP 会话。
+
+远程结构化文件访问始终再次经过 Agent `allowedRoots` 和真实路径校验；命令执行还受 DevSpace 权限规则、systemd 服务用户权限及 Linux 自身权限约束。大文件采用 512 KiB 分块、每块和整文件 SHA-256、gzip 可选压缩与 delta chunk 复用。短暂断线时，尚未发送的 RPC 可以有界等待重连；已经发送但结果未知的写操作不会被自动重放，避免重复修改。
+
+远程会话审阅继续使用 Windows 侧有界 `sparse-journal-v4`，不会在服务器再复制一套 review 仓库。结构化修改的 baseline、历史 diff、回退前安全快照仍受每会话 32 MiB / 总计 512 MiB 上限约束；任意 shell 副作用仍只声明 `tracked-paths-only`。控制中心可以查看远程历史，但真正的远程 rollback / safety restore 必须由当前在线 MCP 会话通过已认证 Agent 执行。
 
 ## Gemini、Claude 和其它 MCP 客户端
 
@@ -314,6 +341,18 @@ https://你的域名/mcp
 - 当前发行链还提供 `DevSpacePortable-Rescue-1.1.33-to-<当前版本>.zip`。这是**不调用旧 Update.exe 的直接覆盖救援包**：先关闭/停止旧 Portable，再把 ZIP 内容直接解压到原安装目录并选择全部替换即可；包内不包含 `data`、`logs`、`reports`。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.39 主要变化
+
+- **完整 Remote Workspace Backend。** `open_workspace` 支持 `devspace://<agent-id-or-name>/absolute/linux/path`；打开后继续复用现有文件、搜索、命令、进程、file watch、review 和 patch 工具，不要求模型回退到 SSH/SFTP。
+- **Windows 仍是唯一 MCP/OAuth Control Plane。** Linux 只运行主动出站的轻量 Agent；一次性 Enrollment Token 默认 15 分钟且只能使用一次，之后改用独立 Agent Secret。控制中心可以创建 enrollment、查看 Agent 在线/主机/版本/allowedRoots，并撤销或删除登记。
+- **Linux Agent 零 pip 依赖。** Agent 只依赖 Python 3 标准库；安装器双重校验 installer/Agent SHA-256，systemd 服务拒绝以 root 身份运行，并使用 `NoNewPrivileges`、`ProtectSystem=strict`、`ProtectHome=read-only` 和显式 `ReadWritePaths`。
+- **大文件与断线语义有界。** 文件传输固定 512 KiB chunks，支持 gzip、chunk/whole-file SHA-256 与 delta reuse；8 MiB 单 RPC 上限不被大文件绕过。短暂离线只允许尚未发送的请求等待重连，已经发出的不确定写操作不会自动 replay。
+- **远程 sparse review / rollback。** Windows 继续保存 bounded sparse-journal-v4 baseline；Agent 只 capture/restore 明确路径。`session_rollback` 可恢复远程结构化修改并生成 pre-rollback safety snapshot；新增 `session_restore_safety` 用于通过在线 Agent 恢复该安全快照。
+- **远程进程、PTY、watch 与 Lifecycle Hooks。** `exec_command`/`write_stdin`、persistent process、PTY、file watch 和 workspace hooks 都在远端 backend 执行，本地 Workspace 行为不变。
+- **远程系统/GPU 状态进入 `open_workspace`。** Agent 返回 Linux 主机、CPU/内存和 `nvidia-smi` GPU 摘要，常规 GPU 检查不再需要额外 SSH 命令。
+- **资源和安全边界收紧。** Agent 对 allowedRoots/realpath、symlink restore、目录列举、grep candidate、watch、process registry、文本读取和 RPC payload 都有明确上限；撤销 Agent 后现有连接会被 heartbeat 关闭。
+- Portable Protocol 仍为 1.5；**顶层 MCP Schema 有变化，升级后应 Refresh / Scan Tools**。OAuth 客户端身份、Token 持久化和本地历史 session 不要求重建。
 
 ## 1.1.38 主要变化
 
@@ -572,7 +611,7 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap-dev.ps1
 源码仓库不保存约 579 MiB 的 `runtime/`。需要构建完整 Portable ZIP 时，可从已有 Release 恢复固定运行时：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.38
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.39
 ```
 
 脚本只从 Release ZIP 提取 `runtime/`，不会复制其中的用户配置、OAuth 数据、日志或 `data/`。
@@ -600,7 +639,7 @@ docs/releases/HOTFIX-<版本>.md
 需要从维护机手工创建或覆盖 Release 附件时，可运行：
 
 ```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.38 -BypassProxy
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.39 -BypassProxy
 ```
 
 ## 在线更新

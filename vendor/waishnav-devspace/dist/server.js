@@ -13,7 +13,7 @@ import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextpro
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE, } from "@modelcontextprotocol/ext-apps/server";
 import express from "express";
 import * as z from "zod/v4";
-import { applyPatch, parsePatch } from "./apply-patch.js";
+import { applyHunks, applyPatch, countPatchStats, parsePatch, unifiedFilePatch } from "./apply-patch.js";
 import { isArtifactDownloadSupportedPlatform, registerArtifactTools, } from "./artifact-tools.js";
 import { loadConfig } from "./config.js";
 import { createOpenAIIncomingArtifactAdapter, } from "./incoming-artifacts.js";
@@ -38,10 +38,11 @@ import { registerFeatureTools } from "./feature-tools.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
-import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
+import { formatAgentsPath, isRemoteWorkspace, WorkspaceRegistry } from "./workspaces.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
 import { formatLocalAgentProviderAvailabilitySummary, getLocalAgentProviderAvailabilitySnapshot, } from "./local-agent-availability.js";
+import { linuxAgentAsset, RemoteAgentManager } from "./remote-agent-manager.js";
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
 // Each MCP transport owns a complete McpServer/tool registration graph. A
@@ -161,7 +162,7 @@ const toolNames = {
 function permissionInstruction(config) {
     const permissions = config.permissions;
     if (permissions.profile === "full-access") {
-        return "The owner has explicitly enabled full local-user access. Commands may use any current-user-accessible local path and may perform requested SSH/SCP/SFTP operations, network access, credential-manager access, shell-based file changes, installers, package managers, and long-running or interactive processes. Treat the current Windows account permissions as the operating-system boundary; do not invent an additional DevSpace workspace-only restriction. This does not grant administrator, SYSTEM, or UAC-elevated privileges.";
+        return "The owner has explicitly enabled full local-user access on the Windows control plane. Local commands may use any current-user-accessible Windows path. Remote Linux workspaces are still independently confined by the enrolled Agent's allowedRoots and the Linux service user's OS permissions. Commands may perform requested network access, credential-manager access, shell-based file changes, installers, package managers, and long-running or interactive processes within the active backend's OS boundary. This does not grant administrator, SYSTEM, UAC-elevated, root, or sudo privileges.";
     }
     if (permissions.profile === "custom") {
         const enabled = [
@@ -188,7 +189,7 @@ function permissionInstruction(config) {
 }
 function commandToolDescription(config, toolName) {
     if (config.permissions.allowArbitraryCommands) {
-        return `Run a command as the current Windows user. The owner has authorized arbitrary host commands, including SSH/SCP/SFTP, network operations, credential helpers, shell-based file changes, installers, and long-running or interactive processes when requested. Use tty=true for commands that require a real console. Call open_workspace first and pass workspaceId. Windows ACLs, UAC, and the current account's privileges remain in force.`;
+        return `Run a command in the opened workspace backend. Local workspaces execute as the current Windows user; remote-agent workspaces execute directly on the selected Linux host as the Agent service user, without SSH/SFTP. The owner has authorized arbitrary host commands, network operations, credential helpers, shell-based file changes, installers, and long-running or interactive processes when requested. Use tty=true for commands that require a real console. Call open_workspace first and pass workspaceId. Windows ACLs/UAC apply locally; Linux allowedRoots and the Agent user's permissions apply remotely.`;
     }
     const mutation = config.permissions.allowShellMutation
         ? "Shell-based file changes are authorized."
@@ -197,8 +198,8 @@ function commandToolDescription(config, toolName) {
 }
 function workingDirectoryDescription(config) {
     return config.permissions.allowExternalPaths
-        ? "Working directory. Relative paths resolve from the workspace root; absolute current-user-accessible paths are also allowed. Defaults to the workspace root."
-        : "Working directory relative to the workspace root. Defaults to the workspace root.";
+        ? "Working directory. Relative paths resolve from the workspace root. Local absolute paths may use current-user-accessible Windows locations; remote absolute paths remain confined to the opened Linux workspace root. Defaults to the workspace root."
+        : "Working directory relative to the workspace root. Remote Linux paths remain confined by the opened workspace and Agent allowedRoots. Defaults to the workspace root.";
 }
 function serverInstructions(config) {
     const artifactInstruction = config.artifactsEnabled && isArtifactDownloadSupportedPlatform()
@@ -219,12 +220,12 @@ function serverInstructions(config) {
             ? " Computer Use is available only while the local Portable UI is open. Use computer_snapshot before coordinate-based actions, keep actions bounded and user-directed, and prefer workspace/file tools for code and file operations."
             : "",
         config.features?.uiSessionReview
-            ? " show_changes also reports aggregate changes since the persisted workspace session captured its first-mutation baseline. Session rollback restores the complete workspace tree, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result."
+            ? " show_changes also reports aggregate changes since the persisted workspace session captured its first structured-mutation baseline. Session rollback restores the tracked structured paths, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result. The same bounded sparse-journal model is used for local and remote-agent workspaces; arbitrary shell side effects outside tracked paths are not claimed as rollback-safe."
             : "",
     ].join("");
     const compactActivityInstruction = " Keep tool calls task-driven and minimal because the client may expose every MCP invocation and its JSON arguments in a native activity panel. Do not call capabilities, doctor, session_list, session_resume, or show_changes merely to demonstrate or test the UI. Do not issue no-op diagnostics after the required result is already known. Use show_changes only once after actual file modifications.";
     if (config.toolMode === "codex") {
-        return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Use ${toolNames.read} for direct file reads, apply_patch for structured multi-file modifications, exec_command for commands, and write_stdin to poll or interact with running processes. ${permissions} Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${featureInstruction}${artifactInstruction}${showChangesInstruction}${compactActivityInstruction}`;
+        return `Use DevSpace as a local-or-remote coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Remote Linux projects use devspace://<agent-id-or-name>/absolute/linux/path and then use the same tools as local projects; do not fall back to SSH merely because the workspace is remote. Use ${toolNames.read} for direct file reads, apply_patch for structured multi-file modifications, exec_command for commands, and write_stdin to poll or interact with running processes. ${permissions} Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction files before working in their scope.${featureInstruction}${artifactInstruction}${showChangesInstruction}${compactActivityInstruction}`;
     }
     const inspection = config.toolMode !== "full"
         ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
@@ -234,9 +235,9 @@ function serverInstructions(config) {
         : "";
     const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
     const shellGuidance = config.permissions.allowArbitraryCommands
-        ? `${toolNames.shell} may run arbitrary owner-requested commands as the current Windows user, including SSH, network, credential, installer, and shell file operations. `
+        ? `${toolNames.shell} may run arbitrary owner-requested commands in the active workspace backend: current Windows user for local workspaces, Linux Agent service user for remote workspaces. `
         : `Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. `;
-    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}${shellGuidance}${permissions}${featureInstruction}${artifactInstruction}${showChangesInstruction}${compactActivityInstruction}`;
+    return `Use DevSpace as a local-or-remote coding workspace. Remote Linux projects use devspace://<agent-id-or-name>/absolute/linux/path and remain transparent after open_workspace: reuse the returned workspaceId with the same file/search/edit/review/process tools instead of opening SSH/SFTP sessions. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. ${agentsMd}${skills}${inspection}${shellGuidance}${permissions}${featureInstruction}${artifactInstruction}${showChangesInstruction}${compactActivityInstruction}`;
 }
 function formatVisibleAgent(agent) {
     const model = agent.model ? `, model ${agent.model}` : "";
@@ -282,6 +283,15 @@ const workspaceLocalAgentProviderOutputSchema = z.object({
 });
 const workspaceAvailableAgentsFileOutputSchema = z.object({
     path: z.string(),
+});
+const remoteWorkspaceAgentOutputSchema = z.object({
+    id: z.string(),
+    name: z.string(),
+    status: z.string(),
+    hostname: z.string().optional(),
+    agentVersion: z.string().optional(),
+    allowedRoots: z.array(z.string()),
+    system: z.unknown().optional(),
 });
 const reviewFileOutputSchema = z.object({
     path: z.string(),
@@ -430,6 +440,142 @@ function newFilePatch(path, content) {
     ]
         .filter((line) => line.length > 0)
         .join("\n");
+}
+function remoteTextToolResponse(text) {
+    return { content: [textBlock(String(text ?? ""))], isError: false };
+}
+function decodeRemoteUtf8(buffer, displayPath) {
+    try {
+        const value = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+        if (value.includes("\0"))
+            throw new Error("binary");
+        return value;
+    }
+    catch {
+        throw new Error(`Remote patch target is not valid UTF-8 text: ${displayPath}`);
+    }
+}
+function applyRemoteStructuredEdits(path, original, edits) {
+    const replacements = [];
+    for (const edit of edits) {
+        const oldText = String(edit.oldText ?? "");
+        const newText = String(edit.newText ?? "");
+        if (!oldText)
+            throw new Error(`Edit oldText must not be empty: ${path}`);
+        const first = original.indexOf(oldText);
+        if (first < 0)
+            throw new Error(`oldText did not match in ${path}.`);
+        if (original.indexOf(oldText, first + oldText.length) >= 0)
+            throw new Error(`oldText must match exactly once in ${path}.`);
+        replacements.push({ start: first, end: first + oldText.length, newText });
+    }
+    replacements.sort((left, right) => left.start - right.start);
+    for (let index = 1; index < replacements.length; index += 1) {
+        if (replacements[index].start < replacements[index - 1].end)
+            throw new Error(`Edits overlap in ${path}; merge nearby changes into one edit.`);
+    }
+    let cursor = 0;
+    let updated = "";
+    for (const replacement of replacements) {
+        updated += original.slice(cursor, replacement.start);
+        updated += replacement.newText;
+        cursor = replacement.end;
+    }
+    updated += original.slice(cursor);
+    return updated;
+}
+async function applyRemotePatch(workspace, patch, workspaces, remoteAgents) {
+    const actions = parsePatch(patch);
+    const results = [];
+    const patches = [];
+    const staged = new Map();
+    const confined = (displayPath) => {
+        const text = String(displayPath ?? "").replace(/\\/g, "/");
+        if (!text || text.startsWith("/") || text.split("/").includes(".."))
+            throw new Error(`Invalid patch: path must be relative to the workspace: ${displayPath}`);
+        return workspaces.resolvePath(workspace, text);
+    };
+    const readOptional = async (displayPath) => {
+        const absolute = confined(displayPath);
+        if (staged.has(absolute))
+            return staged.get(absolute);
+        const info = await remoteAgents.rpcWorkspace(workspace, "fs.stat", { path: displayPath });
+        if (!info.exists) {
+            staged.set(absolute, null);
+            return null;
+        }
+        if (info.type !== "file")
+            throw new Error(`Invalid patch: path is not a regular file: ${displayPath}`);
+        const bytes = await remoteAgents.readWhole(workspace, displayPath);
+        const value = { content: decodeRemoteUtf8(bytes ?? Buffer.alloc(0), displayPath), mode: info.mode };
+        staged.set(absolute, value);
+        return value;
+    };
+    const readRequired = async (displayPath) => {
+        const value = await readOptional(displayPath);
+        if (!value)
+            throw new Error(`Invalid patch: file does not exist: ${displayPath}`);
+        return value;
+    };
+    for (const action of actions) {
+        if (action.kind === "add") {
+            const absolute = confined(action.path);
+            const original = await readOptional(action.path);
+            staged.set(absolute, { displayPath: action.path, content: action.content, mode: original?.mode });
+            patches.push(unifiedFilePatch(action.path, action.path, original?.content ?? null, action.content));
+            results.push({ path: action.path, operation: "add" });
+            continue;
+        }
+        const absolute = confined(action.path);
+        const file = await readRequired(action.path);
+        if (action.kind === "delete") {
+            staged.set(absolute, { displayPath: action.path, deleted: true });
+            patches.push(unifiedFilePatch(action.path, action.path, file.content, null));
+            results.push({ path: action.path, operation: "delete" });
+            continue;
+        }
+        const updated = applyHunks(action.path, file.content, action.hunks);
+        if (action.moveTo) {
+            const destination = confined(action.moveTo);
+            if (destination !== absolute)
+                await readOptional(action.moveTo);
+            staged.set(destination, { displayPath: action.moveTo, content: updated, mode: file.mode });
+            if (destination !== absolute)
+                staged.set(absolute, { displayPath: action.path, deleted: true });
+            patches.push(unifiedFilePatch(action.path, action.moveTo, file.content, updated));
+            results.push({ path: action.moveTo, previousPath: action.path, operation: "move" });
+        }
+        else {
+            staged.set(absolute, { displayPath: action.path, content: updated, mode: file.mode });
+            patches.push(unifiedFilePatch(action.path, action.path, file.content, updated));
+            results.push({ path: action.path, operation: "update" });
+        }
+    }
+    for (const value of staged.values()) {
+        if (value && !value.deleted)
+            await remoteAgents.writeBuffer(workspace, value.displayPath, Buffer.from(value.content, "utf8"), { mode: value.mode });
+    }
+    for (const value of staged.values()) {
+        if (value?.deleted)
+            await remoteAgents.rpcWorkspace(workspace, "fs.remove", { path: value.displayPath }, 60_000);
+    }
+    const unifiedPatch = patches.filter(Boolean).join("\n");
+    return { files: results, patch: unifiedPatch, ...countPatchStats(unifiedPatch) };
+}
+function remoteGrepText(result) {
+    const lines = (result.matches ?? []).map((match) => `${match.path}:${match.line}:${match.text}`);
+    if (result.truncated)
+        lines.push("[results truncated]");
+    return lines.join("\n");
+}
+function remoteGlobText(result) {
+    const lines = [...(result.matches ?? [])];
+    if (result.truncated)
+        lines.push("[results truncated]");
+    return lines.join("\n");
+}
+function remoteListText(result) {
+    return (result.entries ?? []).map((entry) => `${entry.type === "directory" ? "d" : entry.type === "symlink" ? "l" : "-"}\t${entry.size}\t${entry.name}`).join("\n");
 }
 function assetBaseUrl(config) {
     return `${config.publicBaseUrl.replace(/\/+$/, "")}/mcp-app-assets`;
@@ -585,7 +731,7 @@ function reviewOperation(record) {
     });
 }
 
-async function collectWorkspacePreviews(workspace, files, workspaces) {
+async function collectWorkspacePreviews(workspace, files, workspaces, remoteAgents) {
     const previews = [];
     const artifacts = [];
     const imageContent = [];
@@ -598,10 +744,22 @@ async function collectWorkspacePreviews(workspace, files, workspaces) {
         if (!path || !mimeType)
             continue;
         try {
-            const absolutePath = workspaces.resolvePath(workspace, path);
-            const metadata = await stat(absolutePath);
-            if (!metadata.isFile())
-                continue;
+            let metadata;
+            let remoteBytes;
+            if (isRemoteWorkspace(workspace)) {
+                if (!remoteAgents)
+                    continue;
+                metadata = await remoteAgents.rpcWorkspace(workspace, "fs.stat", { path });
+                if (!metadata.exists || metadata.type !== "file")
+                    continue;
+            }
+            else {
+                const absolutePath = workspaces.resolvePath(workspace, path);
+                const localMetadata = await stat(absolutePath);
+                if (!localMetadata.isFile())
+                    continue;
+                metadata = localMetadata;
+            }
             const artifact = {
                 path,
                 mimeType,
@@ -616,7 +774,11 @@ async function collectWorkspacePreviews(workspace, files, workspaces) {
                 || inlineBytes + metadata.size > INLINE_PREVIEW_MAX_TOTAL_BYTES) {
                 continue;
             }
-            const data = (await readFile(absolutePath)).toString("base64");
+            if (isRemoteWorkspace(workspace))
+                remoteBytes = await remoteAgents.readWhole(workspace, path);
+            const data = isRemoteWorkspace(workspace)
+                ? (remoteBytes ?? Buffer.alloc(0)).toString("base64")
+                : (await readFile(workspaces.resolvePath(workspace, path))).toString("base64");
             inlineBytes += metadata.size;
             artifact.inline = true;
             const preview = {
@@ -737,7 +899,7 @@ function processToolResponse(tool, workspaceId, snapshot, summary, runtime = {})
         },
     };
 }
-function registerCodexProcessTools(server, config, workspaces, processSessions, permissionRules, reviewCheckpoints, hookManager) {
+function registerCodexProcessTools(server, config, workspaces, processSessions, permissionRules, reviewCheckpoints, hookManager, remoteAgents) {
     registerAppTool(server, "exec_command", {
         title: "Execute command",
         description: `${commandToolDescription(config, "exec_command")} Returns its result when it exits during the yield window; otherwise returns a sessionId for write_stdin.`,
@@ -822,29 +984,51 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
         if (permissionDecision.decision === "deny") {
             throw new Error(`Command denied by permission rule ${permissionDecision.ruleId}.`);
         }
-        let snapshot = await processSessions.start({
-            workspaceId,
-            command: cmd,
-            argv,
-            processHandle,
-            env,
-            persistent: persistent ?? Boolean(processHandle),
-            cwd,
-            workspaceRoot: workspace.root,
-            tty,
-            columns,
-            rows,
-            yieldTimeMs,
-            maxOutputTokens,
-        });
-        if (snapshot.running && !config.permissions.allowPersistentProcesses && snapshot.sessionId !== undefined) {
-            processSessions.terminate(workspaceId, snapshot.sessionId);
-            snapshot = await processSessions.write({
+        let snapshot = isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "process.start", {
+                command: cmd,
+                argv,
+                processHandle,
+                env,
+                persistent: persistent ?? Boolean(processHandle),
+                cwd,
+                tty,
+                columns,
+                rows,
+                yieldTimeMs,
+                maxOutputTokens,
+            }, Math.max(60_000, Number(yieldTimeMs ?? 10_000) + 30_000))
+            : await processSessions.start({
                 workspaceId,
-                sessionId: snapshot.sessionId,
-                yieldTimeMs: 1_000,
+                command: cmd,
+                argv,
+                processHandle,
+                env,
+                persistent: persistent ?? Boolean(processHandle),
+                cwd,
+                workspaceRoot: workspace.root,
+                tty,
+                columns,
+                rows,
+                yieldTimeMs,
                 maxOutputTokens,
             });
+        if (snapshot.running && !config.permissions.allowPersistentProcesses && snapshot.sessionId !== undefined) {
+            if (isRemoteWorkspace(workspace)) {
+                snapshot = await remoteAgents.rpcWorkspace(workspace, "process.kill", {
+                    processHandle: snapshot.processHandle,
+                    signal: "SIGTERM",
+                }, 30_000);
+            }
+            else {
+                processSessions.terminate(workspaceId, snapshot.sessionId);
+                snapshot = await processSessions.write({
+                    workspaceId,
+                    sessionId: snapshot.sessionId,
+                    yieldTimeMs: 1_000,
+                    maxOutputTokens,
+                });
+            }
         }
         await hookManager.runEvent("after_command", {
             workspaceId,
@@ -920,17 +1104,27 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
         const startedAt = performance.now();
         if (sessionId === undefined && !processHandle)
             throw new Error("Provide sessionId or processHandle.");
-        workspaces.getWorkspace(workspaceId);
-        const snapshot = await processSessions.write({
-            workspaceId,
-            sessionId,
-            processHandle,
-            chars,
-            columns,
-            rows,
-            yieldTimeMs,
-            maxOutputTokens,
-        });
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const snapshot = isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "process.write", {
+                sessionId,
+                processHandle,
+                chars,
+                columns,
+                rows,
+                yieldTimeMs,
+                maxOutputTokens,
+            }, Math.max(45_000, Number(yieldTimeMs ?? 10_000) + 20_000))
+            : await processSessions.write({
+                workspaceId,
+                sessionId,
+                processHandle,
+                chars,
+                columns,
+                rows,
+                yieldTimeMs,
+                maxOutputTokens,
+            });
         logToolCall(config, {
             tool: "write_stdin",
             workspaceId,
@@ -964,9 +1158,10 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
         ...toolWidgetDescriptorMeta(config, "shell"),
         annotations: READ_ONLY_TOOL_ANNOTATIONS,
     }, async ({ workspaceId, includeCompleted, limit }) => {
-        if (workspaceId)
-            workspaces.getWorkspace(workspaceId);
-        const processes = processSessions.list({ workspaceId, includeCompleted, limit });
+        const workspace = workspaceId ? workspaces.getWorkspace(workspaceId) : undefined;
+        const processes = workspace && isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "process.list", { includeCompleted, limit }, 30_000)
+            : processSessions.list({ workspaceId, includeCompleted, limit });
         const result = JSON.stringify(processes, null, 2);
         return {
             content: [textBlock(result)],
@@ -985,8 +1180,10 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
         ...toolWidgetDescriptorMeta(config, "runtime"),
         annotations: READ_ONLY_TOOL_ANNOTATIONS,
     }, async ({ workspaceId, processHandle, yieldTimeMs }) => {
-        workspaces.getWorkspace(workspaceId);
-        const snapshot = await processSessions.attach({ workspaceId, processHandle, yieldTimeMs });
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const snapshot = isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "process.attach", { processHandle, yieldTimeMs }, Math.max(45_000, Number(yieldTimeMs ?? 10_000) + 20_000))
+            : await processSessions.attach({ workspaceId, processHandle, yieldTimeMs });
         return processToolResponse("process_attach", workspaceId, snapshot, {
             processHandle,
             running: snapshot.running,
@@ -1007,8 +1204,10 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
         ...toolWidgetDescriptorMeta(config, "runtime"),
         annotations: SHELL_TOOL_ANNOTATIONS,
     }, async ({ workspaceId, processHandle, signal }) => {
-        workspaces.getWorkspace(workspaceId);
-        const process = processSessions.killByHandle(workspaceId, processHandle, signal ?? "SIGTERM");
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const process = isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "process.kill", { processHandle, signal: signal ?? "SIGTERM" }, 30_000)
+            : processSessions.killByHandle(workspaceId, processHandle, signal ?? "SIGTERM");
         const result = JSON.stringify(process, null, 2);
         const content = [textBlock(result)];
         return {
@@ -1080,7 +1279,7 @@ function registerDoctorTool(server, config, processSessions, runtimeState) {
         return { content: [textBlock(result)], structuredContent: { result, history } };
     });
 }
-function registerRuntimeStateTools(server, config, workspaces, runtimeState, fileWatches, permissionRules) {
+function registerRuntimeStateTools(server, config, workspaces, runtimeState, fileWatches, permissionRules, remoteAgents) {
     registerAppTool(server, "event_poll", {
         title: "Poll events",
         description: "Read ordered DevSpace events after a sequence cursor. Events cover process lifecycle, file changes, watches, and permission audits.",
@@ -1135,7 +1334,9 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
     }, async ({ workspaceId, path, watchId, recursive }) => {
         const workspace = workspaces.getWorkspace(workspaceId);
         const absolutePath = workspaces.resolvePath(workspace, path);
-        const watch = fileWatches.start({ workspaceId, path: absolutePath, watchId, recursive });
+        const watch = isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "watch.start", { path, watchId, recursive }, 30_000)
+            : fileWatches.start({ workspaceId, path: absolutePath, watchId, recursive });
         const result = JSON.stringify(watch, null, 2);
         return { content: [textBlock(result)], structuredContent: { result, watch } };
     });
@@ -1152,8 +1353,10 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
         ...toolWidgetDescriptorMeta(config, "shell"),
         annotations: READ_ONLY_TOOL_ANNOTATIONS,
     }, async (input) => {
-        workspaces.getWorkspace(input.workspaceId);
-        const page = fileWatches.poll(input);
+        const workspace = workspaces.getWorkspace(input.workspaceId);
+        const page = isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "watch.poll", input, 30_000)
+            : fileWatches.poll(input);
         const result = JSON.stringify(page, null, 2);
         return { content: [textBlock(result)], structuredContent: { result, ...page } };
     });
@@ -1165,8 +1368,10 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
         ...toolWidgetDescriptorMeta(config, "shell"),
         annotations: EDIT_TOOL_ANNOTATIONS,
     }, async ({ workspaceId, watchId }) => {
-        workspaces.getWorkspace(workspaceId);
-        const watch = fileWatches.stop(watchId);
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const watch = isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "watch.stop", { watchId }, 30_000)
+            : fileWatches.stop(watchId);
         const result = JSON.stringify(watch, null, 2);
         return { content: [textBlock(result)], structuredContent: { result, watch } };
     });
@@ -1178,9 +1383,10 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
         ...toolWidgetDescriptorMeta(config, "shell"),
         annotations: READ_ONLY_TOOL_ANNOTATIONS,
     }, async (input) => {
-        if (input.workspaceId)
-            workspaces.getWorkspace(input.workspaceId);
-        const watches = fileWatches.list(input);
+        const workspace = input.workspaceId ? workspaces.getWorkspace(input.workspaceId) : undefined;
+        const watches = workspace && isRemoteWorkspace(workspace)
+            ? await remoteAgents.rpcWorkspace(workspace, "watch.list", input, 30_000)
+            : fileWatches.list(input);
         const result = JSON.stringify(watches, null, 2);
         return { content: [textBlock(result)], structuredContent: { result, watches } };
     });
@@ -1271,7 +1477,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         };
     });
     registerDoctorTool(server, config, processSessions, runtimeServices.runtimeState);
-    registerRuntimeStateTools(server, config, workspaces, runtimeServices.runtimeState, runtimeServices.fileWatches, runtimeServices.permissionRules);
+    registerRuntimeStateTools(server, config, workspaces, runtimeServices.runtimeState, runtimeServices.fileWatches, runtimeServices.permissionRules, runtimeServices.remoteAgents);
     registerPluginManagementTools(server, config, workspaces, runtimeServices.pluginManager);
     registerPluginDispatchTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);
     registerReservedPluginSlots(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);
@@ -1289,13 +1495,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         registerDynamicPluginTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);
     registerAppTool(server, "open_workspace", {
         title: "Open workspace",
-        description: `Open a local project directory as a coding workspace. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. By default this opens the actual checkout; set mode="worktree" when the user asks for an isolated or parallel coding session. ${config.permissions.allowExternalPaths ? "The owner enabled full path access, so any path accessible to the current Windows user may be opened." : "The path must be inside a configured allowed root."} Returns a workspaceId, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.`,
+        description: `Open a local or enrolled Linux-agent project directory as a coding workspace. Remote Linux paths use devspace://<agent-id-or-name>/absolute/linux/path and then work with the same read/edit/search/process/review tools as local workspaces. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. By default this opens the actual checkout; set mode="worktree" when the user asks for an isolated or parallel coding session. ${config.permissions.allowExternalPaths ? "For local workspaces the owner enabled full path access, so any path accessible to the current Windows user may be opened. Remote workspaces remain independently confined by each Linux Agent's allowed roots and Linux user permissions." : "Local paths must be inside a configured allowed root; remote paths must be inside the selected Linux Agent's allowed roots."} Returns a workspaceId, backend identity, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.`,
         inputSchema: {
             path: z
                 .string()
                 .describe(config.permissions.allowExternalPaths
-                ? "Absolute path, or a leading-tilde home path such as ~/project, to any current-user-accessible local project directory."
-                : "Absolute path, or a leading-tilde home path such as ~/project, to a local project directory inside an allowed root."),
+                ? "Local absolute/home path, or remote URI devspace://<agent-id-or-name>/absolute/linux/path."
+                : "Local absolute/home path inside an allowed root, or remote URI devspace://<agent-id-or-name>/absolute/linux/path inside that agent's allowed roots."),
             mode: z
                 .enum(["checkout", "worktree"])
                 .optional()
@@ -1308,6 +1514,8 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         outputSchema: {
             workspaceId: z.string(),
             root: z.string(),
+            backend: z.enum(["local", "remote-agent"]),
+            backendId: z.string().optional(),
             title: z.string().optional(),
             mode: z.enum(["checkout", "worktree"]),
             git: z
@@ -1335,6 +1543,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             agents: z.array(workspaceLocalAgentOutputSchema),
             skillDiagnostics: z.array(z.unknown()),
             memories: z.array(z.unknown()),
+            remoteAgent: remoteWorkspaceAgentOutputSchema.optional(),
             instruction: z.string(),
         },
         ...toolWidgetDescriptorMeta(config, "workspace"),
@@ -1393,6 +1602,26 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
         const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
         const memories = includeBootstrapContext ? cardMemories : [];
+        let remoteAgent;
+        if (isRemoteWorkspace(workspace)) {
+            const agent = runtimeServices.remoteAgents.resolveAgent(workspace.backendId, true);
+            let system;
+            try {
+                system = await runtimeServices.remoteAgents.rpcWorkspace(workspace, "system.status", {}, 15_000);
+            }
+            catch {
+                system = undefined;
+            }
+            remoteAgent = {
+                id: agent.id,
+                name: agent.name,
+                status: agent.status,
+                hostname: agent.hostname,
+                agentVersion: agent.agentVersion,
+                allowedRoots: agent.allowedRoots,
+                system,
+            };
+        }
         const baseInstruction = config.skillsEnabled
             ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
             : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, the user asks to reopen, or you switch to a different folder/worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
@@ -1408,6 +1637,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 text: [
                     workspaceReused ? `Workspace already open as ${workspace.id}.` : `Opened workspace ${workspace.id}`,
                     `Root: ${workspace.root}`,
+                    `Backend: ${workspace.backend}${workspace.backendId ? ` (${workspace.backendId})` : ""}`,
                     `Mode: ${workspace.mode}`,
                     loadedAgentsFiles.length > 0
                         ? `Loaded project instructions: ${loadedAgentsFiles.map((file) => file.path).join(", ")}`
@@ -1429,6 +1659,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         : undefined,
                     memories.length > 0
                         ? `Explicit memories: ${memories.map((memory) => `${memory.title}: ${memory.content}`).join(" | ")}`
+                        : undefined,
+                    remoteAgent
+                        ? `Remote Agent: ${remoteAgent.name} (${remoteAgent.id}), host=${remoteAgent.hostname ?? "unknown"}, version=${remoteAgent.agentVersion ?? "unknown"}, allowedRoots=${remoteAgent.allowedRoots.join(", ")}`
+                        : undefined,
+                    Array.isArray(remoteAgent?.system?.gpus) && remoteAgent.system.gpus.length > 0
+                        ? `Remote GPUs: ${remoteAgent.system.gpus.map((gpu) => `GPU${gpu.index} ${gpu.name}, ${gpu.memoryUsedMiB}/${gpu.memoryTotalMiB} MiB, util ${gpu.utilizationPercent}%`).join(" | ")}`
                         : undefined,
                     instruction,
                 ].filter(Boolean).join("\n"),
@@ -1453,6 +1689,8 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     path: workspace.root,
                     summary: {
                         mode: workspace.mode,
+                        backend: workspace.backend,
+                        backendId: workspace.backendId,
                         workspaceReused,
                         includeBootstrapContext,
                         agentsFiles: cardAgentsFiles.length,
@@ -1462,12 +1700,15 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         agents: cardAgents.length,
                         skillDiagnostics: workspace.skillDiagnostics.length,
                         memories: cardMemories.length,
+                        remoteAgent: remoteAgent ? remoteAgent.id : undefined,
                     },
                 },
             },
             structuredContent: {
                 workspaceId: workspace.id,
                 root: workspace.root,
+                backend: workspace.backend,
+                backendId: workspace.backendId,
                 title: workspace.title,
                 mode: workspace.mode,
                 git: workspace.git,
@@ -1480,6 +1721,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 agents: visibleAgents,
                 skillDiagnostics: includeBootstrapContext ? workspace.skillDiagnostics : [],
                 memories,
+                remoteAgent,
                 instruction,
             },
         };
@@ -1606,12 +1848,18 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         const readPath = workspaces.resolveReadPath(workspace, input.path);
-        const response = await readFileTool({ ...input, path: readPath.absolutePath }, {
-            cwd: workspace.root,
-            root: workspace.root,
-            readRoots: readPath.readRoots,
-            allowExternalPaths: config.permissions.allowExternalPaths,
-        });
+        const response = isRemoteWorkspace(workspace)
+            ? await runtimeServices.remoteAgents.read(workspace, input.path, { offset: input.offset, limit: input.limit }).then((remote) => {
+                if (remote.kind === "text")
+                    return remoteTextToolResponse(remote.text);
+                return remoteTextToolResponse(`[remote binary file: ${input.path}; ${remote.size} bytes${remote.truncated ? "; preview truncated" : ""}]`);
+            })
+            : await readFileTool({ ...input, path: readPath.absolutePath }, {
+                cwd: workspace.root,
+                root: workspace.root,
+                readRoots: readPath.readRoots,
+                allowExternalPaths: config.permissions.allowExternalPaths,
+            });
         if (response.isError) {
             logFailedToolResponse(config, {
                 tool: toolNames.read,
@@ -1675,11 +1923,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 paths: [input.path],
                 toolName: toolNames.write,
             });
-            const response = await writeFileTool(input, {
-                cwd: workspace.root,
-                root: workspace.root,
-                allowExternalPaths: config.permissions.allowExternalPaths,
-            });
+            const response = isRemoteWorkspace(workspace)
+                ? await runtimeServices.remoteAgents.writeBuffer(workspace, input.path, Buffer.from(input.content, "utf8")).then((result) => remoteTextToolResponse(`Wrote ${input.path} (${result.bytes} bytes).`))
+                : await writeFileTool(input, {
+                    cwd: workspace.root,
+                    root: workspace.root,
+                    allowExternalPaths: config.permissions.allowExternalPaths,
+                });
             if (response.isError) {
                 await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                     workspaceId,
@@ -1768,11 +2018,24 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 paths: [input.path],
                 toolName: toolNames.edit,
             });
-            const response = await editFileTool(input, {
-                cwd: workspace.root,
-                root: workspace.root,
-                allowExternalPaths: config.permissions.allowExternalPaths,
-            });
+            let response;
+            if (isRemoteWorkspace(workspace)) {
+                const beforeBytes = await runtimeServices.remoteAgents.readWhole(workspace, input.path);
+                if (beforeBytes === null)
+                    throw new Error(`Remote edit target does not exist: ${input.path}`);
+                const before = decodeRemoteUtf8(beforeBytes, input.path);
+                const after = applyRemoteStructuredEdits(input.path, before, input.edits);
+                await runtimeServices.remoteAgents.writeBuffer(workspace, input.path, Buffer.from(after, "utf8"));
+                const patch = unifiedFilePatch(input.path, input.path, before, after);
+                response = { ...remoteTextToolResponse(`Edited ${input.path}.`), details: { diff: patch, patch } };
+            }
+            else {
+                response = await editFileTool(input, {
+                    cwd: workspace.root,
+                    root: workspace.root,
+                    allowExternalPaths: config.permissions.allowExternalPaths,
+                });
+            }
             if (response.isError) {
                 await finishMutation(reviewCheckpoints, runtimeServices.hookManager, {
                     workspaceId,
@@ -1863,10 +2126,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 paths: mutationPaths,
                 toolName: "apply_patch",
             });
-            const applied = await applyPatch(workspace.root, patch);
+            const applied = isRemoteWorkspace(workspace)
+                ? await applyRemotePatch(workspace, patch, workspaces, runtimeServices.remoteAgents)
+                : await applyPatch(workspace.root, patch);
             const paths = applied.files.map((file) => file.path).join(", ");
             const result = `Applied patch to ${applied.files.length} file(s): ${paths}`;
-            const preview = await collectWorkspacePreviews(workspace, applied.files, workspaces);
+            const preview = await collectWorkspacePreviews(workspace, applied.files, workspaces, runtimeServices.remoteAgents);
             const content = [textBlock(result), ...preview.imageContent];
             const displayPath = applied.files.length === 1
                 ? applied.files[0]?.path
@@ -1961,7 +2226,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const latestOperationId = operationRecords.at(-1)?.id;
             if (latestOperationId !== undefined)
                 reviewToolCursors.set(workspaceId, latestOperationId);
-            const preview = await collectWorkspacePreviews(workspace, review.files, workspaces);
+            const preview = await collectWorkspacePreviews(workspace, review.files, workspaces, runtimeServices.remoteAgents);
             const content = [textBlock(review.result), ...preview.imageContent];
             await runtimeServices.hookManager.runEvent("after_review", {
                 workspaceId,
@@ -2023,11 +2288,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const workspace = workspaces.getWorkspace(workspaceId);
             if (input.path)
                 workspaces.resolvePath(workspace, input.path);
-            const response = await grepFilesTool(input, {
-                cwd: workspace.root,
-                root: workspace.root,
-                allowExternalPaths: config.permissions.allowExternalPaths,
-            });
+            const response = isRemoteWorkspace(workspace)
+                ? await runtimeServices.remoteAgents.rpcWorkspace(workspace, "search.grep", input, 60_000).then((result) => remoteTextToolResponse(remoteGrepText(result)))
+                : await grepFilesTool(input, {
+                    cwd: workspace.root,
+                    root: workspace.root,
+                    allowExternalPaths: config.permissions.allowExternalPaths,
+                });
             if (response.isError) {
                 logFailedToolResponse(config, {
                     tool: toolNames.grep,
@@ -2085,11 +2352,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const workspace = workspaces.getWorkspace(workspaceId);
             if (input.path)
                 workspaces.resolvePath(workspace, input.path);
-            const response = await findFilesTool(input, {
-                cwd: workspace.root,
-                root: workspace.root,
-                allowExternalPaths: config.permissions.allowExternalPaths,
-            });
+            const response = isRemoteWorkspace(workspace)
+                ? await runtimeServices.remoteAgents.rpcWorkspace(workspace, "search.glob", input, 60_000).then((result) => remoteTextToolResponse(remoteGlobText(result)))
+                : await findFilesTool(input, {
+                    cwd: workspace.root,
+                    root: workspace.root,
+                    allowExternalPaths: config.permissions.allowExternalPaths,
+                });
             if (response.isError) {
                 logFailedToolResponse(config, {
                     tool: toolNames.glob,
@@ -2144,11 +2413,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const startedAt = performance.now();
             const workspace = workspaces.getWorkspace(workspaceId);
             workspaces.resolvePath(workspace, input.path);
-            const response = await listDirectoryTool(input, {
-                cwd: workspace.root,
-                root: workspace.root,
-                allowExternalPaths: config.permissions.allowExternalPaths,
-            });
+            const response = isRemoteWorkspace(workspace)
+                ? await runtimeServices.remoteAgents.rpcWorkspace(workspace, "fs.list", input, 60_000).then((result) => remoteTextToolResponse(remoteListText(result)))
+                : await listDirectoryTool(input, {
+                    cwd: workspace.root,
+                    root: workspace.root,
+                    allowExternalPaths: config.permissions.allowExternalPaths,
+                });
             if (response.isError) {
                 logFailedToolResponse(config, {
                     tool: toolNames.ls,
@@ -2224,11 +2495,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 workspaceRoot: workspace.root,
                 toolName: toolNames.shell,
             }, { strict: true });
-            const response = await runShellTool(input, {
-                cwd,
-                root: workspace.root,
-                allowExternalPaths: config.permissions.allowExternalPaths,
-            });
+            const response = isRemoteWorkspace(workspace)
+                ? await runtimeServices.remoteAgents.rpcWorkspace(workspace, "shell.run", { ...input, cwd }, Math.min(310_000, Math.max(30_000, Number(input.timeout ?? 30) * 1000 + 10_000))).then((result) => ({ ...remoteTextToolResponse(result.output), details: { exitCode: result.exitCode } }))
+                : await runShellTool(input, {
+                    cwd,
+                    root: workspace.root,
+                    allowExternalPaths: config.permissions.allowExternalPaths,
+                });
             if (response.isError) {
                 await runtimeServices.hookManager.runEvent("after_command", {
                     workspaceId,
@@ -2295,7 +2568,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         });
     }
     if (config.toolMode === "codex") {
-        registerCodexProcessTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, reviewCheckpoints, runtimeServices.hookManager);
+        registerCodexProcessTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, reviewCheckpoints, runtimeServices.hookManager, runtimeServices.remoteAgents);
     }
     if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
         registerArtifactTools(server, {
@@ -2327,6 +2600,7 @@ export function createServer(config = loadConfig(), options = {}) {
     });
     const runtimeState = new StructuredRuntimeState(config.stateDir);
     structuredRuntimeState = runtimeState;
+    const remoteAgents = new RemoteAgentManager(config, runtimeState);
     const pluginManager = new PluginManager(config, runtimeState);
     if (!Object.prototype.hasOwnProperty.call(config, "_devspaceBaseSkillPaths")) {
         Object.defineProperty(config, "_devspaceBaseSkillPaths", {
@@ -2338,14 +2612,27 @@ export function createServer(config = loadConfig(), options = {}) {
     }
     config.skillPaths = Array.from(new Set([...config._devspaceBaseSkillPaths, ...pluginManager.enabledSkillRoots()]));
     const workspaceStore = createWorkspaceStore(config.stateDir);
-    const workspaces = new WorkspaceRegistry(config, workspaceStore);
+    const workspaces = new WorkspaceRegistry(config, workspaceStore, remoteAgents);
     const uiLease = new UiSessionLease(config);
     const memoryStore = new MemoryStore(runtimeState.database.sqlite);
-    const hookManager = new HookManager(config, runtimeState, workspaces);
+    const hookManager = new HookManager(config, runtimeState, workspaces, remoteAgents);
     const reviewCheckpoints = createReviewCheckpointManager({
         stateDir: config.stateDir,
         uiLease,
         sessionReviewEnabled: config.features?.uiSessionReview,
+        resolveIo: (workspaceId) => {
+            const workspace = workspaces.getWorkspace(workspaceId);
+            if (!isRemoteWorkspace(workspace))
+                return undefined;
+            return {
+                kind: "remote-agent",
+                root: workspace.root,
+                backendId: workspace.backendId,
+                resolvePath: (value) => workspaces.resolvePath(workspace, value),
+                capture: (value) => remoteAgents.capture(workspace, value),
+                restore: (value, descriptor, content) => remoteAgents.restore(workspace, value, descriptor, content),
+            };
+        },
     });
     const processSessions = new ProcessSessionManager({ stateDir: config.stateDir, runtimeState });
     const fileWatches = new FileWatchManager(runtimeState);
@@ -2403,6 +2690,20 @@ export function createServer(config = loadConfig(), options = {}) {
             });
         });
         next();
+    });
+    app.get("/agent/v1/devspace-agent.py", (_req, res) => {
+        const asset = linuxAgentAsset("devspace-agent.py");
+        res.setHeader("Content-Type", "text/x-python; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, max-age=0");
+        res.setHeader("X-Content-SHA256", asset.sha256);
+        res.send(asset.bytes);
+    });
+    app.get("/agent/v1/install.sh", (_req, res) => {
+        const asset = linuxAgentAsset("install.sh");
+        res.setHeader("Content-Type", "text/x-shellscript; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, max-age=0");
+        res.setHeader("X-Content-SHA256", asset.sha256);
+        res.send(asset.bytes);
     });
     app.use(mcpAuthRouter({
         provider: oauthProvider,
@@ -2496,6 +2797,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     uiLease,
                     memoryStore,
                     hookManager,
+                    remoteAgents,
                 });
                 await server.connect(transport);
             }
@@ -2525,6 +2827,8 @@ export function createServer(config = loadConfig(), options = {}) {
         fileWatches,
         permissionRules,
         pluginManager,
+        remoteAgents,
+        attachAgentHttpServer: (httpServer) => remoteAgents.attachHttpServer(httpServer),
         close: () => {
             closePromise ??= (async () => {
                 clearInterval(sessionCleanupTimer);
@@ -2532,6 +2836,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 logSessionCloseResults("server_shutdown", results);
                 fileWatches.close();
                 processSessions.shutdown({ preservePersistent: true });
+                await remoteAgents.close();
                 oauthProvider.close();
                 workspaceStore.close?.();
                 pluginManager.close();
@@ -2551,7 +2856,7 @@ async function isMainModule() {
     return modulePath === entrypointPath;
 }
 if (await isMainModule()) {
-    const { app, config, close, localAgentProviders, processSessions, pluginManager } = createServer();
+    const { app, config, close, localAgentProviders, processSessions, pluginManager, remoteAgents, attachAgentHttpServer } = createServer();
     const httpServer = app.listen(config.port, config.host, () => {
         console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
         console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
@@ -2562,6 +2867,7 @@ if (await isMainModule()) {
         console.log(`recovered process records: ${processSessions.recoveredProcesses.length}`);
         console.log(`protocol/server version: ${DEVSPACE_PROTOCOL_VERSION}/${DEVSPACE_SERVER_VERSION}`);
         console.log(`plugins: ${pluginManager.list().filter((plugin) => plugin.enabled).length} enabled, ${pluginManager.list().length} cached`);
+        console.log(`remote agents: ${remoteAgents.list().filter((agent) => agent.connected).length} connected, ${remoteAgents.list().length} enrolled`);
         console.log("auth: oauth owner-token flow required");
         console.log(`logging: ${config.logging.level} ${config.logging.format}`);
         console.log(`request logging: ${config.logging.requests ? "enabled" : "disabled"}`);
@@ -2577,6 +2883,7 @@ if (await isMainModule()) {
             console.log(`subagent providers: ${formatLocalAgentProviderAvailabilitySummary(localAgentProviders)}`);
         }
     });
+    attachAgentHttpServer(httpServer);
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown)

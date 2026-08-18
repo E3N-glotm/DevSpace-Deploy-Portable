@@ -43,10 +43,11 @@ export function createReviewCheckpointManager(options = {}) {
     scheduleLegacyCleanup(stateDir);
 
     async function ensureState(workspaceId, root) {
-        const absoluteRoot = resolve(root);
+        const io = options.resolveIo?.(workspaceId, root);
+        const absoluteRoot = io?.kind === "remote-agent" ? String(io.root || root) : resolve(root);
         let state = states.get(workspaceId);
         if (!state || state.root !== absoluteRoot) {
-            state = await loadOrCreateSession(stateDir, workspaceId, absoluteRoot);
+            state = await loadOrCreateSession(stateDir, workspaceId, absoluteRoot, io);
         }
         // Session JSON/object storage on disk is authoritative. Keep only a
         // bounded LRU of hot review states so repeated workspace opens cannot
@@ -65,6 +66,11 @@ export function createReviewCheckpointManager(options = {}) {
     const manager = {
         async initializeWorkspace({ workspaceId, root }) {
             const state = await ensureState(workspaceId, root);
+            const io = options.resolveIo?.(workspaceId, root);
+            if (io?.kind === "remote-agent") {
+                state.executionBackend = "remote-agent";
+                state.backendId = io.backendId;
+            }
             state.status = "active";
             state.updatedAt = new Date().toISOString();
             if (sessionWorthPersisting(state)) {
@@ -89,8 +95,9 @@ export function createReviewCheckpointManager(options = {}) {
             if (!sessionReviewEnabled)
                 return { active: false, reason: "Session review is disabled" };
             const state = await ensureState(workspaceId, root);
+            const io = options.resolveIo?.(workspaceId, root);
             const requestedPaths = [...new Set((Array.isArray(paths) ? paths : [])
-                .map((item) => normalizeTrackedPath(state.root, item))
+                .map((item) => normalizeTrackedPath(state.root, item, io))
                 .filter(Boolean))];
             if (requestedPaths.length === 0) {
                 if (kind === "shell") {
@@ -118,7 +125,7 @@ export function createReviewCheckpointManager(options = {}) {
             for (const trackedPath of requestedPaths) {
                 if (state.tracked[trackedPath])
                     continue;
-                const captured = await captureDescriptor(stateDir, state, trackedPath, true);
+                const captured = await captureDescriptor(stateDir, state, trackedPath, true, io);
                 state.tracked[trackedPath] = {
                     baseline: captured.descriptor,
                     lastShown: captured.descriptor,
@@ -137,15 +144,16 @@ export function createReviewCheckpointManager(options = {}) {
             if (!sessionReviewEnabled || !success || kind === "shell")
                 return;
             const state = await ensureState(workspaceId, root);
+            const io = options.resolveIo?.(workspaceId, root);
             const requestedPaths = [...new Set((Array.isArray(paths) ? paths : [])
-                .map((item) => normalizeTrackedPath(state.root, item))
+                .map((item) => normalizeTrackedPath(state.root, item, io))
                 .filter(Boolean))];
             if (requestedPaths.length === 0 || Object.keys(state.tracked ?? {}).length === 0)
                 return;
             // Freeze the session's own historical result immediately after a
             // successful structured mutation. Later sessions may change the
             // same files, but this recorded diff must never silently become 0.
-            const comparison = await compareTrackedPaths(stateDir, state, "baseline", false);
+            const comparison = await compareTrackedPaths(stateDir, state, "baseline", false, io);
             state.recordedReview = compactRecordedReview(comparison);
             state.recordedAt = new Date().toISOString();
             state.updatedAt = state.recordedAt;
@@ -155,11 +163,13 @@ export function createReviewCheckpointManager(options = {}) {
 
         async reviewChanges({ workspaceId, root, since = "last_shown", markReviewed = true }) {
             const state = await ensureState(workspaceId, root);
+            const io = options.resolveIo?.(workspaceId, root);
             const comparison = await compareTrackedPaths(
                 stateDir,
                 state,
                 since === "workspace_open" ? "baseline" : "lastShown",
                 markReviewed,
+                io,
             );
             if (markReviewed) {
                 state.updatedAt = new Date().toISOString();
@@ -169,7 +179,7 @@ export function createReviewCheckpointManager(options = {}) {
             if (comparison.summary.files > 0 && Object.keys(state.tracked ?? {}).length > 0) {
                 const historical = since === "workspace_open"
                     ? comparison
-                    : await compareTrackedPaths(stateDir, state, "baseline", false);
+                    : await compareTrackedPaths(stateDir, state, "baseline", false, io);
                 state.recordedReview = compactRecordedReview(historical);
                 state.recordedAt = new Date().toISOString();
             }
@@ -182,7 +192,8 @@ export function createReviewCheckpointManager(options = {}) {
             const state = await ensureState(workspaceId, root);
             if (!sessionReviewEnabled)
                 return inactiveSessionReview("Session review is disabled");
-            const comparison = await compareTrackedPaths(stateDir, state, "baseline", false);
+            const io = options.resolveIo?.(workspaceId, root);
+            const comparison = await compareTrackedPaths(stateDir, state, "baseline", false, io);
             state.lastReview = comparison.summary;
             state.updatedAt = new Date().toISOString();
             if (comparison.summary.files > 0 && Object.keys(state.tracked ?? {}).length > 0) {
@@ -196,7 +207,14 @@ export function createReviewCheckpointManager(options = {}) {
 
         async rollbackSession({ workspaceId, root, confirmation, forcePartial = false }) {
             const state = await ensureState(workspaceId, root);
-            return rollbackState(stateDir, state, confirmation, Boolean(forcePartial));
+            const io = options.resolveIo?.(workspaceId, root);
+            return rollbackState(stateDir, state, confirmation, Boolean(forcePartial), io);
+        },
+
+        async restoreSafetySnapshot({ workspaceId, root, snapshotId, confirmation }) {
+            const state = await ensureState(workspaceId, root);
+            const io = options.resolveIo?.(workspaceId, root);
+            return restoreSafetySnapshot(stateDir, state, { snapshotId, confirmation }, io);
         },
     };
     return manager;
@@ -225,7 +243,7 @@ export async function reviewAdmin({ stateDir, action, payload = {} }) {
         throw new Error(`Review session not found: ${sessionId}`);
     if (action === "details") {
         let comparison = recordedComparison(state);
-        if (!comparison && existsSync(state.root)) {
+        if (!comparison && state.executionBackend !== "remote-agent" && existsSync(state.root)) {
             comparison = await compareTrackedPaths(stateDir, state, "baseline", false);
             if (comparison.summary.files === 0 && Number(state.lastReview?.files || 0) > 0) {
                 // 1.1.33 and earlier did not freeze historical file details.
@@ -277,21 +295,25 @@ export async function reviewAdmin({ stateDir, action, payload = {} }) {
         return { session: publicSession(state) };
     }
     if (action === "rollback") {
+        if (state.executionBackend === "remote-agent")
+            throw new Error("Remote review rollback requires an active DevSpace server session so the authenticated Linux Agent can perform the restore.");
         return rollbackState(stateDir, state, String(payload.confirmation || ""), Boolean(payload.forcePartial));
     }
     if (action === "restore-safety") {
+        if (state.executionBackend === "remote-agent")
+            throw new Error("Remote safety-snapshot restore requires an active DevSpace server session so the authenticated Linux Agent can perform the restore.");
         return restoreSafetySnapshot(stateDir, state, payload);
     }
     throw new Error(`Unsupported reviewAdmin action: ${action}`);
 }
 
-async function rollbackState(stateDir, state, confirmation, forcePartial) {
+async function rollbackState(stateDir, state, confirmation, forcePartial, io) {
     if (confirmation !== confirmationToken(state))
         throw new Error(`Confirmation must exactly equal: ${confirmationToken(state)}`);
     if (state.rollbackStoragePruned) {
         throw new Error("This historical session is retained for review, but its bounded rollback snapshot content has been pruned.");
     }
-    const comparison = await compareTrackedPaths(stateDir, state, "baseline", false);
+    const comparison = await compareTrackedPaths(stateDir, state, "baseline", false, io);
     if (comparison.summary.files === 0) {
         return { restored: 0, paths: [], partial: false, checkpointId: state.sessionId };
     }
@@ -304,7 +326,7 @@ async function rollbackState(stateDir, state, confirmation, forcePartial) {
             unsupported.push(file.path);
             continue;
         }
-        const current = await captureDescriptor(stateDir, state, file.path, true);
+        const current = await captureDescriptor(stateDir, state, file.path, true, io);
         if (!descriptorRestorable(current.descriptor)) {
             unsupported.push(file.path);
             continue;
@@ -324,7 +346,7 @@ async function rollbackState(stateDir, state, confirmation, forcePartial) {
     const safety = { id: snapshotId, createdAt: new Date().toISOString(), paths: safetyPaths };
     state.safetySnapshots = [safety, ...(state.safetySnapshots ?? [])].slice(0, MAX_SAFETY_SNAPSHOTS);
     for (const trackedPath of restorable) {
-        await restoreDescriptor(stateDir, state, trackedPath, state.tracked[trackedPath].baseline);
+        await restoreDescriptor(stateDir, state, trackedPath, state.tracked[trackedPath].baseline, io);
         state.tracked[trackedPath].lastShown = state.tracked[trackedPath].baseline;
     }
     state.lastReview = { files: unsupported.length, additions: 0, removals: 0 };
@@ -342,7 +364,7 @@ async function rollbackState(stateDir, state, confirmation, forcePartial) {
     };
 }
 
-async function restoreSafetySnapshot(stateDir, state, payload) {
+async function restoreSafetySnapshot(stateDir, state, payload, io) {
     const snapshotId = String(payload.snapshotId || "");
     const snapshot = (state.safetySnapshots ?? []).find((item) => item.id === snapshotId);
     if (!snapshot)
@@ -353,7 +375,7 @@ async function restoreSafetySnapshot(stateDir, state, payload) {
     for (const [trackedPath, descriptor] of Object.entries(snapshot.paths ?? {})) {
         if (!descriptorRestorable(descriptor))
             continue;
-        await restoreDescriptor(stateDir, state, trackedPath, descriptor);
+        await restoreDescriptor(stateDir, state, trackedPath, descriptor, io);
         restored.push(trackedPath);
     }
     state.updatedAt = new Date().toISOString();
@@ -361,7 +383,7 @@ async function restoreSafetySnapshot(stateDir, state, payload) {
     return { restored: restored.length, paths: restored, snapshotId, session: publicSession(state) };
 }
 
-async function loadOrCreateSession(stateDir, workspaceId, root) {
+async function loadOrCreateSession(stateDir, workspaceId, root, io) {
     const existing = await loadSessionById(stateDir, workspaceId);
     if (existing && existing.root === root)
         return normalizeState(existing);
@@ -382,6 +404,8 @@ async function loadOrCreateSession(stateDir, workspaceId, root) {
         safetySnapshots: [],
         storedBytes: 0,
         shellMutationObserved: false,
+        executionBackend: io?.kind === "remote-agent" ? "remote-agent" : "local",
+        backendId: io?.backendId,
     });
     return state;
 }
@@ -397,6 +421,8 @@ function normalizeState(state) {
         shellMutationObserved: Boolean(state.shellMutationObserved),
         recordedReview: normalizeRecordedReview(state.recordedReview),
         rollbackStoragePruned: Boolean(state.rollbackStoragePruned),
+        executionBackend: state.executionBackend === "remote-agent" ? "remote-agent" : "local",
+        backendId: state.backendId ?? undefined,
     };
 }
 
@@ -474,10 +500,19 @@ function objectFile(stateDir, state, objectKey) {
     return join(sessionDirectory(stateDir, state.sessionId), "objects", `${objectKey}.gz`);
 }
 
-function normalizeTrackedPath(root, value) {
+function normalizeTrackedPath(root, value, io) {
     const text = String(value ?? "").trim();
     if (!text)
         return "";
+    if (io?.kind === "remote-agent") {
+        const normalized = io.resolvePath(text);
+        const normalizedRoot = String(io.root || root).replace(/\/+$/, "") || "/";
+        if (normalized === normalizedRoot)
+            return "";
+        if (!normalized.startsWith(`${normalizedRoot}/`))
+            throw new Error(`Review path escapes the remote workspace: ${text}`);
+        return normalized.slice(normalizedRoot.length + 1);
+    }
     const absolute = isAbsolute(text) ? resolve(text) : resolve(root, text);
     const rel = relative(root, absolute);
     if (!rel || rel === ".")
@@ -491,7 +526,26 @@ function absoluteTrackedPath(state, trackedPath) {
     return resolve(state.root, trackedPath.split("/").join(sep));
 }
 
-async function captureDescriptor(stateDir, state, trackedPath, persist) {
+async function captureDescriptor(stateDir, state, trackedPath, persist, io) {
+    if (io?.kind === "remote-agent") {
+        const captured = await io.capture(trackedPath);
+        const descriptor = { ...(captured?.descriptor ?? { exists: false, type: "missing", stored: true }) };
+        const content = captured?.content ? Buffer.from(captured.content) : undefined;
+        if (descriptor.type === "file" && content) {
+            const hash = descriptor.sha256 || createHash("sha256").update(content).digest("hex");
+            descriptor.sha256 = hash;
+            descriptor.text = descriptor.text !== false && looksLikeText(content);
+            descriptor.stored = false;
+            descriptor.object = undefined;
+            if (persist) {
+                const stored = await storeObject(stateDir, state, hash, content);
+                descriptor.stored = stored;
+                descriptor.object = stored ? hash : undefined;
+                descriptor.reason = stored ? undefined : `session-storage-cap-${MAX_SESSION_STORED_BYTES}-bytes`;
+            }
+        }
+        return { descriptor, content };
+    }
     const target = absoluteTrackedPath(state, trackedPath);
     let information;
     try {
@@ -650,13 +704,13 @@ function descriptorsEqual(left, right) {
     return left.size === right.size && Math.trunc(left.mtimeMs || 0) === Math.trunc(right.mtimeMs || 0);
 }
 
-async function compareTrackedPaths(stateDir, state, baseField, persistCurrent) {
+async function compareTrackedPaths(stateDir, state, baseField, persistCurrent, io) {
     const files = [];
     const patches = [];
     for (const trackedPath of Object.keys(state.tracked ?? {}).sort()) {
         const tracked = state.tracked[trackedPath];
         const before = tracked?.[baseField] ?? tracked?.baseline;
-        const current = await captureDescriptor(stateDir, state, trackedPath, persistCurrent);
+        const current = await captureDescriptor(stateDir, state, trackedPath, persistCurrent, io);
         if (descriptorsEqual(before, current.descriptor)) {
             if (persistCurrent)
                 tracked.lastShown = current.descriptor;
@@ -746,7 +800,16 @@ function descriptorRestorable(descriptor) {
     return descriptor.type === "file" && Boolean(descriptor.stored && descriptor.object);
 }
 
-async function restoreDescriptor(stateDir, state, trackedPath, descriptor) {
+async function restoreDescriptor(stateDir, state, trackedPath, descriptor, io) {
+    if (io?.kind === "remote-agent") {
+        const content = descriptor?.type === "file"
+            ? await readDescriptorContent(stateDir, state, descriptor)
+            : undefined;
+        if (descriptor?.type === "file" && content === null)
+            throw new Error(`Review object is unavailable for ${trackedPath}.`);
+        await io.restore(trackedPath, descriptor, content);
+        return;
+    }
     const target = absoluteTrackedPath(state, trackedPath);
     if (!descriptor.exists) {
         await rm(target, { recursive: true, force: true });
@@ -1087,6 +1150,8 @@ function publicSession(state) {
         storedBytes: Number(state.storedBytes || 0),
         shellMutationObserved: Boolean(state.shellMutationObserved),
         rollbackStoragePruned: Boolean(state.rollbackStoragePruned),
+        executionBackend: state.executionBackend === "remote-agent" ? "remote-agent" : "local",
+        backendId: state.backendId ?? undefined,
     };
 }
 

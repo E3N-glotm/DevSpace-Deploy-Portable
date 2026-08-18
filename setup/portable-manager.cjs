@@ -57,6 +57,7 @@ const PLUGIN_ADMIN_FILE = path.join(ROOT, "app", "plugin-admin.mjs");
 const REVIEW_MANAGER_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "review-checkpoints.js");
 const DATABASE_CLIENT_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "db", "client.js");
 const MEMORY_STORE_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "memory-store.js");
+const REMOTE_AGENT_STORE_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "remote-agent-store.js");
 const PORTABLE_UPDATER_FILE = path.join(ROOT, "setup", "portable-updater.ps1");
 const UPDATE_STAGING_ROOT = path.join(ROOT, ".update-staging");
 const UPDATE_REPOSITORY = "E3N-glotm/DevSpace-Deploy-Portable";
@@ -65,7 +66,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.38";
+const PORTABLE_VERSION = "1.1.39";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -1544,6 +1545,21 @@ async function runOAuthClientAdmin(action, payload = {}) {
   } finally {
     database.close();
   }
+}
+
+async function runRemoteAgentAdmin(action, payload = {}) {
+  if (!fs.existsSync(REMOTE_AGENT_STORE_FILE)) {
+    throw new Error("Remote Workspace Agent runtime is missing from the bundled DevSpace package.");
+  }
+  const moduleUrl = `${pathToFileURL(REMOTE_AGENT_STORE_FILE).href}?mtime=${fs.statSync(REMOTE_AGENT_STORE_FILE).mtimeMs}`;
+  const remoteModule = await import(moduleUrl);
+  const config = readJson(CONFIG_FILE, {});
+  return remoteModule.remoteAgentAdmin({
+    stateDir: STATE_DIR,
+    action,
+    payload,
+    publicBaseUrl: String(config.publicBaseUrl || ""),
+  });
 }
 
 function installTasks() {
@@ -3484,6 +3500,14 @@ async function main() {
       stdoutJson(await runOAuthClientAdmin("rotate-secret", await readStdinJson()));
     } else if (command === "oauth-client-delete") {
       stdoutJson(await runOAuthClientAdmin("delete", await readStdinJson()));
+    } else if (command === "remote-agent-list") {
+      stdoutJson(await runRemoteAgentAdmin("list", await readStdinJson()));
+    } else if (command === "remote-agent-create-enrollment") {
+      stdoutJson(await runRemoteAgentAdmin("create-enrollment", await readStdinJson()));
+    } else if (command === "remote-agent-revoke") {
+      stdoutJson(await runRemoteAgentAdmin("revoke", await readStdinJson()));
+    } else if (command === "remote-agent-delete") {
+      stdoutJson(await runRemoteAgentAdmin("delete", await readStdinJson()));
     } else if (command === "log-paths") {
       const provider = selectedTunnelProvider();
       stdoutJson({
@@ -3496,7 +3520,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete oauth-client-list oauth-client-create oauth-client-rotate-secret oauth-client-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete oauth-client-list oauth-client-create oauth-client-rotate-secret oauth-client-delete remote-agent-list remote-agent-create-enrollment remote-agent-revoke remote-agent-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);

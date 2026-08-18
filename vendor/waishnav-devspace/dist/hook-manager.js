@@ -66,10 +66,12 @@ export class HookManager {
     file;
     runtimeState;
     workspaces;
-    constructor(config, runtimeState, workspaces) {
+    remoteAgents;
+    constructor(config, runtimeState, workspaces, remoteAgents) {
         this.config = config;
         this.runtimeState = runtimeState;
         this.workspaces = workspaces;
+        this.remoteAgents = remoteAgents;
         this.file = join(config.stateDir, "hooks.json");
     }
     list() {
@@ -154,6 +156,45 @@ export class HookManager {
         };
         const startedAt = performance.now();
         try {
+            if (workspace?.backend === "remote-agent") {
+                if (!this.remoteAgents)
+                    throw new Error("Remote Workspace hook execution is unavailable because no Linux Agent manager is attached.");
+                const snapshot = await this.remoteAgents.rpcWorkspace(workspace, "process.start", {
+                    argv: [executable, ...args],
+                    cwd,
+                    env: environment,
+                    persistent: false,
+                    tty: false,
+                    yieldTimeMs: Math.min(hook.timeoutMs, 30_000),
+                    maxOutputTokens: 8_000,
+                }, hook.timeoutMs + 15_000);
+                if (snapshot.running) {
+                    await this.remoteAgents.rpcWorkspace(workspace, "process.kill", {
+                        processHandle: snapshot.processHandle,
+                        signal: "SIGKILL",
+                    }, 15_000).catch(() => {});
+                    throw new Error(`Remote hook timed out after ${hook.timeoutMs} ms.`);
+                }
+                const result = {
+                    hookId: hook.id,
+                    name: hook.name,
+                    event: context.event,
+                    success: snapshot.exitCode === 0,
+                    exitCode: snapshot.exitCode,
+                    durationMs: Math.round(performance.now() - startedAt),
+                    stdout: redactText(String(snapshot.output ?? "")).slice(-16_000),
+                    stderr: "",
+                    backend: "remote-agent",
+                    agentId: workspace.backendId,
+                };
+                this.runtimeState.appendEvent({
+                    kind: result.success ? "hook.completed" : "hook.failed",
+                    subject: hook.id,
+                    workspaceId: context.workspaceId,
+                    payload: result,
+                });
+                return result;
+            }
             const { stdout, stderr } = await execFileAsync(executable, args, {
                 cwd,
                 env: environment,
