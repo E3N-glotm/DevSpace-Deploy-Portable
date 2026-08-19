@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,7 +9,21 @@ const SOURCE_AGENT = join(ROOT, "vendor", "waishnav-devspace", "dist", "linux-ag
 const SOURCE_INSTALLER = join(ROOT, "vendor", "waishnav-devspace", "dist", "linux-agent", "install.sh");
 const PACKAGED_AGENT = join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "linux-agent", "devspace-agent.py");
 const PACKAGED_INSTALLER = join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "linux-agent", "install.sh");
-const BASH = join(ROOT, "runtime", "git", "bin", "bash.exe");
+const BUNDLED_BASH = join(ROOT, "runtime", "git", "bin", "bash.exe");
+
+function resolveBash() {
+  const candidates = [BUNDLED_BASH];
+  if (process.env.GIT_BASH) candidates.push(process.env.GIT_BASH);
+  if (process.env.ProgramFiles) candidates.push(join(process.env.ProgramFiles, "Git", "bin", "bash.exe"));
+
+  const where = spawnSync("where.exe", ["bash.exe"], { cwd: ROOT, encoding: "utf8", windowsHide: true });
+  if (where.status === 0) {
+    candidates.push(...String(where.stdout || "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean));
+  }
+  return candidates.find((candidate) => existsSync(candidate)) || "bash";
+}
+
+const BASH = resolveBash();
 
 const agent = readFileSync(SOURCE_AGENT, "utf8");
 const installer = readFileSync(SOURCE_INSTALLER, "utf8");
@@ -74,7 +88,11 @@ assert.equal(python.status, 0, python.stderr || python.stdout || "Python AST val
 assert.match(python.stdout, /python-ast-ok/);
 
 const bash = spawnSync(BASH, ["-n", SOURCE_INSTALLER], { cwd: ROOT, encoding: "utf8" });
-assert.equal(bash.status, 0, bash.stderr || bash.stdout || "install.sh syntax validation failed");
+assert.equal(
+  bash.status,
+  0,
+  bash.error?.message || bash.stderr || bash.stdout || `install.sh syntax validation failed with ${BASH}`,
+);
 
 assert.match(remoteAgentStore, /\? `\( tmp=\$\(mktemp\);/);
 assert.match(remoteAgentStore, /&& bash "\$tmp" --server/);
