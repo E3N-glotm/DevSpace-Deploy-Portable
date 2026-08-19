@@ -206,7 +206,7 @@ Owner password
 allowedRoots：/home/ubuntu/workspace
 ```
 
-点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256；Enrollment Token 默认 15 分钟有效且只能消费一次。完成后 Agent 使用独立随机 Secret 建立长期出站连接，systemd 服务以普通 Linux 用户运行，不以 root 身份运行。
+点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256。Enrollment Token 默认 15 分钟有效；首次握手开始后，在 Linux 尚未确认已持久化 Agent 凭据前保留最多 2 分钟恢复窗口。若公网 ACK 在这段时间内丢失，Agent 会自动重试并复用同一 Agent ID，同时控制端轮换新的 Agent Secret；Linux 原子保存凭据并确认后 Token 立即失效。之后 Agent 使用独立随机 Secret 建立长期出站连接，systemd 服务以普通 Linux 用户运行，不以 root 身份运行。
 
 之后可以直接让 MCP 打开：
 
@@ -224,7 +224,7 @@ devspace://gpu-01/home/ubuntu/workspace/MyProject
 
 DevSpace Portable 的公网 MCP/OAuth 层不绑定 ChatGPT。1.1.35 起，支持标准 OAuth Dynamic Client Registration 的客户端可以使用任意安全的 HTTPS 回调地址自动注册；本机原生客户端也支持 loopback HTTP(S) 与符合反向域名格式的 private URI scheme。
 
-如果 Gemini、Claude、IDE 或其它客户端提示“服务器不能自动注册 OAuth 客户端”，打开 DevSpace **配置与权限 → AI / MCP OAuth 客户端**：
+如果 Gemini、Claude、IDE 或其它客户端提示“服务器不能自动注册 OAuth 客户端”，打开 DevSpace **配置与权限 → AI / MCP OAuth 客户端**。1.1.39 重打包版已把“创建手动客户端”和“选中客户端凭据”拆开；左侧现有 ChatGPT/DCR 记录不会再覆盖右侧的新建表单：
 
 1. 从目标 AI 客户端复制它显示的 Redirect URI；
 2. 在 DevSpace 中创建一个手动 OAuth 客户端；
@@ -345,13 +345,15 @@ https://你的域名/mcp
 ## 1.1.39 主要变化
 
 - **完整 Remote Workspace Backend。** `open_workspace` 支持 `devspace://<agent-id-or-name>/absolute/linux/path`；打开后继续复用现有文件、搜索、命令、进程、file watch、review 和 patch 工具，不要求模型回退到 SSH/SFTP。
-- **Windows 仍是唯一 MCP/OAuth Control Plane。** Linux 只运行主动出站的轻量 Agent；一次性 Enrollment Token 默认 15 分钟且只能使用一次，之后改用独立 Agent Secret。控制中心可以创建 enrollment、查看 Agent 在线/主机/版本/allowedRoots，并撤销或删除登记。
+- **Windows 仍是唯一 MCP/OAuth Control Plane。** Linux 只运行主动出站的轻量 Agent；Enrollment Token 默认 15 分钟有效，成功确认后改用独立 Agent Secret。控制中心可以创建 enrollment、查看 Agent 在线/主机/版本/allowedRoots，并撤销或删除登记。
+- **Enrollment 改为可确认、可恢复的两阶段握手。** 首次 hello 后 Token 最多保留 2 分钟恢复窗口；ACK 丢失时同一 Token 可安全重试，复用 Agent ID 并轮换 Agent Secret。Linux 原子写入凭据后显式确认，控制端立即销毁 enrollment。Agent 默认最多尝试 3 次，并在失败时显示 WebSocket close code/reason，而不是留下“Windows 已登记、Linux 没 Secret”的半注册状态。
 - **Linux Agent 零 pip 依赖。** Agent 只依赖 Python 3 标准库；安装器双重校验 installer/Agent SHA-256，systemd 服务拒绝以 root 身份运行，并使用 `NoNewPrivileges`、`ProtectSystem=strict`、`ProtectHome=read-only` 和显式 `ReadWritePaths`。
 - **大文件与断线语义有界。** 文件传输固定 512 KiB chunks，支持 gzip、chunk/whole-file SHA-256 与 delta reuse；8 MiB 单 RPC 上限不被大文件绕过。短暂离线只允许尚未发送的请求等待重连，已经发出的不确定写操作不会自动 replay。
 - **远程 sparse review / rollback。** Windows 继续保存 bounded sparse-journal-v4 baseline；Agent 只 capture/restore 明确路径。`session_rollback` 可恢复远程结构化修改并生成 pre-rollback safety snapshot；新增 `session_restore_safety` 用于通过在线 Agent 恢复该安全快照。
 - **远程进程、PTY、watch 与 Lifecycle Hooks。** `exec_command`/`write_stdin`、persistent process、PTY、file watch 和 workspace hooks 都在远端 backend 执行，本地 Workspace 行为不变。
 - **远程系统/GPU 状态进入 `open_workspace`。** Agent 返回 Linux 主机、CPU/内存和 `nvidia-smi` GPU 摘要，常规 GPU 检查不再需要额外 SSH 命令。
 - **资源和安全边界收紧。** Agent 对 allowedRoots/realpath、symlink restore、目录列举、grep candidate、watch、process registry、文本读取和 RPC payload 都有明确上限；撤销 Agent 后现有连接会被 heartbeat 关闭。
+- **原生 UI 同版本重做。** `AI / MCP OAuth 客户端` 不再使用容易受 WinForms DPI/Dock 瞬时尺寸影响的 SplitContainer，改成与主页一致的 SurfacePanel / FieldHost / ModernButton 响应式双栏；手动创建区与已选客户端凭据区彻底分离，并增加 Secret 显示/隐藏。`远程服务器 / Linux Agent` 同步统一卡片、字段、表格和 danger 操作样式。剩余分栏页的共享 `SafeSplitLayout` 增加重入保护与边界安全余量。
 - Portable Protocol 仍为 1.5；**顶层 MCP Schema 有变化，升级后应 Refresh / Scan Tools**。OAuth 客户端身份、Token 持久化和本地历史 session 不要求重建。
 
 ## 1.1.38 主要变化

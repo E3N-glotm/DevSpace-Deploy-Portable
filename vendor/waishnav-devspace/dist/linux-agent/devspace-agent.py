@@ -55,6 +55,7 @@ MAX_LIST_ENTRIES = 5_000
 MAX_WATCHES = 64
 MAX_PROCESS_RECORDS = 500
 MAX_LIVE_PROCESSES = 128
+ENROLL_ATTEMPTS = 3
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -299,7 +300,10 @@ class WebSocketClient:
             if mask:
                 payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
             if opcode == 0x8:
-                raise ConnectionError("WebSocket was closed by the server.")
+                code = struct.unpack("!H", payload[:2])[0] if len(payload) >= 2 else 1005
+                reason = payload[2:].decode("utf-8", "replace") if len(payload) > 2 else ""
+                detail = f" ({code}{': ' + reason if reason else ''})"
+                raise ConnectionError(f"WebSocket was closed by the server{detail}.")
             if opcode == 0x9:
                 self._send_frame(0xA, payload)
                 continue
@@ -975,6 +979,12 @@ class AgentRuntime:
             self.config["agentSecret"] = ack["agentSecret"]
             self.config["allowedRoots"] = ack.get("allowedRoots") or self.config.get("allowedRoots")
             atomic_json(self.config_path, self.config)
+            try:
+                ws.send_json({"type": "enrollment_confirm", "agentId": ack["agentId"]})
+            except (ConnectionError, OSError, ssl.SSLError):
+                # The durable Agent credentials are already fsynced locally. The
+                # control plane retains a short recovery window and will prune it.
+                pass
         return ack
 
     def serve(self) -> None:
@@ -1410,9 +1420,26 @@ def enroll(args) -> int:
     config_path, config = enrollment_config(args)
     runtime = AgentRuntime(config_path, config)
     try:
-        ack = runtime.connect(config["server"], args.token)
-        print(json.dumps({"enrolled": True, "agentId": ack.get("agentId"), "name": ack.get("name"), "allowedRoots": ack.get("allowedRoots")}, ensure_ascii=False))
-        return 0
+        last_error = None
+        for attempt in range(1, ENROLL_ATTEMPTS + 1):
+            try:
+                ack = runtime.connect(config["server"], args.token)
+                print(json.dumps({"enrolled": True, "agentId": ack.get("agentId"), "name": ack.get("name"), "allowedRoots": ack.get("allowedRoots"), "recovered": bool(ack.get("enrollmentRecovered"))}, ensure_ascii=False))
+                return 0
+            except (ConnectionError, OSError, ssl.SSLError) as error:
+                last_error = error
+                if runtime.ws:
+                    try:
+                        runtime.ws.close()
+                    except Exception:
+                        pass
+                    runtime.ws = None
+                if attempt >= ENROLL_ATTEMPTS:
+                    break
+                print(f"DevSpace enrollment attempt {attempt}/{ENROLL_ATTEMPTS} failed: {error}; retrying...", file=sys.stderr, flush=True)
+                time.sleep(0.75 * attempt)
+        assert last_error is not None
+        raise last_error
     finally:
         runtime.close()
 

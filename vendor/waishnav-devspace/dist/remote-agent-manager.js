@@ -162,6 +162,18 @@ export class RemoteAgentManager {
                     return;
                 }
                 this.store.markSeen(state.agentId);
+                if (message.type === "enrollment_confirm") {
+                    if (String(message.agentId ?? "") !== state.agentId)
+                        throw new Error("Remote agent enrollment confirmation identity mismatch.");
+                    if (this.store.confirmEnrollment(state.agentId)) {
+                        this.runtimeState.appendEvent({
+                            kind: "remote.agent.enrollment_confirmed",
+                            subject: state.agentId,
+                            payload: { agentId: state.agentId },
+                        });
+                    }
+                    return;
+                }
                 if (message.type === "response") {
                     const pending = state.pending.get(message.id);
                     if (!pending)
@@ -233,6 +245,7 @@ export class RemoteAgentManager {
             agentVersion: DEVSPACE_LINUX_AGENT_VERSION,
             agentScriptSha256: agentScript.sha256,
             agentScriptUrl: `${this.config.publicBaseUrl.replace(/\/+$/, "")}/agent/v1/devspace-agent.py`,
+            enrollmentRecovered: Boolean(identity.recovered),
         };
         state.ws.send(JSON.stringify(ack));
         this.runtimeState.appendEvent({

@@ -24,7 +24,12 @@ assert.match(nativeSource, /显式 Memories/);
 assert.match(nativeSource, /日志与诊断/);
 assert.match(nativeSource, /正在执行，请稍候/);
 assert.match(nativeSource, /internal static class SafeSplitLayout/);
-assert.match(nativeSource, /SafeSplitLayout\.Bind\(split, 420, 390, 0\.55D\)/);
+assert.match(nativeSource, /SafeSplitLayout\.Bind\(split, 260, 240, 0\.55D\)/);
+assert.match(nativeSource, /Text = "创建手动 OAuth 客户端"/);
+assert.match(nativeSource, /Text = "选中客户端凭据"/);
+assert.match(nativeSource, /new SurfacePanel/);
+assert.match(nativeSource, /new FieldHost\(_clientId\)/);
+assert.match(nativeSource, /new FieldHost\(_clientSecret\)/);
 assert.match(nativeSource, /AutoScaleMode\s*=\s*AutoScaleMode\.Dpi/);
 assert.doesNotMatch(nativeSource, /SplitterDistance\s*=\s*610/);
 
@@ -45,6 +50,7 @@ try {
   assert.equal(report.passed, true);
   assert.equal(report.splitterLayout?.passed, true);
   assert.equal(report.splitterLayout?.oauthDialog, true);
+  assert.equal(report.splitterLayout?.oauthResponsiveColumns, true);
   assert.equal(report.splitterLayout?.dpiSafeDeferredLayout, true);
   assert.deepEqual(report.splitterLayout?.verticalWidths, [120, 240, 480, 820, 940, 1180, 1800]);
   assert.deepEqual(report.splitterLayout?.horizontalHeights, [90, 180, 360, 520, 700, 980]);
@@ -65,7 +71,7 @@ try {
     nativeExe: true,
     browserUi: false,
     splitterLayout: true,
-    oauthClientDialogLayout: true,
+    oauthClientDialogLayout: "responsive-surface-columns",
     tabs: report.uiTabs.length,
     buttons: report.uiButtons.length,
   }));

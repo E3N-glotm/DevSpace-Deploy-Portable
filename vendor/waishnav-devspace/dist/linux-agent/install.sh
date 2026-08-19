@@ -56,7 +56,15 @@ chown -R "$RUN_USER":"$(id -gn "$RUN_USER")" "$STATE_DIR"
 
 ARGS=("$INSTALL_DIR/devspace-agent.py" enroll --config "$CONFIG" --server "$SERVER" --token "$TOKEN" --name "$NAME" --state-dir "$STATE_DIR")
 for root in "${ALLOWED_ROOTS[@]}"; do ARGS+=(--allowed-root "$root"); done
-sudo -u "$RUN_USER" -- python3 "${ARGS[@]}"
+WAS_ACTIVE=0
+if systemctl is-active --quiet devspace-agent.service 2>/dev/null; then
+  WAS_ACTIVE=1
+  systemctl stop devspace-agent.service
+fi
+if ! sudo -u "$RUN_USER" -- python3 "${ARGS[@]}"; then
+  if [[ "$WAS_ACTIVE" -eq 1 ]]; then systemctl start devspace-agent.service || true; fi
+  exit 1
+fi
 chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$CONFIG"
 chmod 0600 "$CONFIG"
 

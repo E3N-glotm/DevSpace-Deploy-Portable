@@ -49,6 +49,11 @@ const migrations = [
         name: "remote-workspace-backend",
         up: migrateRemoteWorkspaceBackend,
     },
+    {
+        version: 11,
+        name: "remote-agent-enrollment-recovery",
+        up: migrateRemoteAgentEnrollmentRecovery,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -396,11 +401,19 @@ function migrateRemoteWorkspaceBackend(sqlite) {
       allowed_roots_json text not null,
       expires_at text not null,
       created_at text not null,
-      used_at text
+      used_at text,
+      agent_id text
     );
 
     create index if not exists remote_agent_enrollments_expires_idx
       on remote_agent_enrollments(expires_at);
+  `);
+}
+function migrateRemoteAgentEnrollmentRecovery(sqlite) {
+    addColumnIfMissing(sqlite, "remote_agent_enrollments", "agent_id", "text");
+    sqlite.exec(`
+    create index if not exists remote_agent_enrollments_agent_id_idx
+      on remote_agent_enrollments(agent_id);
   `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

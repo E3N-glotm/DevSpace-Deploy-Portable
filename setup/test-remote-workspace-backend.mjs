@@ -69,6 +69,9 @@ class FakeLinuxAgent {
         const message = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data));
         if (message.type === "hello_ack") {
           this.ack = message;
+          if (this.options.enrollmentToken && this.options.confirmEnrollment !== false) {
+            ws.send(JSON.stringify({ type: "enrollment_confirm", agentId: message.agentId }));
+          }
           resolvePromise(message);
           return;
         }
@@ -101,7 +104,9 @@ class FakeLinuxAgent {
         persistentProcesses: true,
       },
       metadata: { python: "3.12-test", user: "ubuntu", uid: 1000 },
-      ...this.options,
+      ...(this.options.enrollmentToken
+        ? { enrollmentToken: this.options.enrollmentToken }
+        : { agentId: this.options.agentId, agentSecret: this.options.agentSecret }),
     }));
     return ackPromise;
   }
@@ -274,6 +279,22 @@ try {
   config.publicBaseUrl = `http://127.0.0.1:${address.port}`;
   const wsUrl = `ws://127.0.0.1:${address.port}/agent/v1/connect`;
 
+  const recoveryEnrollment = manager.store.createEnrollment({
+    name: "recovery-probe",
+    allowedRoots: ["/home/ubuntu/workspace"],
+    ttlMinutes: 15,
+  });
+  const firstRecovery = manager.store.consumeEnrollment(recoveryEnrollment.token, { hostname: "first-attempt" });
+  const secondRecovery = manager.store.consumeEnrollment(recoveryEnrollment.token, { hostname: "retry-attempt" });
+  assert.equal(secondRecovery.agentId, firstRecovery.agentId);
+  assert.notEqual(secondRecovery.agentSecret, firstRecovery.agentSecret);
+  assert.equal(secondRecovery.recovered, true);
+  assert.equal(manager.store.authenticate(secondRecovery.agentId, secondRecovery.agentSecret)?.id, secondRecovery.agentId);
+  assert.equal(manager.store.authenticate(firstRecovery.agentId, firstRecovery.agentSecret), undefined);
+  assert.equal(manager.store.confirmEnrollment(secondRecovery.agentId), true);
+  assert.throws(() => manager.store.consumeEnrollment(recoveryEnrollment.token, {}), /invalid/i);
+  manager.store.delete(secondRecovery.agentId);
+
   const enrollment = manager.store.createEnrollment({
     name: "gpu-01",
     allowedRoots: ["/home/ubuntu/workspace"],
@@ -288,7 +309,8 @@ try {
   assert.match(helloAck.agentId, /^agent_/);
   assert.match(helloAck.agentSecret, /^dva_/);
   assert.deepEqual(helloAck.allowedRoots, ["/home/ubuntu/workspace"]);
-  assert.throws(() => manager.store.consumeEnrollment(enrollment.token, {}), /already been used/i);
+  assert.equal(await waitFor(() => events.some((event) => event.kind === "remote.agent.enrollment_confirmed" && event.subject === helloAck.agentId)), true);
+  assert.throws(() => manager.store.consumeEnrollment(enrollment.token, {}), /invalid/i);
 
   const listed = manager.list();
   assert.equal(listed.length, 1);
@@ -392,6 +414,7 @@ try {
   manager.store.revoke(helloAck.agentId);
   assert.throws(() => manager.resolveAgent(helloAck.agentId, false), /revoked/i);
   assert.ok(events.some((event) => event.kind === "remote.agent.enrolled"));
+  assert.ok(events.some((event) => event.kind === "remote.agent.enrollment_confirmed"));
 
   console.log("DevSpace 1.1.39 Remote Workspace Backend end-to-end protocol tests passed.");
 }

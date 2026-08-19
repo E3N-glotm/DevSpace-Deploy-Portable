@@ -5,6 +5,7 @@ import { openDatabase } from "./db/client.js";
 
 const DEFAULT_ENROLLMENT_TTL_MINUTES = 15;
 const MAX_ENROLLMENT_TTL_MINUTES = 24 * 60;
+const ENROLLMENT_RECOVERY_WINDOW_MS = 2 * 60_000;
 
 function sha256(value) {
     return createHash("sha256").update(String(value), "utf8").digest("hex");
@@ -96,14 +97,25 @@ export class RemoteAgentStore {
       `).get(tokenHash);
             if (!row)
                 throw new Error("Enrollment token is invalid.");
-            if (row.used_at)
-                throw new Error("Enrollment token has already been used.");
             if (Date.parse(row.expires_at) <= Date.now())
                 throw new Error("Enrollment token has expired.");
+            const allowedRoots = normalizeRoots(parseJson(row.allowed_roots_json, []));
+            if (row.used_at) {
+                const recoveryAge = Date.now() - Date.parse(row.used_at);
+                if (!row.agent_id || !Number.isFinite(recoveryAge) || recoveryAge < 0 || recoveryAge > ENROLLMENT_RECOVERY_WINDOW_MS)
+                    throw new Error("Enrollment token has already been used.");
+                const agent = this.database.sqlite.prepare(`select * from remote_agents where id=?`).get(row.agent_id);
+                if (!agent || agent.revoked_at)
+                    throw new Error("Enrollment recovery is no longer available for this Agent.");
+                const agentSecret = `dva_${randomBytes(32).toString("base64url")}`;
+                this.database.sqlite.prepare(`
+          update remote_agents set secret_hash=?, status='online' where id=? and revoked_at is null
+        `).run(sha256(agentSecret), row.agent_id);
+                return { agentId: row.agent_id, agentSecret, name: row.name, allowedRoots, recovered: true };
+            }
             const agentId = `agent_${randomBytes(5).toString("hex")}`;
             const agentSecret = `dva_${randomBytes(32).toString("base64url")}`;
             const now = new Date().toISOString();
-            const allowedRoots = normalizeRoots(parseJson(row.allowed_roots_json, []));
             this.database.sqlite.prepare(`
         insert into remote_agents (
           id, name, secret_hash, status, allowed_roots_json, hostname, platform,
@@ -111,10 +123,15 @@ export class RemoteAgentStore {
           connected_at, last_seen_at, revoked_at
         ) values (?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?, null)
       `).run(agentId, row.name, sha256(agentSecret), JSON.stringify(allowedRoots), hello.hostname ?? null, hello.platform ?? null, hello.agentVersion ?? null, JSON.stringify(hello.capabilities ?? {}), JSON.stringify(hello.metadata ?? {}), now, now, now);
-            this.database.sqlite.prepare(`update remote_agent_enrollments set used_at=? where token_hash=?`).run(now, tokenHash);
-            return { agentId, agentSecret, name: row.name, allowedRoots };
+            this.database.sqlite.prepare(`update remote_agent_enrollments set used_at=?, agent_id=? where token_hash=?`).run(now, agentId, tokenHash);
+            return { agentId, agentSecret, name: row.name, allowedRoots, recovered: false };
         });
         return transaction();
+    }
+    confirmEnrollment(agentId) {
+        return this.database.sqlite.prepare(`
+      delete from remote_agent_enrollments where agent_id=? and used_at is not null
+    `).run(String(agentId)).changes > 0;
     }
     authenticate(agentId, secret) {
         const row = this.database.sqlite.prepare(`select * from remote_agents where id=?`).get(String(agentId));
@@ -175,7 +192,12 @@ export class RemoteAgentStore {
         return { deleted: true, agentId: String(agentId) };
     }
     pruneEnrollments() {
-        this.database.sqlite.prepare(`delete from remote_agent_enrollments where used_at is not null or expires_at < ?`).run(new Date().toISOString());
+        const now = new Date();
+        const recoveryCutoff = new Date(now.getTime() - ENROLLMENT_RECOVERY_WINDOW_MS).toISOString();
+        this.database.sqlite.prepare(`
+      delete from remote_agent_enrollments
+      where expires_at < ? or (used_at is not null and used_at < ?)
+    `).run(now.toISOString(), recoveryCutoff);
     }
     close() {
         this.database.close();

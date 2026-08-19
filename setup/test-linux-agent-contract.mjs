@@ -24,9 +24,12 @@ for (const contract of [
   /MAX_WATCHES = 64/,
   /MAX_PROCESS_RECORDS = 500/,
   /MAX_LIVE_PROCESSES = 128/,
+  /ENROLL_ATTEMPTS = 3/,
   /request_slots = threading\.BoundedSemaphore\(16\)/,
   /"agent\.selfUpdate": self\.agent_self_update/,
   /"system\.status": self\.system_status/,
+  /"type": "enrollment_confirm"/,
+  /WebSocket was closed by the server\{detail\}/,
   /self\.guard\.absolute\(root, resolved_link_target\)/,
 ]) {
   assert.match(agent, contract);
@@ -42,6 +45,7 @@ for (const contract of [
   /ProtectSystem=strict/,
   /ProtectHome=read-only/,
   /ReadWritePaths=\$STATE_DIR/,
+  /systemctl stop devspace-agent\.service/,
 ]) {
   assert.match(installer, contract);
 }
@@ -64,6 +68,8 @@ console.log(JSON.stringify({
   installerSyntax: true,
   ordinaryUserService: true,
   installerAndAgentHashChain: true,
+  recoverableEnrollmentRetry: true,
+  websocketCloseDiagnostics: true,
   boundedRpcAndResources: true,
   allowedRootAndSymlinkGuard: true,
 }));

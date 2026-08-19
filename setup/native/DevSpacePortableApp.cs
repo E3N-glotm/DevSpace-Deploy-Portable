@@ -174,7 +174,14 @@ namespace DevSpacePortable.NativeUI
             if (split == null) throw new ArgumentNullException("split");
             split.Panel1MinSize = 0;
             split.Panel2MinSize = 0;
-            EventHandler apply = delegate { Apply(split, panel1MinSize, panel2MinSize, panel1Ratio); };
+            bool applying = false;
+            EventHandler apply = delegate
+            {
+                if (applying || split.IsDisposed) return;
+                applying = true;
+                try { Apply(split, panel1MinSize, panel2MinSize, panel1Ratio); }
+                finally { applying = false; }
+            };
             split.HandleCreated += apply;
             split.ParentChanged += apply;
             split.SizeChanged += apply;
@@ -215,8 +222,12 @@ namespace DevSpacePortable.NativeUI
                 if (split.SplitterDistance != distance) split.SplitterDistance = distance;
                 if (hasRoomForDesiredMinimums)
                 {
-                    split.Panel1MinSize = desiredMin1;
-                    split.Panel2MinSize = desiredMin2;
+                    // WinForms validates minimums against the current splitter
+                    // distance again while DPI/Dock layout events are firing. Keep
+                    // a one-pixel safety margin so a transient exact-boundary value
+                    // can never throw from Panel1MinSize/Panel2MinSize setters.
+                    split.Panel1MinSize = Math.Min(desiredMin1, Math.Max(0, distance - 1));
+                    split.Panel2MinSize = Math.Min(desiredMin2, Math.Max(0, usable - distance - 1));
                 }
             }
             catch (ArgumentOutOfRangeException)
@@ -241,7 +252,7 @@ namespace DevSpacePortable.NativeUI
             {
                 ResetMinimums(split);
                 if (usable <= 2) return;
-                int distance = Math.Max(1, Math.Min((int)Math.Round(usable * ratio), usable));
+                int distance = Math.Max(1, Math.Min((int)Math.Round(usable * ratio), Math.Max(1, usable - 1)));
                 if (split.SplitterDistance != distance) split.SplitterDistance = distance;
             }
             catch { }
@@ -1317,14 +1328,8 @@ namespace DevSpacePortable.NativeUI
             {
                 oauth.CreateControl();
                 oauth.PerformLayout();
-                SplitContainer oauthSplit = FindControls<SplitContainer>(oauth).Single();
-                oauthSplit.Dock = DockStyle.None;
-                foreach (int width in transientWidths)
-                {
-                    oauthSplit.Size = new Size(width, 520);
-                    oauthSplit.PerformLayout();
-                    AssertSplitterBounds(oauthSplit);
-                }
+                report["oauthResponsiveColumns"] = FindControls<SplitContainer>(oauth).Count() == 0
+                    && FindControls<SurfacePanel>(oauth).Count() >= 2;
             }
 
             using (RemoteAgentsDialog agents = new RemoteAgentsDialog(manager))
@@ -1445,6 +1450,7 @@ namespace DevSpacePortable.NativeUI
         private readonly TextBox _redirectUris = new TextBox();
         private readonly TextBox _clientId = new TextBox();
         private readonly TextBox _clientSecret = new TextBox();
+        private readonly Label _selectionHint = new Label();
         private readonly Label _status = new Label();
         private string _secretForClientId = "";
 
@@ -1461,7 +1467,11 @@ namespace DevSpacePortable.NativeUI
             ForeColor = UiPalette.Text;
             Font = UiTypography.Ui(9.25F);
             BuildUi();
-            Shown += async delegate { await LoadClientsAsync(); };
+            Shown += async delegate
+            {
+                NativeWindowEffects.Apply(Handle);
+                await LoadClientsAsync();
+            };
         }
 
         private void BuildUi()
@@ -1471,17 +1481,17 @@ namespace DevSpacePortable.NativeUI
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 3,
-                Padding = new Padding(20),
+                Padding = new Padding(22),
                 BackColor = UiPalette.Background,
             };
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
 
             Panel intro = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
             Label title = new Label
             {
-                Text = "通用 AI / MCP OAuth 客户端",
+                Text = "AI / MCP OAuth 客户端",
                 Font = UiTypography.Display(16F, FontStyle.Bold),
                 ForeColor = UiPalette.Text,
                 AutoSize = true,
@@ -1489,7 +1499,7 @@ namespace DevSpacePortable.NativeUI
             };
             Label hint = new Label
             {
-                Text = "支持 Gemini、Claude、IDE 和其它标准 MCP 客户端。支持 DCR 的客户端可自动注册；不支持时，把客户端提供的 Redirect URI 粘贴到右侧创建 Client ID / Secret。",
+                Text = "统一管理 ChatGPT、Gemini、Claude、IDE 等标准 MCP 客户端。支持 DCR 时自动注册；客户端明确要求 Client ID / Secret 时，再创建手动客户端。",
                 Font = UiTypography.Ui(9F),
                 ForeColor = UiPalette.TextMuted,
                 AutoSize = false,
@@ -1502,59 +1512,152 @@ namespace DevSpacePortable.NativeUI
             intro.Controls.Add(hint);
             root.Controls.Add(intro, 0, 0);
 
-            SplitContainer split = new SplitContainer
+            TableLayoutPanel columns = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                Orientation = Orientation.Vertical,
-                SplitterWidth = 12,
+                ColumnCount = 2,
+                RowCount = 1,
                 BackColor = UiPalette.Background,
+                Margin = new Padding(0),
             };
-            SafeSplitLayout.Bind(split, 420, 390, 0.55D);
-            ConfigureGrid();
-            split.Panel1.Padding = new Padding(0, 0, 8, 0);
-            split.Panel1.Controls.Add(_grid);
+            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 52));
+            columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 48));
+            columns.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
+            SurfacePanel listSurface = new SurfacePanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(14),
+                Margin = new Padding(0, 0, 8, 0),
+            };
+            TableLayoutPanel listLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0),
+                Padding = new Padding(2),
+            };
+            listLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            listLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            listLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+            Panel listHeader = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
+            listHeader.Controls.Add(new Label
+            {
+                Text = "已注册客户端",
+                AutoSize = true,
+                Font = UiTypography.Display(11.5F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                Location = new Point(4, 2),
+            });
+            listHeader.Controls.Add(new Label
+            {
+                Text = "DCR 与手动客户端都显示在这里。选中一项后，右侧只显示该客户端的凭据。",
+                AutoSize = false,
+                AutoEllipsis = true,
+                Font = UiTypography.Ui(8.6F),
+                ForeColor = UiPalette.TextMuted,
+                Location = new Point(5, 29),
+                Size = new Size(500, 24),
+                Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right,
+            });
+            ConfigureGrid();
+            listLayout.Controls.Add(listHeader, 0, 0);
+            listLayout.Controls.Add(_grid, 0, 1);
+            FlowLayoutPanel listActions = ButtonBar();
+            listActions.Controls.Add(ActionButton("刷新列表", async delegate { await LoadClientsAsync(); }, false));
+            listLayout.Controls.Add(listActions, 0, 2);
+            listSurface.Controls.Add(listLayout);
+            columns.Controls.Add(listSurface, 0, 0);
+
+            SurfacePanel formSurface = new SurfacePanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(14),
+                Margin = new Padding(8, 0, 0, 0),
+            };
             TableLayoutPanel form = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 10,
-                Padding = new Padding(8, 0, 0, 0),
-                BackColor = UiPalette.Background,
+                RowCount = 14,
+                Padding = new Padding(4, 0, 4, 0),
+                BackColor = Color.Transparent,
                 AutoScroll = true,
             };
-            for (int i = 0; i < 10; i++) form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            form.Controls.Add(FieldLabel("客户端名称"), 0, 0);
+            for (int i = 0; i < 14; i++) form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            Label createTitle = new Label
+            {
+                Text = "创建手动 OAuth 客户端",
+                AutoSize = true,
+                Font = UiTypography.Display(11.5F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                Margin = new Padding(3, 2, 3, 4),
+            };
+            Label createHint = new Label
+            {
+                Text = "仅当 Gemini / Claude 显示“未能自动注册”并要求 Client ID / Secret 时使用。先在目标客户端复制 Redirect URI，再粘贴到这里。",
+                AutoSize = false,
+                Height = 42,
+                Dock = DockStyle.Top,
+                Font = UiTypography.Ui(8.6F),
+                ForeColor = UiPalette.TextMuted,
+                Margin = new Padding(3, 0, 3, 6),
+            };
+            form.Controls.Add(createTitle, 0, 0);
+            form.Controls.Add(createHint, 0, 1);
+            form.Controls.Add(FieldLabel("客户端名称"), 0, 2);
             StyleTextBox(_clientName);
-            _clientName.Text = "Gemini / MCP client";
-            form.Controls.Add(_clientName, 0, 1);
-            form.Controls.Add(FieldLabel("Redirect URI（每行一个）"), 0, 2);
+            _clientName.Text = "Gemini";
+            form.Controls.Add(new FieldHost(_clientName), 0, 3);
+            form.Controls.Add(FieldLabel("Redirect URI（每行一个）"), 0, 4);
             StyleTextBox(_redirectUris);
             _redirectUris.Multiline = true;
             _redirectUris.ScrollBars = ScrollBars.Vertical;
-            _redirectUris.Height = 104;
-            form.Controls.Add(_redirectUris, 0, 3);
+            _redirectUris.Height = 82;
+            FieldHost redirectHost = new FieldHost(_redirectUris) { Dock = DockStyle.Top, Height = 98 };
+            form.Controls.Add(redirectHost, 0, 5);
             FlowLayoutPanel createActions = ButtonBar();
             createActions.Controls.Add(ActionButton("创建客户端", async delegate { await CreateClientAsync(); }, true));
-            createActions.Controls.Add(ActionButton("刷新列表", async delegate { await LoadClientsAsync(); }, false));
-            form.Controls.Add(createActions, 0, 4);
-            form.Controls.Add(FieldLabel("Client ID"), 0, 5);
+            form.Controls.Add(createActions, 0, 6);
+
+            Label credentialsTitle = new Label
+            {
+                Text = "选中客户端凭据",
+                AutoSize = true,
+                Font = UiTypography.Display(11F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                Margin = new Padding(3, 10, 3, 3),
+            };
+            _selectionHint.AutoSize = false;
+            _selectionHint.Height = 34;
+            _selectionHint.Dock = DockStyle.Top;
+            _selectionHint.Font = UiTypography.Ui(8.5F);
+            _selectionHint.ForeColor = UiPalette.TextMuted;
+            _selectionHint.Text = "从左侧选择客户端。";
+            _selectionHint.Margin = new Padding(3, 0, 3, 4);
+            form.Controls.Add(credentialsTitle, 0, 7);
+            form.Controls.Add(_selectionHint, 0, 8);
+            form.Controls.Add(FieldLabel("Client ID"), 0, 9);
             StyleTextBox(_clientId);
             _clientId.ReadOnly = true;
-            form.Controls.Add(_clientId, 0, 6);
-            form.Controls.Add(FieldLabel("Client Secret（只在创建/轮换后提供）"), 0, 7);
+            form.Controls.Add(new FieldHost(_clientId), 0, 10);
+            form.Controls.Add(FieldLabel("Client Secret（仅在创建/轮换后的当前窗口提供）"), 0, 11);
             StyleTextBox(_clientSecret);
             _clientSecret.ReadOnly = true;
             _clientSecret.UseSystemPasswordChar = true;
-            form.Controls.Add(_clientSecret, 0, 8);
+            form.Controls.Add(new FieldHost(_clientSecret), 0, 12);
             FlowLayoutPanel manageActions = ButtonBar();
             manageActions.Controls.Add(ActionButton("复制 Client ID", delegate { CopyText(_clientId.Text, "Client ID"); }, false));
             manageActions.Controls.Add(ActionButton("复制 Client Secret", delegate { CopyText(_clientSecret.Text, "Client Secret"); }, false));
+            manageActions.Controls.Add(ActionButton("显示 / 隐藏 Secret", delegate { ToggleSecretVisibility(); }, false));
             manageActions.Controls.Add(ActionButton("轮换 Secret", async delegate { await RotateSecretAsync(); }, false));
-            manageActions.Controls.Add(ActionButton("删除并撤销", async delegate { await DeleteClientAsync(); }, false));
-            form.Controls.Add(manageActions, 0, 9);
-            split.Panel2.Controls.Add(form);
-            root.Controls.Add(split, 0, 1);
+            manageActions.Controls.Add(ActionButton("删除并撤销", async delegate { await DeleteClientAsync(); }, false, true));
+            form.Controls.Add(manageActions, 0, 13);
+            formSurface.Controls.Add(form);
+            columns.Controls.Add(formSurface, 1, 0);
+            root.Controls.Add(columns, 0, 1);
 
             _status.Dock = DockStyle.Fill;
             _status.ForeColor = UiPalette.TextMuted;
@@ -1568,7 +1671,9 @@ namespace DevSpacePortable.NativeUI
         {
             _grid.Dock = DockStyle.Fill;
             _grid.BackgroundColor = UiPalette.Surface;
-            _grid.BorderStyle = BorderStyle.FixedSingle;
+            _grid.BorderStyle = BorderStyle.None;
+            _grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            _grid.GridColor = UiPalette.Border;
             _grid.AllowUserToAddRows = false;
             _grid.AllowUserToDeleteRows = false;
             _grid.AllowUserToResizeRows = false;
@@ -1587,6 +1692,7 @@ namespace DevSpacePortable.NativeUI
             _grid.DefaultCellStyle.ForeColor = UiPalette.Text;
             _grid.DefaultCellStyle.SelectionBackColor = UiPalette.PrimarySoft;
             _grid.DefaultCellStyle.SelectionForeColor = UiPalette.Text;
+            _grid.DefaultCellStyle.Padding = new Padding(6, 0, 6, 0);
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ClientName", HeaderText = "客户端", FillWeight = 27 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Kind", HeaderText = "类型", FillWeight = 12 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Auth", HeaderText = "认证", FillWeight = 16 });
@@ -1598,6 +1704,7 @@ namespace DevSpacePortable.NativeUI
         {
             try
             {
+                string priorId = SelectedClientId();
                 _status.Text = "正在读取 OAuth 客户端……";
                 Dictionary<string, object> result = await _manager.RunJsonAsync("oauth-client-list");
                 _grid.Rows.Clear();
@@ -1614,7 +1721,9 @@ namespace DevSpacePortable.NativeUI
                     _grid.Rows[rowIndex].Cells[0].ToolTipText = id;
                 }
                 _status.Text = "已读取 " + _grid.Rows.Count + " 个 OAuth 客户端。DCR 客户端由 ChatGPT/Gemini 等支持动态注册的工具自动创建。";
-                if (_grid.Rows.Count > 0)
+                string targetId = !string.IsNullOrWhiteSpace(_secretForClientId) ? _secretForClientId : priorId;
+                if (!string.IsNullOrWhiteSpace(targetId)) SelectClientById(targetId);
+                if (_grid.SelectedRows.Count != 1 && _grid.Rows.Count > 0)
                 {
                     _grid.ClearSelection();
                     _grid.Rows[0].Selected = true;
@@ -1649,11 +1758,11 @@ namespace DevSpacePortable.NativeUI
                 _clientId.Text = createdId;
                 _clientSecret.Text = createdSecret;
                 _secretForClientId = createdId;
-                _status.Text = "客户端已创建。Client Secret 只在本次创建/轮换结果中提供，请立即复制到目标 AI 客户端。";
                 await LoadClientsAsync();
                 _secretForClientId = createdId;
                 _clientSecret.Text = createdSecret;
                 SelectClientById(createdId);
+                _status.Text = "客户端已创建。现在依次复制 Client ID 和 Client Secret 到目标 AI 客户端；Secret 关闭此窗口后不会再次显示。";
             }
             catch (Exception ex)
             {
@@ -1679,11 +1788,11 @@ namespace DevSpacePortable.NativeUI
                 _clientId.Text = id;
                 _clientSecret.Text = rotatedSecret;
                 _secretForClientId = id;
-                _status.Text = "Client Secret 已轮换，旧 Token 已撤销。请把新 Secret 更新到目标 AI 客户端。";
                 await LoadClientsAsync();
                 _secretForClientId = id;
                 _clientSecret.Text = rotatedSecret;
                 SelectClientById(id);
+                _status.Text = "Client Secret 已轮换，旧 Token 已撤销。请立即把新 Secret 更新到目标 AI 客户端。";
             }
             catch (Exception ex)
             {
@@ -1716,8 +1825,9 @@ namespace DevSpacePortable.NativeUI
             string id = ValueText(client, "clientId");
             _clientId.Text = id;
             if (!string.Equals(_secretForClientId, id, StringComparison.Ordinal)) _clientSecret.Text = "";
-            _redirectUris.Text = string.Join(Environment.NewLine, Strings(client, "redirectUris"));
-            _clientName.Text = ValueText(client, "clientName");
+            _selectionHint.Text = Bool(client, "manual")
+                ? "手动客户端：可复制 Client ID；Secret 仅在创建或轮换后的当前窗口可见。"
+                : "DCR 客户端：凭据由对应工具自动管理，不提供可手动复用的 Client Secret。";
         }
 
         private void SelectClientById(string clientId)
@@ -1749,6 +1859,18 @@ namespace DevSpacePortable.NativeUI
             _clientId.Text = "";
             _clientSecret.Text = "";
             _secretForClientId = "";
+            _selectionHint.Text = "从左侧选择客户端。";
+        }
+
+        private void ToggleSecretVisibility()
+        {
+            if (string.IsNullOrWhiteSpace(_clientSecret.Text))
+            {
+                MessageBox.Show(this, "当前没有可显示的 Client Secret。手动客户端的 Secret 只在创建或轮换后的当前窗口提供。", "没有 Client Secret", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            _clientSecret.UseSystemPasswordChar = !_clientSecret.UseSystemPasswordChar;
+            _clientSecret.Refresh();
         }
 
         private void CopyText(string value, string label)
@@ -1769,12 +1891,12 @@ namespace DevSpacePortable.NativeUI
 
         private static void StyleTextBox(TextBox box)
         {
-            box.Dock = DockStyle.Top;
+            box.Dock = DockStyle.Fill;
             box.Font = UiTypography.Ui(9.25F);
-            box.BackColor = UiPalette.Surface;
+            box.BackColor = UiPalette.SurfaceMuted;
             box.ForeColor = UiPalette.Text;
-            box.BorderStyle = BorderStyle.FixedSingle;
-            box.Margin = new Padding(3, 2, 3, 8);
+            box.BorderStyle = BorderStyle.None;
+            box.Margin = new Padding(0);
         }
 
         private static FlowLayoutPanel ButtonBar()
@@ -1782,21 +1904,18 @@ namespace DevSpacePortable.NativeUI
             return new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, BackColor = Color.Transparent, Margin = new Padding(0, 4, 0, 8) };
         }
 
-        private static Button ActionButton(string text, EventHandler handler, bool primary)
+        private static Button ActionButton(string text, EventHandler handler, bool primary, bool danger = false)
         {
-            Button button = new Button
+            ModernButton button = new ModernButton
             {
                 Text = text,
                 AutoSize = true,
-                Height = 36,
-                Padding = new Padding(12, 0, 12, 0),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = primary ? UiPalette.Primary : UiPalette.Surface,
-                ForeColor = primary ? Color.White : UiPalette.Text,
+                Primary = primary,
+                Danger = danger,
+                MinimumSize = new Size(104, 40),
+                Padding = new Padding(14, 0, 14, 0),
                 Margin = new Padding(3),
-                Cursor = Cursors.Hand,
             };
-            button.FlatAppearance.BorderColor = primary ? UiPalette.Primary : UiPalette.Border;
             button.Click += handler;
             return button;
         }
@@ -1866,7 +1985,11 @@ namespace DevSpacePortable.NativeUI
             ForeColor = UiPalette.Text;
             Font = UiTypography.Ui(9.25F);
             BuildUi();
-            Shown += async delegate { await LoadAgentsAsync(); };
+            Shown += async delegate
+            {
+                NativeWindowEffects.Apply(Handle);
+                await LoadAgentsAsync();
+            };
         }
 
         private void BuildUi()
@@ -1876,7 +1999,7 @@ namespace DevSpacePortable.NativeUI
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 4,
-                Padding = new Padding(20),
+                Padding = new Padding(22),
                 BackColor = UiPalette.Background,
             };
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
@@ -1887,7 +2010,7 @@ namespace DevSpacePortable.NativeUI
             Panel intro = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
             Label title = new Label
             {
-                Text = "Linux Remote Workspace Agents",
+                Text = "远程服务器 / Linux Agent",
                 Font = UiTypography.Display(16F, FontStyle.Bold),
                 ForeColor = UiPalette.Text,
                 AutoSize = true,
@@ -1895,7 +2018,7 @@ namespace DevSpacePortable.NativeUI
             };
             Label hint = new Label
             {
-                Text = "Ubuntu 只运行轻量出站 Agent；MCP/OAuth、审阅和权限控制仍由本机 DevSpace 负责。Agent 自己还有一层 allowedRoots 和 Linux 用户权限边界。",
+                Text = "Ubuntu 只运行轻量出站 Agent；MCP/OAuth、审阅与权限控制仍由本机 DevSpace 负责。Agent 额外受 allowedRoots 与 Linux 用户权限约束。",
                 Font = UiTypography.Ui(9F),
                 ForeColor = UiPalette.TextMuted,
                 AutoSize = false,
@@ -1909,7 +2032,9 @@ namespace DevSpacePortable.NativeUI
             root.Controls.Add(intro, 0, 0);
 
             ConfigureGrid();
-            root.Controls.Add(_grid, 0, 1);
+            SurfacePanel gridSurface = new SurfacePanel { Dock = DockStyle.Fill, Padding = new Padding(12), Margin = new Padding(0, 0, 0, 2) };
+            gridSurface.Controls.Add(_grid);
+            root.Controls.Add(gridSurface, 0, 1);
 
             SurfacePanel formSurface = new SurfacePanel { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 12, 0, 6) };
             TableLayoutPanel form = new TableLayoutPanel
@@ -1930,35 +2055,39 @@ namespace DevSpacePortable.NativeUI
             form.Controls.Add(FieldLabel("Linux allowedRoots（每行一个）"), 1, 0);
             StyleTextBox(_name);
             _name.Text = "gpu-server";
-            form.Controls.Add(_name, 0, 1);
+            form.Controls.Add(new FieldHost(_name), 0, 1);
             StyleTextBox(_roots);
             _roots.Multiline = true;
             _roots.ScrollBars = ScrollBars.Vertical;
             _roots.Height = 64;
             _roots.Text = "/home/ubuntu/workspace";
-            form.Controls.Add(_roots, 1, 1);
+            FieldHost rootsHost = new FieldHost(_roots) { Dock = DockStyle.Fill, Height = 80 };
+            form.Controls.Add(rootsHost, 1, 1);
             FlowLayoutPanel actions = ButtonBar();
             actions.Controls.Add(ActionButton("生成一次性安装命令", async delegate { await CreateEnrollmentAsync(); }, true));
             actions.Controls.Add(ActionButton("刷新列表", async delegate { await LoadAgentsAsync(); }, false));
-            actions.Controls.Add(ActionButton("撤销选中 Agent", async delegate { await RevokeSelectedAsync(); }, false));
-            actions.Controls.Add(ActionButton("删除选中记录", async delegate { await DeleteSelectedAsync(); }, false));
+            actions.Controls.Add(ActionButton("撤销选中 Agent", async delegate { await RevokeSelectedAsync(); }, false, true));
+            actions.Controls.Add(ActionButton("删除选中记录", async delegate { await DeleteSelectedAsync(); }, false, true));
             form.Controls.Add(actions, 0, 2);
             form.SetColumnSpan(actions, 2);
             StyleTextBox(_installCommand);
             _installCommand.Multiline = true;
             _installCommand.ScrollBars = ScrollBars.Vertical;
             _installCommand.ReadOnly = true;
-            _installCommand.Dock = DockStyle.Fill;
-            form.Controls.Add(_installCommand, 0, 3);
-            form.SetColumnSpan(_installCommand, 2);
+            _installCommand.Height = 120;
+            FieldHost commandHost = new FieldHost(_installCommand) { Dock = DockStyle.Fill };
+            form.Controls.Add(commandHost, 0, 3);
+            form.SetColumnSpan(commandHost, 2);
             FlowLayoutPanel copyBar = ButtonBar();
             copyBar.Controls.Add(ActionButton("复制安装命令", delegate { CopyInstallCommand(); }, false));
             copyBar.Controls.Add(new Label
             {
-                Text = "Enrollment Token 只在本次生成结果中出现，默认 15 分钟有效且只能使用一次。安装后改用独立 Agent Secret。",
-                AutoSize = true,
+                Text = "Enrollment Token 默认 15 分钟有效；首次握手若在 ACK 前断线，可在 2 分钟恢复窗口内安全重试。成功确认后立即失效。",
+                AutoSize = false,
+                Width = 720,
+                Height = 42,
                 ForeColor = UiPalette.TextMuted,
-                Padding = new Padding(8, 10, 0, 0),
+                Padding = new Padding(8, 8, 0, 0),
             });
             form.Controls.Add(copyBar, 0, 4);
             form.SetColumnSpan(copyBar, 2);
@@ -1977,7 +2106,9 @@ namespace DevSpacePortable.NativeUI
         {
             _grid.Dock = DockStyle.Fill;
             _grid.BackgroundColor = UiPalette.Surface;
-            _grid.BorderStyle = BorderStyle.FixedSingle;
+            _grid.BorderStyle = BorderStyle.None;
+            _grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+            _grid.GridColor = UiPalette.Border;
             _grid.AllowUserToAddRows = false;
             _grid.AllowUserToDeleteRows = false;
             _grid.AllowUserToResizeRows = false;
@@ -1996,6 +2127,7 @@ namespace DevSpacePortable.NativeUI
             _grid.DefaultCellStyle.ForeColor = UiPalette.Text;
             _grid.DefaultCellStyle.SelectionBackColor = UiPalette.PrimarySoft;
             _grid.DefaultCellStyle.SelectionForeColor = UiPalette.Text;
+            _grid.DefaultCellStyle.Padding = new Padding(6, 0, 6, 0);
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "服务器", FillWeight = 17 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "State", HeaderText = "状态", FillWeight = 12 });
             _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Host", HeaderText = "主机", FillWeight = 18 });
@@ -2102,10 +2234,10 @@ namespace DevSpacePortable.NativeUI
         {
             box.Dock = DockStyle.Fill;
             box.Font = UiTypography.Ui(9.25F);
-            box.BackColor = UiPalette.Surface;
+            box.BackColor = UiPalette.SurfaceMuted;
             box.ForeColor = UiPalette.Text;
-            box.BorderStyle = BorderStyle.FixedSingle;
-            box.Margin = new Padding(3, 2, 8, 8);
+            box.BorderStyle = BorderStyle.None;
+            box.Margin = new Padding(0);
         }
 
         private static FlowLayoutPanel ButtonBar()
@@ -2113,21 +2245,18 @@ namespace DevSpacePortable.NativeUI
             return new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, BackColor = Color.Transparent, Margin = new Padding(0, 4, 0, 8) };
         }
 
-        private static Button ActionButton(string text, EventHandler handler, bool primary)
+        private static Button ActionButton(string text, EventHandler handler, bool primary, bool danger = false)
         {
-            Button button = new Button
+            ModernButton button = new ModernButton
             {
                 Text = text,
                 AutoSize = true,
-                Height = 36,
-                Padding = new Padding(12, 0, 12, 0),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = primary ? UiPalette.Primary : UiPalette.Surface,
-                ForeColor = primary ? Color.White : UiPalette.Text,
+                Primary = primary,
+                Danger = danger,
+                MinimumSize = new Size(104, 40),
+                Padding = new Padding(14, 0, 14, 0),
                 Margin = new Padding(3),
-                Cursor = Cursors.Hand,
             };
-            button.FlatAppearance.BorderColor = primary ? UiPalette.Primary : UiPalette.Border;
             button.Click += handler;
             return button;
         }

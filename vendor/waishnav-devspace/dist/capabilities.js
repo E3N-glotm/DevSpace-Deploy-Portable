@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.38";
+export const DEVSPACE_SERVER_VERSION = "1.1.39";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -120,6 +120,10 @@ const FEATURE_CATALOG = [
     { id: "sqlite-conversation-workspace-bindings", maturity: "stable", since: "1.1.38" },
     { id: "concurrent-checkout-open-coalescing", maturity: "stable", since: "1.1.38" },
     { id: "compact-workspace-ids", maturity: "stable", since: "1.1.38" },
+    { id: "remote-workspace-backend", maturity: "stable", since: "1.1.39" },
+    { id: "remote-agent-recoverable-enrollment", maturity: "stable", since: "1.1.39" },
+    { id: "remote-review-safety-restore", maturity: "stable", since: "1.1.39" },
+    { id: "native-ui-responsive-oauth-administration", maturity: "stable", since: "1.1.39" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

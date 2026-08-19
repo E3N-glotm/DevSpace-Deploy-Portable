@@ -47,8 +47,10 @@ export const remoteAgentEnrollments = sqliteTable("remote_agent_enrollments", {
     expiresAt: text("expires_at").notNull(),
     createdAt: text("created_at").notNull(),
     usedAt: text("used_at"),
+    agentId: text("agent_id"),
 }, (table) => [
     index("remote_agent_enrollments_expires_idx").on(table.expiresAt),
+    index("remote_agent_enrollments_agent_id_idx").on(table.agentId),
 ]);
 export const loadedAgentFiles = sqliteTable("loaded_agent_files", {
     workspaceSessionId: text("workspace_session_id")
