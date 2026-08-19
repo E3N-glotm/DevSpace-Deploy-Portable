@@ -49,6 +49,14 @@ even when that plugin is byte-identical to the base release. This keeps every
 official DevSpace ZIP self-contained with the bridge payload while still
 excluding user-persistent `data/`, `logs/`, and `reports/` roots from deltas.
 
+Versioned packed-core archives under
+`packages/waishnav-devspace-<semver>.tgz` are special-cased when they disappear
+from a target release. The delta records them as `retainedObsoleteFiles`
+instead of strict `deletedFiles`. The target lockfile points at the new core
+archive, so an older TGZ is inert; retaining it avoids rejecting historical
+same-version repacks whose generated TGZ bytes differ from the canonical base.
+All ordinary deleted program files keep the existing base-SHA drift guard.
+
 Version 1.1.40 is the one-time updater migration checkpoint. Its GitHub
 workflow builds exact deltas from every canonical 1.1.32-1.1.39 full ZIP plus
 the historical 1.1.33 direct-extract rescue overlay. Those generated ZIPs live

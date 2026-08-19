@@ -46,6 +46,7 @@ def main() -> int:
                 "setup/bundled-plugins/codex-runtime-bridge/1.1.1/runtime.mjs": b"export const runtime = true;\n",
                 "setup/bundled-plugins/codex-runtime-bridge/1.1.1/keep-awake.ps1": b"Write-Output keep-awake\n",
                 "setup/bundled-plugins/codex-runtime-bridge/1.1.1/skills/codex-runtime-bridge/SKILL.md": b"# Codex Runtime Bridge\n",
+                "packages/waishnav-devspace-1.0.5.tgz": b"historical-core-repack-a",
                 "obsolete.txt": b"delete-me",
                 "data/user-state.txt": b"persistent-old",
             },
@@ -61,6 +62,7 @@ def main() -> int:
                 "setup/bundled-plugins/codex-runtime-bridge/1.1.1/runtime.mjs": b"export const runtime = true;\n",
                 "setup/bundled-plugins/codex-runtime-bridge/1.1.1/keep-awake.ps1": b"Write-Output keep-awake\n",
                 "setup/bundled-plugins/codex-runtime-bridge/1.1.1/skills/codex-runtime-bridge/SKILL.md": b"# Codex Runtime Bridge\n",
+                "packages/waishnav-devspace-1.0.7.tgz": b"current-core",
                 "data/user-state.txt": b"persistent-new-should-not-be-delta",
             },
         )
@@ -86,6 +88,7 @@ def main() -> int:
 
         changed = {entry["path"]: entry for entry in manifest["changedFiles"]}
         deleted = {entry["path"]: entry for entry in manifest["deletedFiles"]}
+        retained_obsolete = set(manifest["retainedObsoleteFiles"])
         assert manifest["format"] == "file-delta-v1"
         assert manifest["fromVersion"] == "1.1.15"
         assert manifest["toVersion"] == "1.1.16"
@@ -107,6 +110,9 @@ def main() -> int:
             assert "DevSpacePortableDelta/files/" + path in names
         assert manifest["alwaysIncludedPrefixes"] == ["setup/bundled-plugins/codex-runtime-bridge/"]
         assert "obsolete.txt" in deleted
+        assert "packages/waishnav-devspace-1.0.5.tgz" not in deleted
+        assert "packages/waishnav-devspace-1.0.5.tgz" in retained_obsolete
+        assert "packages/waishnav-devspace-1.0.7.tgz" in changed
         assert "DevSpacePortableDelta/files/setup/a.txt" in names
         assert "DevSpacePortableDelta/files/setup/new.txt" in names
         assert "DevSpacePortableDelta/files/runtime/keep.bin" not in names
@@ -122,6 +128,7 @@ def main() -> int:
                     "persistentRootsExcluded": True,
                     "baseHashPreflight": True,
                     "codexRuntimeBridgeAlwaysIncluded": True,
+                    "obsoleteCoreArchiveRetained": True,
                 }
             )
         )

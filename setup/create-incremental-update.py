@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -13,6 +14,17 @@ DELTA_PREFIX = "DevSpacePortableDelta/"
 PERSISTENT_ROOTS = ("data", "logs", "reports")
 REQUIRED_BUNDLED_PREFIXES = (
     "setup/bundled-plugins/codex-runtime-bridge/",
+)
+RETAINABLE_OBSOLETE_PATTERNS = (
+    # The packed core archive is a build/install input referenced by the
+    # release-specific app/package-lock.json.  After an update points the
+    # lockfile at a newer archive, an older archive is inert.  Some historical
+    # same-version Portable repacks produced byte-different TGZs, so putting
+    # these obsolete archives in deletedFiles makes old updaters reject an
+    # otherwise safe delta with "deleted file has local drift".  Retain the
+    # stale archive instead; it is neither executed nor referenced by the
+    # target release.
+    re.compile(r"^packages/waishnav-devspace-\d+\.\d+\.\d+\.tgz$"),
 )
 
 
@@ -50,6 +62,10 @@ def normalize_relative(value: str) -> str:
 def is_persistent(relative: str) -> bool:
     first = PurePosixPath(relative).parts[0] if PurePosixPath(relative).parts else ""
     return first in PERSISTENT_ROOTS
+
+
+def is_retainable_obsolete(relative: str) -> bool:
+    return any(pattern.fullmatch(relative) for pattern in RETAINABLE_OBSOLETE_PATTERNS)
 
 
 def release_file_infos(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
@@ -145,7 +161,13 @@ def main() -> int:
                     f"Target release ZIP is missing mandatory bundled plugin payload under {prefix}"
                 )
         included_paths = sorted(set(changed_paths) | set(required_bundled_paths))
-        deleted_paths = sorted(path for path in base_infos if path not in target_infos)
+        removed_paths = sorted(path for path in base_infos if path not in target_infos)
+        retained_obsolete_paths = sorted(
+            path for path in removed_paths if is_retainable_obsolete(path)
+        )
+        deleted_paths = sorted(
+            path for path in removed_paths if not is_retainable_obsolete(path)
+        )
 
         changed_files: list[dict[str, object]] = []
         for relative in included_paths:
@@ -187,6 +209,7 @@ def main() -> int:
             },
             "persistentRoots": list(PERSISTENT_ROOTS),
             "alwaysIncludedPrefixes": list(REQUIRED_BUNDLED_PREFIXES),
+            "retainedObsoleteFiles": retained_obsolete_paths,
             "changedFiles": changed_files,
             "deletedFiles": deleted_files,
         }
@@ -227,6 +250,7 @@ def main() -> int:
                 "includedFiles": len(included_paths),
                 "requiredBundledFiles": len(required_bundled_paths),
                 "deletedFiles": len(deleted_paths),
+                "retainedObsoleteFiles": len(retained_obsolete_paths),
                 "output": str(output),
                 "bytes": output.stat().st_size,
                 "sha256": sha256_file(output),

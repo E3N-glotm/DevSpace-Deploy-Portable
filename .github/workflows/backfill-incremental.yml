@@ -114,6 +114,30 @@ jobs:
             --target-zip "$target_zip" \
             --output "$delta_zip"
 
+          python - "$delta_zip" <<'PY'
+          import json
+          import re
+          import sys
+          import zipfile
+
+          archive_path = sys.argv[1]
+          pattern = re.compile(r"^packages/waishnav-devspace-\d+\.\d+\.\d+\.tgz$")
+          with zipfile.ZipFile(archive_path) as archive:
+              manifest = json.loads(
+                  archive.read("DevSpacePortableDelta/delta-manifest.json")
+              )
+          unsafe = [
+              entry["path"]
+              for entry in manifest.get("deletedFiles", [])
+              if pattern.fullmatch(str(entry.get("path", "")))
+          ]
+          if unsafe:
+              raise SystemExit(
+                  "Obsolete generated core archives must not be strict delta deletions: "
+                  + ", ".join(unsafe)
+              )
+          PY
+
           args=(--repository "$GITHUB_REPOSITORY" --zip "$target_zip")
           delta_name="DevSpacePortable-Update-${FROM_VERSION}-to-${TO_VERSION}.zip"
           while IFS= read -r asset_name; do

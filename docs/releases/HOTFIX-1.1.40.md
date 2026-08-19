@@ -21,6 +21,15 @@ Installed 1.1.32-1.1.39 updaters predate the new chain planner and only know how
 
 These ZIPs are generated from the already-published canonical full Releases by the GitHub Release workflow. They are Release assets only and are not committed to the Git repository. 1.1.40 also retains the historical 1.1.33 direct-extract rescue overlay for the known pre-1.1.36 apply-path failure mode.
 
+The migration deltas deliberately do not require removal of an older
+`packages/waishnav-devspace-<semver>.tgz` archive. Historical same-version
+repacks could leave a byte-different copy of that generated core archive on an
+otherwise valid installation. Older updaters treat a hash mismatch on a file
+listed in `deletedFiles` as a hard safety failure, which would unnecessarily
+force a full-package fallback. The target `app/package-lock.json` references
+the new core archive, so an older TGZ is inert and may safely remain. Ordinary
+deleted program files continue to require an exact base hash.
+
 ## Incremental chain from 1.1.40 onward
 
 After the migration checkpoint, a normal Release only needs its previous-version delta. The 1.1.40+ updater reads uploaded SHA-256/size metadata from stable GitHub Release assets, builds a directed graph of valid `file-delta-v1` edges, and selects the byte-minimal path from the installed version to the latest stable version.
