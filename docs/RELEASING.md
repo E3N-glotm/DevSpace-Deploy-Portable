@@ -98,6 +98,13 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-relea
 `-BypassProxy` is optional. Use it when a local HTTP proxy makes large Release
 uploads substantially slower and the machine can reach GitHub directly.
 
+The manual publisher is idempotent by default. An existing asset is skipped
+when its GitHub SHA-256, size, and upload state already match the local file.
+If the same Release already contains an asset with the same name but different
+bytes, the script fails before calling `--clobber`. Use `-AllowRepack` only for
+an intentional same-version replacement after the new full ZIP, deltas,
+manifest, checksums, and upgrade path have been independently validated.
+
 ## Public-release requirements
 
 The repository and Releases are public. Before each public binary Release:

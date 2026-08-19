@@ -6,7 +6,9 @@ param(
 
     [string]$Repository = "E3N-glotm/DevSpace-Deploy-Portable",
 
-    [switch]$BypassProxy
+    [switch]$BypassProxy,
+
+    [switch]$AllowRepack
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,7 +70,8 @@ if ($BypassProxy) {
 }
 $Gh = Get-GitHubCli
 
-& $Gh release view $Tag --repo $Repository --json tagName 1>$null 2>$null
+$ExistingRelease = $null
+$ExistingReleaseJson = & $Gh release view $Tag --repo $Repository --json tagName,assets 2>$null
 if ($LASTEXITCODE -ne 0) {
     & $Gh release create $Tag `
         --repo $Repository `
@@ -76,12 +79,41 @@ if ($LASTEXITCODE -ne 0) {
         --notes-file $ReleaseNotes `
         --verify-tag
     if ($LASTEXITCODE -ne 0) { throw "GitHub Release creation failed." }
+    $ExistingRelease = [pscustomobject]@{ assets = @() }
+} else {
+    $ExistingRelease = $ExistingReleaseJson | ConvertFrom-Json
 }
 
 foreach ($Asset in $Assets) {
     $Item = Get-Item -LiteralPath $Asset
+    $LocalDigest = (Get-FileHash -LiteralPath $Item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $ExistingAsset = @($ExistingRelease.assets) | Where-Object { $_.name -eq $Item.Name } | Select-Object -First 1
+    if ($ExistingAsset) {
+        $ExistingDigest = [string]$ExistingAsset.digest
+        $MatchesDigest = $ExistingDigest -eq "sha256:$LocalDigest"
+        $MatchesSize = [int64]$ExistingAsset.size -eq $Item.Length
+        $IsUploaded = [string]$ExistingAsset.state -eq "uploaded"
+        if ($MatchesDigest -and $MatchesSize -and $IsUploaded) {
+            Write-Host "Already matches GitHub Release: $($Item.Name)"
+            continue
+        }
+        if (-not $AllowRepack) {
+            throw (
+                "GitHub Release already contains a different asset named '$($Item.Name)'. " +
+                "Refusing to clobber an existing same-version asset by default. " +
+                "Local SHA-256: $LocalDigest; remote digest: $ExistingDigest; " +
+                "local bytes: $($Item.Length); remote bytes: $($ExistingAsset.size). " +
+                "Re-run with -AllowRepack only after intentionally validating a same-version repack."
+            )
+        }
+    }
+
     Write-Host "Uploading $($Item.Name) ($($Item.Length) bytes)..."
-    & $Gh release upload $Tag $Item.FullName --repo $Repository --clobber
+    if ($ExistingAsset) {
+        & $Gh release upload $Tag $Item.FullName --repo $Repository --clobber
+    } else {
+        & $Gh release upload $Tag $Item.FullName --repo $Repository
+    }
     if ($LASTEXITCODE -ne 0) { throw "GitHub Release upload failed: $($Item.Name)" }
 }
 
@@ -94,7 +126,13 @@ foreach ($Asset in $Assets) {
     $Item = Get-Item -LiteralPath $Asset
     $Remote = @($Release.assets) | Where-Object { $_.name -eq $Item.Name } | Select-Object -First 1
     if (-not $Remote) { throw "Release asset is missing after upload: $($Item.Name)" }
-    if ([int64]$Remote.size -ne $Item.Length -or $Remote.state -ne "uploaded") {
+    $LocalDigest = (Get-FileHash -LiteralPath $Item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    $RemoteDigest = [string]$Remote.digest
+    if (
+        [int64]$Remote.size -ne $Item.Length -or
+        $Remote.state -ne "uploaded" -or
+        ($RemoteDigest -and $RemoteDigest -ne "sha256:$LocalDigest")
+    ) {
         throw "Release asset verification failed: $($Item.Name)"
     }
     $VerifiedAssets += [pscustomobject]@{
