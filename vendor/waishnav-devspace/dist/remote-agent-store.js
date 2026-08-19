@@ -221,7 +221,7 @@ export function remoteAgentAdmin({ stateDir, action, payload = {}, publicBaseUrl
             const installer = bundledAgentAsset("install.sh");
             const agent = bundledAgentAsset("devspace-agent.py");
             const installCommand = base
-                ? `tmp=$(mktemp); curl -fsSL '${base}/agent/v1/install.sh' -o "$tmp" && echo '${installer.sha256}  '"$tmp" | sha256sum -c - && sudo bash "$tmp" --server '${base}' --token '${enrollment.token}' --name '${enrollment.name.replace(/'/g, `'"'"'`)}' --agent-sha256 '${agent.sha256}' ${rootArgs}; rc=$?; rm -f "$tmp"; exit $rc`
+                ? `( tmp=$(mktemp); curl -fsSL '${base}/agent/v1/install.sh' -o "$tmp" && echo '${installer.sha256}  '"$tmp" | sha256sum -c - && sudo bash "$tmp" --server '${base}' --token '${enrollment.token}' --name '${enrollment.name.replace(/'/g, `'"'"'`)}' --agent-sha256 '${agent.sha256}' ${rootArgs}; rc=$?; rm -f "$tmp"; exit $rc )`
                 : undefined;
             return { enrollment, installCommand, installerSha256: installer.sha256, agentSha256: agent.sha256 };
         }

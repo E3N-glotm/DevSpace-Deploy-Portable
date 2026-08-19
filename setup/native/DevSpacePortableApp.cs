@@ -1335,16 +1335,33 @@ namespace DevSpacePortable.NativeUI
             using (RemoteAgentsDialog agents = new RemoteAgentsDialog(manager))
             {
                 agents.CreateControl();
-                agents.PerformLayout();
-                report["remoteAgentsDialog"] = FindControls<DataGridView>(agents).Count() == 1
-                    && FindControls<TextBox>(agents).Count() >= 3;
+                Size[] remoteSizes = new[]
+                {
+                    new Size(980, 720),
+                    new Size(1080, 760),
+                    new Size(1180, 820),
+                    new Size(1360, 900),
+                };
+                foreach (Size size in remoteSizes)
+                {
+                    agents.Size = size;
+                    agents.PerformLayout();
+                }
+                TextBox commandBox = FindControls<TextBox>(agents).FirstOrDefault(box => box.Multiline && box.ReadOnly);
+                report["remoteAgentsStableLayout"] = FindControls<DataGridView>(agents).Count() == 1
+                    && FindControls<TextBox>(agents).Count() >= 3
+                    && FindControls<SurfacePanel>(agents).Count() == 0
+                    && FindControls<FieldHost>(agents).Count() == 0
+                    && commandBox != null
+                    && commandBox.Height >= 60;
+                report["remoteAgentSizes"] = remoteSizes.Select(size => size.Width + "x" + size.Height).ToArray();
             }
 
             report["passed"] = true;
             report["verticalWidths"] = transientWidths;
             report["horizontalHeights"] = transientHeights;
             report["oauthDialog"] = true;
-            report["remoteAgentsDialog"] = true;
+            report["remoteAgentsDialog"] = Convert.ToBoolean(report["remoteAgentsStableLayout"]);
             report["dpiSafeDeferredLayout"] = true;
             return report;
         }
@@ -1895,8 +1912,8 @@ namespace DevSpacePortable.NativeUI
             box.Font = UiTypography.Ui(9.25F);
             box.BackColor = UiPalette.SurfaceMuted;
             box.ForeColor = UiPalette.Text;
-            box.BorderStyle = BorderStyle.None;
-            box.Margin = new Padding(0);
+            box.BorderStyle = BorderStyle.FixedSingle;
+            box.Margin = new Padding(0, 2, 0, 4);
         }
 
         private static FlowLayoutPanel ButtonBar()
@@ -1978,13 +1995,15 @@ namespace DevSpacePortable.NativeUI
             Text = "远程服务器 / Linux Agent";
             Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterParent;
-            MinimumSize = new Size(980, 680);
-            Size = new Size(1180, 790);
+            MinimumSize = new Size(980, 720);
+            Size = new Size(1180, 820);
             AutoScaleMode = AutoScaleMode.Dpi;
             BackColor = UiPalette.Background;
             ForeColor = UiPalette.Text;
             Font = UiTypography.Ui(9.25F);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BuildUi();
+            Resize += delegate { Invalidate(true); };
             Shown += async delegate
             {
                 NativeWindowEffects.Apply(Handle);
@@ -2002,10 +2021,10 @@ namespace DevSpacePortable.NativeUI
                 Padding = new Padding(22),
                 BackColor = UiPalette.Background,
             };
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 286));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
 
             Panel intro = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
             Label title = new Label
@@ -2032,37 +2051,39 @@ namespace DevSpacePortable.NativeUI
             root.Controls.Add(intro, 0, 0);
 
             ConfigureGrid();
-            SurfacePanel gridSurface = new SurfacePanel { Dock = DockStyle.Fill, Padding = new Padding(12), Margin = new Padding(0, 0, 0, 2) };
-            gridSurface.Controls.Add(_grid);
-            root.Controls.Add(gridSurface, 0, 1);
+            Panel gridCard = StableCard(_grid, 10, new Padding(0, 0, 0, 8));
+            root.Controls.Add(gridCard, 0, 1);
 
-            SurfacePanel formSurface = new SurfacePanel { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 12, 0, 6) };
             TableLayoutPanel form = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
                 RowCount = 5,
-                BackColor = Color.Transparent,
+                BackColor = UiPalette.Surface,
+                Margin = new Padding(0),
             };
             form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
             form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
-            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            form.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            form.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
             form.Controls.Add(FieldLabel("服务器显示名"), 0, 0);
             form.Controls.Add(FieldLabel("Linux allowedRoots（每行一个）"), 1, 0);
             StyleTextBox(_name);
             _name.Text = "gpu-server";
-            form.Controls.Add(new FieldHost(_name), 0, 1);
+            Panel nameCell = new Panel { Dock = DockStyle.Fill, BackColor = UiPalette.Surface, Padding = new Padding(0, 2, 8, 20), Margin = new Padding(0) };
+            _name.Dock = DockStyle.Top;
+            nameCell.Controls.Add(_name);
+            form.Controls.Add(nameCell, 0, 1);
             StyleTextBox(_roots);
             _roots.Multiline = true;
             _roots.ScrollBars = ScrollBars.Vertical;
-            _roots.Height = 64;
             _roots.Text = "/home/ubuntu/workspace";
-            FieldHost rootsHost = new FieldHost(_roots) { Dock = DockStyle.Fill, Height = 80 };
-            form.Controls.Add(rootsHost, 1, 1);
+            _roots.Dock = DockStyle.Fill;
+            _roots.Margin = new Padding(0, 2, 0, 4);
+            form.Controls.Add(_roots, 1, 1);
             FlowLayoutPanel actions = ButtonBar();
             actions.Controls.Add(ActionButton("生成一次性安装命令", async delegate { await CreateEnrollmentAsync(); }, true));
             actions.Controls.Add(ActionButton("刷新列表", async delegate { await LoadAgentsAsync(); }, false));
@@ -2074,25 +2095,36 @@ namespace DevSpacePortable.NativeUI
             _installCommand.Multiline = true;
             _installCommand.ScrollBars = ScrollBars.Vertical;
             _installCommand.ReadOnly = true;
-            _installCommand.Height = 120;
-            FieldHost commandHost = new FieldHost(_installCommand) { Dock = DockStyle.Fill };
-            form.Controls.Add(commandHost, 0, 3);
-            form.SetColumnSpan(commandHost, 2);
-            FlowLayoutPanel copyBar = ButtonBar();
-            copyBar.Controls.Add(ActionButton("复制安装命令", delegate { CopyInstallCommand(); }, false));
-            copyBar.Controls.Add(new Label
+            _installCommand.Dock = DockStyle.Fill;
+            _installCommand.Margin = new Padding(0, 2, 0, 4);
+            form.Controls.Add(_installCommand, 0, 3);
+            form.SetColumnSpan(_installCommand, 2);
+
+            TableLayoutPanel copyBar = new TableLayoutPanel
             {
-                Text = "Enrollment Token 默认 15 分钟有效；首次握手若在 ACK 前断线，可在 2 分钟恢复窗口内安全重试。成功确认后立即失效。",
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = UiPalette.Surface,
+                Margin = new Padding(0),
+            };
+            copyBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 154));
+            copyBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            copyBar.Controls.Add(ActionButton("复制安装命令", delegate { CopyInstallCommand(); }, false), 0, 0);
+            Label enrollmentHint = new Label
+            {
+                Text = "Enrollment Token 默认 15 分钟有效；首次握手若在 ACK 前断线，可在 2 分钟恢复窗口内安全重试。确认成功后立即失效。",
                 AutoSize = false,
-                Width = 720,
-                Height = 42,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
                 ForeColor = UiPalette.TextMuted,
-                Padding = new Padding(8, 8, 0, 0),
-            });
+                Padding = new Padding(6, 0, 0, 0),
+            };
+            copyBar.Controls.Add(enrollmentHint, 1, 0);
             form.Controls.Add(copyBar, 0, 4);
             form.SetColumnSpan(copyBar, 2);
-            formSurface.Controls.Add(form);
-            root.Controls.Add(formSurface, 0, 2);
+            Panel formCard = StableCard(form, 8, new Padding(0, 8, 0, 4));
+            root.Controls.Add(formCard, 0, 2);
 
             _status.Dock = DockStyle.Fill;
             _status.ForeColor = UiPalette.TextMuted;
@@ -2100,6 +2132,28 @@ namespace DevSpacePortable.NativeUI
             _status.Text = "准备读取远程 Agent。";
             root.Controls.Add(_status, 0, 3);
             Controls.Add(root);
+        }
+
+        private static Panel StableCard(Control content, int padding, Padding margin)
+        {
+            Panel border = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = UiPalette.Border,
+                Padding = new Padding(1),
+                Margin = margin,
+            };
+            Panel body = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = UiPalette.Surface,
+                Padding = new Padding(padding),
+                Margin = new Padding(0),
+            };
+            content.Dock = DockStyle.Fill;
+            body.Controls.Add(content);
+            border.Controls.Add(body);
+            return border;
         }
 
         private void ConfigureGrid()
@@ -2203,7 +2257,7 @@ namespace DevSpacePortable.NativeUI
             Dictionary<string, object> agent = SelectedAgent();
             string id = ValueText(agent, "id");
             if (string.IsNullOrWhiteSpace(id)) return;
-            if (MessageBox.Show(this, "永久删除此 Agent 的控制端登记记录？远端 systemd 服务不会被远程删除。", "删除 Agent 记录", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            if (MessageBox.Show(this, "永久删除此 Agent 的控制端登记记录？远端 systemd 服务或后台 Agent 进程不会被远程删除。", "删除 Agent 记录", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
             await _manager.RunJsonAsync("remote-agent-delete", new { agentId = id });
             await LoadAgentsAsync();
         }

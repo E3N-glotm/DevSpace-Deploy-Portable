@@ -51,6 +51,8 @@ try {
   assert.equal(report.splitterLayout?.passed, true);
   assert.equal(report.splitterLayout?.oauthDialog, true);
   assert.equal(report.splitterLayout?.oauthResponsiveColumns, true);
+  assert.equal(report.splitterLayout?.remoteAgentsStableLayout, true);
+  assert.deepEqual(report.splitterLayout?.remoteAgentSizes, ["980x720", "1080x760", "1180x820", "1360x900"]);
   assert.equal(report.splitterLayout?.dpiSafeDeferredLayout, true);
   assert.deepEqual(report.splitterLayout?.verticalWidths, [120, 240, 480, 820, 940, 1180, 1800]);
   assert.deepEqual(report.splitterLayout?.horizontalHeights, [90, 180, 360, 520, 700, 980]);
@@ -72,6 +74,7 @@ try {
     browserUi: false,
     splitterLayout: true,
     oauthClientDialogLayout: "responsive-surface-columns",
+    remoteAgentDialogLayout: "stable-standard-card-layout",
     tabs: report.uiTabs.length,
     buttons: report.uiButtons.length,
   }));

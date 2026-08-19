@@ -8,6 +8,8 @@ RUN_USER="${SUDO_USER:-${USER:-ubuntu}}"
 STATE_DIR="/var/lib/devspace-agent"
 CONFIG="$STATE_DIR/config.json"
 INSTALL_DIR="$STATE_DIR/bin"
+PID_FILE="$STATE_DIR/agent.pid"
+LOG_FILE="$STATE_DIR/agent.log"
 ALLOWED_ROOTS=()
 AGENT_SHA256=""
 
@@ -54,21 +56,75 @@ echo "${AGENT_SHA256,,}  $INSTALL_DIR/devspace-agent.py" | sha256sum -c -
 chmod 0755 "$INSTALL_DIR/devspace-agent.py"
 chown -R "$RUN_USER":"$(id -gn "$RUN_USER")" "$STATE_DIR"
 
+has_systemd() {
+  [[ "$(ps -p 1 -o comm= 2>/dev/null | tr -d '[:space:]')" == "systemd" ]] \
+    && [[ -d /run/systemd/system ]] \
+    && command -v systemctl >/dev/null 2>&1
+}
+
+stop_background_agent() {
+  [[ -f "$PID_FILE" ]] || return 0
+  local pid=""
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && [[ -r "/proc/$pid/cmdline" ]]; then
+    local cmdline=""
+    cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+    if [[ "$cmdline" == *"$INSTALL_DIR/devspace-agent.py"* && "$cmdline" == *"$CONFIG"* ]]; then
+      kill "$pid" 2>/dev/null || true
+      for _ in {1..20}; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+      done
+    fi
+  fi
+  rm -f "$PID_FILE"
+}
+
+start_background_agent() {
+  touch "$LOG_FILE"
+  chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$LOG_FILE"
+  chmod 0600 "$LOG_FILE"
+  sudo -u "$RUN_USER" -- sh -c \
+    "umask 077; nohup /usr/bin/python3 '$INSTALL_DIR/devspace-agent.py' --config '$CONFIG' run >>'$LOG_FILE' 2>&1 </dev/null & echo \$! >'$PID_FILE'"
+  chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$PID_FILE"
+  sleep 0.5
+  local pid=""
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || {
+    echo "DevSpace Agent background process failed to start. See $LOG_FILE" >&2
+    return 1
+  }
+}
+
 ARGS=("$INSTALL_DIR/devspace-agent.py" enroll --config "$CONFIG" --server "$SERVER" --token "$TOKEN" --name "$NAME" --state-dir "$STATE_DIR")
 for root in "${ALLOWED_ROOTS[@]}"; do ARGS+=(--allowed-root "$root"); done
 WAS_ACTIVE=0
-if systemctl is-active --quiet devspace-agent.service 2>/dev/null; then
-  WAS_ACTIVE=1
-  systemctl stop devspace-agent.service
+SERVICE_MODE="background"
+if has_systemd; then
+  SERVICE_MODE="systemd"
+  if systemctl is-active --quiet devspace-agent.service 2>/dev/null; then
+    WAS_ACTIVE=1
+    systemctl stop devspace-agent.service
+  fi
+else
+  if [[ -f "$PID_FILE" ]]; then WAS_ACTIVE=1; fi
+  stop_background_agent
 fi
 if ! sudo -u "$RUN_USER" -- python3 "${ARGS[@]}"; then
-  if [[ "$WAS_ACTIVE" -eq 1 ]]; then systemctl start devspace-agent.service || true; fi
+  if [[ "$WAS_ACTIVE" -eq 1 ]]; then
+    if [[ "$SERVICE_MODE" == "systemd" ]]; then
+      systemctl start devspace-agent.service || true
+    elif [[ -s "$CONFIG" ]]; then
+      start_background_agent || true
+    fi
+  fi
   exit 1
 fi
 chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$CONFIG"
 chmod 0600 "$CONFIG"
 
-cat >/etc/systemd/system/devspace-agent.service <<EOF
+if [[ "$SERVICE_MODE" == "systemd" ]]; then
+  cat >/etc/systemd/system/devspace-agent.service <<EOF
 [Unit]
 Description=DevSpace Linux Remote Workspace Agent
 After=network-online.target
@@ -90,7 +146,13 @@ ReadWritePaths=$STATE_DIR ${ALLOWED_ROOTS[*]}
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now devspace-agent.service
-echo "DevSpace Linux Agent installed and started as $RUN_USER."
+  systemctl daemon-reload
+  systemctl enable --now devspace-agent.service
+  echo "DevSpace Linux Agent installed and started as $RUN_USER using systemd."
+else
+  start_background_agent
+  echo "DevSpace Linux Agent installed and started as $RUN_USER using background fallback mode."
+  echo "systemd is not PID 1 on this host; the Agent will survive SSH logout but must be restarted after the container/host itself restarts."
+  echo "Background log: $LOG_FILE"
+fi
 echo "Allowed roots: ${ALLOWED_ROOTS[*]}"

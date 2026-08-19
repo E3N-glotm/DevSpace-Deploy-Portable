@@ -13,6 +13,7 @@ const BASH = join(ROOT, "runtime", "git", "bin", "bash.exe");
 
 const agent = readFileSync(SOURCE_AGENT, "utf8");
 const installer = readFileSync(SOURCE_INSTALLER, "utf8");
+const remoteAgentStore = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "remote-agent-store.js"), "utf8");
 
 assert.equal(readFileSync(PACKAGED_AGENT, "utf8"), agent, "installed Portable Agent must match maintained source");
 assert.equal(readFileSync(PACKAGED_INSTALLER, "utf8"), installer, "installed Portable installer must match maintained source");
@@ -46,6 +47,13 @@ for (const contract of [
   /ProtectHome=read-only/,
   /ReadWritePaths=\$STATE_DIR/,
   /systemctl stop devspace-agent\.service/,
+  /has_systemd\(\)/,
+  /ps -p 1 -o comm=/,
+  /start_background_agent\(\)/,
+  /nohup \/usr\/bin\/python3/,
+  /PID_FILE="\$STATE_DIR\/agent\.pid"/,
+  /LOG_FILE="\$STATE_DIR\/agent\.log"/,
+  /systemd is not PID 1 on this host/,
 ]) {
   assert.match(installer, contract);
 }
@@ -62,6 +70,10 @@ assert.match(python.stdout, /python-ast-ok/);
 const bash = spawnSync(BASH, ["-n", SOURCE_INSTALLER], { cwd: ROOT, encoding: "utf8" });
 assert.equal(bash.status, 0, bash.stderr || bash.stdout || "install.sh syntax validation failed");
 
+assert.match(remoteAgentStore, /\? `\( tmp=\$\(mktemp\);/);
+assert.match(remoteAgentStore, /rm -f "\$tmp"; exit \$rc \)`/);
+assert.doesNotMatch(remoteAgentStore, /\? `tmp=\$\(mktemp\);[^`]+exit \$rc`/);
+
 console.log(JSON.stringify({
   linuxAgentSourceMatchesInstalledCore: true,
   pythonSyntax: true,
@@ -70,6 +82,8 @@ console.log(JSON.stringify({
   installerAndAgentHashChain: true,
   recoverableEnrollmentRetry: true,
   websocketCloseDiagnostics: true,
+  nonSystemdBackgroundFallback: true,
+  installCommandKeepsInteractiveShellOpen: true,
   boundedRpcAndResources: true,
   allowedRootAndSymlinkGuard: true,
 }));

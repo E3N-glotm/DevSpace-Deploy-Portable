@@ -206,7 +206,7 @@ Owner password
 allowedRoots：/home/ubuntu/workspace
 ```
 
-点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256。Enrollment Token 默认 15 分钟有效；首次握手开始后，在 Linux 尚未确认已持久化 Agent 凭据前保留最多 2 分钟恢复窗口。若公网 ACK 在这段时间内丢失，Agent 会自动重试并复用同一 Agent ID，同时控制端轮换新的 Agent Secret；Linux 原子保存凭据并确认后 Token 立即失效。之后 Agent 使用独立随机 Secret 建立长期出站连接，systemd 服务以普通 Linux 用户运行，不以 root 身份运行。
+点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256。Enrollment Token 默认 15 分钟有效；首次握手开始后，在 Linux 尚未确认已持久化 Agent 凭据前保留最多 2 分钟恢复窗口。若公网 ACK 在这段时间内丢失，Agent 会自动重试并复用同一 Agent ID，同时控制端轮换新的 Agent Secret；Linux 原子保存凭据并确认后 Token 立即失效。安装器只在 PID 1 确实是 systemd 时创建 systemd service；Docker/LXC/其它非 systemd 环境会自动切换到普通 Linux 用户的 `nohup` 后台模式，并在 `/var/lib/devspace-agent/agent.pid` 与 `agent.log` 保存运行信息。后台模式可跨 SSH 退出保持连接，但容器/主机自身重启后需要由其启动机制重新拉起 Agent。生成命令本身运行在子 shell 中，不会在完成后主动关闭用户当前 SSH 会话。
 
 之后可以直接让 MCP 打开：
 
@@ -216,7 +216,7 @@ devspace://gpu-01/home/ubuntu/workspace/MyProject
 
 也可以使用 Agent ID 代替显示名。`open_workspace` 返回远程 backend、Agent/主机信息和可用的 GPU 状态；后续 `read`、`write/edit/apply_patch`、grep/glob/ls、`exec_command`、PTY/持续进程、file watch、`show_changes`、`session_rollback` 等继续复用同一个 `workspaceId`，不需要另外创建 SSH/SFTP 会话。
 
-远程结构化文件访问始终再次经过 Agent `allowedRoots` 和真实路径校验；命令执行还受 DevSpace 权限规则、systemd 服务用户权限及 Linux 自身权限约束。大文件采用 512 KiB 分块、每块和整文件 SHA-256、gzip 可选压缩与 delta chunk 复用。短暂断线时，尚未发送的 RPC 可以有界等待重连；已经发送但结果未知的写操作不会被自动重放，避免重复修改。
+远程结构化文件访问始终再次经过 Agent `allowedRoots` 和真实路径校验；命令执行还受 DevSpace 权限规则、Agent 运行用户权限及 Linux 自身权限约束。systemd 模式额外使用 unit sandbox；非 systemd 后台模式没有 systemd sandbox，但仍保留 allowedRoots、真实路径校验和普通用户权限边界。大文件采用 512 KiB 分块、每块和整文件 SHA-256、gzip 可选压缩与 delta chunk 复用。短暂断线时，尚未发送的 RPC 可以有界等待重连；已经发送但结果未知的写操作不会被自动重放，避免重复修改。
 
 远程会话审阅继续使用 Windows 侧有界 `sparse-journal-v4`，不会在服务器再复制一套 review 仓库。结构化修改的 baseline、历史 diff、回退前安全快照仍受每会话 32 MiB / 总计 512 MiB 上限约束；任意 shell 副作用仍只声明 `tracked-paths-only`。控制中心可以查看远程历史，但真正的远程 rollback / safety restore 必须由当前在线 MCP 会话通过已认证 Agent 执行。
 
@@ -347,13 +347,14 @@ https://你的域名/mcp
 - **完整 Remote Workspace Backend。** `open_workspace` 支持 `devspace://<agent-id-or-name>/absolute/linux/path`；打开后继续复用现有文件、搜索、命令、进程、file watch、review 和 patch 工具，不要求模型回退到 SSH/SFTP。
 - **Windows 仍是唯一 MCP/OAuth Control Plane。** Linux 只运行主动出站的轻量 Agent；Enrollment Token 默认 15 分钟有效，成功确认后改用独立 Agent Secret。控制中心可以创建 enrollment、查看 Agent 在线/主机/版本/allowedRoots，并撤销或删除登记。
 - **Enrollment 改为可确认、可恢复的两阶段握手。** 首次 hello 后 Token 最多保留 2 分钟恢复窗口；ACK 丢失时同一 Token 可安全重试，复用 Agent ID 并轮换 Agent Secret。Linux 原子写入凭据后显式确认，控制端立即销毁 enrollment。Agent 默认最多尝试 3 次，并在失败时显示 WebSocket close code/reason，而不是留下“Windows 已登记、Linux 没 Secret”的半注册状态。
-- **Linux Agent 零 pip 依赖。** Agent 只依赖 Python 3 标准库；安装器双重校验 installer/Agent SHA-256，systemd 服务拒绝以 root 身份运行，并使用 `NoNewPrivileges`、`ProtectSystem=strict`、`ProtectHome=read-only` 和显式 `ReadWritePaths`。
+- **Linux Agent 零 pip 依赖，并支持非 systemd 环境。** Agent 只依赖 Python 3 标准库；安装器双重校验 installer/Agent SHA-256。PID 1 为 systemd 时使用普通用户 systemd service，并启用 `NoNewPrivileges`、`ProtectSystem=strict`、`ProtectHome=read-only` 与显式 `ReadWritePaths`；容器等非 systemd 环境自动使用普通用户 `nohup` 后台进程，不再调用不可用的 systemctl。
+- **安装命令不会再关闭 SSH。** 一次性命令在子 shell 内清理临时 installer 并返回安装退出码，不再直接对用户当前交互式 shell 执行 `exit $rc`。
 - **大文件与断线语义有界。** 文件传输固定 512 KiB chunks，支持 gzip、chunk/whole-file SHA-256 与 delta reuse；8 MiB 单 RPC 上限不被大文件绕过。短暂离线只允许尚未发送的请求等待重连，已经发出的不确定写操作不会自动 replay。
 - **远程 sparse review / rollback。** Windows 继续保存 bounded sparse-journal-v4 baseline；Agent 只 capture/restore 明确路径。`session_rollback` 可恢复远程结构化修改并生成 pre-rollback safety snapshot；新增 `session_restore_safety` 用于通过在线 Agent 恢复该安全快照。
 - **远程进程、PTY、watch 与 Lifecycle Hooks。** `exec_command`/`write_stdin`、persistent process、PTY、file watch 和 workspace hooks 都在远端 backend 执行，本地 Workspace 行为不变。
 - **远程系统/GPU 状态进入 `open_workspace`。** Agent 返回 Linux 主机、CPU/内存和 `nvidia-smi` GPU 摘要，常规 GPU 检查不再需要额外 SSH 命令。
 - **资源和安全边界收紧。** Agent 对 allowedRoots/realpath、symlink restore、目录列举、grep candidate、watch、process registry、文本读取和 RPC payload 都有明确上限；撤销 Agent 后现有连接会被 heartbeat 关闭。
-- **原生 UI 同版本重做。** `AI / MCP OAuth 客户端` 不再使用容易受 WinForms DPI/Dock 瞬时尺寸影响的 SplitContainer，改成与主页一致的 SurfacePanel / FieldHost / ModernButton 响应式双栏；手动创建区与已选客户端凭据区彻底分离，并增加 Secret 显示/隐藏。`远程服务器 / Linux Agent` 同步统一卡片、字段、表格和 danger 操作样式。剩余分栏页的共享 `SafeSplitLayout` 增加重入保护与边界安全余量。
+- **原生 UI 同版本重做。** `AI / MCP OAuth 客户端` 不再使用容易受 WinForms DPI/Dock 瞬时尺寸影响的 SplitContainer，改成与主页一致的响应式双栏；手动创建区与已选客户端凭据区彻底分离，并增加 Secret 显示/隐藏。`远程服务器 / Linux Agent` 针对真实截图中的重绘残影再次重构：该窗口不再使用 SurfacePanel/FieldHost 自绘圆角层，改为单层标准卡片与固定配置区，同时保留主页配色、字体和 ModernButton；自测覆盖 980×720 到 1360×900 的多种窗口尺寸。剩余分栏页的共享 `SafeSplitLayout` 继续使用重入保护与边界安全余量。
 - Portable Protocol 仍为 1.5；**顶层 MCP Schema 有变化，升级后应 Refresh / Scan Tools**。OAuth 客户端身份、Token 持久化和本地历史 session 不要求重建。
 
 ## 1.1.38 主要变化

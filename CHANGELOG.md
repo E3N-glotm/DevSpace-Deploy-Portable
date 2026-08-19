@@ -7,8 +7,10 @@
 - 新增 Remote Workspace Backend：Windows 继续作为唯一 MCP/OAuth Control Plane，Ubuntu/Linux 通过轻量出站 Agent 登记后可使用 `devspace://<agent-id-or-name>/absolute/linux/path` 直接打开；文件、搜索、patch、命令、PTY、持续进程、file watch、review/rollback 等继续复用现有 workspaceId。
 - 修复首版 1.1.39 在公网 enrollment ACK 丢失/瞬时断线时会出现“Windows 已创建 Agent、Linux 尚未拿到 Agent Secret、一次性 Token 又已永久失效”的半注册状态。Enrollment 现在采用两阶段确认：首次使用后保留 2 分钟恢复窗口，同一 Token 重试会复用 Agent ID、轮换为新的 Agent Secret；Linux 原子写入凭据后显式确认，控制端随即销毁 enrollment。Agent 默认自动尝试 3 次，并输出 WebSocket close code/reason。
 - Linux installer 在重新登记前会暂停已有 `devspace-agent.service`，避免旧守护进程与新 enrollment 竞争连接；登记失败时会尝试恢复原服务。Agent/installer 仍保持 SHA-256 链式校验、普通用户运行与 systemd sandbox 边界。
+- 修复容器/非 systemd Ubuntu 的安装失败：仅当 PID 1 确实是 systemd 时才创建并启用 systemd unit；否则自动以普通 Linux 用户通过 `nohup` 后台模式启动 Agent，并保存 PID/日志。该模式可跨 SSH 退出保持运行，不再因 `systemctl` 无法连接 bus 而把已成功的 enrollment 判为失败。
+- 修复生成的一次性安装命令末尾直接执行 `exit $rc` 会主动关闭用户当前 SSH shell 的问题；安装过程现在运行在子 shell 中，仍保留正确退出码，但不会关闭交互式 SSH 会话。
 - 重做 **AI / MCP OAuth 客户端** 窗口：彻底移除该页易受 DPI/Dock 瞬时尺寸影响的 SplitContainer，改用与主页一致的 SurfacePanel / FieldHost / ModernButton 视觉体系，并把“新建手动客户端”与“当前选中客户端凭据”拆成独立区域，避免把 ChatGPT DCR Client ID 误当成 Gemini 手动 Client ID。
-- Remote Linux Agent 管理窗口同步采用主页卡片、字段和按钮样式；危险操作统一 danger 样式。共享 `SafeSplitLayout` 额外增加重入保护和边界安全余量，插件、Memories、日志等仍使用分栏的页面不会再在布局事件嵌套时触发 SplitterDistance 越界。
+- Remote Linux Agent 管理窗口第二次收口：移除该窗口全部 `SurfacePanel` / `FieldHost` 自绘圆角容器，改为稳定的单层标准 Panel/TextBox 卡片，同时保留主页的背景、字体、主色和 ModernButton。列表改为自适应高度，配置区改为固定高度，避免 resize/DPI 时出现旧圆角边框残影、控件层叠、按钮/说明文字被裁切。危险操作仍统一 danger 样式。
 - 1.1.39 Release 资产按同一版本号重新构建并原位替换；Portable Protocol 仍为 `1.5`，原 1.1.39 已新增的顶层 MCP Schema 不再发生第二次变化。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.39.md)
