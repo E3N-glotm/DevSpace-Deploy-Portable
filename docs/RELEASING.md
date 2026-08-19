@@ -80,6 +80,18 @@ runs tests, rebuilds the Portable ZIP, and uploads:
 - `release-assets/update-manifest.json`
 - `release-assets/SHA256SUMS-release.txt`
 
+The updater selects incremental assets by an exact `fromVersion` match. If a
+widely deployed older version is not the immediately previous Release and is
+not one of the compatibility bases above, users on that version will correctly
+fall back to the complete ZIP unless an exact delta is backfilled.
+
+Use the `Backfill Incremental Update` workflow for that case. It downloads the
+already-published canonical full ZIPs for both versions on a GitHub runner,
+builds `DevSpacePortable-Update-<from>-to-<to>.zip`, preserves the delta and
+rescue entries already advertised by the target Release manifest, refreshes
+`update-manifest.json` and `SHA256SUMS-release.txt`, and uploads only those
+supplemental updater assets. It never rebuilds or replaces the target full ZIP.
+
 ## First bootstrap Release
 
 The first source-only repository Release could not hydrate its runtime from an

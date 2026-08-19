@@ -1,0 +1,176 @@
+name: Backfill Incremental Update
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_version:
+        description: Installed Portable version that needs an exact delta
+        required: true
+        type: string
+      to_version:
+        description: Existing target Release version
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: backfill-incremental-${{ inputs.to_version }}
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${{ inputs.from_version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid from_version: ${{ inputs.from_version }}" >&2
+            exit 1
+          fi
+          if [[ ! "${{ inputs.to_version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid to_version: ${{ inputs.to_version }}" >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Verify source metadata matches target Release
+        shell: python
+        env:
+          TO_VERSION: ${{ inputs.to_version }}
+        run: |
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path("VERSION-MANIFEST.json").read_text(encoding="utf-8"))
+          actual = str(manifest["runtime"]["devspacePortable"])
+          expected = os.environ["TO_VERSION"]
+          if actual != expected:
+              raise SystemExit(
+                  f"Current source metadata is {actual}; backfill target is {expected}. "
+                  "Run this workflow from a ref whose VERSION-MANIFEST matches the target Release."
+              )
+
+      - name: Download canonical Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FROM_VERSION: ${{ inputs.from_version }}
+          TO_VERSION: ${{ inputs.to_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p backfill
+
+          base_name="DevSpacePortable-Windows-x64-${FROM_VERSION}.zip"
+          target_name="DevSpacePortable-Windows-x64-${TO_VERSION}.zip"
+
+          gh release download "v${FROM_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$base_name" \
+            --dir backfill
+          gh release download "v${TO_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$target_name" \
+            --dir backfill
+          gh release download "v${TO_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "update-manifest.json" \
+            --dir backfill
+
+          while IFS= read -r asset_name; do
+            [[ -z "$asset_name" ]] && continue
+            gh release download "v${TO_VERSION}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "$asset_name" \
+              --dir backfill
+          done < <(jq -r '.incrementalAssets[].name, .rescueAssets[].name' backfill/update-manifest.json)
+
+      - name: Build exact delta and refreshed manifest
+        shell: bash
+        env:
+          FROM_VERSION: ${{ inputs.from_version }}
+          TO_VERSION: ${{ inputs.to_version }}
+        run: |
+          set -euo pipefail
+          base_zip="backfill/DevSpacePortable-Windows-x64-${FROM_VERSION}.zip"
+          target_zip="backfill/DevSpacePortable-Windows-x64-${TO_VERSION}.zip"
+          delta_zip="backfill/DevSpacePortable-Update-${FROM_VERSION}-to-${TO_VERSION}.zip"
+
+          python setup/create-incremental-update.py \
+            --base-zip "$base_zip" \
+            --target-zip "$target_zip" \
+            --output "$delta_zip"
+
+          args=(--repository "$GITHUB_REPOSITORY" --zip "$target_zip")
+          delta_name="DevSpacePortable-Update-${FROM_VERSION}-to-${TO_VERSION}.zip"
+          while IFS= read -r asset_name; do
+            [[ -z "$asset_name" ]] && continue
+            [[ "$asset_name" == "$delta_name" ]] && continue
+            args+=(--incremental "backfill/$asset_name")
+          done < <(jq -r '.incrementalAssets[].name' backfill/update-manifest.json)
+          args+=(--incremental "$delta_zip")
+          while IFS= read -r asset_name; do
+            [[ -z "$asset_name" ]] && continue
+            args+=(--rescue "backfill/$asset_name")
+          done < <(jq -r '.rescueAssets[].name' backfill/update-manifest.json)
+
+          python setup/create-update-manifest.py "${args[@]}"
+
+          jq -e \
+            --arg from "$FROM_VERSION" \
+            --arg to "$TO_VERSION" \
+            '.incrementalAssets[] | select(.fromVersion == $from and .toVersion == $to)' \
+            release-assets/update-manifest.json >/dev/null
+
+      - name: Publish supplemental delta only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FROM_VERSION: ${{ inputs.from_version }}
+          TO_VERSION: ${{ inputs.to_version }}
+        run: |
+          set -euo pipefail
+          delta_zip="backfill/DevSpacePortable-Update-${FROM_VERSION}-to-${TO_VERSION}.zip"
+          gh release upload "v${TO_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            "$delta_zip" \
+            release-assets/update-manifest.json \
+            release-assets/SHA256SUMS-release.txt \
+            --clobber
+
+      - name: Verify published delta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FROM_VERSION: ${{ inputs.from_version }}
+          TO_VERSION: ${{ inputs.to_version }}
+        run: |
+          set -euo pipefail
+          delta_name="DevSpacePortable-Update-${FROM_VERSION}-to-${TO_VERSION}.zip"
+          gh release view "v${TO_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq ".assets[] | select(.name == \"${delta_name}\") | {name,size,digest,state}"
+          gh release download "v${TO_VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern update-manifest.json \
+            --dir backfill/verify \
+            --clobber
+          jq -e \
+            --arg from "$FROM_VERSION" \
+            --arg to "$TO_VERSION" \
+            '.incrementalAssets[] | select(.fromVersion == $from and .toVersion == $to)' \
+            backfill/verify/update-manifest.json
