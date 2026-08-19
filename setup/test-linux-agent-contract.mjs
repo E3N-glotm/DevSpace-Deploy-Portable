@@ -39,6 +39,12 @@ for (const contract of [
 for (const contract of [
   /INSTALL_DIR="\$STATE_DIR\/bin"/,
   /Refusing to run the DevSpace Agent service as root/,
+  /XDG_STATE_HOME/,
+  /\.local\/state/,
+  /LEGACY_STATE_DIR="\/var\/lib\/devspace-agent"/,
+  /run_as_agent_user\(\)/,
+  /PYTHON_BIN="\$\(command -v python3\)"/,
+  /A non-root install can only run as the current Linux user/,
   /Linux allowedRoot cannot be \/\./,
   /sha256sum -c -/,
   /User=\$RUN_USER/,
@@ -50,7 +56,7 @@ for (const contract of [
   /has_systemd\(\)/,
   /ps -p 1 -o comm=/,
   /start_background_agent\(\)/,
-  /nohup \/usr\/bin\/python3/,
+  /nohup '\$PYTHON_BIN'/,
   /PID_FILE="\$STATE_DIR\/agent\.pid"/,
   /LOG_FILE="\$STATE_DIR\/agent\.log"/,
   /systemd is not PID 1 on this host/,
@@ -71,18 +77,22 @@ const bash = spawnSync(BASH, ["-n", SOURCE_INSTALLER], { cwd: ROOT, encoding: "u
 assert.equal(bash.status, 0, bash.stderr || bash.stdout || "install.sh syntax validation failed");
 
 assert.match(remoteAgentStore, /\? `\( tmp=\$\(mktemp\);/);
+assert.match(remoteAgentStore, /&& bash "\$tmp" --server/);
 assert.match(remoteAgentStore, /rm -f "\$tmp"; exit \$rc \)`/);
 assert.doesNotMatch(remoteAgentStore, /\? `tmp=\$\(mktemp\);[^`]+exit \$rc`/);
+assert.doesNotMatch(remoteAgentStore, /sudo bash "\$tmp"/);
 
 console.log(JSON.stringify({
   linuxAgentSourceMatchesInstalledCore: true,
   pythonSyntax: true,
   installerSyntax: true,
-  ordinaryUserService: true,
+  passwordlessUserInstall: true,
   installerAndAgentHashChain: true,
   recoverableEnrollmentRetry: true,
   websocketCloseDiagnostics: true,
   nonSystemdBackgroundFallback: true,
+  legacyWritableStateReuse: true,
+  generatedInstallCommandRequiresSudo: false,
   installCommandKeepsInteractiveShellOpen: true,
   boundedRpcAndResources: true,
   allowedRootAndSymlinkGuard: true,

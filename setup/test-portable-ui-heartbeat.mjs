@@ -30,6 +30,11 @@ assert.match(nativeSource, /Text = "选中客户端凭据"/);
 assert.match(nativeSource, /new SurfacePanel/);
 assert.match(nativeSource, /new FieldHost\(_clientId\)/);
 assert.match(nativeSource, /new FieldHost\(_clientSecret\)/);
+assert.match(nativeSource, /internal sealed class RemoteAgentTile/);
+assert.match(nativeSource, /internal sealed class RemoteInputHost/);
+assert.match(nativeSource, /internal sealed class RemoteCard/);
+assert.match(nativeSource, /点击磁贴选择 Agent/);
+assert.match(nativeSource, /默认无 sudo/);
 assert.match(nativeSource, /AutoScaleMode\s*=\s*AutoScaleMode\.Dpi/);
 assert.doesNotMatch(nativeSource, /SplitterDistance\s*=\s*610/);
 
@@ -52,7 +57,13 @@ try {
   assert.equal(report.splitterLayout?.oauthDialog, true);
   assert.equal(report.splitterLayout?.oauthResponsiveColumns, true);
   assert.equal(report.splitterLayout?.remoteAgentsStableLayout, true);
-  assert.deepEqual(report.splitterLayout?.remoteAgentSizes, ["980x720", "1080x760", "1180x820", "1360x900"]);
+  assert.ok(report.splitterLayout?.remoteAgentTileCount >= 1);
+  assert.ok(report.splitterLayout?.remoteAgentInputHostCount >= 3);
+  assert.ok(report.splitterLayout?.remoteAgentCardCount >= 2);
+  assert.ok(report.splitterLayout?.remoteAgentButtonMinHeight >= 44);
+  assert.equal(report.splitterLayout?.remoteAgentButtonsUnclipped, true);
+  assert.ok(report.splitterLayout?.remoteAgentCommandHostHeight >= 64);
+  assert.deepEqual(report.splitterLayout?.remoteAgentSizes, ["1040x760", "1120x800", "1220x860", "1440x920"]);
   assert.equal(report.splitterLayout?.dpiSafeDeferredLayout, true);
   assert.deepEqual(report.splitterLayout?.verticalWidths, [120, 240, 480, 820, 940, 1180, 1800]);
   assert.deepEqual(report.splitterLayout?.horizontalHeights, [90, 180, 360, 520, 700, 980]);
@@ -74,7 +85,7 @@ try {
     browserUi: false,
     splitterLayout: true,
     oauthClientDialogLayout: "responsive-surface-columns",
-    remoteAgentDialogLayout: "stable-standard-card-layout",
+    remoteAgentDialogLayout: "responsive-hover-tile-layout",
     tabs: report.uiTabs.length,
     buttons: report.uiButtons.length,
   }));

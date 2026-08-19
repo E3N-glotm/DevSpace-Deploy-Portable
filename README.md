@@ -206,7 +206,7 @@ Owner password
 allowedRoots：/home/ubuntu/workspace
 ```
 
-点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256。Enrollment Token 默认 15 分钟有效；首次握手开始后，在 Linux 尚未确认已持久化 Agent 凭据前保留最多 2 分钟恢复窗口。若公网 ACK 在这段时间内丢失，Agent 会自动重试并复用同一 Agent ID，同时控制端轮换新的 Agent Secret；Linux 原子保存凭据并确认后 Token 立即失效。安装器只在 PID 1 确实是 systemd 时创建 systemd service；Docker/LXC/其它非 systemd 环境会自动切换到普通 Linux 用户的 `nohup` 后台模式，并在 `/var/lib/devspace-agent/agent.pid` 与 `agent.log` 保存运行信息。后台模式可跨 SSH 退出保持连接，但容器/主机自身重启后需要由其启动机制重新拉起 Agent。生成命令本身运行在子 shell 中，不会在完成后主动关闭用户当前 SSH 会话。
+点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。**默认命令不再使用 sudo**：普通 Linux 账号直接安装到 `${XDG_STATE_HOME:-$HOME/.local/state}/devspace-agent` 并以该账号运行；如果之前的 1.1.39 已创建 `/var/lib/devspace-agent` 且该目录现在归当前账号可写，则自动复用旧目录原位升级，不会再启动一份重复 Agent。只有管理员显式用 sudo/root 运行 installer 时才进入系统级 `/var/lib` + systemd 路径。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256。Enrollment Token 默认 15 分钟有效；首次握手开始后，在 Linux 尚未确认已持久化 Agent 凭据前保留最多 2 分钟恢复窗口。若公网 ACK 在这段时间内丢失，Agent 会自动重试并复用同一 Agent ID，同时控制端轮换新的 Agent Secret；Linux 原子保存凭据并确认后 Token 立即失效。没有 systemd 服务条件时使用普通用户 `nohup` 后台模式并保存 PID/日志；该模式可跨正常 SSH 退出保持连接，但主机/容器重启后若没有用户级 init 机制，需要重新启动 Agent。生成命令本身运行在子 shell 中，不会在完成后主动关闭用户当前 SSH 会话。
 
 之后可以直接让 MCP 打开：
 
@@ -347,14 +347,14 @@ https://你的域名/mcp
 - **完整 Remote Workspace Backend。** `open_workspace` 支持 `devspace://<agent-id-or-name>/absolute/linux/path`；打开后继续复用现有文件、搜索、命令、进程、file watch、review 和 patch 工具，不要求模型回退到 SSH/SFTP。
 - **Windows 仍是唯一 MCP/OAuth Control Plane。** Linux 只运行主动出站的轻量 Agent；Enrollment Token 默认 15 分钟有效，成功确认后改用独立 Agent Secret。控制中心可以创建 enrollment、查看 Agent 在线/主机/版本/allowedRoots，并撤销或删除登记。
 - **Enrollment 改为可确认、可恢复的两阶段握手。** 首次 hello 后 Token 最多保留 2 分钟恢复窗口；ACK 丢失时同一 Token 可安全重试，复用 Agent ID 并轮换 Agent Secret。Linux 原子写入凭据后显式确认，控制端立即销毁 enrollment。Agent 默认最多尝试 3 次，并在失败时显示 WebSocket close code/reason，而不是留下“Windows 已登记、Linux 没 Secret”的半注册状态。
-- **Linux Agent 零 pip 依赖，并支持非 systemd 环境。** Agent 只依赖 Python 3 标准库；安装器双重校验 installer/Agent SHA-256。PID 1 为 systemd 时使用普通用户 systemd service，并启用 `NoNewPrivileges`、`ProtectSystem=strict`、`ProtectHome=read-only` 与显式 `ReadWritePaths`；容器等非 systemd 环境自动使用普通用户 `nohup` 后台进程，不再调用不可用的 systemctl。
+- **Linux Agent 零 pip、默认零 sudo，并支持非 systemd 环境。** Agent 只依赖 Python 3 标准库；安装器双重校验 installer/Agent SHA-256。默认一键命令直接以当前 Linux 用户安装，不要求 sudo 密码；新用户级状态目录位于 `~/.local/state/devspace-agent`（尊重 `XDG_STATE_HOME`），同时兼容原位复用当前用户可写的旧 `/var/lib/devspace-agent`。显式 root 安装且 PID 1 为 systemd 时才使用 systemd system service 和 sandbox；其它环境使用普通用户 `nohup` 后台进程。
 - **安装命令不会再关闭 SSH。** 一次性命令在子 shell 内清理临时 installer 并返回安装退出码，不再直接对用户当前交互式 shell 执行 `exit $rc`。
 - **大文件与断线语义有界。** 文件传输固定 512 KiB chunks，支持 gzip、chunk/whole-file SHA-256 与 delta reuse；8 MiB 单 RPC 上限不被大文件绕过。短暂离线只允许尚未发送的请求等待重连，已经发出的不确定写操作不会自动 replay。
 - **远程 sparse review / rollback。** Windows 继续保存 bounded sparse-journal-v4 baseline；Agent 只 capture/restore 明确路径。`session_rollback` 可恢复远程结构化修改并生成 pre-rollback safety snapshot；新增 `session_restore_safety` 用于通过在线 Agent 恢复该安全快照。
 - **远程进程、PTY、watch 与 Lifecycle Hooks。** `exec_command`/`write_stdin`、persistent process、PTY、file watch 和 workspace hooks 都在远端 backend 执行，本地 Workspace 行为不变。
 - **远程系统/GPU 状态进入 `open_workspace`。** Agent 返回 Linux 主机、CPU/内存和 `nvidia-smi` GPU 摘要，常规 GPU 检查不再需要额外 SSH 命令。
 - **资源和安全边界收紧。** Agent 对 allowedRoots/realpath、symlink restore、目录列举、grep candidate、watch、process registry、文本读取和 RPC payload 都有明确上限；撤销 Agent 后现有连接会被 heartbeat 关闭。
-- **原生 UI 同版本重做。** `AI / MCP OAuth 客户端` 不再使用容易受 WinForms DPI/Dock 瞬时尺寸影响的 SplitContainer，改成与主页一致的响应式双栏；手动创建区与已选客户端凭据区彻底分离，并增加 Secret 显示/隐藏。`远程服务器 / Linux Agent` 针对真实截图中的重绘残影再次重构：该窗口不再使用 SurfacePanel/FieldHost 自绘圆角层，改为单层标准卡片与固定配置区，同时保留主页配色、字体和 ModernButton；自测覆盖 980×720 到 1360×900 的多种窗口尺寸。剩余分栏页的共享 `SafeSplitLayout` 继续使用重入保护与边界安全余量。
+- **原生 UI 同版本重做。** `AI / MCP OAuth 客户端` 不再使用容易受 WinForms DPI/Dock 瞬时尺寸影响的 SplitContainer，改成与主页一致的响应式双栏；手动创建区与已选客户端凭据区彻底分离，并增加 Secret 显示/隐藏。`远程服务器 / Linux Agent` 第三次按真实截图收口：删除 DataGridView 和生硬标准方框，改成主页式圆角 Agent 动态磁贴（hover/selected/status）、实心圆角焦点输入框和 44px ModernButton；磁贴会根据窗口宽度自动在双列/单列之间切换。自测覆盖 1040×760 到 1440×920，同时继续避免早期多层透明 SurfacePanel 的 resize 残影。
 - Portable Protocol 仍为 1.5；**顶层 MCP Schema 有变化，升级后应 Refresh / Scan Tools**。OAuth 客户端身份、Token 持久化和本地历史 session 不要求重建。
 
 ## 1.1.38 主要变化

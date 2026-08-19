@@ -4,12 +4,12 @@ set -Eeuo pipefail
 SERVER=""
 TOKEN=""
 NAME=""
-RUN_USER="${SUDO_USER:-${USER:-ubuntu}}"
-STATE_DIR="/var/lib/devspace-agent"
-CONFIG="$STATE_DIR/config.json"
-INSTALL_DIR="$STATE_DIR/bin"
-PID_FILE="$STATE_DIR/agent.pid"
-LOG_FILE="$STATE_DIR/agent.log"
+RUN_USER="${SUDO_USER:-${USER:-$(id -un 2>/dev/null || echo ubuntu)}}"
+STATE_DIR=""
+CONFIG=""
+INSTALL_DIR=""
+PID_FILE=""
+LOG_FILE=""
 ALLOWED_ROOTS=()
 AGENT_SHA256=""
 
@@ -29,8 +29,7 @@ done
 [[ -n "$TOKEN" ]] || { echo "--token is required" >&2; exit 2; }
 [[ -n "$NAME" ]] || { echo "--name is required" >&2; exit 2; }
 ((${#ALLOWED_ROOTS[@]} > 0)) || { echo "At least one --allowed-root is required" >&2; exit 2; }
-[[ "$EUID" -eq 0 ]] || { echo "Run installer with sudo/root; the installed service itself runs as the selected ordinary user." >&2; exit 2; }
-if [[ "$RUN_USER" == "root" ]]; then
+if [[ "$EUID" -eq 0 && "$RUN_USER" == "root" ]]; then
   if id ubuntu >/dev/null 2>&1; then
     RUN_USER="ubuntu"
   else
@@ -39,22 +38,67 @@ if [[ "$RUN_USER" == "root" ]]; then
   fi
 fi
 id "$RUN_USER" >/dev/null 2>&1 || { echo "Linux user does not exist: $RUN_USER" >&2; exit 2; }
+if [[ "$EUID" -ne 0 && "$RUN_USER" != "$(id -un)" ]]; then
+  echo "A non-root install can only run as the current Linux user ($(id -un)). Remove --user or use an administrator for a system-wide install." >&2
+  exit 2
+fi
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 2; }
+PYTHON_BIN="$(command -v python3)"
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 2; }
 command -v sha256sum >/dev/null || { echo "sha256sum is required" >&2; exit 2; }
 [[ "$AGENT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "--agent-sha256 with a 64-character SHA-256 digest is required" >&2; exit 2; }
+
+if [[ "$EUID" -eq 0 ]]; then
+  STATE_DIR="/var/lib/devspace-agent"
+else
+  LEGACY_STATE_DIR="/var/lib/devspace-agent"
+  USER_STATE_HOME="${XDG_STATE_HOME:-${HOME:?HOME is required for a user-mode install}/.local/state}"
+  if [[ -d "$LEGACY_STATE_DIR" && -w "$LEGACY_STATE_DIR" && -x "$LEGACY_STATE_DIR" ]]; then
+    # 1.1.39 revision 2 installed the background Agent under /var/lib but
+    # chowned it to the ordinary service user. Reuse that writable location so
+    # a subsequent passwordless reinstall upgrades the existing Agent in place
+    # instead of starting a duplicate identity from a second state directory.
+    STATE_DIR="$LEGACY_STATE_DIR"
+  else
+    STATE_DIR="$USER_STATE_HOME/devspace-agent"
+  fi
+fi
+CONFIG="$STATE_DIR/config.json"
+INSTALL_DIR="$STATE_DIR/bin"
+PID_FILE="$STATE_DIR/agent.pid"
+LOG_FILE="$STATE_DIR/agent.log"
+
+run_as_agent_user() {
+  if [[ "$EUID" -ne 0 || "$RUN_USER" == "$(id -un)" ]]; then
+    "$@"
+    return
+  fi
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$RUN_USER" -- "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -u "$RUN_USER" -- "$@"
+    return
+  fi
+  echo "System-wide install requires runuser or sudo to launch the Agent as $RUN_USER." >&2
+  return 1
+}
+
 for root in "${ALLOWED_ROOTS[@]}"; do
   [[ "$root" == /* ]] || { echo "Linux allowedRoot must be absolute: $root" >&2; exit 2; }
   [[ "$root" != "/" ]] || { echo "Linux allowedRoot cannot be /." >&2; exit 2; }
   [[ -d "$root" ]] || { echo "Linux allowedRoot does not exist or is not a directory: $root" >&2; exit 2; }
-  sudo -u "$RUN_USER" -- test -x "$root" || { echo "Linux service user cannot traverse allowedRoot: $RUN_USER -> $root" >&2; exit 2; }
+  run_as_agent_user test -x "$root" || { echo "Linux Agent user cannot traverse allowedRoot: $RUN_USER -> $root" >&2; exit 2; }
 done
 
 mkdir -p "$INSTALL_DIR" "$STATE_DIR"
 curl -fsSL "${SERVER%/}/agent/v1/devspace-agent.py" -o "$INSTALL_DIR/devspace-agent.py"
 echo "${AGENT_SHA256,,}  $INSTALL_DIR/devspace-agent.py" | sha256sum -c -
 chmod 0755 "$INSTALL_DIR/devspace-agent.py"
-chown -R "$RUN_USER":"$(id -gn "$RUN_USER")" "$STATE_DIR"
+if [[ "$EUID" -eq 0 ]]; then
+  chown -R "$RUN_USER":"$(id -gn "$RUN_USER")" "$STATE_DIR"
+fi
 
 has_systemd() {
   [[ "$(ps -p 1 -o comm= 2>/dev/null | tr -d '[:space:]')" == "systemd" ]] \
@@ -82,11 +126,27 @@ stop_background_agent() {
 
 start_background_agent() {
   touch "$LOG_FILE"
-  chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$LOG_FILE"
+  if [[ "$EUID" -eq 0 ]]; then
+    chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$LOG_FILE"
+  fi
   chmod 0600 "$LOG_FILE"
-  sudo -u "$RUN_USER" -- sh -c \
-    "umask 077; nohup /usr/bin/python3 '$INSTALL_DIR/devspace-agent.py' --config '$CONFIG' run >>'$LOG_FILE' 2>&1 </dev/null & echo \$! >'$PID_FILE'"
-  chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$PID_FILE"
+  if [[ "$EUID" -eq 0 && "$RUN_USER" != "$(id -un)" ]]; then
+    if command -v runuser >/dev/null 2>&1; then
+      runuser -u "$RUN_USER" -- sh -c \
+        "umask 077; nohup '$PYTHON_BIN' '$INSTALL_DIR/devspace-agent.py' --config '$CONFIG' run >>'$LOG_FILE' 2>&1 </dev/null & echo \$! >'$PID_FILE'"
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo -u "$RUN_USER" -- sh -c \
+        "umask 077; nohup '$PYTHON_BIN' '$INSTALL_DIR/devspace-agent.py' --config '$CONFIG' run >>'$LOG_FILE' 2>&1 </dev/null & echo \$! >'$PID_FILE'"
+    else
+      echo "Cannot start system-wide Agent as $RUN_USER: runuser/sudo is unavailable." >&2
+      return 1
+    fi
+  else
+    sh -c "umask 077; nohup '$PYTHON_BIN' '$INSTALL_DIR/devspace-agent.py' --config '$CONFIG' run >>'$LOG_FILE' 2>&1 </dev/null & echo \$! >'$PID_FILE'"
+  fi
+  if [[ "$EUID" -eq 0 ]]; then
+    chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$PID_FILE"
+  fi
   sleep 0.5
   local pid=""
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
@@ -100,7 +160,7 @@ ARGS=("$INSTALL_DIR/devspace-agent.py" enroll --config "$CONFIG" --server "$SERV
 for root in "${ALLOWED_ROOTS[@]}"; do ARGS+=(--allowed-root "$root"); done
 WAS_ACTIVE=0
 SERVICE_MODE="background"
-if has_systemd; then
+if [[ "$EUID" -eq 0 ]] && has_systemd; then
   SERVICE_MODE="systemd"
   if systemctl is-active --quiet devspace-agent.service 2>/dev/null; then
     WAS_ACTIVE=1
@@ -110,7 +170,7 @@ else
   if [[ -f "$PID_FILE" ]]; then WAS_ACTIVE=1; fi
   stop_background_agent
 fi
-if ! sudo -u "$RUN_USER" -- python3 "${ARGS[@]}"; then
+if ! run_as_agent_user "$PYTHON_BIN" "${ARGS[@]}"; then
   if [[ "$WAS_ACTIVE" -eq 1 ]]; then
     if [[ "$SERVICE_MODE" == "systemd" ]]; then
       systemctl start devspace-agent.service || true
@@ -120,7 +180,9 @@ if ! sudo -u "$RUN_USER" -- python3 "${ARGS[@]}"; then
   fi
   exit 1
 fi
-chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$CONFIG"
+if [[ "$EUID" -eq 0 ]]; then
+  chown "$RUN_USER":"$(id -gn "$RUN_USER")" "$CONFIG"
+fi
 chmod 0600 "$CONFIG"
 
 if [[ "$SERVICE_MODE" == "systemd" ]]; then
@@ -133,7 +195,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$RUN_USER
-ExecStart=/usr/bin/python3 $INSTALL_DIR/devspace-agent.py --config $CONFIG run
+ExecStart=$PYTHON_BIN $INSTALL_DIR/devspace-agent.py --config $CONFIG run
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -151,8 +213,14 @@ EOF
   echo "DevSpace Linux Agent installed and started as $RUN_USER using systemd."
 else
   start_background_agent
-  echo "DevSpace Linux Agent installed and started as $RUN_USER using background fallback mode."
-  echo "systemd is not PID 1 on this host; the Agent will survive SSH logout but must be restarted after the container/host itself restarts."
+  if [[ "$EUID" -eq 0 ]]; then
+    echo "DevSpace Linux Agent installed and started as $RUN_USER using background fallback mode."
+    echo "systemd is not PID 1 on this host; the Agent will survive SSH logout but must be restarted after the container/host itself restarts."
+  else
+    echo "DevSpace Linux Agent installed without sudo as $RUN_USER using user-mode background service."
+    echo "State directory: $STATE_DIR"
+    echo "The Agent survives normal SSH logout. After a host/container reboot, restart it from the user session or reinstall if no user init service is available."
+  fi
   echo "Background log: $LOG_FILE"
 fi
 echo "Allowed roots: ${ALLOWED_ROOTS[*]}"

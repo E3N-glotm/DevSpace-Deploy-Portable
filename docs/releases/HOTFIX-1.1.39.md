@@ -1,5 +1,7 @@
 # DevSpace Portable 1.1.39
 
+> 2026-08-19 repack revision 3: the same-version assets were rebuilt in place once more after the real Remote Agent screen showed that the revision-2 rectangular stability fallback no longer matched the main control-center design and still clipped button content. The generated Linux command also still required `sudo` solely because the installer chose `/var/lib`. Revision 3 makes the generated install passwordless/user-scoped by default and rebuilds Remote Agent administration as responsive hover tiles with rounded focus-aware fields. Portable version and Protocol remain unchanged.
+
 > 2026-08-19 repack revision 2: the 1.1.39 Release assets were rebuilt in place again after a real containerized Ubuntu host confirmed two additional defects: the installer assumed systemd was PID 1, and the generated one-line command exited the user's interactive SSH shell. The Remote Agent dialog was also rebuilt without its custom rounded SurfacePanel/FieldHost layers after real resize screenshots showed persistent repaint ghosts. The version and Portable Protocol remain unchanged; these replacement assets supersede all earlier 1.1.39 binaries.
 
 ## Scope
@@ -20,6 +22,7 @@ Portable Protocol remains 1.5. The top-level MCP tool schema changes because rem
 - Reinstall/re-enrollment temporarily stops an already-active `devspace-agent.service` before the enrollment handshake so a stale service cannot race with the new identity; if enrollment fails, the installer attempts to restore the previously active service.
 - The installer now detects whether PID 1 is actually systemd. Only a real systemd host receives the systemd unit. Docker/LXC/other non-systemd environments automatically use an ordinary-user `nohup` fallback with a guarded PID file and private log under `/var/lib/devspace-agent`; the Agent survives SSH logout instead of failing after a successful enrollment because `systemctl` cannot reach a bus.
 - The generated one-line install command now runs its cleanup/exit-code logic inside a subshell. It still returns the installer status to the terminal but no longer executes `exit` against the user's interactive SSH shell.
+- The generated one-line command no longer invokes `sudo`. A normal account installs into `${XDG_STATE_HOME:-$HOME/.local/state}/devspace-agent` and runs the Agent as itself. If `/var/lib/devspace-agent` already exists from the earlier 1.1.39 background installer and is writable by that same account, revision 3 deliberately reuses it for an in-place upgrade. Running the installer explicitly as root remains supported for administrators who want the system-wide service path.
 - Agent WebSocket upgrades obey the same Host allowlist/public hostname boundary used by the control plane.
 - Revoked Agents are rejected for new RPC and existing connections are closed by heartbeat validation.
 
@@ -54,7 +57,7 @@ The replacement 1.1.39 assets also rebuild the two newly exposed administration 
 - **AI / MCP OAuth clients** no longer uses a `SplitContainer`. It uses responsive table columns and `SurfacePanel`, `FieldHost` and `ModernButton`, which removes the first-open `SplitterDistance` failure path entirely for this dialog.
 - Manual-client creation and selected-client credentials are now separate information areas. Selecting an existing ChatGPT/Gemini DCR registration no longer overwrites the manual-client name/Redirect URI form, so a DCR Client ID cannot be mistaken for the credentials that Gemini is asking the user to create manually.
 - Client Secret visibility has an explicit show/hide action. One-time secret semantics are stated next to the selected client, and create/rotate success messages are preserved after the list refresh.
-- **Remote server / Linux Agent** was rebuilt a second time after real resize screenshots exposed rounded-border repaint ghosts. This dialog now contains no `SurfacePanel` and no `FieldHost`: it uses stable rectangular Panel/TextBox cards, a percentage-height Agent list, a fixed-height configuration area and the shared `ModernButton` palette. This removes stale rounded-border trails, overlapping controls and bottom-row clipping while preserving the main control-center typography and colors.
+- **Remote server / Linux Agent** was rebuilt a third time after the stable rectangular fallback proved visually inconsistent with the homepage. The Agent table is replaced by responsive `RemoteAgentTile` controls that use the homepage's 18px card language, status colors, hover/selection feedback and automatic one/two-column layout. Inputs use dedicated opaque `RemoteInputHost` controls with rounded focus borders; section backgrounds use a single `RemoteCard` paint layer. Buttons are allocated a real 44px height instead of being squeezed into a smaller TableLayout row. This restores the homepage visual language without reintroducing the earlier nested-transparent-surface repaint ghosts.
 - Shared `SafeSplitLayout` now guards against re-entrant WinForms size/layout events and keeps a one-pixel safety margin when restoring panel minimums. Split-based plugin/Memory/log pages retain responsive behavior without assigning a boundary value that a nested DPI/Dock event can invalidate.
 
 ## Remote review and safety restore
@@ -71,7 +74,7 @@ The dedicated Remote Workspace Backend regression uses a real local HTTP/WebSock
 
 Linux Agent Python and installer syntax are validated without modifying a production Linux host. The public ngrok endpoint was independently exercised with both Node `ws` and dependency-free Python TLS/WebSocket framing: HTTP 101 and the extended-length `hello_ack` carrying an Agent Secret were received successfully. The Agent contains an additional dependency-free `self-test` command for Linux-side filesystem, transfer, process and status validation when installed on a target host.
 
-Native UI self-test verifies that the OAuth dialog contains no `SplitContainer`, uses the responsive surface-column structure, and that the remaining shared vertical/horizontal split layouts survive transient 120–1800 px widths and 90–980 px heights. The Remote Agent dialog additionally verifies that it contains zero `SurfacePanel`/`FieldHost` instances and lays out successfully at 980×720, 1080×760, 1180×820 and 1360×900.
+Native UI self-test verifies that the OAuth dialog contains no `SplitContainer`, uses the responsive surface-column structure, and that the remaining shared vertical/horizontal split layouts survive transient 120–1800 px widths and 90–980 px heights. The Remote Agent dialog additionally verifies zero `DataGridView`/`SurfacePanel`/`FieldHost` instances, at least two `RemoteCard` containers, rounded `RemoteInputHost` fields, a live `RemoteAgentTile`, minimum 44px action-button height, and successful layout at 1040×760, 1120×800, 1220×860 and 1440×920.
 
 ## Compatibility
 
@@ -81,6 +84,8 @@ Native UI self-test verifies that the OAuth dialog contains no `SplitContainer`,
 - Linux Agent version: 1.0.0;
 - enrollment recovery window: 120 seconds, until explicit confirmation;
 - enrollment transport attempts: up to 3;
+- generated install privilege: ordinary-user/no-sudo by default; explicit root remains supported;
+- default user state: `${XDG_STATE_HOME:-$HOME/.local/state}/devspace-agent`, with writable legacy `/var/lib/devspace-agent` reuse;
 - Linux service mode: systemd when PID 1 is systemd; ordinary-user background fallback otherwise;
 - generated install command: subshell-scoped, does not close the caller's interactive SSH shell;
 - Portable Protocol: 1.5;

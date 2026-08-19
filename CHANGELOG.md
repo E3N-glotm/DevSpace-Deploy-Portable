@@ -9,8 +9,9 @@
 - Linux installer 在重新登记前会暂停已有 `devspace-agent.service`，避免旧守护进程与新 enrollment 竞争连接；登记失败时会尝试恢复原服务。Agent/installer 仍保持 SHA-256 链式校验、普通用户运行与 systemd sandbox 边界。
 - 修复容器/非 systemd Ubuntu 的安装失败：仅当 PID 1 确实是 systemd 时才创建并启用 systemd unit；否则自动以普通 Linux 用户通过 `nohup` 后台模式启动 Agent，并保存 PID/日志。该模式可跨 SSH 退出保持运行，不再因 `systemctl` 无法连接 bus 而把已成功的 enrollment 判为失败。
 - 修复生成的一次性安装命令末尾直接执行 `exit $rc` 会主动关闭用户当前 SSH shell 的问题；安装过程现在运行在子 shell 中，仍保留正确退出码，但不会关闭交互式 SSH 会话。
+- 第三次 1.1.39 原位修订将 Linux Agent 默认安装模式改为**无 sudo 用户级安装**：生成的一键命令不再包含 `sudo`，普通账号可直接安装到 `~/.local/state/devspace-agent`；若之前 1.1.39 已把 `/var/lib/devspace-agent` 交给当前用户，则自动复用该可写目录原位升级，避免重复 Agent。只有管理员显式用 sudo/root 执行 installer 时才走系统级 systemd 路径。
 - 重做 **AI / MCP OAuth 客户端** 窗口：彻底移除该页易受 DPI/Dock 瞬时尺寸影响的 SplitContainer，改用与主页一致的 SurfacePanel / FieldHost / ModernButton 视觉体系，并把“新建手动客户端”与“当前选中客户端凭据”拆成独立区域，避免把 ChatGPT DCR Client ID 误当成 Gemini 手动 Client ID。
-- Remote Linux Agent 管理窗口第二次收口：移除该窗口全部 `SurfacePanel` / `FieldHost` 自绘圆角容器，改为稳定的单层标准 Panel/TextBox 卡片，同时保留主页的背景、字体、主色和 ModernButton。列表改为自适应高度，配置区改为固定高度，避免 resize/DPI 时出现旧圆角边框残影、控件层叠、按钮/说明文字被裁切。危险操作仍统一 danger 样式。
+- Remote Linux Agent 管理窗口第三次收口：不再使用生硬 DataGridView/标准方框。Agent 改成与主页状态卡一致的圆角动态磁贴，支持 hover、选中、状态点和自适应双列/单列；输入框改为实心背景的独立圆角输入宿主，焦点时使用主页蓝色描边。按钮行改为固定 44px 真实高度并取消窄行裁切，同时仍保持单层自绘，避免早期多层透明 SurfacePanel 的 resize 残影。
 - 1.1.39 Release 资产按同一版本号重新构建并原位替换；Portable Protocol 仍为 `1.5`，原 1.1.39 已新增的顶层 MCP Schema 不再发生第二次变化。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.39.md)

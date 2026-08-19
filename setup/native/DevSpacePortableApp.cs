@@ -1337,10 +1337,10 @@ namespace DevSpacePortable.NativeUI
                 agents.CreateControl();
                 Size[] remoteSizes = new[]
                 {
-                    new Size(980, 720),
-                    new Size(1080, 760),
-                    new Size(1180, 820),
-                    new Size(1360, 900),
+                    new Size(1040, 760),
+                    new Size(1120, 800),
+                    new Size(1220, 860),
+                    new Size(1440, 920),
                 };
                 foreach (Size size in remoteSizes)
                 {
@@ -1348,12 +1348,30 @@ namespace DevSpacePortable.NativeUI
                     agents.PerformLayout();
                 }
                 TextBox commandBox = FindControls<TextBox>(agents).FirstOrDefault(box => box.Multiline && box.ReadOnly);
-                report["remoteAgentsStableLayout"] = FindControls<DataGridView>(agents).Count() == 1
+                RemoteInputHost commandHost = commandBox == null ? null : commandBox.Parent as RemoteInputHost;
+                int remoteButtonMinHeight = FindControls<ModernButton>(agents).Select(button => button.Height).DefaultIfEmpty(0).Min();
+                int remoteTileCount = FindControls<RemoteAgentTile>(agents).Count();
+                int remoteInputCount = FindControls<RemoteInputHost>(agents).Count();
+                int remoteCardCount = FindControls<RemoteCard>(agents).Count();
+                bool remoteButtonsUnclipped = FindControls<ModernButton>(agents).All(button => button.Parent == null || button.Bottom <= button.Parent.ClientSize.Height + 1);
+                report["remoteAgentsStableLayout"] = FindControls<DataGridView>(agents).Count() == 0
                     && FindControls<TextBox>(agents).Count() >= 3
                     && FindControls<SurfacePanel>(agents).Count() == 0
                     && FindControls<FieldHost>(agents).Count() == 0
+                    && remoteCardCount >= 2
+                    && remoteInputCount >= 3
+                    && remoteTileCount >= 1
+                    && remoteButtonMinHeight >= 44
+                    && remoteButtonsUnclipped
                     && commandBox != null
-                    && commandBox.Height >= 60;
+                    && commandHost != null
+                    && commandHost.Height >= 64;
+                report["remoteAgentTileCount"] = remoteTileCount;
+                report["remoteAgentInputHostCount"] = remoteInputCount;
+                report["remoteAgentCardCount"] = remoteCardCount;
+                report["remoteAgentButtonMinHeight"] = remoteButtonMinHeight;
+                report["remoteAgentButtonsUnclipped"] = remoteButtonsUnclipped;
+                report["remoteAgentCommandHostHeight"] = commandHost == null ? 0 : commandHost.Height;
                 report["remoteAgentSizes"] = remoteSizes.Select(size => size.Width + "x" + size.Height).ToArray();
             }
 
@@ -1980,14 +1998,211 @@ namespace DevSpacePortable.NativeUI
         }
     }
 
+    internal sealed class RemoteAgentTile : Control
+    {
+        private bool _hover;
+        private bool _selected;
+        private bool _placeholder;
+        private string _name = "";
+        private string _status = "";
+        private string _host = "";
+        private string _agentId = "";
+        private string _version = "";
+        private string _roots = "";
+
+        public bool Selected
+        {
+            get { return _selected; }
+            set { if (_selected != value) { _selected = value; Invalidate(); } }
+        }
+
+        public RemoteAgentTile()
+        {
+            Height = 118;
+            MinimumSize = new Size(330, 118);
+            Margin = new Padding(6);
+            Cursor = Cursors.Hand;
+            TabStop = true;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            BackColor = UiPalette.Surface;
+        }
+
+        public void SetAgent(string name, string status, string host, string agentId, string version, string roots, bool placeholder = false)
+        {
+            _name = name ?? "";
+            _status = status ?? "";
+            _host = host ?? "";
+            _agentId = agentId ?? "";
+            _version = version ?? "";
+            _roots = roots ?? "";
+            _placeholder = placeholder;
+            Cursor = placeholder ? Cursors.Default : Cursors.Hand;
+            Invalidate();
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.Clear(UiPalette.Surface);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            if (ClientSize.Width <= 2 || ClientSize.Height <= 2) return;
+            Rectangle bounds = new Rectangle(2, 2, Width - 5, Height - 5);
+            Color fill = _selected
+                ? UiPalette.PrimarySoft
+                : _hover && !_placeholder ? Color.FromArgb(248, 249, 255) : UiPalette.Surface;
+            Color borderColor = _selected || Focused ? UiPalette.Primary : (_hover && !_placeholder ? UiPalette.BorderStrong : UiPalette.Border);
+            float borderWidth = _selected || Focused ? 1.8F : 1.0F;
+            using (GraphicsPath path = DrawingUtil.Rounded(bounds, 18))
+            using (SolidBrush brush = new SolidBrush(fill))
+            using (Pen border = new Pen(borderColor, borderWidth))
+            {
+                e.Graphics.FillPath(brush, path);
+                e.Graphics.DrawPath(border, path);
+            }
+
+            if (_placeholder)
+            {
+                using (Font titleFont = UiTypography.Ui(11F, FontStyle.Bold))
+                    TextRenderer.DrawText(e.Graphics, string.IsNullOrWhiteSpace(_name) ? "尚未登记 Linux Agent" : _name, titleFont,
+                        new Rectangle(24, 28, Math.Max(0, Width - 48), 28), UiPalette.Text,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                using (Font detailFont = UiTypography.Ui(9F))
+                    TextRenderer.DrawText(e.Graphics, string.IsNullOrWhiteSpace(_roots) ? "生成一次性安装命令并在目标 Ubuntu 执行，Agent 会自动出现在这里。" : _roots, detailFont,
+                        new Rectangle(24, 61, Math.Max(0, Width - 48), 28), UiPalette.TextMuted,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                return;
+            }
+
+            Color statusColor = StatusColor(_status);
+            using (SolidBrush dot = new SolidBrush(statusColor)) e.Graphics.FillEllipse(dot, 22, 24, 12, 12);
+            using (Font titleFont = UiTypography.Ui(11.2F, FontStyle.Bold))
+                TextRenderer.DrawText(e.Graphics, string.IsNullOrWhiteSpace(_name) ? "Linux Agent" : _name, titleFont,
+                    new Rectangle(44, 16, Math.Max(0, Width - 220), 28), UiPalette.Text,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+
+            string statusText = string.IsNullOrWhiteSpace(_status) ? "unknown" : _status;
+            using (Font pillFont = UiTypography.Ui(8.4F, FontStyle.Bold))
+            {
+                int pillWidth = Math.Min(142, Math.Max(72, TextRenderer.MeasureText(statusText, pillFont).Width + 20));
+                Rectangle pill = new Rectangle(Math.Max(48, Width - pillWidth - 20), 16, pillWidth, 28);
+                using (GraphicsPath pillPath = DrawingUtil.Rounded(pill, 14))
+                using (SolidBrush pillFill = new SolidBrush(Color.FromArgb(22, statusColor))) e.Graphics.FillPath(pillFill, pillPath);
+                TextRenderer.DrawText(e.Graphics, statusText, pillFont, pill, statusColor,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            }
+
+            string hostLine = string.IsNullOrWhiteSpace(_version) ? _host : _host + "   ·   v" + _version;
+            using (Font metaFont = UiTypography.Ui(8.9F))
+                TextRenderer.DrawText(e.Graphics, string.IsNullOrWhiteSpace(hostLine) ? "主机信息待 Agent 上报" : hostLine, metaFont,
+                    new Rectangle(22, 49, Math.Max(0, Width - 44), 20), UiPalette.TextMuted,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            using (Font codeFont = UiTypography.Code(8.5F))
+                TextRenderer.DrawText(e.Graphics, _agentId, codeFont,
+                    new Rectangle(22, 72, Math.Max(0, Width - 44), 18), UiPalette.Text,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            using (Font rootFont = UiTypography.Ui(8.7F))
+                TextRenderer.DrawText(e.Graphics, _roots, rootFont,
+                    new Rectangle(22, 94, Math.Max(0, Width - 44), 17), UiPalette.TextMuted,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+        }
+
+        private static Color StatusColor(string status)
+        {
+            string value = (status ?? "").Trim().ToLowerInvariant();
+            if (value.StartsWith("online", StringComparison.Ordinal)) return UiPalette.Success;
+            if (value.Contains("revoked")) return UiPalette.Danger;
+            if (value.Contains("offline") || value.Contains("stale")) return Color.FromArgb(150, 159, 178);
+            return UiPalette.Primary;
+        }
+    }
+
+    internal sealed class RemoteInputHost : Panel
+    {
+        private readonly TextBox _textBox;
+
+        public RemoteInputHost(TextBox textBox, int height)
+        {
+            _textBox = textBox;
+            Height = height;
+            MinimumSize = new Size(60, height);
+            Margin = new Padding(3, 2, 3, 6);
+            Padding = textBox.Multiline ? new Padding(12, 9, 10, 9) : new Padding(12, 8, 10, 7);
+            BackColor = UiPalette.Surface;
+            textBox.BorderStyle = BorderStyle.None;
+            textBox.BackColor = UiPalette.SurfaceMuted;
+            textBox.ForeColor = UiPalette.Text;
+            textBox.Font = UiTypography.Ui(9.25F);
+            textBox.Dock = DockStyle.Fill;
+            textBox.Margin = new Padding(0);
+            Controls.Add(textBox);
+            textBox.Enter += delegate { Invalidate(); };
+            textBox.Leave += delegate { Invalidate(); };
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.Clear(UiPalette.Surface);
+            Rectangle bounds = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
+            using (GraphicsPath path = DrawingUtil.Rounded(bounds, 12))
+            using (SolidBrush fill = new SolidBrush(UiPalette.SurfaceMuted)) e.Graphics.FillPath(fill, path);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (ClientSize.Width <= 2 || ClientSize.Height <= 2) return;
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle bounds = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
+            using (GraphicsPath path = DrawingUtil.Rounded(bounds, 12))
+            using (Pen border = new Pen(ContainsFocus ? UiPalette.Primary : UiPalette.BorderStrong, ContainsFocus ? 1.8F : 1.1F))
+                e.Graphics.DrawPath(border, path);
+        }
+    }
+
+    internal sealed class RemoteCard : Panel
+    {
+        public RemoteCard()
+        {
+            Padding = new Padding(16);
+            Margin = new Padding(0, 4, 0, 8);
+            BackColor = UiPalette.Background;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.Clear(UiPalette.Background);
+            Rectangle bounds = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
+            using (GraphicsPath path = DrawingUtil.Rounded(bounds, 20))
+            using (SolidBrush fill = new SolidBrush(UiPalette.Surface))
+            using (Pen border = new Pen(UiPalette.Border))
+            {
+                e.Graphics.FillPath(fill, path);
+                e.Graphics.DrawPath(border, path);
+            }
+        }
+    }
+
     internal sealed class RemoteAgentsDialog : Form
     {
         private readonly ManagerClient _manager;
-        private readonly DataGridView _grid = new DataGridView();
+        private readonly FlowLayoutPanel _agentTiles = new FlowLayoutPanel();
         private readonly TextBox _name = new TextBox();
         private readonly TextBox _roots = new TextBox();
         private readonly TextBox _installCommand = new TextBox();
         private readonly Label _status = new Label();
+        private Dictionary<string, object> _selectedAgent = new Dictionary<string, object>();
 
         public RemoteAgentsDialog(ManagerClient manager)
         {
@@ -1995,15 +2210,15 @@ namespace DevSpacePortable.NativeUI
             Text = "远程服务器 / Linux Agent";
             Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterParent;
-            MinimumSize = new Size(980, 720);
-            Size = new Size(1180, 820);
+            MinimumSize = new Size(1040, 760);
+            Size = new Size(1220, 860);
             AutoScaleMode = AutoScaleMode.Dpi;
             BackColor = UiPalette.Background;
             ForeColor = UiPalette.Text;
             Font = UiTypography.Ui(9.25F);
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BuildUi();
-            Resize += delegate { Invalidate(true); };
+            Resize += delegate { ResizeAgentTiles(); Invalidate(true); };
             Shown += async delegate
             {
                 NativeWindowEffects.Apply(Handle);
@@ -2021,10 +2236,10 @@ namespace DevSpacePortable.NativeUI
                 Padding = new Padding(22),
                 BackColor = UiPalette.Background,
             };
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 80));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 286));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 354));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
             Panel intro = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
             Label title = new Label
@@ -2050,55 +2265,108 @@ namespace DevSpacePortable.NativeUI
             intro.Controls.Add(hint);
             root.Controls.Add(intro, 0, 0);
 
-            ConfigureGrid();
-            Panel gridCard = StableCard(_grid, 10, new Padding(0, 0, 0, 8));
-            root.Controls.Add(gridCard, 0, 1);
+            RemoteCard agentCard = new RemoteCard { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 0, 0, 8) };
+            TableLayoutPanel agentSection = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = UiPalette.Surface,
+                Margin = new Padding(0),
+            };
+            agentSection.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            agentSection.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            TableLayoutPanel agentHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = UiPalette.Surface, Margin = new Padding(0) };
+            agentHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            agentHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            agentHeader.Controls.Add(new Label
+            {
+                Text = "已登记的远程服务器",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = UiTypography.Display(11.5F, FontStyle.Bold),
+                ForeColor = UiPalette.Text,
+                Margin = new Padding(4, 0, 0, 0),
+            }, 0, 0);
+            agentHeader.Controls.Add(new Label
+            {
+                Text = "点击磁贴选择 Agent",
+                AutoSize = true,
+                Anchor = AnchorStyles.Right,
+                Font = UiTypography.Ui(8.7F),
+                ForeColor = UiPalette.TextMuted,
+                Margin = new Padding(8, 0, 4, 0),
+            }, 1, 0);
+            _agentTiles.Dock = DockStyle.Fill;
+            _agentTiles.AutoScroll = true;
+            _agentTiles.WrapContents = true;
+            _agentTiles.FlowDirection = FlowDirection.LeftToRight;
+            _agentTiles.BackColor = UiPalette.Surface;
+            _agentTiles.Padding = new Padding(0, 2, 0, 4);
+            _agentTiles.Margin = new Padding(0);
+            _agentTiles.SizeChanged += delegate { ResizeAgentTiles(); };
+            RemoteAgentTile loadingTile = new RemoteAgentTile();
+            loadingTile.SetAgent("正在读取 Linux Agent", "", "", "", "", "正在从本机 DevSpace 控制端读取登记记录与 heartbeat 状态……", true);
+            _agentTiles.Controls.Add(loadingTile);
+            agentSection.Controls.Add(agentHeader, 0, 0);
+            agentSection.Controls.Add(_agentTiles, 0, 1);
+            agentCard.Controls.Add(agentSection);
+            root.Controls.Add(agentCard, 0, 1);
 
+            RemoteCard formCard = new RemoteCard { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 4, 0, 6) };
             TableLayoutPanel form = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 2,
+                ColumnCount = 1,
                 RowCount = 5,
                 BackColor = UiPalette.Surface,
                 Margin = new Padding(0),
             };
-            form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
-            form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
-            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 88));
             form.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
-            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
-            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
-            form.Controls.Add(FieldLabel("服务器显示名"), 0, 0);
-            form.Controls.Add(FieldLabel("Linux allowedRoots（每行一个）"), 1, 0);
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 98));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            form.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, BackColor = UiPalette.Surface, Margin = new Padding(0) };
+            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
+            fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+            fields.Controls.Add(FieldLabel("服务器显示名"), 0, 0);
+            fields.Controls.Add(FieldLabel("Linux allowedRoots（每行一个）"), 1, 0);
             StyleTextBox(_name);
             _name.Text = "gpu-server";
-            Panel nameCell = new Panel { Dock = DockStyle.Fill, BackColor = UiPalette.Surface, Padding = new Padding(0, 2, 8, 20), Margin = new Padding(0) };
-            _name.Dock = DockStyle.Top;
-            nameCell.Controls.Add(_name);
-            form.Controls.Add(nameCell, 0, 1);
+            RemoteInputHost nameHost = new RemoteInputHost(_name, 44) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 10, 5) };
+            fields.Controls.Add(nameHost, 0, 1);
             StyleTextBox(_roots);
             _roots.Multiline = true;
             _roots.ScrollBars = ScrollBars.Vertical;
             _roots.Text = "/home/ubuntu/workspace";
-            _roots.Dock = DockStyle.Fill;
-            _roots.Margin = new Padding(0, 2, 0, 4);
-            form.Controls.Add(_roots, 1, 1);
+            RemoteInputHost rootsHost = new RemoteInputHost(_roots, 52) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 2, 5) };
+            fields.Controls.Add(rootsHost, 1, 1);
+            form.Controls.Add(fields, 0, 0);
+
             FlowLayoutPanel actions = ButtonBar();
-            actions.Controls.Add(ActionButton("生成一次性安装命令", async delegate { await CreateEnrollmentAsync(); }, true));
+            actions.WrapContents = false;
+            actions.Controls.Add(ActionButton("生成一次性安装命令", async delegate { await CreateEnrollmentAsync(); }, true, false, 176));
             actions.Controls.Add(ActionButton("刷新列表", async delegate { await LoadAgentsAsync(); }, false));
-            actions.Controls.Add(ActionButton("撤销选中 Agent", async delegate { await RevokeSelectedAsync(); }, false, true));
-            actions.Controls.Add(ActionButton("删除选中记录", async delegate { await DeleteSelectedAsync(); }, false, true));
-            form.Controls.Add(actions, 0, 2);
-            form.SetColumnSpan(actions, 2);
+            actions.Controls.Add(ActionButton("撤销选中 Agent", async delegate { await RevokeSelectedAsync(); }, false, true, 138));
+            actions.Controls.Add(ActionButton("删除选中记录", async delegate { await DeleteSelectedAsync(); }, false, true, 138));
+            form.Controls.Add(actions, 0, 1);
+
+            TableLayoutPanel commandBlock = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = UiPalette.Surface, Margin = new Padding(0) };
+            commandBlock.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
+            commandBlock.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            commandBlock.Controls.Add(FieldLabel("一次性安装命令（默认无 sudo，当前 Linux 用户安装）"), 0, 0);
             StyleTextBox(_installCommand);
             _installCommand.Multiline = true;
-            _installCommand.ScrollBars = ScrollBars.Vertical;
+            _installCommand.ScrollBars = ScrollBars.Both;
+            _installCommand.WordWrap = false;
             _installCommand.ReadOnly = true;
-            _installCommand.Dock = DockStyle.Fill;
-            _installCommand.Margin = new Padding(0, 2, 0, 4);
-            form.Controls.Add(_installCommand, 0, 3);
-            form.SetColumnSpan(_installCommand, 2);
+            RemoteInputHost commandHost = new RemoteInputHost(_installCommand, 68) { Dock = DockStyle.Fill, Margin = new Padding(2, 0, 2, 4) };
+            commandBlock.Controls.Add(commandHost, 0, 1);
+            form.Controls.Add(commandBlock, 0, 2);
 
             TableLayoutPanel copyBar = new TableLayoutPanel
             {
@@ -2108,12 +2376,12 @@ namespace DevSpacePortable.NativeUI
                 BackColor = UiPalette.Surface,
                 Margin = new Padding(0),
             };
-            copyBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 154));
+            copyBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 164));
             copyBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            copyBar.Controls.Add(ActionButton("复制安装命令", delegate { CopyInstallCommand(); }, false), 0, 0);
+            copyBar.Controls.Add(ActionButton("复制安装命令", delegate { CopyInstallCommand(); }, false, false, 146), 0, 0);
             Label enrollmentHint = new Label
             {
-                Text = "Enrollment Token 默认 15 分钟有效；首次握手若在 ACK 前断线，可在 2 分钟恢复窗口内安全重试。确认成功后立即失效。",
+                Text = "默认不需要 sudo。Token 默认 15 分钟有效；ACK 前断线可在 2 分钟恢复窗口内安全重试，确认成功后立即失效。",
                 AutoSize = false,
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft,
@@ -2121,9 +2389,20 @@ namespace DevSpacePortable.NativeUI
                 Padding = new Padding(6, 0, 0, 0),
             };
             copyBar.Controls.Add(enrollmentHint, 1, 0);
-            form.Controls.Add(copyBar, 0, 4);
-            form.SetColumnSpan(copyBar, 2);
-            Panel formCard = StableCard(form, 8, new Padding(0, 8, 0, 4));
+            form.Controls.Add(copyBar, 0, 3);
+            Label privilegeHint = new Label
+            {
+                Text = "无管理员权限：安装到当前用户可写状态目录并后台运行；若当前用户可写旧 /var/lib/devspace-agent，则自动原位升级。只有显式使用 sudo 执行安装器时才走系统级安装。",
+                Dock = DockStyle.Fill,
+                AutoEllipsis = true,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = UiTypography.Ui(8.6F),
+                ForeColor = UiPalette.TextMuted,
+                Padding = new Padding(5, 0, 5, 0),
+                Margin = new Padding(0),
+            };
+            form.Controls.Add(privilegeHint, 0, 4);
+            formCard.Controls.Add(form);
             root.Controls.Add(formCard, 0, 2);
 
             _status.Dock = DockStyle.Fill;
@@ -2134,60 +2413,14 @@ namespace DevSpacePortable.NativeUI
             Controls.Add(root);
         }
 
-        private static Panel StableCard(Control content, int padding, Padding margin)
+        private void ResizeAgentTiles()
         {
-            Panel border = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = UiPalette.Border,
-                Padding = new Padding(1),
-                Margin = margin,
-            };
-            Panel body = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = UiPalette.Surface,
-                Padding = new Padding(padding),
-                Margin = new Padding(0),
-            };
-            content.Dock = DockStyle.Fill;
-            body.Controls.Add(content);
-            border.Controls.Add(body);
-            return border;
-        }
-
-        private void ConfigureGrid()
-        {
-            _grid.Dock = DockStyle.Fill;
-            _grid.BackgroundColor = UiPalette.Surface;
-            _grid.BorderStyle = BorderStyle.None;
-            _grid.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
-            _grid.GridColor = UiPalette.Border;
-            _grid.AllowUserToAddRows = false;
-            _grid.AllowUserToDeleteRows = false;
-            _grid.AllowUserToResizeRows = false;
-            _grid.MultiSelect = false;
-            _grid.ReadOnly = true;
-            _grid.RowHeadersVisible = false;
-            _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            _grid.AutoGenerateColumns = false;
-            _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            _grid.ColumnHeadersHeight = 36;
-            _grid.RowTemplate.Height = 34;
-            _grid.EnableHeadersVisualStyles = false;
-            _grid.ColumnHeadersDefaultCellStyle.BackColor = UiPalette.SurfaceMuted;
-            _grid.ColumnHeadersDefaultCellStyle.ForeColor = UiPalette.TextMuted;
-            _grid.DefaultCellStyle.BackColor = UiPalette.Surface;
-            _grid.DefaultCellStyle.ForeColor = UiPalette.Text;
-            _grid.DefaultCellStyle.SelectionBackColor = UiPalette.PrimarySoft;
-            _grid.DefaultCellStyle.SelectionForeColor = UiPalette.Text;
-            _grid.DefaultCellStyle.Padding = new Padding(6, 0, 6, 0);
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "服务器", FillWeight = 17 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "State", HeaderText = "状态", FillWeight = 12 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Host", HeaderText = "主机", FillWeight = 18 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "AgentId", HeaderText = "Agent ID", FillWeight = 20 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Version", HeaderText = "版本", FillWeight = 10 });
-            _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Roots", HeaderText = "allowedRoots", FillWeight = 33 });
+            if (_agentTiles.IsDisposed || _agentTiles.ClientSize.Width <= 0) return;
+            int available = Math.Max(320, _agentTiles.ClientSize.Width - _agentTiles.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 8);
+            int columns = available >= 760 ? 2 : 1;
+            int width = Math.Max(330, (available - (columns * 12)) / columns);
+            foreach (RemoteAgentTile tile in _agentTiles.Controls.OfType<RemoteAgentTile>())
+                tile.Width = width;
         }
 
         private async Task LoadAgentsAsync()
@@ -2195,19 +2428,44 @@ namespace DevSpacePortable.NativeUI
             try
             {
                 Dictionary<string, object> result = await _manager.RunJsonAsync("remote-agent-list");
-                _grid.Rows.Clear();
+                string selectedId = ValueText(_selectedAgent, "id");
+                _agentTiles.SuspendLayout();
+                _agentTiles.Controls.Clear();
+                _selectedAgent = new Dictionary<string, object>();
+                int count = 0;
                 foreach (Dictionary<string, object> agent in Dictionaries(result, "agents"))
                 {
-                    int row = _grid.Rows.Add(
+                    RemoteAgentTile tile = new RemoteAgentTile { Tag = agent };
+                    tile.SetAgent(
                         ValueText(agent, "name"),
                         ValueText(agent, "status"),
                         ValueText(agent, "hostname"),
                         ValueText(agent, "id"),
                         ValueText(agent, "agentVersion"),
-                        string.Join("; ", Strings(agent, "allowedRoots")));
-                    _grid.Rows[row].Tag = agent;
+                        string.Join("  ·  ", Strings(agent, "allowedRoots")));
+                    tile.Click += delegate { SelectAgentTile(tile); };
+                    tile.KeyDown += delegate (object sender, KeyEventArgs args)
+                    {
+                        if (args.KeyCode == Keys.Enter || args.KeyCode == Keys.Space)
+                        {
+                            SelectAgentTile(tile);
+                            args.Handled = true;
+                        }
+                    };
+                    _agentTiles.Controls.Add(tile);
+                    count++;
+                    if (!string.IsNullOrWhiteSpace(selectedId) && string.Equals(selectedId, ValueText(agent, "id"), StringComparison.Ordinal))
+                        SelectAgentTile(tile);
                 }
-                _status.Text = "已登记 " + _grid.Rows.Count + " 个 Linux Agent。在线状态由持久连接 heartbeat 更新。";
+                if (count == 0)
+                {
+                    RemoteAgentTile empty = new RemoteAgentTile();
+                    empty.SetAgent("尚未登记 Linux Agent", "", "", "", "", "生成一次性安装命令并在目标 Ubuntu 执行，Agent 会自动出现在这里。", true);
+                    _agentTiles.Controls.Add(empty);
+                }
+                _agentTiles.ResumeLayout(true);
+                ResizeAgentTiles();
+                _status.Text = "已登记 " + count + " 个 Linux Agent。绿色状态磁贴表示最近 heartbeat 正常。";
             }
             catch (Exception ex)
             {
@@ -2234,7 +2492,7 @@ namespace DevSpacePortable.NativeUI
                 _installCommand.Text = ValueText(result, "installCommand");
                 _status.Text = string.IsNullOrWhiteSpace(_installCommand.Text)
                     ? "Enrollment 已生成，但当前 publicBaseUrl 不完整，因此没有生成公网安装命令。"
-                    : "一次性安装命令已生成。复制到目标 Ubuntu 执行即可；DevSpace 不需要 SSH 密码。";
+                    : "一次性安装命令已生成。默认用户级安装，不需要 sudo 密码，也不需要把 SSH 密码交给 DevSpace。";
             }
             catch (Exception ex)
             {
@@ -2264,8 +2522,18 @@ namespace DevSpacePortable.NativeUI
 
         private Dictionary<string, object> SelectedAgent()
         {
-            if (_grid.SelectedRows.Count != 1) return new Dictionary<string, object>();
-            return _grid.SelectedRows[0].Tag as Dictionary<string, object> ?? new Dictionary<string, object>();
+            return _selectedAgent ?? new Dictionary<string, object>();
+        }
+
+        private void SelectAgentTile(RemoteAgentTile selected)
+        {
+            if (selected == null || selected.Tag == null) return;
+            foreach (RemoteAgentTile tile in _agentTiles.Controls.OfType<RemoteAgentTile>()) tile.Selected = ReferenceEquals(tile, selected);
+            _selectedAgent = selected.Tag as Dictionary<string, object> ?? new Dictionary<string, object>();
+            selected.Focus();
+            string name = ValueText(_selectedAgent, "name");
+            string id = ValueText(_selectedAgent, "id");
+            _status.Text = string.IsNullOrWhiteSpace(id) ? "已选择 Linux Agent。" : "已选择 " + name + "（" + id + "）。";
         }
 
         private void CopyInstallCommand()
@@ -2296,20 +2564,30 @@ namespace DevSpacePortable.NativeUI
 
         private static FlowLayoutPanel ButtonBar()
         {
-            return new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, BackColor = Color.Transparent, Margin = new Padding(0, 4, 0, 8) };
+            return new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = false,
+                WrapContents = true,
+                BackColor = UiPalette.Surface,
+                Margin = new Padding(0),
+                Padding = new Padding(0, 3, 0, 3),
+            };
         }
 
-        private static Button ActionButton(string text, EventHandler handler, bool primary, bool danger = false)
+        private static Button ActionButton(string text, EventHandler handler, bool primary, bool danger = false, int width = 112)
         {
             ModernButton button = new ModernButton
             {
                 Text = text,
-                AutoSize = true,
+                AutoSize = false,
                 Primary = primary,
                 Danger = danger,
-                MinimumSize = new Size(104, 40),
+                Width = Math.Max(104, width),
+                Height = 44,
+                MinimumSize = new Size(104, 44),
                 Padding = new Padding(14, 0, 14, 0),
-                Margin = new Padding(3),
+                Margin = new Padding(4, 3, 4, 3),
             };
             button.Click += handler;
             return button;
