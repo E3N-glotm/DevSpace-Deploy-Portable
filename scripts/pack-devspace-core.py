@@ -38,7 +38,13 @@ def build_package(source: Path, output: Path) -> dict[str, object]:
         raise RuntimeError(f"Portable core source is incomplete: {source}")
 
     entries = sorted(
-        (path for path in source.rglob("*") if ".git" not in path.relative_to(source).parts),
+        (
+            path
+            for path in source.rglob("*")
+            if ".git" not in path.relative_to(source).parts
+            and "__pycache__" not in path.relative_to(source).parts
+            and path.suffix.lower() not in {".pyc", ".pyo"}
+        ),
         key=lambda path: path.relative_to(source).as_posix(),
     )
     output.parent.mkdir(parents=True, exist_ok=True)

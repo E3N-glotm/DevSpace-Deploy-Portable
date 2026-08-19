@@ -9,15 +9,36 @@
 4. Run:
 
 ```powershell
+npm run source:verify
 npm run core:pack
+npm ci --prefix app
+node setup/harden-nested-dependencies.mjs
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/test-source.ps1 -SkipInstall
+npm audit --omit=dev --prefix app
 python setup/finalize-release.py <version> --hotfix docs/releases/HOTFIX-<version>.md
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/test-source.ps1
 python setup/build-release.py
 python setup/create-incremental-update.py --base-zip <previous-full.zip> --target-zip DevSpacePortable-Windows-x64-<version>.zip
 python setup/create-incremental-update.py --base-zip DevSpacePortable-Windows-x64-1.1.33.zip --target-zip DevSpacePortable-Windows-x64-<version>.zip --output DevSpacePortable-Update-1.1.33-to-<version>.zip
 python setup/create-rescue-overlay.py --base-zip DevSpacePortable-Windows-x64-1.1.33.zip --target-zip DevSpacePortable-Windows-x64-<version>.zip --output DevSpacePortable-Rescue-1.1.33-to-<version>.zip
 python setup/create-update-manifest.py --repository E3N-glotm/DevSpace-Deploy-Portable --incremental DevSpacePortable-Update-<previous>-to-<version>.zip --incremental DevSpacePortable-Update-1.1.33-to-<version>.zip --rescue DevSpacePortable-Rescue-1.1.33-to-<version>.zip
 ```
+
+The order above is intentional. `core:pack` may update the local core archive
+and lockfile, so `npm ci --prefix app` must run after the current pack before a
+formal ZIP is built. `test-source.ps1 -SkipInstall` is only valid here because
+the clean install has already completed in the preceding step. Running
+`build-release.py` directly against a stale lockfile or stale
+`app/node_modules/@waishnav/devspace` is rejected by the release preflight.
+
+The source preflight also checks the working-tree EOLs declared by
+`.gitattributes`. This matters on long-lived Windows checkouts: Git can regard
+the logical text as clean while the on-disk LF/CRLF representation has drifted,
+which would otherwise change the bytes placed in a Portable ZIP or core TGZ.
+Re-materialize the checkout before releasing if that check fails.
+
+Generated Python bytecode is never part of the maintained core package.
+`__pycache__`, `*.pyc`, and `*.pyo` are excluded by the core packer so running
+Python-side tests before a pack cannot perturb the release payload.
 
 Every full `DevSpacePortable-Windows-x64-<version>.zip` must include the bundled
 `codex-runtime-bridge` plugin under

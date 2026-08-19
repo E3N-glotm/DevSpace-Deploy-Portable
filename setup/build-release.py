@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -56,6 +58,91 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha512_integrity(path: Path) -> str:
+    digest = hashlib.sha512()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return "sha512-" + base64.b64encode(digest.digest()).decode("ascii")
+
+
+def validate_source_checkout(node: Path) -> None:
+    verifier = ROOT / "scripts" / "verify-source-tree.mjs"
+    if not verifier.is_file():
+        raise RuntimeError(f"Source-tree verifier is missing: {verifier}")
+    subprocess.run([str(node), str(verifier)], cwd=ROOT, check=True)
+
+
+def validate_installed_core() -> None:
+    package_json = ROOT / "vendor" / "waishnav-devspace" / "package.json"
+    if not package_json.is_file():
+        raise RuntimeError(f"Maintained core package metadata is missing: {package_json}")
+    core_version = str(json.loads(package_json.read_text(encoding="utf-8"))["version"])
+    archive = ROOT / "packages" / f"waishnav-devspace-{core_version}.tgz"
+    lock_path = ROOT / "app" / "package-lock.json"
+    installed_root = ROOT / "app" / "node_modules" / "@waishnav" / "devspace"
+    if not archive.is_file():
+        raise RuntimeError(
+            f"Packed core archive is missing: {archive}. Run npm run core:pack before building a release."
+        )
+    if not lock_path.is_file():
+        raise RuntimeError(f"Portable app lockfile is missing: {lock_path}")
+    if not installed_root.is_dir():
+        raise RuntimeError(
+            f"Installed Portable core is missing: {installed_root}. Run npm ci --prefix app before building a release."
+        )
+
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    dependency = lock.get("packages", {}).get("node_modules/@waishnav/devspace")
+    if not dependency:
+        raise RuntimeError("app/package-lock.json has no @waishnav/devspace package entry.")
+    expected_integrity = sha512_integrity(archive)
+    if dependency.get("integrity") != expected_integrity:
+        raise RuntimeError(
+            "Packed core and app/package-lock.json are out of sync. "
+            "Run npm run core:pack before building a release."
+        )
+    expected_resolved = f"file:../packages/{archive.name}"
+    if dependency.get("resolved") != expected_resolved:
+        raise RuntimeError(
+            f"Unexpected @waishnav/devspace lockfile source: {dependency.get('resolved')!r}; "
+            f"expected {expected_resolved!r}."
+        )
+
+    mismatches: list[str] = []
+    checked = 0
+    with tarfile.open(archive, mode="r:gz") as package:
+        for member in package.getmembers():
+            if not member.isfile() or not member.name.startswith("package/"):
+                continue
+            relative = member.name.removeprefix("package/")
+            target = installed_root / Path(relative)
+            if not target.is_file():
+                mismatches.append(f"missing installed core file: {relative}")
+                if len(mismatches) >= 20:
+                    break
+                continue
+            source = package.extractfile(member)
+            if source is None:
+                mismatches.append(f"cannot read packed core file: {relative}")
+                if len(mismatches) >= 20:
+                    break
+                continue
+            packed_digest = hashlib.sha256(source.read()).hexdigest()
+            installed_digest = sha256_file(target)
+            checked += 1
+            if packed_digest != installed_digest:
+                mismatches.append(f"stale installed core file: {relative}")
+                if len(mismatches) >= 20:
+                    break
+    if mismatches:
+        raise RuntimeError(
+            "app/node_modules/@waishnav/devspace does not match the packed core. "
+            "Run npm ci --prefix app before building a release:\n" + "\n".join(mismatches)
+        )
+    print(f"Validated installed core: {checked} packed files match app/node_modules/@waishnav/devspace", flush=True)
 
 
 def release_plugin_entries() -> list[tuple[Path, Path]]:
@@ -209,6 +296,8 @@ def main() -> int:
         raise RuntimeError(f"Bundled Node runtime is missing: {node}")
     if not native_ui_builder.exists():
         raise RuntimeError(f"Native UI builder is missing: {native_ui_builder}")
+    validate_source_checkout(node)
+    validate_installed_core()
     subprocess.run([str(node), str(native_ui_builder)], cwd=ROOT, check=True)
     version = release_version()
     plugin_entries = release_plugin_entries()

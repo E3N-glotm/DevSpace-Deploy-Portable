@@ -41,6 +41,48 @@ function gitFiles() {
   }
 }
 
+function gitEolRows() {
+  try {
+    const output = execFileSync("git", ["ls-files", "--eol", "-z"], {
+      cwd: root,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    return output.split("\0").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function validateWorkingTreeEol() {
+  const rows = gitEolRows();
+  if (!rows.length) return { checked: 0, mismatches: [] };
+
+  const mismatches = [];
+  let checked = 0;
+  for (const row of rows) {
+    const tab = row.indexOf("\t");
+    if (tab < 0) continue;
+    const metadata = row.slice(0, tab).trim();
+    const path = row.slice(tab + 1).replaceAll("\\", "/");
+    const tokens = metadata.split(/\s+/);
+    const working = tokens.find((token) => token.startsWith("w/"))?.slice(2) || "";
+    const attributes = metadata.includes("attr/") ? metadata.slice(metadata.indexOf("attr/") + 5) : "";
+    let expected = "";
+    if (/\beol=lf\b/.test(attributes)) expected = "lf";
+    if (/\beol=crlf\b/.test(attributes)) expected = "crlf";
+    if (!expected) continue;
+
+    checked += 1;
+    // Git reports w/none for an empty or single-line text file with no line
+    // endings. That is compatible with either declared EOL policy.
+    if (working !== expected && working !== "none") {
+      mismatches.push({ path, expected, actual: working || "unknown" });
+    }
+  }
+  return { checked, mismatches };
+}
+
 function sourceFiles() {
   const excluded = new Set([".git", ".idea", ".vs", ".vscode", "runtime", "data", "logs", "reports", "node_modules"]);
   const files = [];
@@ -92,6 +134,19 @@ if (sensitiveFiles.length) {
   throw new Error(`Credential or state files are tracked:\n${sensitiveFiles.join("\n")}`);
 }
 
+const eol = validateWorkingTreeEol();
+if (eol.mismatches.length) {
+  const preview = eol.mismatches
+    .slice(0, 40)
+    .map(({ path, expected, actual }) => `${path}: expected ${expected}, working tree is ${actual}`)
+    .join("\n");
+  throw new Error(
+    "Tracked files do not match their .gitattributes EOL policy. " +
+    "Re-materialize the checkout before packing a Portable release:\n" +
+    preview,
+  );
+}
+
 const manifest = JSON.parse(readFileSync(join(root, "VERSION-MANIFEST.json"), "utf8"));
 if (!String(manifest.release || "").startsWith("DevSpacePortable-Windows-x64-")) {
   throw new Error("VERSION-MANIFEST.json contains an invalid release name.");
@@ -105,5 +160,7 @@ console.log(JSON.stringify({
   portableVersion: manifest.runtime?.devspacePortable,
   forbiddenTrackedPaths: 0,
   sensitiveTrackedFiles: 0,
+  explicitEolFilesChecked: eol.checked,
+  eolMismatches: 0,
 }, null, 2));
 
