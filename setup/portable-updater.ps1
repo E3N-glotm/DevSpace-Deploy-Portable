@@ -51,6 +51,22 @@ function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $UpdateLog -Value $line -Encoding UTF8
 }
 
+function Get-Sha256File([string]$Path) {
+    $absolute = [IO.Path]::GetFullPath($Path)
+    $stream = [IO.File]::Open($absolute, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = $sha256.ComputeHash($stream)
+            return ([BitConverter]::ToString($bytes)).Replace("-", "").ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Write-UpdateResult([object]$Value) {
     New-Item -ItemType Directory -Force -Path $StateDirectory | Out-Null
     $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $ResultFile -Encoding UTF8
@@ -1106,7 +1122,7 @@ function Stage-FullUpdate([object]$Latest, [string]$FallbackReason = "") {
         $expectedSize = [int64]$Latest.manifest.asset.size
         if ($actualSize -ne $expectedSize) { throw "Downloaded ZIP size mismatch: expected $expectedSize, received $actualSize." }
         Write-UpdateProgress -Phase "verifying" -Message "Verifying full update package SHA-256" -BytesReceived $actualSize -BytesTotal $expectedSize
-        $actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = Get-Sha256File $zip
         $expectedHash = ([string]$Latest.manifest.asset.sha256).ToLowerInvariant()
         if ($actualHash -ne $expectedHash) { throw "Downloaded ZIP SHA-256 mismatch." }
 
@@ -1179,7 +1195,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
         $expectedSize = [int64]$Incremental.manifest.size
         if ($actualSize -ne $expectedSize) { throw "Downloaded incremental ZIP size mismatch: expected $expectedSize, received $actualSize." }
         Write-UpdateProgress -Phase "verifying" -Message "Verifying incremental update package SHA-256" -BytesReceived $actualSize -BytesTotal $expectedSize
-        $actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = Get-Sha256File $zip
         $expectedHash = ([string]$Incremental.manifest.sha256).ToLowerInvariant()
         if ($actualHash -ne $expectedHash) { throw "Downloaded incremental ZIP SHA-256 mismatch." }
 
@@ -1214,7 +1230,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
             $source = Join-Path $filesRoot ($relative.Replace('/','\'))
             if (-not (Test-Path $source -PathType Leaf)) { throw "Incremental package is missing changed file: $relative" }
             if ((Get-Item -LiteralPath $source).Length -ne [int64]$entry.size) { throw "Incremental file size mismatch: $relative" }
-            $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+            $sourceHash = Get-Sha256File $source
             if ($sourceHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Incremental file SHA-256 mismatch: $relative" }
             $currentTarget = Join-Path $Root ($relative.Replace('/','\'))
             $baseHash = ([string]$entry.baseSha256).ToLowerInvariant()
@@ -1223,7 +1239,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
                     Write-UpdateLog "Accepting missing changed-file base for $relative. file-delta-v1 carries the complete target file and final SHA-256 is verified after apply."
                     [void]$acceptedBaseDrift.Add($relative)
                 } else {
-                    $installedHash = (Get-FileHash -LiteralPath $currentTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $installedHash = Get-Sha256File $currentTarget
                     if ($installedHash -ne $baseHash) {
                         Write-UpdateLog "Accepting changed-file base drift for $relative. file-delta-v1 carries the complete target file; persistent roots are excluded and the final target hash is verified."
                         [void]$acceptedBaseDrift.Add($relative)
@@ -1240,7 +1256,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
             $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
             $currentTarget = Join-Path $Root ($relative.Replace('/','\'))
             if (Test-Path $currentTarget -PathType Leaf) {
-                $installedHash = (Get-FileHash -LiteralPath $currentTarget -Algorithm SHA256).Hash.ToLowerInvariant()
+                $installedHash = Get-Sha256File $currentTarget
                 if ($installedHash -ne ([string]$entry.baseSha256).ToLowerInvariant()) { throw "Incremental deleted file has local drift: $relative" }
             }
             [void]$deletedPaths.Add($relative)
@@ -1323,7 +1339,7 @@ function Stage-IncrementalChainUpdate([object]$Latest, [object]$Plan) {
             if ($actualSize -ne [int64]$manifest.size) {
                 throw "Downloaded incremental chain ZIP size mismatch for $($manifest.name)."
             }
-            $actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actualHash = Get-Sha256File $zip
             if ($actualHash -ne ([string]$manifest.sha256).ToLowerInvariant()) {
                 throw "Downloaded incremental chain ZIP SHA-256 mismatch for $($manifest.name)."
             }
@@ -1360,7 +1376,7 @@ function Stage-IncrementalChainUpdate([object]$Latest, [object]$Plan) {
                 $source = Join-Path $filesRoot ($relative.Replace('/','\'))
                 if (-not (Test-Path $source -PathType Leaf)) { throw "Incremental chain package is missing changed file: $relative" }
                 if ((Get-Item -LiteralPath $source).Length -ne [int64]$entry.size) { throw "Incremental chain file size mismatch: $relative" }
-                $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+                $sourceHash = Get-Sha256File $source
                 if ($sourceHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Incremental chain file SHA-256 mismatch: $relative" }
                 [void]$changedPaths.Add($relative)
             }
@@ -1631,7 +1647,7 @@ function Apply-StagedUpdate {
                     $target = Join-Path $Root $relativeWindows
                     $backupTarget = Join-Path $backup $relativeWindows
                     if (-not (Test-Path $source -PathType Leaf)) { throw "Staged changed file disappeared before apply: $relative" }
-                    $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $sourceHash = Get-Sha256File $source
                     if ($sourceHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Staged changed file failed SHA-256 revalidation: $relative" }
                     if (Test-Path $target) {
                         if ($backedOriginals.Add($relative)) {
@@ -1653,7 +1669,7 @@ function Apply-StagedUpdate {
                     if (-not (Test-Path $target)) { continue }
                     $expectedBaseHash = ([string]$entry.baseSha256).ToLowerInvariant()
                     if ($expectedBaseHash -and (Test-Path $target -PathType Leaf)) {
-                        $installedHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+                        $installedHash = Get-Sha256File $target
                         if ($installedHash -ne $expectedBaseHash) { throw "Incremental deleted file has local drift during apply: $relative" }
                     }
                     $backupTarget = Join-Path $backup $relativeWindows
@@ -1669,7 +1685,7 @@ function Apply-StagedUpdate {
                     $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
                     $target = Join-Path $Root ($relative.Replace('/','\'))
                     if (-not (Test-Path $target -PathType Leaf)) { throw "Incremental target file is missing after apply: $relative" }
-                    $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $targetHash = Get-Sha256File $target
                     if ($targetHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Incremental target file failed SHA-256 validation: $relative" }
                 }
                 $stepVersionManifest = Get-Content -LiteralPath (Join-Path $Root "VERSION-MANIFEST.json") -Raw | ConvertFrom-Json
