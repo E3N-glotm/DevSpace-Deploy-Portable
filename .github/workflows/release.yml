@@ -172,7 +172,7 @@ jobs:
           python setup/create-update-manifest.py @manifestArgs
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: DevSpace Portable ${{ steps.version.outputs.version }}
