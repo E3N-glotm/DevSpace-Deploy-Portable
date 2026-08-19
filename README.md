@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.39**
+当前稳定版本：**1.1.40**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.39.zip
+DevSpacePortable-Windows-x64-1.1.40.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -193,11 +193,11 @@ Owner password
 检查当前 DevSpace 可以访问哪些工作目录和权限，不要做任何修改。
 ```
 
-如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。**1.1.39 新增远程 Linux Workspace 能力和 `session_restore_safety`，因此升级后应重新 Refresh / Scan Tools。** Portable Protocol 仍为 1.5，现有 OAuth 客户端身份本身不需要重建。
+如果升级后顶层 MCP 工具 Schema 发生变化，需要在 ChatGPT App 管理页面执行 Refresh / Scan Tools；如果当前 UI 没有刷新入口，可以删除后使用同一个 `/mcp` URL 重新创建 App。**1.1.40 新增 `read_attachment` 原生图片/PDF附件工具，因此升级后应重新 Refresh / Scan Tools。** Portable Protocol 仍为 1.5，现有 OAuth 客户端身份本身不需要重建。
 
 ## Linux Remote Workspace
 
-1.1.39 起，Windows DevSpace 可以继续作为唯一 MCP/OAuth Control Plane，同时把一台或多台 Ubuntu/Linux 服务器登记为远程 Workspace Backend。Linux 主机不需要暴露新的 MCP 服务，也不需要把 SSH 密码交给 ChatGPT；它只运行一个依赖 Python 标准库的轻量 Agent，并主动连接回当前 DevSpace 的 `/agent/v1/connect` WebSocket。
+1.1.39 起，Windows DevSpace 可以继续作为唯一 MCP/OAuth Control Plane，同时把一台或多台 Ubuntu/Linux 服务器登记为远程 Workspace Backend。Linux 主机不需要暴露新的 MCP 服务；它只运行一个依赖 Python 标准库的轻量 Agent，并主动连接回当前 DevSpace 的 `/agent/v1/connect` WebSocket。1.1.40 额外提供可选 SSH 救援通道：SSH 只用于离线 Agent 的启动/安装，不承载正常 Remote Workspace 文件和命令流量。
 
 在 **配置与权限 → 远程服务器 / Linux Agent** 中填写服务器显示名和允许访问的 Linux 父目录，例如：
 
@@ -206,7 +206,7 @@ Owner password
 allowedRoots：/home/ubuntu/workspace
 ```
 
-点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。**默认命令不再使用 sudo**：普通 Linux 账号直接安装到 `${XDG_STATE_HOME:-$HOME/.local/state}/devspace-agent` 并以该账号运行；如果之前的 1.1.39 已创建 `/var/lib/devspace-agent` 且该目录现在归当前账号可写，则自动复用旧目录原位升级，不会再启动一份重复 Agent。只有管理员显式用 sudo/root 运行 installer 时才进入系统级 `/var/lib` + systemd 路径。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256。Enrollment Token 默认 15 分钟有效；首次握手开始后，在 Linux 尚未确认已持久化 Agent 凭据前保留最多 2 分钟恢复窗口。若公网 ACK 在这段时间内丢失，Agent 会自动重试并复用同一 Agent ID，同时控制端轮换新的 Agent Secret；Linux 原子保存凭据并确认后 Token 立即失效。没有 systemd 服务条件时使用普通用户 `nohup` 后台模式并保存 PID/日志；该模式可跨正常 SSH 退出保持连接，但主机/容器重启后若没有用户级 init 机制，需要重新启动 Agent。生成命令本身运行在子 shell 中，不会在完成后主动关闭用户当前 SSH 会话。
+点击 **生成一次性安装命令**，把生成的命令复制到目标 Ubuntu 执行。**默认命令不再使用 sudo**：普通 Linux 账号直接安装到 `${XDG_STATE_HOME:-$HOME/.local/state}/devspace-agent` 并以该账号运行；如果之前的 1.1.39 已创建 `/var/lib/devspace-agent` 且该目录现在归当前账号可写，则自动复用旧目录原位升级，不会再启动一份重复 Agent。只有管理员显式用 sudo/root 运行 installer 时才进入系统级 `/var/lib` + systemd 路径。命令会先校验 installer SHA-256，再由 installer 校验 Agent SHA-256。Enrollment Token 默认 15 分钟有效；首次握手开始后，在 Linux 尚未确认已持久化 Agent 凭据前保留最多 2 分钟恢复窗口。若公网 ACK 在这段时间内丢失，Agent 会自动重试并复用同一 Agent ID，同时控制端轮换新的 Agent Secret；Linux 原子保存凭据并确认后 Token 立即失效。没有 systemd 服务条件时使用普通用户 `nohup` 后台模式并保存 PID/日志；该模式可跨正常 SSH 退出保持连接，但主机/容器重启后若没有用户级 init 机制，需要重新启动 Agent。1.1.40 的同一页面可以保存 SSH 主机、端口、用户名和可选密码，然后点击 **一键恢复 / 安装 Agent**；客户端优先拉起原有 Agent 身份，服务器确实未安装时才重新 enrollment。密码使用 Windows 当前用户 DPAPI 加密保存，不写入 SSH 参数或远程命令。可选的自动 SSH 恢复在控制中心缩到托盘时仍会限频检查离线 Agent。原来的手动安装命令始终保留为最终 fallback。
 
 之后可以直接让 MCP 打开：
 
@@ -337,10 +337,24 @@ https://你的域名/mcp
 ## Release 文件说明
 
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
-- 精确基础版本存在时会发布 `DevSpacePortable-Update-<旧版本>-to-<新版本>.zip` 增量包；当前发行链额外保留 `1.1.33 -> 当前版本` 增量资产，避免 1.1.33 被迫下载 500+ MiB 完整包。
-- 当前发行链还提供 `DevSpacePortable-Rescue-1.1.33-to-<当前版本>.zip`。这是**不调用旧 Update.exe 的直接覆盖救援包**：先关闭/停止旧 Portable，再把 ZIP 内容直接解压到原安装目录并选择全部替换即可；包内不包含 `data`、`logs`、`reports`。
+- **1.1.40 是更新协议迁移点。** 为让旧更新器直接识别，1.1.40 Release 一次性发布 `1.1.32`～`1.1.39` 各自直达 `1.1.40` 的精确增量包；这些 ZIP 只存在于 GitHub Release，不进入 Git 仓库。
+- **1.1.40 以后不再让最新版携带一整套旧版本差分矩阵。** 每个新 Release 正常只发布“上一版 → 当前版”差分；1.1.40+ 更新器会从历史稳定 Release 自动拼出到最新版的最小下载量增量链，在一次停服、一次事务中应用全部步骤，任一步失败整体回滚，完整 ZIP 继续作为最终兜底。
+- 1.1.40 仍提供 `DevSpacePortable-Rescue-1.1.33-to-1.1.40.zip`，用于兼容 1.1.33 已知的旧 Apply 路径问题；后续版本不再默认复制这条历史 Rescue。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.40 主要变化
+
+- **1.1.32～1.1.39 全部可以一键增量迁移到 1.1.40。** GitHub Release workflow 从各版本已发布的 canonical 完整包临时生成八个精确差分，不把数百 MB/GB 的迁移中间产物提交进源码仓库。
+- **1.1.40+ 支持跨多个 Release 的事务增量链。** 更新器读取历史稳定 Release 中带 GitHub SHA-256 的 `file-delta-v1` 资产，选择总下载字节最小的连续路径；全部包先下载并校验，随后只停一次 DevSpace，在同一 rollback backup 下顺序应用，中间版本不启动。若链断裂、SHA/路径/删除基线/中间 `VERSION-MANIFEST` 任一异常，则恢复到更新前原版本并可继续完整包 fallback。
+- **最新版 `update-manifest.json` 会携带历史增量图。** 从 1.1.40 之后，Release workflow 会把上一版 manifest 中已经验证过的历史 `file-delta-v1` 元数据继续带到新 manifest，新客户端通常只需要读取最新版这个几 KB 清单即可规划跳版增量；只有清单不可用或不完整时才枚举 GitHub 历史 Release 作为备用。大 ZIP 仍各自留在原 Release，不复制到最新版，也不进入 Git 仓库。
+- **Remote Workspace Agent 增加 SSH 救援。** 原生页面可保存服务器 IP/域名、SSH 端口、用户名和可选密码，支持测试 SSH 与一键恢复/安装；已有 Agent 优先按原 identity 拉起，只有确认未安装才生成短期 enrollment。密码用当前 Windows 用户 DPAPI 加密落盘，并通过独立 `DevSpace-SshAskPass.exe` 子进程环境交给 OpenSSH，不进入参数、日志或远程 shell 文本。
+- **主控制中心可后台恢复离线 Agent。** 用户明确勾选后，即使窗口缩到托盘也会每分钟检查，单 Agent 至少间隔两分钟才尝试 SSH；systemd 主机仍优先依赖 service 开机自恢复，非 systemd/container 则可由 SSH 在生命周期重启后重新拉起原有 `config.json` 身份。手动安装命令继续保留。
+- **新增 `read_attachment` 原生多模态读取。** PNG/JPEG/WebP/GIF 直接返回 MCP `image` block，PDF/SVG 返回内嵌 `resource`；普通 `read` 遇到这些扩展名也自动走同一原生路径。无论本地还是 Remote Workspace，都不调用 Codex Runtime、OCR、`pdftotext` 或本地子模型，因此图片/PDF读取本身不会消耗本地 Codex 额度。单文件当前限制 32 MiB，超限时明确失败而不是偷偷回退本地模型。
+- **统一修复原生 UI 输入框的下半区“假输入区域”。** `FieldHost` 和 Remote Agent 专用 `RemoteInputHost` 现在会把单行 TextBox/ComboBox/Numeric 控件垂直居中，并把整个圆角宿主区域都作为真实 hit target；点击输入框上半部、下半部或留白都会聚焦真实控件并定位插入点，不再出现只有上半截能输入、下半截仍是普通箭头的情况。Remote Agent 的 SSH/安装说明区同时改为短屏滚动而不是裁切。
+- Portable Protocol 仍为 1.5；顶层 MCP Schema 因 `read_attachment` 新增而变化，升级后应 Refresh / Scan Tools。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.40.md)
 
 ## 1.1.39 主要变化
 

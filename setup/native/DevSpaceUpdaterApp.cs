@@ -307,9 +307,13 @@ namespace DevSpacePortableUpdater
                 string mode = GetString(_lastCheck, "preferredMode", "full");
                 long fullSize = GetLong(_lastCheck, "fullAssetSize", GetLong(_lastCheck, "assetSize", 0));
                 long incrementalSize = GetLong(_lastCheck, "incrementalAssetSize", 0);
-                bool incremental = string.Equals(mode, "incremental", StringComparison.OrdinalIgnoreCase) && incrementalSize > 0;
+                bool incremental = (string.Equals(mode, "incremental", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(mode, "incremental-chain", StringComparison.OrdinalIgnoreCase))
+                    && incrementalSize > 0;
+                int chainLength = (int)GetLong(_lastCheck, "incrementalChainLength", incremental ? 1 : 0);
+                string incrementalLabel = chainLength > 1 ? "增量链更新（" + chainLength + " 段）" : "增量更新";
                 _summary.Text = "发现 DevSpace Portable " + latest;
-                _detail.Text = "首选：" + (incremental ? "增量更新" : "完整包")
+                _detail.Text = "首选：" + (incremental ? incrementalLabel : "完整包")
                     + " · 预计下载 " + FormatBytes(incremental ? incrementalSize : fullSize)
                     + (incremental ? " · 完整包兜底 " + FormatBytes(fullSize) : "");
                 _installButton.Text = "下载并安装 " + latest;
@@ -349,8 +353,11 @@ namespace DevSpacePortableUpdater
                 _stagingPath = GetString(staged, "stagingPath", "");
                 string actualMode = GetString(staged, "updateMode", "full");
                 string fallbackReason = GetString(staged, "fallbackReason", "");
+                string actualLabel = actualMode == "incremental-chain"
+                    ? "增量链更新（" + GetLong(staged, "chainLength", 0) + " 段）"
+                    : (actualMode == "incremental" ? "增量更新" : "完整包更新");
                 _summary.Text = "更新包已下载并校验";
-                _detail.Text = "实际方式：" + (actualMode == "incremental" ? "增量更新" : "完整包更新")
+                _detail.Text = "实际方式：" + actualLabel
                     + (string.IsNullOrWhiteSpace(fallbackReason) ? "" : " · 兜底原因：" + fallbackReason);
                 AppendLog("暂存完成：" + _stagingPath);
 
@@ -507,7 +514,8 @@ namespace DevSpacePortableUpdater
                 return value != null
                     && !GetBool(value, "success")
                     && GetBool(value, "rolledBack")
-                    && string.Equals(GetString(value, "updateMode", ""), "incremental", StringComparison.OrdinalIgnoreCase);
+                    && (string.Equals(GetString(value, "updateMode", ""), "incremental", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(GetString(value, "updateMode", ""), "incremental-chain", StringComparison.OrdinalIgnoreCase));
             }
             catch { return false; }
         }

@@ -416,7 +416,7 @@ try {
   assert.ok(events.some((event) => event.kind === "remote.agent.enrolled"));
   assert.ok(events.some((event) => event.kind === "remote.agent.enrollment_confirmed"));
 
-  console.log("DevSpace 1.1.39 Remote Workspace Backend end-to-end protocol tests passed.");
+  console.log("DevSpace 1.1.40 Remote Workspace Backend end-to-end protocol tests passed.");
 }
 finally {
   await reconnectAgent?.close().catch(() => undefined);

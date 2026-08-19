@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.39";
+export const DEVSPACE_SERVER_VERSION = "1.1.40";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -124,6 +124,11 @@ const FEATURE_CATALOG = [
     { id: "remote-agent-recoverable-enrollment", maturity: "stable", since: "1.1.39" },
     { id: "remote-review-safety-restore", maturity: "stable", since: "1.1.39" },
     { id: "native-ui-responsive-oauth-administration", maturity: "stable", since: "1.1.39" },
+    { id: "github-updater-transactional-incremental-chain", maturity: "stable", since: "1.1.40" },
+    { id: "remote-agent-ssh-rescue", maturity: "stable", since: "1.1.40" },
+    { id: "remote-agent-background-ssh-recovery", maturity: "stable", since: "1.1.40" },
+    { id: "native-workspace-attachments", maturity: "stable", since: "1.1.40" },
+    { id: "mcp-pdf-resource-blocks", maturity: "stable", since: "1.1.40" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

@@ -15,10 +15,20 @@ const TARGETS = [
   {
     source: path.join(ROOT, "setup", "native", "DevSpacePortableApp.cs"),
     output: path.join(ROOT, "DevSpace-Portable.exe"),
+    target: "winexe",
+    shared: true,
   },
   {
     source: path.join(ROOT, "setup", "native", "DevSpaceUpdaterApp.cs"),
     output: path.join(ROOT, "Update.exe"),
+    target: "winexe",
+    shared: true,
+  },
+  {
+    source: path.join(ROOT, "setup", "native", "DevSpaceSshAskPass.cs"),
+    output: path.join(ROOT, "DevSpace-SshAskPass.exe"),
+    target: "exe",
+    shared: false,
   },
 ];
 const SHARED_SOURCES = [
@@ -72,6 +82,7 @@ const references = [
   "System.dll",
   "System.Core.dll",
   "System.Drawing.dll",
+  "System.Security.dll",
   "System.Web.Extensions.dll",
   "System.Windows.Forms.dll",
 ].map((name) => path.join(referenceRoot, name));
@@ -82,7 +93,7 @@ for (const reference of references) {
 for (const target of TARGETS) {
   run(compiler, [
     "/nologo",
-    "/target:winexe",
+    `/target:${target.target}`,
     "/platform:x64",
     "/optimize+",
     "/deterministic+",
@@ -90,7 +101,7 @@ for (const target of TARGETS) {
     "/langversion:latest",
     `/out:${target.output}`,
     ...references.map((reference) => `/reference:${reference}`),
-    ...SHARED_SOURCES,
+    ...(target.shared ? SHARED_SOURCES : []),
     target.source,
   ]);
 

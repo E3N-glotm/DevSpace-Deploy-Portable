@@ -152,6 +152,7 @@ function toolWidgetDescriptorMeta(config, kind) {
 const toolNames = {
     openWorkspace: "open_workspace",
     read: "read",
+    attachment: "read_attachment",
     write: "write",
     edit: "edit",
     grep: "grep",
@@ -638,6 +639,7 @@ function appCsp(config) {
 const INLINE_PREVIEW_MAX_FILES = 4;
 const INLINE_PREVIEW_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const INLINE_PREVIEW_MAX_TOTAL_BYTES = 6 * 1024 * 1024;
+const NATIVE_ATTACHMENT_MAX_BYTES = 32 * 1024 * 1024;
 const PREVIEW_MIME_TYPES = new Map([
     [".png", "image/png"],
     [".jpg", "image/jpeg"],
@@ -699,6 +701,55 @@ function previewKind(mimeType) {
     if (mimeType === "text/html")
         return "html";
     return "text";
+}
+
+function nativeAttachmentContent(workspaceId, path, mimeType, bytes) {
+    const data = Buffer.from(bytes).toString("base64");
+    const rasterImage = mimeType.startsWith("image/") && mimeType !== "image/svg+xml";
+    if (rasterImage) {
+        return [{ type: "image", data, mimeType }];
+    }
+    return [{
+        type: "resource",
+        resource: {
+            uri: `devspace-attachment://${encodeURIComponent(workspaceId)}/${encodeURIComponent(path)}`,
+            mimeType,
+            blob: data,
+        },
+    }];
+}
+
+async function loadNativeAttachmentBytes(workspace, path, readPath, workspaces, remoteAgents) {
+    let size = 0;
+    let bytes;
+    if (isRemoteWorkspace(workspace)) {
+        const metadata = await remoteAgents.rpcWorkspace(workspace, "fs.stat", { path });
+        if (!metadata.exists)
+            throw new Error(`Remote attachment does not exist: ${path}`);
+        if (metadata.type !== "file")
+            throw new Error(`Remote attachment is not a regular file: ${path}`);
+        size = Number(metadata.size ?? 0);
+        if (!Number.isSafeInteger(size) || size < 0)
+            throw new Error(`Remote attachment reported an invalid size: ${path}`);
+        if (size > NATIVE_ATTACHMENT_MAX_BYTES)
+            throw new Error(`Native attachment exceeds the ${Math.floor(NATIVE_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB inline MCP limit: ${path} (${size} bytes). Do not fall back to a local model; reduce/split the source or use a future streamed resource path.`);
+        bytes = await remoteAgents.readWhole(workspace, path);
+        if (bytes === null)
+            throw new Error(`Remote attachment disappeared while reading: ${path}`);
+    }
+    else {
+        const metadata = await stat(readPath.absolutePath);
+        if (!metadata.isFile())
+            throw new Error(`Attachment is not a regular file: ${path}`);
+        size = metadata.size;
+        if (size > NATIVE_ATTACHMENT_MAX_BYTES)
+            throw new Error(`Native attachment exceeds the ${Math.floor(NATIVE_ATTACHMENT_MAX_BYTES / (1024 * 1024))} MiB inline MCP limit: ${path} (${size} bytes). Do not fall back to a local model; reduce/split the source or use a future streamed resource path.`);
+        bytes = await readFile(readPath.absolutePath);
+    }
+    if (bytes.length !== size)
+        throw new Error(`Attachment changed while being read: ${path}; expected ${size} bytes, received ${bytes.length}.`);
+    workspaces.markReadPathLoaded(workspace, readPath);
+    return { bytes, size };
 }
 
 const REVIEW_OPERATION_TOOLS = new Set([
@@ -1848,6 +1899,28 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
         const readPath = workspaces.resolveReadPath(workspace, input.path);
+        const attachmentMimeType = PREVIEW_MIME_TYPES.get(extname(input.path).toLowerCase());
+        const nativeAttachment = attachmentMimeType
+            && (attachmentMimeType.startsWith("image/") || attachmentMimeType === "application/pdf");
+        if (nativeAttachment) {
+            const { bytes, size } = await loadNativeAttachmentBytes(workspace, input.path, readPath, workspaces, runtimeServices.remoteAgents);
+            const attachmentKind = attachmentMimeType.startsWith("image/") && attachmentMimeType !== "image/svg+xml" ? "image" : "resource";
+            const result = `Native attachment: ${input.path} (${attachmentMimeType}, ${size} bytes).`;
+            logToolCall(config, {
+                tool: toolNames.read,
+                workspaceId,
+                path: input.path,
+                nativeAttachment: true,
+                mimeType: attachmentMimeType,
+                size,
+                success: true,
+                durationMs: Math.round(performance.now() - startedAt),
+            });
+            return {
+                content: [textBlock(result), ...nativeAttachmentContent(workspace.id, input.path, attachmentMimeType, bytes)],
+                structuredContent: { result, path: input.path, mimeType: attachmentMimeType, size, attachmentKind },
+            };
+        }
         const response = isRemoteWorkspace(workspace)
             ? await runtimeServices.remoteAgents.read(workspace, input.path, { offset: input.offset, limit: input.limit }).then((remote) => {
                 if (remote.kind === "text")
@@ -1894,6 +1967,62 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             },
             structuredContent: {
                 result: contentText(response.content),
+            },
+        };
+    });
+    registerAppTool(server, toolNames.attachment, {
+        title: "Read image or PDF attachment",
+        description: [
+            "Return a local or Remote Workspace image/PDF directly to the MCP client as native multimodal content.",
+            "Use this instead of shell, local subagents, OCR, pdftotext, or Codex runtime tools when the model needs to inspect a PNG, JPEG, WebP, GIF, SVG, or PDF from a workspace.",
+            "Raster images are returned as MCP image blocks; PDF and SVG files are returned as embedded MCP resource blocks. No local model or Codex invocation is performed.",
+            "Call open_workspace first and pass workspaceId.",
+        ].join(" "),
+        inputSchema: {
+            workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+            path: z.string().describe("Image or PDF path, relative to the workspace root."),
+        },
+        outputSchema: resultOutputSchema({
+            path: z.string(),
+            mimeType: z.string(),
+            size: z.number(),
+            attachmentKind: z.enum(["image", "resource"]),
+        }),
+        ...toolWidgetDescriptorMeta(config, "read"),
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    }, async ({ workspaceId, path }) => {
+        const startedAt = performance.now();
+        const workspace = workspaces.getWorkspace(workspaceId);
+        const readPath = workspaces.resolveReadPath(workspace, path);
+        const extension = extname(path).toLowerCase();
+        const mimeType = PREVIEW_MIME_TYPES.get(extension);
+        const rasterImage = mimeType?.startsWith("image/") && mimeType !== "image/svg+xml";
+        const embeddedResource = mimeType === "application/pdf" || mimeType === "image/svg+xml";
+        if (!mimeType || (!rasterImage && !embeddedResource)) {
+            throw new Error(`Unsupported native attachment type: ${extension || "(no extension)"}. Supported: PNG, JPEG, WebP, GIF, SVG, PDF.`);
+        }
+
+        const { bytes, size } = await loadNativeAttachmentBytes(workspace, path, readPath, workspaces, runtimeServices.remoteAgents);
+        const attachmentKind = rasterImage ? "image" : "resource";
+        const metadataText = `Native attachment: ${path} (${mimeType}, ${size} bytes).`;
+        const content = [textBlock(metadataText), ...nativeAttachmentContent(workspace.id, path, mimeType, bytes)];
+        logToolCall(config, {
+            tool: toolNames.attachment,
+            workspaceId,
+            path,
+            mimeType,
+            size,
+            success: true,
+            durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+            content,
+            structuredContent: {
+                result: metadataText,
+                path,
+                mimeType,
+                size,
+                attachmentKind,
             },
         };
     });
@@ -2904,4 +3033,4 @@ if (await isMainModule()) {
 
 // Export pure response/preview helpers for packaged smoke tests. They do not
 // bypass workspace path validation or expose server state.
-export { collectWorkspacePreviews, processToolResponse, redactDisplayArgv, reviewOperation, shouldAttachWidget, toolInvocationStatus, toolWidgetDescriptorMeta, workspaceAppHtml };
+export { collectWorkspacePreviews, nativeAttachmentContent, processToolResponse, redactDisplayArgv, reviewOperation, shouldAttachWidget, toolInvocationStatus, toolWidgetDescriptorMeta, workspaceAppHtml };

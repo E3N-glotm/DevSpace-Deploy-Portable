@@ -10,6 +10,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -602,11 +603,16 @@ namespace DevSpacePortable.NativeUI
 
     internal sealed class FieldHost : Panel
     {
+        private readonly Control _child;
+        private readonly bool _centerSingleLineText;
+
         public FieldHost(Control child, int width = 0)
         {
+            _child = child;
             BackColor = Color.Transparent;
             Margin = new Padding(3, 3, 3, 6);
             bool multiline = child is TextBox && ((TextBox)child).Multiline;
+            _centerSingleLineText = child is TextBoxBase && !multiline;
             Padding = multiline
                 ? new Padding(10)
                 : child is ComboBox
@@ -615,7 +621,15 @@ namespace DevSpacePortable.NativeUI
             Height = multiline ? Math.Max(72, child.Height + 12) : 38;
             MinimumSize = new Size(40, Height);
             if (width > 0) Width = width;
-            child.Dock = DockStyle.Fill;
+            if (multiline || !_centerSingleLineText)
+            {
+                child.Dock = DockStyle.Fill;
+            }
+            else
+            {
+                child.Dock = DockStyle.None;
+                child.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            }
             Controls.Add(child);
             ModernNumericUpDown number = child as ModernNumericUpDown;
             if (number != null)
@@ -626,7 +640,51 @@ namespace DevSpacePortable.NativeUI
             }
             child.Enter += delegate { Invalidate(); };
             child.Leave += delegate { Invalidate(); };
+            Cursor = child is TextBoxBase ? Cursors.IBeam : Cursors.Hand;
+            Resize += delegate { LayoutInputChild(); };
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer, true);
+            LayoutInputChild();
+        }
+
+        private void LayoutInputChild()
+        {
+            if (_child == null || !_centerSingleLineText || _child.Dock == DockStyle.Fill) return;
+            int left = Padding.Left;
+            int width = Math.Max(1, ClientSize.Width - Padding.Horizontal);
+            int preferredHeight = Math.Max(1, _child.PreferredSize.Height);
+            int top = Math.Max(Padding.Top, (ClientSize.Height - preferredHeight) / 2);
+            _child.Bounds = new Rectangle(left, top, width, Math.Min(preferredHeight, Math.Max(1, ClientSize.Height - top - Padding.Bottom)));
+        }
+
+        internal void ActivateInput(Point hostPoint)
+        {
+            if (_child == null || !_child.Enabled) return;
+            TextBoxBase text = _child as TextBoxBase;
+            if (text != null)
+            {
+                text.Focus();
+                Point local = new Point(
+                    Math.Max(0, Math.Min(text.ClientSize.Width - 1, hostPoint.X - text.Left)),
+                    Math.Max(0, Math.Min(text.ClientSize.Height - 1, hostPoint.Y - text.Top)));
+                int index = text.GetCharIndexFromPosition(local);
+                text.SelectionStart = Math.Max(0, Math.Min(index, text.TextLength));
+                text.SelectionLength = 0;
+                return;
+            }
+            ComboBox combo = _child as ComboBox;
+            if (combo != null)
+            {
+                combo.Focus();
+                if (combo.DropDownStyle != ComboBoxStyle.Simple) combo.DroppedDown = true;
+                return;
+            }
+            _child.Focus();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left) ActivateInput(e.Location);
+            base.OnMouseDown(e);
         }
         protected override void OnPaintBackground(PaintEventArgs e)
         {
@@ -1354,15 +1412,24 @@ namespace DevSpacePortable.NativeUI
                 int remoteInputCount = FindControls<RemoteInputHost>(agents).Count();
                 int remoteCardCount = FindControls<RemoteCard>(agents).Count();
                 bool remoteButtonsUnclipped = FindControls<ModernButton>(agents).All(button => button.Parent == null || button.Bottom <= button.Parent.ClientSize.Height + 1);
+                Label sshHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("优先通过现有 Agent", StringComparison.Ordinal));
+                Label privilegeHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("无管理员权限", StringComparison.Ordinal));
+                bool remoteHintsUnclipped = new[] { sshHint, privilegeHint }.All(label =>
+                {
+                    if (label == null || label.Width <= 0 || label.Height <= 0) return false;
+                    Size preferred = label.GetPreferredSize(new Size(Math.Max(1, label.ClientSize.Width - label.Padding.Horizontal), 0));
+                    return preferred.Height + label.Padding.Vertical <= label.ClientSize.Height + 1;
+                });
                 report["remoteAgentsStableLayout"] = FindControls<DataGridView>(agents).Count() == 0
                     && FindControls<TextBox>(agents).Count() >= 3
                     && FindControls<SurfacePanel>(agents).Count() == 0
                     && FindControls<FieldHost>(agents).Count() == 0
-                    && remoteCardCount >= 2
-                    && remoteInputCount >= 3
+                    && remoteCardCount >= 3
+                    && remoteInputCount >= 7
                     && remoteTileCount >= 1
                     && remoteButtonMinHeight >= 44
                     && remoteButtonsUnclipped
+                    && remoteHintsUnclipped
                     && commandBox != null
                     && commandHost != null
                     && commandHost.Height >= 64;
@@ -1371,8 +1438,52 @@ namespace DevSpacePortable.NativeUI
                 report["remoteAgentCardCount"] = remoteCardCount;
                 report["remoteAgentButtonMinHeight"] = remoteButtonMinHeight;
                 report["remoteAgentButtonsUnclipped"] = remoteButtonsUnclipped;
+                report["remoteAgentHintsUnclipped"] = remoteHintsUnclipped;
                 report["remoteAgentCommandHostHeight"] = commandHost == null ? 0 : commandHost.Height;
+                report["remoteAgentSshAskPass"] = File.Exists(Path.Combine(manager.Root, "DevSpace-SshAskPass.exe"));
                 report["remoteAgentSizes"] = remoteSizes.Select(size => size.Width + "x" + size.Height).ToArray();
+            }
+
+            // The painted host is taller than a native single-line TextBox.
+            // Verify that its lower half remains an active editing hit target
+            // instead of becoming a dead Panel region with a normal arrow.
+            using (TextBox fieldText = new TextBox { Text = "abcdef" })
+            using (FieldHost fieldHost = new FieldHost(fieldText, 280))
+            using (TextBox remoteText = new TextBox { Text = "abcdef" })
+            using (RemoteInputHost remoteHost = new RemoteInputHost(remoteText, 44))
+            using (ModernComboBox combo = new ModernComboBox())
+            using (FieldHost comboHost = new FieldHost(combo, 280))
+            {
+                combo.Items.Add("ngrok");
+                combo.Items.Add("cloudflare");
+                combo.SelectedIndex = 0;
+                fieldHost.Size = new Size(280, 44);
+                remoteHost.Size = new Size(280, 44);
+                comboHost.Size = new Size(280, 44);
+                fieldHost.CreateControl();
+                fieldText.CreateControl();
+                remoteHost.CreateControl();
+                remoteText.CreateControl();
+                comboHost.CreateControl();
+                combo.CreateControl();
+                fieldHost.PerformLayout();
+                remoteHost.PerformLayout();
+                comboHost.PerformLayout();
+                fieldText.SelectionStart = 0;
+                remoteText.SelectionStart = 0;
+                fieldHost.ActivateInput(new Point(fieldHost.ClientSize.Width - 12, fieldHost.ClientSize.Height - 4));
+                remoteHost.ActivateInput(new Point(remoteHost.ClientSize.Width - 12, remoteHost.ClientSize.Height - 4));
+                bool fieldHitTarget = fieldHost.Cursor == Cursors.IBeam && fieldText.SelectionStart > 0;
+                bool remoteHitTarget = remoteHost.Cursor == Cursors.IBeam && remoteText.SelectionStart > 0;
+                bool comboUnclipped = combo.Dock == DockStyle.Fill
+                    && combo.ClientSize.Height >= combo.ItemHeight
+                    && combo.Bottom <= comboHost.ClientSize.Height - comboHost.Padding.Bottom + 1;
+                report["inputHostsFullHitTarget"] = fieldHitTarget && remoteHitTarget;
+                report["fieldHostLowerHalfHitTarget"] = fieldHitTarget;
+                report["remoteInputLowerHalfHitTarget"] = remoteHitTarget;
+                report["comboBoxUnclipped"] = comboUnclipped;
+                if (!fieldHitTarget || !remoteHitTarget || !comboUnclipped)
+                    throw new InvalidOperationException("Rounded input host lower-half hit testing regressed.");
             }
 
             report["passed"] = true;
@@ -1422,6 +1533,8 @@ namespace DevSpacePortable.NativeUI
             if (!File.Exists(_node)) throw new FileNotFoundException("Bundled Node runtime is missing.", _node);
             if (!File.Exists(_manager)) throw new FileNotFoundException("Portable manager is missing.", _manager);
         }
+
+        public string Root { get { return _root; } }
 
         public Task<string> RunAsync(string action, object payload = null)
         {
@@ -2140,12 +2253,44 @@ namespace DevSpacePortable.NativeUI
             textBox.BackColor = UiPalette.SurfaceMuted;
             textBox.ForeColor = UiPalette.Text;
             textBox.Font = UiTypography.Ui(9.25F);
-            textBox.Dock = DockStyle.Fill;
+            textBox.Dock = textBox.Multiline ? DockStyle.Fill : DockStyle.None;
+            if (!textBox.Multiline) textBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             textBox.Margin = new Padding(0);
             Controls.Add(textBox);
             textBox.Enter += delegate { Invalidate(); };
             textBox.Leave += delegate { Invalidate(); };
+            Cursor = Cursors.IBeam;
+            Resize += delegate { LayoutTextBox(); };
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            LayoutTextBox();
+        }
+
+        private void LayoutTextBox()
+        {
+            if (_textBox.Multiline) return;
+            int left = Padding.Left;
+            int width = Math.Max(1, ClientSize.Width - Padding.Horizontal);
+            int preferredHeight = Math.Max(1, _textBox.PreferredSize.Height);
+            int top = Math.Max(Padding.Top, (ClientSize.Height - preferredHeight) / 2);
+            _textBox.Bounds = new Rectangle(left, top, width, Math.Min(preferredHeight, Math.Max(1, ClientSize.Height - top - Padding.Bottom)));
+        }
+
+        internal void ActivateInput(Point hostPoint)
+        {
+            if (!_textBox.Enabled) return;
+            _textBox.Focus();
+            Point local = new Point(
+                Math.Max(0, Math.Min(_textBox.ClientSize.Width - 1, hostPoint.X - _textBox.Left)),
+                Math.Max(0, Math.Min(_textBox.ClientSize.Height - 1, hostPoint.Y - _textBox.Top)));
+            int index = _textBox.GetCharIndexFromPosition(local);
+            _textBox.SelectionStart = Math.Max(0, Math.Min(index, _textBox.TextLength));
+            _textBox.SelectionLength = 0;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left) ActivateInput(e.Location);
+            base.OnMouseDown(e);
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)
@@ -2201,8 +2346,32 @@ namespace DevSpacePortable.NativeUI
         private readonly TextBox _name = new TextBox();
         private readonly TextBox _roots = new TextBox();
         private readonly TextBox _installCommand = new TextBox();
+        private readonly TextBox _sshHost = new TextBox();
+        private readonly TextBox _sshPort = new TextBox();
+        private readonly TextBox _sshUser = new TextBox();
+        private readonly TextBox _sshPassword = new TextBox();
+        private readonly CheckBox _sshAutoRecover = new CheckBox();
+        private readonly System.Windows.Forms.Timer _sshRecoveryTimer = new System.Windows.Forms.Timer { Interval = 30000 };
         private readonly Label _status = new Label();
+        private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         private Dictionary<string, object> _selectedAgent = new Dictionary<string, object>();
+        private bool _sshBusy;
+        private static readonly Dictionary<string, DateTime> BackgroundSshAttempts = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        private sealed class StoredSshProfile
+        {
+            public string Key { get; set; }
+            public string Host { get; set; }
+            public int Port { get; set; }
+            public string UserName { get; set; }
+            public string ProtectedPassword { get; set; }
+            public bool AutoRecover { get; set; }
+        }
+
+        private sealed class StoredSshProfiles
+        {
+            public List<StoredSshProfile> Profiles { get; set; } = new List<StoredSshProfile>();
+        }
 
         public RemoteAgentsDialog(ManagerClient manager)
         {
@@ -2210,8 +2379,8 @@ namespace DevSpacePortable.NativeUI
             Text = "远程服务器 / Linux Agent";
             Icon = BrandIconFactory.Create(64);
             StartPosition = FormStartPosition.CenterParent;
-            MinimumSize = new Size(1040, 760);
-            Size = new Size(1220, 860);
+            MinimumSize = new Size(1040, 900);
+            Size = new Size(1220, 1020);
             AutoScaleMode = AutoScaleMode.Dpi;
             BackColor = UiPalette.Background;
             ForeColor = UiPalette.Text;
@@ -2219,10 +2388,13 @@ namespace DevSpacePortable.NativeUI
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             BuildUi();
             Resize += delegate { ResizeAgentTiles(); Invalidate(true); };
+            _sshRecoveryTimer.Tick += async delegate { await AutoRecoverSelectedAgentAsync(); };
+            FormClosed += delegate { _sshRecoveryTimer.Stop(); };
             Shown += async delegate
             {
                 NativeWindowEffects.Apply(Handle);
                 await LoadAgentsAsync();
+                _sshRecoveryTimer.Start();
             };
         }
 
@@ -2232,14 +2404,21 @@ namespace DevSpacePortable.NativeUI
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 4,
+                RowCount = 5,
                 Padding = new Padding(22),
                 BackColor = UiPalette.Background,
+                AutoScroll = true,
             };
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 354));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+            // Keep the Remote Agent cards at a stable preferred height and let
+            // the outer dialog scroll vertically on shorter screens. The old
+            // Percent row silently donated height from the two lower cards;
+            // at 125%-150% DPI their explanatory labels were partially hidden
+            // behind the rounded card border even though the controls existed.
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 226));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 400));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
 
             Panel intro = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
             Label title = new Label
@@ -2313,6 +2492,71 @@ namespace DevSpacePortable.NativeUI
             agentCard.Controls.Add(agentSection);
             root.Controls.Add(agentCard, 0, 1);
 
+            RemoteCard sshCard = new RemoteCard { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 4, 0, 6) };
+            TableLayoutPanel sshLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = UiPalette.Surface,
+                Margin = new Padding(0),
+            };
+            sshLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
+            sshLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            sshLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            TableLayoutPanel sshFields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 2, BackColor = UiPalette.Surface, Margin = new Padding(0) };
+            sshFields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+            sshFields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 12));
+            sshFields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
+            sshFields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 30));
+            sshFields.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            sshFields.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+            sshFields.Controls.Add(FieldLabel("服务器 IP / 主机名"), 0, 0);
+            sshFields.Controls.Add(FieldLabel("SSH 端口"), 1, 0);
+            sshFields.Controls.Add(FieldLabel("用户名"), 2, 0);
+            sshFields.Controls.Add(FieldLabel("密码（Windows 用户级加密保存）"), 3, 0);
+            StyleTextBox(_sshHost);
+            StyleTextBox(_sshPort);
+            StyleTextBox(_sshUser);
+            StyleTextBox(_sshPassword);
+            _sshPort.Text = "22";
+            _sshUser.Text = "ubuntu";
+            _sshPassword.UseSystemPasswordChar = true;
+            sshFields.Controls.Add(new RemoteInputHost(_sshHost, 44) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 8, 5) }, 0, 1);
+            sshFields.Controls.Add(new RemoteInputHost(_sshPort, 44) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 8, 5) }, 1, 1);
+            sshFields.Controls.Add(new RemoteInputHost(_sshUser, 44) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 8, 5) }, 2, 1);
+            sshFields.Controls.Add(new RemoteInputHost(_sshPassword, 44) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 2, 5) }, 3, 1);
+            sshLayout.Controls.Add(sshFields, 0, 0);
+
+            FlowLayoutPanel sshActions = ButtonBar();
+            sshActions.WrapContents = false;
+            sshActions.Controls.Add(ActionButton("保存 SSH 配置", delegate { SaveCurrentSshProfile(true); }, false, false, 138));
+            sshActions.Controls.Add(ActionButton("测试 SSH", async delegate { await TestSshAsync(); }, false, false, 116));
+            sshActions.Controls.Add(ActionButton("一键恢复 / 安装 Agent", async delegate { await RecoverAgentViaSshAsync(false); }, true, false, 190));
+            _sshAutoRecover.Text = "选中 Agent 离线时自动尝试 SSH 救援";
+            _sshAutoRecover.AutoSize = true;
+            _sshAutoRecover.ForeColor = UiPalette.TextMuted;
+            _sshAutoRecover.Font = UiTypography.Ui(8.8F);
+            _sshAutoRecover.Margin = new Padding(12, 14, 4, 0);
+            sshActions.Controls.Add(_sshAutoRecover);
+            sshLayout.Controls.Add(sshActions, 0, 1);
+
+            Label sshHint = new Label
+            {
+                Text = "优先通过现有 Agent 连接。仅当 Agent 离线时才使用 SSH 救援：先重启已有 Agent；若服务器尚未安装，再自动生成一次性 enrollment 并安装。手动安装命令始终保留为最终 fallback。",
+                Dock = DockStyle.Fill,
+                AutoEllipsis = false,
+                TextAlign = ContentAlignment.TopLeft,
+                Font = UiTypography.Ui(8.6F),
+                ForeColor = UiPalette.TextMuted,
+                Padding = new Padding(5, 6, 5, 0),
+                Margin = new Padding(0),
+            };
+            sshLayout.Controls.Add(sshHint, 0, 2);
+            sshCard.Controls.Add(sshLayout);
+            root.Controls.Add(sshCard, 0, 2);
+
             RemoteCard formCard = new RemoteCard { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 4, 0, 6) };
             TableLayoutPanel form = new TableLayoutPanel
             {
@@ -2325,7 +2569,7 @@ namespace DevSpacePortable.NativeUI
             form.RowStyles.Add(new RowStyle(SizeType.Absolute, 88));
             form.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
             form.RowStyles.Add(new RowStyle(SizeType.Absolute, 98));
-            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
             form.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, BackColor = UiPalette.Surface, Margin = new Padding(0) };
@@ -2386,6 +2630,7 @@ namespace DevSpacePortable.NativeUI
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft,
                 ForeColor = UiPalette.TextMuted,
+                Font = UiTypography.Ui(8.8F),
                 Padding = new Padding(6, 0, 0, 0),
             };
             copyBar.Controls.Add(enrollmentHint, 1, 0);
@@ -2394,22 +2639,22 @@ namespace DevSpacePortable.NativeUI
             {
                 Text = "无管理员权限：安装到当前用户可写状态目录并后台运行；若当前用户可写旧 /var/lib/devspace-agent，则自动原位升级。只有显式使用 sudo 执行安装器时才走系统级安装。",
                 Dock = DockStyle.Fill,
-                AutoEllipsis = true,
-                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = false,
+                TextAlign = ContentAlignment.TopLeft,
                 Font = UiTypography.Ui(8.6F),
                 ForeColor = UiPalette.TextMuted,
-                Padding = new Padding(5, 0, 5, 0),
+                Padding = new Padding(5, 7, 5, 0),
                 Margin = new Padding(0),
             };
             form.Controls.Add(privilegeHint, 0, 4);
             formCard.Controls.Add(form);
-            root.Controls.Add(formCard, 0, 2);
+            root.Controls.Add(formCard, 0, 3);
 
             _status.Dock = DockStyle.Fill;
             _status.ForeColor = UiPalette.TextMuted;
             _status.TextAlign = ContentAlignment.MiddleLeft;
             _status.Text = "准备读取远程 Agent。";
-            root.Controls.Add(_status, 0, 3);
+            root.Controls.Add(_status, 0, 4);
             Controls.Add(root);
         }
 
@@ -2500,6 +2745,424 @@ namespace DevSpacePortable.NativeUI
             }
         }
 
+        private string SshProfilesPath
+        {
+            get { return SshProfilesPathFor(_manager); }
+        }
+
+        private static string SshProfilesPathFor(ManagerClient manager)
+        {
+            return Path.Combine(manager.Root, "data", "remote-agent-ssh-profiles.json");
+        }
+
+        private string CurrentSshProfileKey()
+        {
+            string id = ValueText(_selectedAgent, "id");
+            if (!string.IsNullOrWhiteSpace(id)) return id;
+            string selectedName = ValueText(_selectedAgent, "name");
+            if (!string.IsNullOrWhiteSpace(selectedName)) return "name:" + selectedName;
+            string name = (_name.Text ?? "").Trim();
+            return string.IsNullOrWhiteSpace(name) ? "" : "name:" + name;
+        }
+
+        private StoredSshProfiles LoadSshProfiles()
+        {
+            return LoadSshProfiles(_manager);
+        }
+
+        private static StoredSshProfiles LoadSshProfiles(ManagerClient manager)
+        {
+            try
+            {
+                string path = SshProfilesPathFor(manager);
+                if (!File.Exists(path)) return new StoredSshProfiles();
+                JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                StoredSshProfiles value = json.Deserialize<StoredSshProfiles>(File.ReadAllText(path, Encoding.UTF8));
+                return value ?? new StoredSshProfiles();
+            }
+            catch
+            {
+                return new StoredSshProfiles();
+            }
+        }
+
+        private StoredSshProfile FindSshProfile(Dictionary<string, object> agent)
+        {
+            StoredSshProfiles profiles = LoadSshProfiles();
+            string id = ValueText(agent, "id");
+            string name = ValueText(agent, "name");
+            StoredSshProfile direct = profiles.Profiles.FirstOrDefault(profile =>
+                !string.IsNullOrWhiteSpace(id) && string.Equals(profile.Key, id, StringComparison.Ordinal));
+            if (direct != null) return direct;
+            return profiles.Profiles.FirstOrDefault(profile =>
+                !string.IsNullOrWhiteSpace(name) && string.Equals(profile.Key, "name:" + name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string ProtectSshPassword(string password)
+        {
+            if (string.IsNullOrEmpty(password)) return "";
+            byte[] entropy = Encoding.UTF8.GetBytes("DevSpacePortable.RemoteAgentSsh.v1");
+            byte[] protectedBytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(password), entropy, DataProtectionScope.CurrentUser);
+            return Convert.ToBase64String(protectedBytes);
+        }
+
+        private static string UnprotectSshPassword(string protectedPassword)
+        {
+            if (string.IsNullOrWhiteSpace(protectedPassword)) return "";
+            byte[] entropy = Encoding.UTF8.GetBytes("DevSpacePortable.RemoteAgentSsh.v1");
+            byte[] clear = ProtectedData.Unprotect(Convert.FromBase64String(protectedPassword), entropy, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(clear);
+        }
+
+        private void SaveCurrentSshProfile(bool notify)
+        {
+            string key = CurrentSshProfileKey();
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                if (notify) MessageBox.Show(this, "请先选择一个 Agent，或填写服务器显示名。", "无法保存 SSH 配置", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            string host = (_sshHost.Text ?? "").Trim();
+            string user = (_sshUser.Text ?? "").Trim();
+            int port;
+            if (!ValidateSshEndpoint(host, _sshPort.Text, user, out port, notify)) return;
+            StoredSshProfiles profiles = LoadSshProfiles();
+            StoredSshProfile existing = profiles.Profiles.FirstOrDefault(profile => string.Equals(profile.Key, key, StringComparison.OrdinalIgnoreCase));
+            if (existing == null)
+            {
+                existing = new StoredSshProfile();
+                profiles.Profiles.Add(existing);
+            }
+            existing.Key = key;
+            existing.Host = host;
+            existing.Port = port;
+            existing.UserName = user;
+            existing.ProtectedPassword = ProtectSshPassword(_sshPassword.Text ?? "");
+            existing.AutoRecover = _sshAutoRecover.Checked;
+            string directory = Path.GetDirectoryName(SshProfilesPath);
+            Directory.CreateDirectory(directory);
+            string temporary = SshProfilesPath + ".tmp";
+            File.WriteAllText(temporary, _json.Serialize(profiles), new UTF8Encoding(false));
+            if (File.Exists(SshProfilesPath)) File.Replace(temporary, SshProfilesPath, null);
+            else File.Move(temporary, SshProfilesPath);
+            if (notify) _status.Text = "SSH 配置已保存。密码仅以当前 Windows 用户可解密的 DPAPI 密文落盘。";
+        }
+
+        private void LoadSelectedSshProfile()
+        {
+            StoredSshProfile profile = FindSshProfile(_selectedAgent);
+            if (profile == null) return;
+            _sshHost.Text = profile.Host ?? "";
+            _sshPort.Text = profile.Port > 0 ? profile.Port.ToString(CultureInfo.InvariantCulture) : "22";
+            _sshUser.Text = profile.UserName ?? "";
+            try { _sshPassword.Text = UnprotectSshPassword(profile.ProtectedPassword); }
+            catch { _sshPassword.Text = ""; }
+            _sshAutoRecover.Checked = profile.AutoRecover;
+        }
+
+        private bool ValidateSshEndpoint(string host, string portText, string user, out int port, bool notify)
+        {
+            port = 0;
+            bool validHost = !string.IsNullOrWhiteSpace(host)
+                && Regex.IsMatch(host, @"^[A-Za-z0-9._:\[\]-]+$")
+                && !host.Contains("..");
+            bool validUser = !string.IsNullOrWhiteSpace(user) && Regex.IsMatch(user, @"^[A-Za-z0-9._-]+$");
+            bool validPort = int.TryParse((portText ?? "").Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out port)
+                && port >= 1 && port <= 65535;
+            if (validHost && validUser && validPort) return true;
+            if (notify)
+            {
+                MessageBox.Show(this, "SSH 主机、端口或用户名格式无效。主机不允许空格和命令字符，端口必须为 1–65535。", "SSH 配置无效", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            return false;
+        }
+
+        private sealed class SshRunResult
+        {
+            public int ExitCode { get; set; }
+            public string Output { get; set; }
+            public string Error { get; set; }
+        }
+
+        private static string QuoteProcessArgument(string value)
+        {
+            if (value == null) return "\"\"";
+            StringBuilder result = new StringBuilder();
+            result.Append('"');
+            int slashes = 0;
+            foreach (char ch in value)
+            {
+                if (ch == '\\')
+                {
+                    slashes++;
+                    continue;
+                }
+                if (ch == '"')
+                {
+                    result.Append('\\', slashes * 2 + 1);
+                    result.Append('"');
+                    slashes = 0;
+                    continue;
+                }
+                if (slashes > 0)
+                {
+                    result.Append('\\', slashes);
+                    slashes = 0;
+                }
+                result.Append(ch);
+            }
+            if (slashes > 0) result.Append('\\', slashes * 2);
+            result.Append('"');
+            return result.ToString();
+        }
+
+        private Task<SshRunResult> RunSshScriptAsync(string script, int timeoutMs = 30000)
+        {
+            string host = (_sshHost.Text ?? "").Trim();
+            string user = (_sshUser.Text ?? "").Trim();
+            int port;
+            if (!ValidateSshEndpoint(host, _sshPort.Text, user, out port, true))
+                throw new InvalidOperationException("SSH endpoint is invalid.");
+            string password = _sshPassword.Text ?? "";
+            return RunSshScriptWithProfileAsync(_manager, host, port, user, password, script, timeoutMs);
+        }
+
+        private static Task<SshRunResult> RunSshScriptWithProfileAsync(ManagerClient manager, string host, int port, string user, string password, string script, int timeoutMs)
+        {
+            string ssh = Path.Combine(manager.Root, "runtime", "git", "usr", "bin", "ssh.exe");
+            if (!File.Exists(ssh)) ssh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe");
+            if (!File.Exists(ssh)) throw new FileNotFoundException("没有找到 bundled Git SSH 或 Windows OpenSSH。", ssh);
+            string askPass = Path.Combine(manager.Root, "DevSpace-SshAskPass.exe");
+            if (!string.IsNullOrEmpty(password) && !File.Exists(askPass))
+                throw new FileNotFoundException("SSH 密码辅助程序缺失。", askPass);
+            string normalizedHost = host.Contains(":") && !host.StartsWith("[", StringComparison.Ordinal) ? "[" + host + "]" : host;
+            string target = user + "@" + normalizedHost;
+            string arguments = "-o ConnectTimeout=10 -o ConnectionAttempts=2 -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR "
+                + (string.IsNullOrEmpty(password) ? "-o BatchMode=yes " : "-o BatchMode=no -o NumberOfPasswordPrompts=2 ")
+                + "-p " + port.ToString(CultureInfo.InvariantCulture) + " " + QuoteProcessArgument(target) + " bash -s";
+
+            return Task.Run(delegate
+            {
+                ProcessStartInfo info = new ProcessStartInfo
+                {
+                    FileName = ssh,
+                    Arguments = arguments,
+                    WorkingDirectory = manager.Root,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8,
+                };
+                if (!string.IsNullOrEmpty(password))
+                {
+                    info.EnvironmentVariables["SSH_ASKPASS"] = askPass;
+                    info.EnvironmentVariables["SSH_ASKPASS_REQUIRE"] = "force";
+                    info.EnvironmentVariables["DISPLAY"] = "devspace";
+                    info.EnvironmentVariables["DEVSPACE_SSH_PASSWORD"] = password;
+                }
+                using (Process process = Process.Start(info))
+                {
+                    Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+                    Task<string> stderr = process.StandardError.ReadToEndAsync();
+                    process.StandardInput.Write(script ?? "");
+                    if (!(script ?? "").EndsWith("\n", StringComparison.Ordinal)) process.StandardInput.WriteLine();
+                    process.StandardInput.Close();
+                    if (!process.WaitForExit(timeoutMs))
+                    {
+                        try { process.Kill(); } catch { }
+                        throw new TimeoutException("SSH 操作超时。请检查服务器地址、端口、防火墙和网络。 ");
+                    }
+                    Task.WaitAll(new Task[] { stdout, stderr }, 5000);
+                    return new SshRunResult
+                    {
+                        ExitCode = process.ExitCode,
+                        Output = stdout.IsCompleted ? stdout.Result.Trim() : "",
+                        Error = stderr.IsCompleted ? stderr.Result.Trim() : "",
+                    };
+                }
+            });
+        }
+
+        private async Task TestSshAsync()
+        {
+            if (_sshBusy) return;
+            _sshBusy = true;
+            try
+            {
+                _status.Text = "正在测试 SSH 连接…";
+                SshRunResult result = await RunSshScriptAsync("set -e\nprintf 'DEVSPACE_SSH_OK\\n'\nuname -s 2>/dev/null || true\nhostname 2>/dev/null || true\n", 20000);
+                if (result.ExitCode != 0 || !result.Output.Contains("DEVSPACE_SSH_OK"))
+                    throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? "SSH 测试未返回预期标记。" : result.Error);
+                SaveCurrentSshProfile(false);
+                _status.Text = "SSH 连接正常。后续 Agent 离线时可以直接使用一键救援。";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "SSH 连接失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                _status.Text = "SSH 连接失败。手动安装命令仍可作为 fallback。";
+            }
+            finally { _sshBusy = false; }
+        }
+
+        private static string ExistingAgentRecoveryScript()
+        {
+            return @"set -eu
+state=''
+for candidate in ""${XDG_STATE_HOME:-$HOME/.local/state}/devspace-agent"" ""$HOME/.local/state/devspace-agent"" ""/var/lib/devspace-agent""; do
+  if [ -f ""$candidate/bin/devspace-agent.py"" ] && [ -f ""$candidate/config.json"" ]; then state=""$candidate""; break; fi
+done
+if [ -z ""$state"" ]; then echo DEVSPACE_AGENT_NOT_INSTALLED; exit 42; fi
+if [ -f ""$state/agent.pid"" ]; then
+  pid=$(cat ""$state/agent.pid"" 2>/dev/null || true)
+  if [ -n ""$pid"" ] && kill -0 ""$pid"" 2>/dev/null; then echo DEVSPACE_AGENT_ALREADY_RUNNING; exit 0; fi
+fi
+if command -v systemctl >/dev/null 2>&1 && [ ""$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')"" = systemd ]; then
+  if systemctl --user cat devspace-agent.service >/dev/null 2>&1; then
+    systemctl --user restart devspace-agent.service && echo DEVSPACE_AGENT_STARTED && exit 0
+  fi
+  if sudo -n systemctl restart devspace-agent.service >/dev/null 2>&1; then echo DEVSPACE_AGENT_STARTED && exit 0; fi
+fi
+python_bin=$(command -v python3 || command -v python || true)
+if [ -z ""$python_bin"" ]; then echo DEVSPACE_AGENT_NO_PYTHON >&2; exit 43; fi
+nohup ""$python_bin"" ""$state/bin/devspace-agent.py"" --config ""$state/config.json"" run >>""$state/agent.log"" 2>&1 </dev/null &
+pid=$!
+printf '%s\n' ""$pid"" > ""$state/agent.pid""
+sleep 1
+if ! kill -0 ""$pid"" 2>/dev/null; then tail -n 20 ""$state/agent.log"" >&2 || true; exit 44; fi
+echo DEVSPACE_AGENT_STARTED
+";
+        }
+
+        internal static async Task AutoRecoverConfiguredAgentsAsync(ManagerClient manager)
+        {
+            StoredSshProfiles profiles = LoadSshProfiles(manager);
+            if (profiles.Profiles == null || profiles.Profiles.Count == 0) return;
+            Dictionary<string, object> listed;
+            try { listed = await manager.RunJsonAsync("remote-agent-list"); }
+            catch { return; }
+            foreach (Dictionary<string, object> agent in Dictionaries(listed, "agents"))
+            {
+                if (!string.Equals(ValueText(agent, "status"), "offline", StringComparison.OrdinalIgnoreCase)) continue;
+                string id = ValueText(agent, "id");
+                string name = ValueText(agent, "name");
+                StoredSshProfile profile = profiles.Profiles.FirstOrDefault(value =>
+                    value.AutoRecover
+                    && ((!string.IsNullOrWhiteSpace(id) && string.Equals(value.Key, id, StringComparison.Ordinal))
+                        || (!string.IsNullOrWhiteSpace(name) && string.Equals(value.Key, "name:" + name, StringComparison.OrdinalIgnoreCase))));
+                if (profile == null || string.IsNullOrWhiteSpace(profile.Host) || string.IsNullOrWhiteSpace(profile.UserName) || profile.Port < 1 || profile.Port > 65535) continue;
+
+                string throttleKey = string.IsNullOrWhiteSpace(id) ? profile.Key : id;
+                lock (BackgroundSshAttempts)
+                {
+                    DateTime last;
+                    if (BackgroundSshAttempts.TryGetValue(throttleKey, out last) && DateTime.UtcNow - last < TimeSpan.FromMinutes(2)) continue;
+                    BackgroundSshAttempts[throttleKey] = DateTime.UtcNow;
+                }
+                string password;
+                try { password = UnprotectSshPassword(profile.ProtectedPassword); }
+                catch { continue; }
+                try
+                {
+                    await RunSshScriptWithProfileAsync(
+                        manager,
+                        profile.Host,
+                        profile.Port,
+                        profile.UserName,
+                        password,
+                        ExistingAgentRecoveryScript(),
+                        30000);
+                }
+                catch
+                {
+                    // Background rescue is deliberately quiet. The explicit
+                    // Remote Agent page exposes detailed SSH diagnostics and
+                    // keeps the manual enrollment command as the final fallback.
+                }
+            }
+        }
+
+        private async Task<bool> WaitForAgentOnlineAsync(string previousId, string name)
+        {
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                await Task.Delay(attempt == 0 ? 800 : 1600);
+                Dictionary<string, object> result = await _manager.RunJsonAsync("remote-agent-list");
+                foreach (Dictionary<string, object> agent in Dictionaries(result, "agents"))
+                {
+                    bool same = (!string.IsNullOrWhiteSpace(previousId) && string.Equals(ValueText(agent, "id"), previousId, StringComparison.Ordinal))
+                        || (!string.IsNullOrWhiteSpace(name) && string.Equals(ValueText(agent, "name"), name, StringComparison.OrdinalIgnoreCase));
+                    if (same && string.Equals(ValueText(agent, "status"), "online", StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+            return false;
+        }
+
+        private async Task RecoverAgentViaSshAsync(bool silent)
+        {
+            if (_sshBusy) return;
+            _sshBusy = true;
+            try
+            {
+                SaveCurrentSshProfile(false);
+                string agentId = ValueText(_selectedAgent, "id");
+                string agentName = ValueText(_selectedAgent, "name");
+                if (string.IsNullOrWhiteSpace(agentName)) agentName = (_name.Text ?? "").Trim();
+                _status.Text = "Agent 离线救援：正在通过 SSH 检查并启动已有 Agent…";
+                SshRunResult recovery = await RunSshScriptAsync(ExistingAgentRecoveryScript(), 30000);
+                if (recovery.ExitCode == 42 || recovery.Output.Contains("DEVSPACE_AGENT_NOT_INSTALLED"))
+                {
+                    string[] selectedRoots = Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+                    string[] roots = selectedRoots.Length > 0
+                        ? selectedRoots
+                        : _roots.Lines.Select(value => value.Trim()).Where(value => value.Length > 0).ToArray();
+                    if (string.IsNullOrWhiteSpace(agentName) || roots.Length == 0)
+                        throw new InvalidOperationException("服务器尚未安装 Agent；请填写服务器显示名和至少一个 allowedRoot 后重试。 ");
+                    Dictionary<string, object> enrollment = await _manager.RunJsonAsync("remote-agent-create-enrollment", new
+                    {
+                        name = agentName,
+                        allowedRoots = roots,
+                        ttlMinutes = 15,
+                    });
+                    string command = ValueText(enrollment, "installCommand");
+                    if (string.IsNullOrWhiteSpace(command))
+                        throw new InvalidOperationException("已生成 enrollment，但当前 publicBaseUrl 无法生成安装命令。请使用手动 fallback。 ");
+                    _installCommand.Text = command;
+                    _status.Text = "服务器未安装 Agent；正在通过 SSH 执行一次性安装命令…";
+                    SshRunResult install = await RunSshScriptAsync("set -e\n" + command + "\n", 120000);
+                    if (install.ExitCode != 0)
+                        throw new InvalidOperationException(string.IsNullOrWhiteSpace(install.Error) ? "远程 Agent 安装失败。" : install.Error);
+                }
+                else if (recovery.ExitCode != 0)
+                {
+                    throw new InvalidOperationException(string.IsNullOrWhiteSpace(recovery.Error) ? "已有 Agent 无法通过 SSH 启动。" : recovery.Error);
+                }
+
+                bool online = await WaitForAgentOnlineAsync(agentId, agentName);
+                await LoadAgentsAsync();
+                if (!online)
+                    throw new InvalidOperationException("SSH 操作已完成，但 Agent 在等待窗口内仍未恢复 heartbeat。请查看服务器 agent.log 或使用手动安装命令。 ");
+                _status.Text = "Remote Workspace Agent 已通过 SSH 恢复并重新上线。";
+            }
+            catch (Exception ex)
+            {
+                _status.Text = "SSH 自动救援失败；手动安装命令仍可用。";
+                if (!silent) MessageBox.Show(this, ex.Message, "Remote Agent SSH 救援失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally { _sshBusy = false; }
+        }
+
+        private async Task AutoRecoverSelectedAgentAsync()
+        {
+            if (_sshBusy || !_sshAutoRecover.Checked) return;
+            if (!string.Equals(ValueText(_selectedAgent, "status"), "offline", StringComparison.OrdinalIgnoreCase)) return;
+            if (string.IsNullOrWhiteSpace(_sshHost.Text) || string.IsNullOrWhiteSpace(_sshUser.Text)) return;
+            await RecoverAgentViaSshAsync(true);
+        }
+
         private async Task RevokeSelectedAsync()
         {
             Dictionary<string, object> agent = SelectedAgent();
@@ -2533,6 +3196,10 @@ namespace DevSpacePortable.NativeUI
             selected.Focus();
             string name = ValueText(_selectedAgent, "name");
             string id = ValueText(_selectedAgent, "id");
+            if (!string.IsNullOrWhiteSpace(name)) _name.Text = name;
+            string[] selectedRoots = Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+            if (selectedRoots.Length > 0) _roots.Lines = selectedRoots;
+            LoadSelectedSshProfile();
             _status.Text = string.IsNullOrWhiteSpace(id) ? "已选择 Linux Agent。" : "已选择 " + name + "（" + id + "）。";
         }
 
@@ -3303,6 +3970,7 @@ namespace DevSpacePortable.NativeUI
         private readonly System.Windows.Forms.Timer _noticeTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _computerUseTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _computerUseIndicatorTimer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer _remoteAgentRecoveryTimer = new System.Windows.Forms.Timer();
         private readonly ComputerUseIndicator _computerUseIndicator = new ComputerUseIndicator();
         private readonly JavaScriptSerializer _computerUseJson = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         private readonly NotifyIcon _notifyIcon = new NotifyIcon();
@@ -3400,6 +4068,8 @@ namespace DevSpacePortable.NativeUI
             _computerUseTimer.Tick += async delegate { await ProcessComputerUseQueueAsync(); };
             _computerUseIndicatorTimer.Interval = 100;
             _computerUseIndicatorTimer.Tick += delegate { _computerUseIndicator.Tick(); };
+            _remoteAgentRecoveryTimer.Interval = 60000;
+            _remoteAgentRecoveryTimer.Tick += async delegate { await RemoteAgentsDialog.AutoRecoverConfiguredAgentsAsync(_manager); };
             _inlineNotice.Dismissed += delegate { CollapseNoticeRow(); };
         }
 
@@ -3626,7 +4296,7 @@ namespace DevSpacePortable.NativeUI
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.39 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.40 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -4287,6 +4957,7 @@ namespace DevSpacePortable.NativeUI
                 _statusTimer.Start();
                 _computerUseTimer.Start();
                 _computerUseIndicatorTimer.Start();
+                _remoteAgentRecoveryTimer.Start();
                 await LoadConfigurationAsync();
                 await LoadPluginsAsync();
                 await LoadSessionsAsync();
@@ -4409,7 +5080,7 @@ namespace DevSpacePortable.NativeUI
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.39") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.40") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -5749,7 +6420,7 @@ namespace DevSpacePortable.NativeUI
                 _allowUiExit = true;
             }
             _closing = true;
-            _heartbeatTimer.Stop(); _statusTimer.Stop(); _noticeTimer.Stop(); _computerUseTimer.Stop(); _computerUseIndicatorTimer.Stop();
+            _heartbeatTimer.Stop(); _statusTimer.Stop(); _noticeTimer.Stop(); _computerUseTimer.Stop(); _computerUseIndicatorTimer.Stop(); _remoteAgentRecoveryTimer.Stop();
             _computerUseIndicator.Dispose();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();

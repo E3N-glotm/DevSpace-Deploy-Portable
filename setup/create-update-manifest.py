@@ -20,12 +20,77 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def merge_incremental_graph(
+    repository: str,
+    current_assets: list[dict[str, object]],
+    previous_manifest: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    merged: dict[tuple[str, str, str], dict[str, object]] = {}
+
+    def add(item: object) -> None:
+        if not isinstance(item, dict):
+            return
+        if str(item.get("format", "")) != "file-delta-v1":
+            return
+        from_version = str(item.get("fromVersion", ""))
+        to_version = str(item.get("toVersion", ""))
+        name = str(item.get("name", ""))
+        if not re.fullmatch(r"\d+\.\d+\.\d+", from_version):
+            return
+        if not re.fullmatch(r"\d+\.\d+\.\d+", to_version):
+            return
+        expected_name = f"DevSpacePortable-Update-{from_version}-to-{to_version}.zip"
+        if name != expected_name:
+            return
+        try:
+            size = int(item.get("size", 0))
+        except (TypeError, ValueError):
+            return
+        sha256 = str(item.get("sha256", "")).lower()
+        download_url = str(item.get("downloadUrl", ""))
+        expected_url = f"https://github.com/{repository}/releases/download/v{to_version}/{name}"
+        if size <= 0 or not re.fullmatch(r"[0-9a-f]{64}", sha256) or download_url != expected_url:
+            return
+        merged[(from_version, to_version, name)] = {
+            "format": "file-delta-v1",
+            "fromVersion": from_version,
+            "toVersion": to_version,
+            "name": name,
+            "size": size,
+            "sha256": sha256,
+            "downloadUrl": download_url,
+        }
+
+    if previous_manifest:
+        if str(previous_manifest.get("repository", "")) != repository:
+            raise SystemExit("Carry-forward update manifest repository does not match the configured repository.")
+        for item in previous_manifest.get("incrementalGraphAssets", []):
+            add(item)
+        for item in previous_manifest.get("incrementalAssets", []):
+            add(item)
+    for item in current_assets:
+        add(item)
+
+    def version_key(value: str) -> tuple[int, int, int]:
+        return tuple(int(part) for part in value.split("."))  # type: ignore[return-value]
+
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            version_key(str(item["toVersion"])),
+            version_key(str(item["fromVersion"])),
+            str(item["name"]),
+        ),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository", default="E3N-glotm/DevSpace-Deploy-Portable")
     parser.add_argument("--zip")
     parser.add_argument("--incremental", action="append", default=[])
     parser.add_argument("--rescue", action="append", default=[])
+    parser.add_argument("--carry-forward-manifest")
     parser.add_argument("--channel", default="stable", choices=("stable", "beta", "nightly"))
     args = parser.parse_args()
 
@@ -88,6 +153,13 @@ def main() -> int:
                 "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{rescue.name}",
             }
         )
+    previous_manifest = None
+    if args.carry_forward_manifest:
+        carry_forward = Path(args.carry_forward_manifest).resolve()
+        if not carry_forward.is_file():
+            raise SystemExit(f"Carry-forward update manifest not found: {carry_forward}")
+        previous_manifest = json.loads(carry_forward.read_text(encoding="utf-8-sig"))
+    incremental_graph_assets = merge_incremental_graph(args.repository, incremental_assets, previous_manifest)
     manifest = {
         "schemaVersion": 2,
         "channel": args.channel,
@@ -109,6 +181,7 @@ def main() -> int:
             "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{asset_name}",
         },
         "incrementalAssets": incremental_assets,
+        "incrementalGraphAssets": incremental_graph_assets,
         "rescueAssets": rescue_assets,
         "releaseNotes": f"docs/releases/HOTFIX-{version}.md",
     }

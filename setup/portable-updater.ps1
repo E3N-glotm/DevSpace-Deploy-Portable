@@ -869,15 +869,192 @@ function Get-IncrementalCandidate([object]$Latest) {
     return [pscustomobject]@{ manifest = $candidate; asset = $asset }
 }
 
+function Get-PublishedIncrementalEdges([object]$Latest) {
+    $manifest = $Latest.manifest
+    $entries = @($manifest.incrementalGraphAssets)
+
+    # When the Release API already supplied trusted server-side digests we do
+    # not fetch update-manifest.json during an ordinary direct update. A jump
+    # update needs the tiny historical edge graph, so fetch the signed manifest
+    # lazily only in that case. If this request is unavailable, the historical
+    # Release API graph below remains a bounded fallback.
+    if ($entries.Count -eq 0 -and $Latest.manifestAsset) {
+        try {
+            $published = Invoke-GitHubJson `
+                -Uri ([string]$Latest.manifestAsset.browser_download_url) `
+                -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } `
+                -TimeoutSec 60 `
+                -Description "GitHub published incremental graph manifest request"
+            if ([string]$published.version -ne [string]$Latest.version) { throw "Published incremental graph manifest version mismatch." }
+            if ([string]$published.repository -ne $Repository) { throw "Published incremental graph manifest repository mismatch." }
+            $entries = @($published.incrementalGraphAssets)
+            Write-UpdateLog "Loaded $($entries.Count) historical incremental edges from the latest published update manifest."
+        } catch {
+            Write-UpdateLog "Published incremental graph manifest is unavailable: $($_.Exception.Message)"
+            $entries = @()
+        }
+    }
+
+    $edges = New-Object System.Collections.ArrayList
+    foreach ($candidate in $entries) {
+        if ([string]$candidate.format -ne "file-delta-v1") { continue }
+        $fromVersion = ([string]$candidate.fromVersion).Trim()
+        $toVersion = ([string]$candidate.toVersion).Trim()
+        if ($fromVersion -notmatch '^\d+\.\d+\.\d+$' -or $toVersion -notmatch '^\d+\.\d+\.\d+$') { continue }
+        if ((Compare-Version $fromVersion $toVersion) -ge 0) { continue }
+        if ((Compare-Version $fromVersion $CurrentVersion) -lt 0) { continue }
+        if ((Compare-Version $toVersion $Latest.version) -gt 0) { continue }
+        $name = [string]$candidate.name
+        $expectedName = "DevSpacePortable-Update-$fromVersion-to-$toVersion.zip"
+        if ($name -ne $expectedName) { continue }
+        $size = [int64]$candidate.size
+        $sha256 = ([string]$candidate.sha256).Trim().ToLowerInvariant()
+        $downloadUrl = ([string]$candidate.downloadUrl).Trim()
+        $expectedUrl = "https://github.com/$Repository/releases/download/v$toVersion/$expectedName"
+        if ($size -le 0 -or $sha256 -notmatch '^[0-9a-f]{64}$' -or $downloadUrl -ne $expectedUrl) { continue }
+        $manifestEdge = [pscustomobject]@{
+            format = "file-delta-v1"
+            fromVersion = $fromVersion
+            toVersion = $toVersion
+            name = $name
+            size = $size
+            sha256 = $sha256
+            downloadUrl = $downloadUrl
+        }
+        $asset = [pscustomobject]@{
+            name = $name
+            size = $size
+            digest = "sha256:$sha256"
+            state = "uploaded"
+            browser_download_url = $downloadUrl
+        }
+        [void]$edges.Add([pscustomobject]@{ manifest = $manifestEdge; asset = $asset })
+    }
+    return @($edges.ToArray())
+}
+
+function Get-StableIncrementalEdges([object]$Latest) {
+    $headers = @{
+        Accept = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+        "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion"
+    }
+    $edges = New-Object System.Collections.ArrayList
+    for ($pageNumber = 1; $pageNumber -le 10; $pageNumber++) {
+        try {
+            $page = Invoke-GitHubJson `
+                -Uri "https://api.github.com/repos/$Repository/releases?per_page=100&page=$pageNumber" `
+                -Headers $headers `
+                -TimeoutSec 60 `
+                -Description "GitHub incremental release graph request page $pageNumber"
+        } catch {
+            Write-UpdateLog "Incremental release graph lookup failed on page ${pageNumber}: $($_.Exception.Message)"
+            return @()
+        }
+        $releases = @($page)
+        foreach ($release in $releases) {
+            if ([bool]$release.draft -or [bool]$release.prerelease) { continue }
+            $releaseVersion = ([string]$release.tag_name).TrimStart('v')
+            if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { continue }
+            if ((Compare-Version $releaseVersion $CurrentVersion) -le 0) { continue }
+            if ((Compare-Version $releaseVersion $Latest.version) -gt 0) { continue }
+            foreach ($asset in @($release.assets)) {
+                $name = [string]$asset.name
+                if ($name -notmatch '^DevSpacePortable-Update-(\d+\.\d+\.\d+)-to-(\d+\.\d+\.\d+)\.zip$') { continue }
+                $fromVersion = $Matches[1]
+                $toVersion = $Matches[2]
+                if ($toVersion -ne $releaseVersion) { continue }
+                if ((Compare-Version $fromVersion $toVersion) -ge 0) { continue }
+                if ((Compare-Version $fromVersion $CurrentVersion) -lt 0) { continue }
+                $sha256 = Get-GitHubAssetSha256 $asset
+                if (-not $sha256 -or [int64]$asset.size -le 0 -or [string]$asset.state -ne "uploaded") { continue }
+                [void]$edges.Add([pscustomobject]@{
+                    manifest = [pscustomobject]@{
+                        format = "file-delta-v1"
+                        fromVersion = $fromVersion
+                        toVersion = $toVersion
+                        name = $name
+                        size = [int64]$asset.size
+                        sha256 = $sha256
+                        downloadUrl = [string]$asset.browser_download_url
+                    }
+                    asset = $asset
+                })
+            }
+        }
+        if ($releases.Count -lt 100) { break }
+    }
+    return @($edges.ToArray())
+}
+
+function Resolve-IncrementalGraphPlan([object[]]$Edges, [string]$LatestVersion) {
+    if (-not $Edges -or $Edges.Count -eq 0) { return $null }
+    $distance = @{}
+    $paths = @{}
+    $distance[$CurrentVersion] = [int64]0
+    $paths[$CurrentVersion] = @()
+
+    # Every accepted edge moves forward in semantic-version order. Repeated
+    # relaxation therefore finds a byte-minimal path without requiring every
+    # intermediate version to be present or contiguous.
+    for ($pass = 0; $pass -le $Edges.Count; $pass++) {
+        $changed = $false
+        foreach ($edge in $Edges) {
+            $fromVersion = [string]$edge.manifest.fromVersion
+            $toVersion = [string]$edge.manifest.toVersion
+            if (-not $distance.ContainsKey($fromVersion)) { continue }
+            $candidateBytes = [int64]$distance[$fromVersion] + [int64]$edge.manifest.size
+            if (-not $distance.ContainsKey($toVersion) -or $candidateBytes -lt [int64]$distance[$toVersion]) {
+                $distance[$toVersion] = $candidateBytes
+                $paths[$toVersion] = @($paths[$fromVersion]) + @($edge)
+                $changed = $true
+            }
+        }
+        if (-not $changed) { break }
+    }
+    if (-not $paths.ContainsKey($LatestVersion)) { return $null }
+    $steps = @($paths[$LatestVersion])
+    if ($steps.Count -eq 0) { return $null }
+    return [pscustomobject]@{
+        mode = if ($steps.Count -gt 1) { "incremental-chain" } else { "incremental" }
+        steps = $steps
+        totalBytes = [int64]$distance[$LatestVersion]
+    }
+}
+
+function Get-IncrementalUpdatePlan([object]$Latest) {
+    $direct = Get-IncrementalCandidate $Latest
+    if ($direct) {
+        return [pscustomobject]@{
+            mode = "incremental"
+            steps = @($direct)
+            totalBytes = [int64]$direct.manifest.size
+        }
+    }
+
+    $publishedEdges = @(Get-PublishedIncrementalEdges $Latest)
+    $publishedPlan = Resolve-IncrementalGraphPlan $publishedEdges ([string]$Latest.version)
+    if ($publishedPlan) { return $publishedPlan }
+
+    # Older manifests or a temporarily unavailable manifest CDN can still be
+    # recovered from GitHub's stable Release history. This path is deliberately
+    # secondary so future clients do not have to enumerate every historical
+    # Release on each jump update.
+    $releaseEdges = @(Get-StableIncrementalEdges $Latest)
+    return Resolve-IncrementalGraphPlan $releaseEdges ([string]$Latest.version)
+}
+
 function Get-UpdateStatus {
     $latest = Get-LatestRelease
     $comparison = Compare-Version $latest.version $CurrentVersion
-    $incremental = $null
+    $incrementalPlan = $null
     $incrementalFallbackReason = ""
     if ($comparison -gt 0) {
-        try { $incremental = Get-IncrementalCandidate $latest }
+        try { $incrementalPlan = Get-IncrementalUpdatePlan $latest }
         catch { $incrementalFallbackReason = $_.Exception.Message }
     }
+    $incrementalSteps = if ($incrementalPlan) { @($incrementalPlan.steps) } else { @() }
+    $firstIncremental = if ($incrementalSteps.Count -gt 0) { $incrementalSteps[0] } else { $null }
     return [pscustomobject]@{
         currentVersion = $CurrentVersion
         latestVersion = $latest.version
@@ -890,10 +1067,12 @@ function Get-UpdateStatus {
         assetSize = [int64]$latest.manifest.asset.size
         assetSha256 = ([string]$latest.manifest.asset.sha256).ToLowerInvariant()
         updateStrategy = [string]$latest.manifest.updateStrategy
-        preferredMode = if ($incremental) { "incremental" } else { "full" }
-        incrementalAssetName = if ($incremental) { [string]$incremental.manifest.name } else { "" }
-        incrementalAssetSize = if ($incremental) { [int64]$incremental.manifest.size } else { 0 }
-        incrementalAssetSha256 = if ($incremental) { ([string]$incremental.manifest.sha256).ToLowerInvariant() } else { "" }
+        preferredMode = if ($incrementalPlan) { [string]$incrementalPlan.mode } else { "full" }
+        incrementalAssetName = if ($firstIncremental) { [string]$firstIncremental.manifest.name } else { "" }
+        incrementalAssetSize = if ($incrementalPlan) { [int64]$incrementalPlan.totalBytes } else { 0 }
+        incrementalAssetSha256 = if ($incrementalSteps.Count -eq 1) { ([string]$firstIncremental.manifest.sha256).ToLowerInvariant() } else { "" }
+        incrementalChainLength = $incrementalSteps.Count
+        incrementalChain = @($incrementalSteps | ForEach-Object { [string]$_.manifest.name })
         incrementalFallbackReason = $incrementalFallbackReason
         fullAssetSize = [int64]$latest.manifest.asset.size
         metadataSource = [string]$latest.manifestSource
@@ -1107,6 +1286,140 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
     }
 }
 
+function Stage-IncrementalChainUpdate([object]$Latest, [object]$Plan) {
+    $steps = @($Plan.steps)
+    if ($steps.Count -lt 2) { throw "Incremental chain requires at least two steps." }
+    New-Item -ItemType Directory -Force -Path $UpdateRoot | Out-Null
+    $stage = Join-Path $UpdateRoot ("{0}-chain-{1}" -f $Latest.version, [guid]::NewGuid().ToString("N"))
+    $stepsRoot = Join-Path $stage "steps"
+    New-Item -ItemType Directory -Force -Path $stage,$stepsRoot | Out-Null
+    $stagedSteps = New-Object System.Collections.ArrayList
+    $expectedFrom = $CurrentVersion
+    $receivedTotal = [int64]0
+    try {
+        for ($index = 0; $index -lt $steps.Count; $index++) {
+            $step = $steps[$index]
+            $manifest = $step.manifest
+            $asset = $step.asset
+            $fromVersion = [string]$manifest.fromVersion
+            $toVersion = [string]$manifest.toVersion
+            if ($fromVersion -ne $expectedFrom) {
+                throw "Incremental chain is discontinuous: expected $expectedFrom, received $fromVersion -> $toVersion."
+            }
+            $stepDirectory = Join-Path $stepsRoot ("{0:D3}-{1}-to-{2}" -f ($index + 1), $fromVersion, $toVersion)
+            $payload = Join-Path $stepDirectory "payload"
+            $zip = Join-Path $stepDirectory ([string]$manifest.name)
+            New-Item -ItemType Directory -Force -Path $stepDirectory,$payload | Out-Null
+            Write-UpdateLog "Downloading incremental chain step $($index + 1)/$($steps.Count): $fromVersion -> $toVersion."
+            Write-UpdateProgress -Phase "downloading" -Message "Downloading incremental step $($index + 1)/$($steps.Count): $fromVersion -> $toVersion" -BytesReceived $receivedTotal -BytesTotal ([int64]$Plan.totalBytes)
+            Invoke-GitHubDownload `
+                -Uri ([string]$asset.browser_download_url) `
+                -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } `
+                -OutFile $zip `
+                -TimeoutSec 1800 `
+                -Description "Incremental chain package $($manifest.name)" `
+                -ExpectedBytes ([int64]$manifest.size)
+            $actualSize = (Get-Item -LiteralPath $zip).Length
+            if ($actualSize -ne [int64]$manifest.size) {
+                throw "Downloaded incremental chain ZIP size mismatch for $($manifest.name)."
+            }
+            $actualHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne ([string]$manifest.sha256).ToLowerInvariant()) {
+                throw "Downloaded incremental chain ZIP SHA-256 mismatch for $($manifest.name)."
+            }
+            $receivedTotal += $actualSize
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+            try {
+                foreach ($entry in $archive.Entries) {
+                    $name = ([string]$entry.FullName).Replace('\','/')
+                    if (-not $name.StartsWith("DevSpacePortableDelta/", [StringComparison]::Ordinal)) {
+                        throw "Incremental archive entry is outside DevSpacePortableDelta/: $name"
+                    }
+                    if ($name.StartsWith("/", [StringComparison]::Ordinal) -or $name -match '(^|/)\.\.(/|$)' -or $name -match '^[A-Za-z]:') {
+                        throw "Unsafe incremental archive entry: $name"
+                    }
+                }
+            } finally {
+                $archive.Dispose()
+            }
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $payload)
+            $deltaRoot = Join-Path $payload "DevSpacePortableDelta"
+            $deltaManifestFile = Join-Path $deltaRoot "delta-manifest.json"
+            if (-not (Test-Path $deltaManifestFile)) { throw "Incremental chain package has no delta-manifest.json." }
+            $delta = Get-Content -LiteralPath $deltaManifestFile -Raw | ConvertFrom-Json
+            if ([string]$delta.format -ne "file-delta-v1") { throw "Unsupported incremental chain format." }
+            if ([string]$delta.fromVersion -ne $fromVersion -or [string]$delta.toVersion -ne $toVersion) {
+                throw "Incremental chain package metadata does not match the selected Release edge."
+            }
+            $filesRoot = Join-Path $deltaRoot "files"
+            $changedPaths = New-Object System.Collections.Generic.List[string]
+            foreach ($entry in @($delta.changedFiles)) {
+                $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
+                $source = Join-Path $filesRoot ($relative.Replace('/','\'))
+                if (-not (Test-Path $source -PathType Leaf)) { throw "Incremental chain package is missing changed file: $relative" }
+                if ((Get-Item -LiteralPath $source).Length -ne [int64]$entry.size) { throw "Incremental chain file size mismatch: $relative" }
+                $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($sourceHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Incremental chain file SHA-256 mismatch: $relative" }
+                [void]$changedPaths.Add($relative)
+            }
+            $deletedPaths = New-Object System.Collections.Generic.List[string]
+            foreach ($entry in @($delta.deletedFiles)) {
+                [void]$deletedPaths.Add((ConvertTo-SafeRelativePath ([string]$entry.path)))
+            }
+            [void]$stagedSteps.Add([pscustomobject]@{
+                fromVersion = $fromVersion
+                toVersion = $toVersion
+                zipName = [string]$manifest.name
+                zipSize = $actualSize
+                zipSha256 = $actualHash
+                payloadRoot = $filesRoot
+                deltaManifestPath = $deltaManifestFile
+                changedFiles = @($changedPaths)
+                deletedFiles = @($deletedPaths)
+            })
+            $expectedFrom = $toVersion
+        }
+        if ($expectedFrom -ne [string]$Latest.version) {
+            throw "Incremental chain ends at $expectedFrom instead of $($Latest.version)."
+        }
+        Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $stage "portable-updater.ps1") -Force
+        $stageInfo = [ordered]@{
+            formatVersion = 2
+            currentVersion = $CurrentVersion
+            targetVersion = $Latest.version
+            repository = $Repository
+            updateMode = "incremental-chain"
+            stagedAt = (Get-Date).ToUniversalTime().ToString("o")
+            zipSize = $receivedTotal
+            chainLength = $stagedSteps.Count
+            steps = @($stagedSteps)
+        }
+        $stageInfo | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $stage "stage-info.json") -Encoding UTF8
+        Write-UpdateLog "Incremental chain $CurrentVersion -> $($Latest.version) staged successfully with $($stagedSteps.Count) steps."
+        Write-UpdateProgress -Phase "staged" -Message "Incremental chain downloaded, verified, and staged" -BytesReceived $receivedTotal -BytesTotal ([int64]$Plan.totalBytes)
+        return [pscustomobject]@{
+            currentVersion = $CurrentVersion
+            latestVersion = $Latest.version
+            updateAvailable = $true
+            staged = $true
+            updateMode = "incremental-chain"
+            stagingPath = $stage
+            assetSize = $receivedTotal
+            chainLength = $stagedSteps.Count
+            chain = @($stagedSteps | ForEach-Object { "$($_.fromVersion)->$($_.toVersion)" })
+            fullFallbackSize = [int64]$Latest.manifest.asset.size
+            releaseUrl = [string]$Latest.release.html_url
+        }
+    } catch {
+        Write-UpdateLog "Incremental chain staging failed: $($_.Exception.Message)"
+        Write-UpdateProgress -Phase "fallback" -Message "Incremental chain failed; preparing full-package fallback: $($_.Exception.Message)"
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 function Stage-Update {
     Write-UpdateProgress -Phase "metadata" -Message "Reading GitHub Release metadata and update manifest"
     $latest = Get-LatestRelease
@@ -1124,16 +1437,20 @@ function Stage-Update {
         Write-UpdateLog $reason
         return Stage-FullUpdate $latest $reason
     }
-    $incremental = $null
-    try { $incremental = Get-IncrementalCandidate $latest }
+    $plan = $null
+    try { $plan = Get-IncrementalUpdatePlan $latest }
     catch {
         $reason = $_.Exception.Message
         Write-UpdateLog "Incremental release metadata cannot be used; automatically falling back to the full package: $reason"
         return Stage-FullUpdate $latest $reason
     }
-    if ($incremental) {
+    if ($plan) {
         try {
-            return Stage-IncrementalUpdate $latest $incremental
+            $steps = @($plan.steps)
+            if ($steps.Count -eq 1) {
+                return Stage-IncrementalUpdate $latest $steps[0]
+            }
+            return Stage-IncrementalChainUpdate $latest $plan
         } catch {
             $reason = $_.Exception.Message
             Write-UpdateLog "Incremental update cannot be used; automatically falling back to the full package: $reason"
@@ -1207,13 +1524,17 @@ function Apply-StagedUpdate {
     $targetVersion = [string]$stageInfo.targetVersion
     Assert-Version $targetVersion "Target version"
     $updateMode = if ([string]$stageInfo.updateMode) { [string]$stageInfo.updateMode } else { "full" }
-    if (@("full", "incremental") -notcontains $updateMode) { throw "Unsupported staged update mode: $updateMode" }
-    $payloadRoot = [IO.Path]::GetFullPath([string]$stageInfo.payloadRoot).TrimEnd('\')
-    if (-not $payloadRoot.StartsWith(($stage + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw "Staged payload path is invalid." }
+    if (@("full", "incremental", "incremental-chain") -notcontains $updateMode) { throw "Unsupported staged update mode: $updateMode" }
+    $payloadRoot = ""
+    if ($updateMode -ne "incremental-chain") {
+        $payloadRoot = [IO.Path]::GetFullPath([string]$stageInfo.payloadRoot).TrimEnd('\')
+        if (-not $payloadRoot.StartsWith(($stage + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw "Staged payload path is invalid." }
+    }
     $deltaManifest = $null
+    $deltaSteps = New-Object System.Collections.ArrayList
     if ($updateMode -eq "full") {
         if (-not (Test-Path (Join-Path $payloadRoot "DevSpace-Portable.exe"))) { throw "Staged Portable executable is missing." }
-    } else {
+    } elseif ($updateMode -eq "incremental") {
         $deltaManifestPath = [IO.Path]::GetFullPath([string]$stageInfo.deltaManifestPath)
         if (-not $deltaManifestPath.StartsWith(($stage + '\'), [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $deltaManifestPath)) {
             throw "Staged incremental manifest path is invalid."
@@ -1221,6 +1542,32 @@ function Apply-StagedUpdate {
         $deltaManifest = Get-Content -LiteralPath $deltaManifestPath -Raw | ConvertFrom-Json
         if ([string]$deltaManifest.fromVersion -ne $CurrentVersion -or [string]$deltaManifest.toVersion -ne $targetVersion) {
             throw "Staged incremental manifest version range is invalid."
+        }
+        [void]$deltaSteps.Add([pscustomobject]@{ manifest = $deltaManifest; payloadRoot = $payloadRoot })
+    } else {
+        $expectedFrom = $CurrentVersion
+        foreach ($step in @($stageInfo.steps)) {
+            $stepPayloadRoot = [IO.Path]::GetFullPath([string]$step.payloadRoot).TrimEnd('\')
+            $stepManifestPath = [IO.Path]::GetFullPath([string]$step.deltaManifestPath)
+            if (-not $stepPayloadRoot.StartsWith(($stage + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Staged incremental-chain payload path is invalid."
+            }
+            if (-not $stepManifestPath.StartsWith(($stage + '\'), [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $stepManifestPath)) {
+                throw "Staged incremental-chain manifest path is invalid."
+            }
+            $stepManifest = Get-Content -LiteralPath $stepManifestPath -Raw | ConvertFrom-Json
+            if ([string]$stepManifest.format -ne "file-delta-v1") { throw "Unsupported staged incremental-chain format." }
+            if ([string]$stepManifest.fromVersion -ne $expectedFrom) {
+                throw "Staged incremental chain is discontinuous at $expectedFrom."
+            }
+            if ([string]$stepManifest.fromVersion -ne [string]$step.fromVersion -or [string]$stepManifest.toVersion -ne [string]$step.toVersion) {
+                throw "Staged incremental-chain step metadata is inconsistent."
+            }
+            [void]$deltaSteps.Add([pscustomobject]@{ manifest = $stepManifest; payloadRoot = $stepPayloadRoot })
+            $expectedFrom = [string]$stepManifest.toVersion
+        }
+        if ($deltaSteps.Count -lt 2 -or $expectedFrom -ne $targetVersion) {
+            throw "Staged incremental chain does not reach $targetVersion."
         }
     }
 
@@ -1265,42 +1612,70 @@ function Apply-StagedUpdate {
     New-Item -ItemType Directory -Force -Path $backup | Out-Null
     $movedOld = New-Object System.Collections.Generic.List[string]
     $movedNew = New-Object System.Collections.Generic.List[string]
+    $backedOriginals = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $installedDuringUpdate = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     try {
         Write-UpdateProgress -Phase "applying" -Message "Applying DevSpace Portable $targetVersion program files"
 
-        if ($updateMode -eq "incremental") {
-            foreach ($entry in @($deltaManifest.changedFiles)) {
-                $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
-                $relativeWindows = $relative.Replace('/','\')
-                $source = Join-Path $payloadRoot $relativeWindows
-                $target = Join-Path $Root $relativeWindows
-                $backupTarget = Join-Path $backup $relativeWindows
-                if (-not (Test-Path $source -PathType Leaf)) { throw "Staged changed file disappeared before apply: $relative" }
-                if (Test-Path $target) {
-                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backupTarget) | Out-Null
-                    Move-Item -LiteralPath $target -Destination $backupTarget -Force
-                    [void]$movedOld.Add($relative)
+        if ($updateMode -eq "incremental" -or $updateMode -eq "incremental-chain") {
+            $stepIndex = 0
+            foreach ($deltaStep in @($deltaSteps)) {
+                $stepIndex++
+                $stepManifest = $deltaStep.manifest
+                $stepPayloadRoot = [string]$deltaStep.payloadRoot
+                Write-UpdateLog "Applying incremental step $stepIndex/$($deltaSteps.Count): $($stepManifest.fromVersion) -> $($stepManifest.toVersion)."
+                foreach ($entry in @($stepManifest.changedFiles)) {
+                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
+                    $relativeWindows = $relative.Replace('/','\')
+                    $source = Join-Path $stepPayloadRoot $relativeWindows
+                    $target = Join-Path $Root $relativeWindows
+                    $backupTarget = Join-Path $backup $relativeWindows
+                    if (-not (Test-Path $source -PathType Leaf)) { throw "Staged changed file disappeared before apply: $relative" }
+                    $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($sourceHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Staged changed file failed SHA-256 revalidation: $relative" }
+                    if (Test-Path $target) {
+                        if ($backedOriginals.Add($relative)) {
+                            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backupTarget) | Out-Null
+                            Move-Item -LiteralPath $target -Destination $backupTarget -Force
+                            [void]$movedOld.Add($relative)
+                        } else {
+                            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+                        }
+                    }
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+                    Move-Item -LiteralPath $source -Destination $target -Force
+                    if ($installedDuringUpdate.Add($relative)) { [void]$movedNew.Add($relative) }
                 }
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-                Move-Item -LiteralPath $source -Destination $target -Force
-                [void]$movedNew.Add($relative)
-            }
-            foreach ($entry in @($deltaManifest.deletedFiles)) {
-                $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
-                $relativeWindows = $relative.Replace('/','\')
-                $target = Join-Path $Root $relativeWindows
-                if (-not (Test-Path $target)) { continue }
-                $backupTarget = Join-Path $backup $relativeWindows
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backupTarget) | Out-Null
-                Move-Item -LiteralPath $target -Destination $backupTarget -Force
-                [void]$movedOld.Add($relative)
-            }
-            foreach ($entry in @($deltaManifest.changedFiles)) {
-                $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
-                $target = Join-Path $Root ($relative.Replace('/','\'))
-                if (-not (Test-Path $target -PathType Leaf)) { throw "Incremental target file is missing after apply: $relative" }
-                $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-                if ($targetHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Incremental target file failed SHA-256 validation: $relative" }
+                foreach ($entry in @($stepManifest.deletedFiles)) {
+                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
+                    $relativeWindows = $relative.Replace('/','\')
+                    $target = Join-Path $Root $relativeWindows
+                    if (-not (Test-Path $target)) { continue }
+                    $expectedBaseHash = ([string]$entry.baseSha256).ToLowerInvariant()
+                    if ($expectedBaseHash -and (Test-Path $target -PathType Leaf)) {
+                        $installedHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+                        if ($installedHash -ne $expectedBaseHash) { throw "Incremental deleted file has local drift during apply: $relative" }
+                    }
+                    $backupTarget = Join-Path $backup $relativeWindows
+                    if ($backedOriginals.Add($relative)) {
+                        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backupTarget) | Out-Null
+                        Move-Item -LiteralPath $target -Destination $backupTarget -Force
+                        [void]$movedOld.Add($relative)
+                    } else {
+                        Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+                    }
+                }
+                foreach ($entry in @($stepManifest.changedFiles)) {
+                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
+                    $target = Join-Path $Root ($relative.Replace('/','\'))
+                    if (-not (Test-Path $target -PathType Leaf)) { throw "Incremental target file is missing after apply: $relative" }
+                    $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($targetHash -ne ([string]$entry.sha256).ToLowerInvariant()) { throw "Incremental target file failed SHA-256 validation: $relative" }
+                }
+                $stepVersionManifest = Get-Content -LiteralPath (Join-Path $Root "VERSION-MANIFEST.json") -Raw | ConvertFrom-Json
+                if ([string]$stepVersionManifest.runtime.devspacePortable -ne [string]$stepManifest.toVersion) {
+                    throw "Incremental step did not produce expected Portable version $($stepManifest.toVersion)."
+                }
             }
         } else {
             $persistent = @("data", "logs", "reports")

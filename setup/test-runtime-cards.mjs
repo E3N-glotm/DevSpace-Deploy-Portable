@@ -4,6 +4,7 @@ import { join, resolve, sep } from "node:path";
 
 import {
   collectWorkspacePreviews,
+  nativeAttachmentContent,
   processToolResponse,
   redactDisplayArgv,
   reviewOperation,
@@ -43,6 +44,21 @@ try {
   );
   if (preview.previews.length !== 1 || preview.artifacts.length !== 2 || preview.imageContent.length !== 1) {
     throw new Error("preview classification failed");
+  }
+
+  const nativeImage = nativeAttachmentContent("ws_test", "preview.png", "image/png", png);
+  if (nativeImage.length !== 1 || nativeImage[0].type !== "image" || nativeImage[0].mimeType !== "image/png") {
+    throw new Error("native image attachment block is invalid");
+  }
+  const pdfBytes = Buffer.from("%PDF-1.4\n");
+  const nativePdf = nativeAttachmentContent("ws_test", "report.pdf", "application/pdf", pdfBytes);
+  if (
+    nativePdf.length !== 1
+    || nativePdf[0].type !== "resource"
+    || nativePdf[0].resource?.mimeType !== "application/pdf"
+    || Buffer.from(nativePdf[0].resource?.blob ?? "", "base64").compare(pdfBytes) !== 0
+  ) {
+    throw new Error("native PDF attachment resource is invalid");
   }
 
   const safeArgv = redactDisplayArgv([
@@ -165,6 +181,8 @@ try {
       previewFiles: preview.previews.length,
       artifacts: preview.artifacts.length,
       imageBlocks: preview.imageContent.length,
+      nativeImageAttachment: true,
+      nativePdfAttachment: true,
       argvRedacted: true,
       runtimeResponseRedacted: true,
       operationTimeline: true,

@@ -17,10 +17,6 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/test-source.ps1 -Ski
 npm audit --omit=dev --prefix app
 python setup/finalize-release.py <version> --hotfix docs/releases/HOTFIX-<version>.md
 python setup/build-release.py
-python setup/create-incremental-update.py --base-zip <previous-full.zip> --target-zip DevSpacePortable-Windows-x64-<version>.zip
-python setup/create-incremental-update.py --base-zip DevSpacePortable-Windows-x64-1.1.33.zip --target-zip DevSpacePortable-Windows-x64-<version>.zip --output DevSpacePortable-Update-1.1.33-to-<version>.zip
-python setup/create-rescue-overlay.py --base-zip DevSpacePortable-Windows-x64-1.1.33.zip --target-zip DevSpacePortable-Windows-x64-<version>.zip --output DevSpacePortable-Rescue-1.1.33-to-<version>.zip
-python setup/create-update-manifest.py --repository E3N-glotm/DevSpace-Deploy-Portable --incremental DevSpacePortable-Update-<previous>-to-<version>.zip --incremental DevSpacePortable-Update-1.1.33-to-<version>.zip --rescue DevSpacePortable-Rescue-1.1.33-to-<version>.zip
 ```
 
 The order above is intentional. `core:pack` may update the local core archive
@@ -53,12 +49,12 @@ even when that plugin is byte-identical to the base release. This keeps every
 official DevSpace ZIP self-contained with the bridge payload while still
 excluding user-persistent `data/`, `logs/`, and `reports/` roots from deltas.
 
-For 1.1.36 and later releases that retain the 1.1.33 recovery contract, the
-release pipeline also builds a direct-extract
-`DevSpacePortable-Rescue-1.1.33-to-<version>.zip`. Rescue overlays contain only
-changed non-persistent target files at installation-root-relative ZIP paths.
-The builder fails if the target requires deleting any old 1.1.33 program file,
-because a plain Explorer extraction cannot express deletions safely.
+Version 1.1.40 is the one-time updater migration checkpoint. Its GitHub
+workflow builds exact deltas from every canonical 1.1.32-1.1.39 full ZIP plus
+the historical 1.1.33 direct-extract rescue overlay. Those generated ZIPs live
+only on the Release. After 1.1.40, ordinary Releases build only the previous ->
+current delta and do not keep expanding the current Release with old-version
+ZIPs.
 
 ## Tag release
 
@@ -74,16 +70,18 @@ from the latest existing stable Release, performs a clean dependency install,
 runs tests, rebuilds the Portable ZIP, and uploads:
 
 - `DevSpacePortable-Windows-x64-<version>.zip`
-- `DevSpacePortable-Update-<previous>-to-<version>.zip`
-- `DevSpacePortable-Update-1.1.33-to-<version>.zip`
-- `DevSpacePortable-Rescue-1.1.33-to-<version>.zip`
+- for `v1.1.40`, eight migration deltas from `1.1.32` through `1.1.39`;
+- after `v1.1.40`, only `DevSpacePortable-Update-<previous>-to-<version>.zip`;
+- the `1.1.33 -> 1.1.40` Rescue overlay only at the migration checkpoint;
 - `release-assets/update-manifest.json`
 - `release-assets/SHA256SUMS-release.txt`
 
-The updater selects incremental assets by an exact `fromVersion` match. If a
-widely deployed older version is not the immediately previous Release and is
-not one of the compatibility bases above, users on that version will correctly
-fall back to the complete ZIP unless an exact delta is backfilled.
+The latest manifest carries `incrementalGraphAssets`, a compact SHA-256/size/
+download-URL graph copied forward from the previous manifest plus the current
+Release edge. This preserves historical routing metadata without copying the
+historical ZIPs. A 1.1.40+ updater first tries that small graph, then falls back
+to bounded stable-Release enumeration if necessary, and finally uses the full
+ZIP if no validated path exists.
 
 Use the `Backfill Incremental Update` workflow for that case. It downloads the
 already-published canonical full ZIPs for both versions on a GitHub runner,
@@ -91,6 +89,21 @@ builds `DevSpacePortable-Update-<from>-to-<to>.zip`, preserves the delta and
 rescue entries already advertised by the target Release manifest, refreshes
 `update-manifest.json` and `SHA256SUMS-release.txt`, and uploads only those
 supplemental updater assets. It never rebuilds or replaces the target full ZIP.
+
+Version 1.1.40 is the migration checkpoint for the long-term updater topology.
+Its Release workflow downloads the canonical 1.1.32 through 1.1.39 full ZIPs on
+the GitHub runner and publishes eight exact `*-to-1.1.40.zip` migration deltas.
+Those generated ZIPs are Release assets only; they are never committed to Git.
+This is required because the installed 1.1.32-1.1.39 updater can only select a
+single exact edge to the current latest Release.
+
+Starting with the Release after 1.1.40, publish only the normal previous-to-
+current incremental ZIP. Pass the previous Release's `update-manifest.json` to
+`create-update-manifest.py --carry-forward-manifest`; the workflow does this
+automatically. The 1.1.40+ updater composes a byte-minimal path to the latest
+version, stages all selected edges before shutdown and applies them in one
+rollback transaction, so neither Git history nor the latest Release accumulates
+an ever-growing matrix of legacy-version ZIPs.
 
 ## First bootstrap Release
 

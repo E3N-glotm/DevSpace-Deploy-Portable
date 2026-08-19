@@ -2,6 +2,19 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.40
+
+- 将 1.1.40 定义为更新协议迁移点：Release workflow 一次性生成 `1.1.32`～`1.1.39` 各自直达 1.1.40 的八个精确增量包，并继续为 1.1.33 提供 direct-overlay Rescue；迁移 ZIP 只发布到 GitHub Release，不进入 Git 历史。
+- 1.1.40+ 更新器新增历史稳定 Release 增量图和最小下载量路径规划。后续每个版本只需保留“上一版 → 当前版”差分，跳版用户由客户端拼成 `incremental-chain`；所有步骤先下载/校验，再一次停服、一次事务应用，任何中间步骤失败都会回滚到原始安装版本并保留完整 ZIP fallback。
+- 最新版 `update-manifest.json` 会继续携带已验证的历史增量图；跳版更新优先使用这个小清单规划路径，清单不可用时才枚举历史 Release，避免常规升级依赖大量 GitHub API 查询。
+- Remote Workspace Agent 页面新增 SSH 主机/IP、端口、用户名、密码、测试连接和“一键恢复 / 安装 Agent”。已有 Agent 优先按原 identity 恢复；确认未安装才创建短期 enrollment。systemd、普通用户 `nohup` 和原手动安装命令继续保留。
+- SSH 密码使用 Windows DPAPI CurrentUser 加密保存，并只通过子进程环境 + `DevSpace-SshAskPass.exe` 交给 OpenSSH；不会写进 SSH 参数、远程命令或 DevSpace 日志。主控制中心支持用户明确启用的后台 SSH 恢复，并对单 Agent 做两分钟限频。
+- 新增 `read_attachment` 原生 MCP 多模态工具；PNG/JPEG/WebP/GIF 返回 `image`，PDF/SVG 返回嵌入式 `resource`。普通 `read` 对这些文件也自动走同一路径，避免为读取图片/PDF调用本地 Codex Runtime、OCR、`pdftotext` 或子模型。
+- 修复原生控制中心圆角输入框只有上半部可点击的问题：公共 `FieldHost` 与 `RemoteInputHost` 现在对整个可见输入区域做 hit forwarding，并将单行编辑控件垂直居中；Remote Agent 两处说明文字也改为不裁切的自适应/滚动布局。
+- 新增真实两段增量事务回归、SSH 救援安全契约、1.1.40 Release 迁移契约和原生图片/PDF内容块测试。Portable Protocol 仍为 `1.5`，顶层 MCP Schema 因 `read_attachment` 新增而变化。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.40.md)
+
 ## 1.1.39
 
 - 新增 Remote Workspace Backend：Windows 继续作为唯一 MCP/OAuth Control Plane，Ubuntu/Linux 通过轻量出站 Agent 登记后可使用 `devspace://<agent-id-or-name>/absolute/linux/path` 直接打开；文件、搜索、patch、命令、PTY、持续进程、file watch、review/rollback 等继续复用现有 workspaceId。

@@ -68,25 +68,43 @@ jobs:
           $metadata = Get-Content -LiteralPath $baseMeta -Raw | ConvertFrom-Json
           $namedBase = Join-Path $env:RUNNER_TEMP ("DevSpacePortable-Windows-x64-{0}.zip" -f $metadata.version)
           Move-Item -LiteralPath $temporaryBase -Destination $namedBase -Force
+          $baseUpdateManifest = Join-Path $env:RUNNER_TEMP ("update-manifest-{0}.json" -f $metadata.version)
+          gh release download ("v{0}" -f $metadata.version) `
+            --repo "${{ github.repository }}" `
+            --pattern "update-manifest.json" `
+            --dir $env:RUNNER_TEMP `
+            --clobber
+          $downloadedManifest = Join-Path $env:RUNNER_TEMP "update-manifest.json"
+          if (Test-Path -LiteralPath $downloadedManifest) {
+            Move-Item -LiteralPath $downloadedManifest -Destination $baseUpdateManifest -Force
+          } else {
+            throw "Missing previous update-manifest.json for $($metadata.version)"
+          }
           "BASE_VERSION=$($metadata.version)" >> $env:GITHUB_ENV
           "BASE_ZIP=$namedBase" >> $env:GITHUB_ENV
+          "BASE_UPDATE_MANIFEST=$baseUpdateManifest" >> $env:GITHUB_ENV
 
-      - name: Download 1.1.33 rescue base
+      - name: Download 1.1.40 migration bases
+        if: ${{ steps.version.outputs.version == '1.1.40' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $legacyName = "DevSpacePortable-Windows-x64-1.1.33.zip"
-          $legacyZip = Join-Path $env:RUNNER_TEMP $legacyName
-          gh release download v1.1.33 `
-            --repo "${{ github.repository }}" `
-            --pattern $legacyName `
-            --dir $env:RUNNER_TEMP `
-            --clobber
-          if (-not (Test-Path -LiteralPath $legacyZip)) {
-            throw "Missing 1.1.33 rescue base: $legacyZip"
+          $migrationDir = Join-Path $env:RUNNER_TEMP "devspace-1.1.40-migration-bases"
+          New-Item -ItemType Directory -Force -Path $migrationDir | Out-Null
+          foreach ($baseVersion in @("1.1.32", "1.1.33", "1.1.34", "1.1.35", "1.1.36", "1.1.37", "1.1.38", "1.1.39")) {
+            $baseName = "DevSpacePortable-Windows-x64-$baseVersion.zip"
+            gh release download "v$baseVersion" `
+              --repo "${{ github.repository }}" `
+              --pattern $baseName `
+              --dir $migrationDir `
+              --clobber
+            $baseZip = Join-Path $migrationDir $baseName
+            if (-not (Test-Path -LiteralPath $baseZip)) {
+              throw "Missing 1.1.40 migration base: $baseZip"
+            }
           }
-          "LEGACY_113_ZIP=$legacyZip" >> $env:GITHUB_ENV
+          "MIGRATION_BASE_DIR=$migrationDir" >> $env:GITHUB_ENV
 
       - name: Verify tag and source version
         shell: pwsh
@@ -119,17 +137,39 @@ jobs:
           python setup/finalize-release.py $env:VERSION --hotfix "docs/releases/HOTFIX-$env:VERSION.md"
           python setup/build-release.py
           $targetZip = Join-Path $PWD "DevSpacePortable-Windows-x64-$env:VERSION.zip"
-          $deltaZip = Join-Path $PWD "DevSpacePortable-Update-$env:BASE_VERSION-to-$env:VERSION.zip"
-          $legacyDeltaZip = Join-Path $PWD "DevSpacePortable-Update-1.1.33-to-$env:VERSION.zip"
-          $rescueZip = Join-Path $PWD "DevSpacePortable-Rescue-1.1.33-to-$env:VERSION.zip"
-          python setup/create-incremental-update.py --base-zip "$env:BASE_ZIP" --target-zip "$targetZip" --output "$deltaZip"
-          python setup/create-incremental-update.py --base-zip "$env:LEGACY_113_ZIP" --target-zip "$targetZip" --output "$legacyDeltaZip"
-          python setup/create-rescue-overlay.py --base-zip "$env:LEGACY_113_ZIP" --target-zip "$targetZip" --output "$rescueZip"
-          python setup/create-update-manifest.py `
-            --repository "${{ github.repository }}" `
-            --incremental "$deltaZip" `
-            --incremental "$legacyDeltaZip" `
-            --rescue "$rescueZip"
+          $incrementalZips = New-Object System.Collections.Generic.List[string]
+          $rescueZip = $null
+
+          if ($env:VERSION -eq "1.1.40") {
+            # 1.1.40 is the migration checkpoint. Old 1.1.32-1.1.39 updaters
+            # only understand one exact fromVersion -> latest edge, so publish
+            # one compatibility delta for each installed version exactly once.
+            foreach ($baseVersion in @("1.1.32", "1.1.33", "1.1.34", "1.1.35", "1.1.36", "1.1.37", "1.1.38", "1.1.39")) {
+              $baseZip = Join-Path $env:MIGRATION_BASE_DIR "DevSpacePortable-Windows-x64-$baseVersion.zip"
+              $deltaZip = Join-Path $PWD "DevSpacePortable-Update-$baseVersion-to-$env:VERSION.zip"
+              python setup/create-incremental-update.py --base-zip "$baseZip" --target-zip "$targetZip" --output "$deltaZip"
+              $incrementalZips.Add($deltaZip)
+            }
+            # Keep the historical 1.1.33 direct-extract rescue path for this
+            # migration Release because that installed updater had a known
+            # apply-path failure mode before 1.1.36 hardened the transaction.
+            $legacy113 = Join-Path $env:MIGRATION_BASE_DIR "DevSpacePortable-Windows-x64-1.1.33.zip"
+            $rescueZip = Join-Path $PWD "DevSpacePortable-Rescue-1.1.33-to-$env:VERSION.zip"
+            python setup/create-rescue-overlay.py --base-zip "$legacy113" --target-zip "$targetZip" --output "$rescueZip"
+          } else {
+            # After the 1.1.40 migration checkpoint, each Release carries only
+            # its previous -> current edge. The 1.1.40+ updater composes these
+            # historical Release edges into one transactional incremental chain.
+            $deltaZip = Join-Path $PWD "DevSpacePortable-Update-$env:BASE_VERSION-to-$env:VERSION.zip"
+            python setup/create-incremental-update.py --base-zip "$env:BASE_ZIP" --target-zip "$targetZip" --output "$deltaZip"
+            $incrementalZips.Add($deltaZip)
+          }
+
+          $manifestArgs = @("--repository", "${{ github.repository }}", "--zip", "$targetZip")
+          foreach ($deltaZip in $incrementalZips) { $manifestArgs += @("--incremental", "$deltaZip") }
+          if ($rescueZip) { $manifestArgs += @("--rescue", "$rescueZip") }
+          if ($env:VERSION -ne "1.1.40") { $manifestArgs += @("--carry-forward-manifest", "$env:BASE_UPDATE_MANIFEST") }
+          python setup/create-update-manifest.py @manifestArgs
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

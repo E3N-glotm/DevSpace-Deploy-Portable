@@ -57,7 +57,19 @@ assert.match(updater, /direct\/TUN/);
 assert.doesNotMatch(updater, /Invoke-WebRequest\s+-Uri\s+\$Uri[\s\S]*?-OutFile\s+\$OutFile/);
 assert.match(updater, /Get-FileHash[^\n]+SHA256/);
 assert.match(updater, /Get-IncrementalCandidate/);
+assert.match(updater, /Get-PublishedIncrementalEdges/);
+assert.match(updater, /Get-StableIncrementalEdges/);
+assert.match(updater, /Resolve-IncrementalGraphPlan/);
+assert.match(updater, /Get-IncrementalUpdatePlan/);
 assert.match(updater, /Stage-IncrementalUpdate/);
+assert.match(updater, /Stage-IncrementalChainUpdate/);
+assert.match(updater, /incremental-chain/);
+assert.match(updater, /incrementalGraphAssets/);
+assert.match(updater, /historical incremental edges from the latest published update manifest/);
+assert.match(updater, /GitHub incremental release graph request page/);
+assert.match(updater, /byte-minimal path/);
+assert.match(updater, /Staged incremental chain is discontinuous/);
+assert.match(updater, /Incremental step did not produce expected Portable version/);
 assert.match(updater, /automatically falling back to the full package/);
 assert.match(updater, /\[switch\]\$ForceFull/);
 assert.match(updater, /Forced full-package fallback after a previous incremental apply failure/);
@@ -91,6 +103,8 @@ assert.match(manager, /Detached updater failed to acknowledge launch/);
 assert.match(updater, /LaunchAckPath/);
 assert.match(updater, /apply-started/);
 assert.match(manifestBuilder, /incrementalAssets/);
+assert.match(manifestBuilder, /incrementalGraphAssets/);
+assert.match(manifestBuilder, /carry-forward-manifest/);
 assert.match(manifestBuilder, /rescueAssets/);
 assert.match(manifestBuilder, /incremental-first-full-fallback/);
 assert.match(deltaBuilder, /file-delta-v1/);
@@ -145,6 +159,8 @@ console.log(JSON.stringify({
   metadataCandidateRefreshRetry: true,
   explicitDirectTunFallback: true,
   incrementalFirst: true,
+  historicalReleaseIncrementalGraph: true,
+  transactionalIncrementalChain: true,
   automaticFullFallback: true,
   forcedFullFallbackAfterApplyFailure: true,
   changedFileFullReplacementDriftTolerance: true,

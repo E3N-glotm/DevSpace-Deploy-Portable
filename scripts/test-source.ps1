@@ -41,6 +41,14 @@ Write-Host "==> setup/test-incremental-update.py"
 & python setup\test-incremental-update.py
 if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-incremental-update.py" }
 
+Write-Host "==> setup/test-incremental-chain.py"
+& python setup\test-incremental-chain.py
+if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-incremental-chain.py" }
+
+Write-Host "==> setup/test-update-manifest-graph.py"
+& python setup\test-update-manifest-graph.py
+if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-update-manifest-graph.py" }
+
 Write-Host "==> setup/test-rescue-overlay.py"
 & python setup\test-rescue-overlay.py
 if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-rescue-overlay.py" }
@@ -57,6 +65,7 @@ $Tests = @(
     "setup/test-standalone-updater.mjs",
     "setup/test-selected-file-diff.mjs",
     "setup/test-online-updater-contract.mjs",
+    "setup/test-release-migration-contract.mjs",
     "setup/test-updater-apply-recovery.mjs",
     "setup/test-update-launch-ack.mjs",
     "setup/test-dashboard-live-status.mjs",
@@ -71,6 +80,7 @@ $Tests = @(
     "setup/test-upstream-workspace-reuse.mjs",
     "setup/test-remote-workspace-backend.mjs",
     "setup/test-linux-agent-contract.mjs",
+    "setup/test-remote-agent-ssh-rescue.mjs",
     "setup/test-session-capabilities.mjs",
     "setup/test-portable-ui-heartbeat.mjs",
     "setup/test-plugin-manager.mjs",
