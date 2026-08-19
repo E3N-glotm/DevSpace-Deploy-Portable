@@ -1418,7 +1418,11 @@ namespace DevSpacePortable.NativeUI
                 {
                     if (label == null || label.Width <= 0 || label.Height <= 0) return false;
                     Size preferred = label.GetPreferredSize(new Size(Math.Max(1, label.ClientSize.Width - label.Padding.Horizontal), 0));
-                    return preferred.Height + label.Padding.Vertical <= label.ClientSize.Height + 1;
+                    // Label.GetPreferredSize already includes the Label.Padding.
+                    // Adding Padding.Vertical a second time made this contract
+                    // font-dependent and could fail on the GitHub runner even
+                    // when the full wrapped text visibly fit inside the row.
+                    return preferred.Height <= label.ClientSize.Height + 1;
                 });
                 report["remoteAgentsStableLayout"] = FindControls<DataGridView>(agents).Count() == 0
                     && FindControls<TextBox>(agents).Count() >= 3
@@ -1439,6 +1443,10 @@ namespace DevSpacePortable.NativeUI
                 report["remoteAgentButtonMinHeight"] = remoteButtonMinHeight;
                 report["remoteAgentButtonsUnclipped"] = remoteButtonsUnclipped;
                 report["remoteAgentHintsUnclipped"] = remoteHintsUnclipped;
+                report["remoteAgentSshHintHeight"] = sshHint == null ? 0 : sshHint.ClientSize.Height;
+                report["remoteAgentSshHintPreferredHeight"] = sshHint == null ? 0 : sshHint.GetPreferredSize(new Size(Math.Max(1, sshHint.ClientSize.Width - sshHint.Padding.Horizontal), 0)).Height;
+                report["remoteAgentPrivilegeHintHeight"] = privilegeHint == null ? 0 : privilegeHint.ClientSize.Height;
+                report["remoteAgentPrivilegeHintPreferredHeight"] = privilegeHint == null ? 0 : privilegeHint.GetPreferredSize(new Size(Math.Max(1, privilegeHint.ClientSize.Width - privilegeHint.Padding.Horizontal), 0)).Height;
                 report["remoteAgentCommandHostHeight"] = commandHost == null ? 0 : commandHost.Height;
                 report["remoteAgentSshAskPass"] = File.Exists(Path.Combine(manager.Root, "DevSpace-SshAskPass.exe"));
                 report["remoteAgentSizes"] = remoteSizes.Select(size => size.Width + "x" + size.Height).ToArray();

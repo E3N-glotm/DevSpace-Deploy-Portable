@@ -62,6 +62,14 @@ try {
   assert.ok(report.splitterLayout?.remoteAgentCardCount >= 2);
   assert.ok(report.splitterLayout?.remoteAgentButtonMinHeight >= 44);
   assert.equal(report.splitterLayout?.remoteAgentButtonsUnclipped, true);
+  assert.equal(report.splitterLayout?.remoteAgentHintsUnclipped, true, JSON.stringify({
+    ssh: [report.splitterLayout?.remoteAgentSshHintPreferredHeight, report.splitterLayout?.remoteAgentSshHintHeight],
+    privilege: [report.splitterLayout?.remoteAgentPrivilegeHintPreferredHeight, report.splitterLayout?.remoteAgentPrivilegeHintHeight],
+  }));
+  assert.equal(report.splitterLayout?.inputHostsFullHitTarget, true);
+  assert.equal(report.splitterLayout?.fieldHostLowerHalfHitTarget, true);
+  assert.equal(report.splitterLayout?.remoteInputLowerHalfHitTarget, true);
+  assert.equal(report.splitterLayout?.comboBoxUnclipped, true);
   assert.ok(report.splitterLayout?.remoteAgentCommandHostHeight >= 64);
   assert.deepEqual(report.splitterLayout?.remoteAgentSizes, ["1040x760", "1120x800", "1220x860", "1440x920"]);
   assert.equal(report.splitterLayout?.dpiSafeDeferredLayout, true);
