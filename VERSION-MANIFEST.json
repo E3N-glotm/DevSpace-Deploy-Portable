@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.42",
-  "builtAt": "2026-08-20T11:09:17+08:00",
+  "builtAt": "2026-08-20T12:02:36+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -538,7 +538,7 @@
   },
   "keyFiles": {
     "DevSpace-Portable.cmd.sha256": "cd10ca0aae1c499835cdf28ef1328f8b90f8dc790ff81eb63a4247bc8cdad3ea",
-    "DevSpace-Portable.exe.sha256": "35d8e4eb73473a143713a9b0c2e25b9565390a8c10097ac462a70e818987cf21",
+    "DevSpace-Portable.exe.sha256": "c97e8527cee60100ea2c59cdea2f67bb0d52ff2f888aa9d856328e0409506711",
     "DevSpace-SshAskPass.exe.sha256": "ce6e7251e751da4faec1d75f5b32588e971e9eea474dc2cf5b26e282dad514e1",
     "Update.exe.sha256": "3a892551a85c3ffada3b6cae320e6baff553e5fa86f2e4f1a22d30ece4017a8c",
     "app/DevSpace-Plugin.cmd.sha256": "aa0fbe0e7f248476ac425ffc0d17752e2c14351b8079ab1d3d2cc56d0104c338",
@@ -634,7 +634,7 @@
     "docs/releases/HOTFIX-1.1.4.md.sha256": "deafbd8723a67d5161598264416b2331eb7b27383a579de44e1023fdf89a74f4",
     "docs/releases/HOTFIX-1.1.40.md.sha256": "b6bab133ebe038ae9d9c037d8a0973b790537701b6a3d113412f568c392dade5",
     "docs/releases/HOTFIX-1.1.41.md.sha256": "4386101c49b84e70c9120d143e8b207c4d3e6fe3c4db4542cc7d8fc5d83fd6b4",
-    "docs/releases/HOTFIX-1.1.42.md.sha256": "03c307775f9242afc7895c9106cd79c6047e7f2397db7de7be4c4dc91fc3ad74",
+    "docs/releases/HOTFIX-1.1.42.md.sha256": "008026f9dabba40b2740fe1c05e01806ad104b9dca82cf1e3622530c2668afb4",
     "docs/releases/HOTFIX-1.1.5.md.sha256": "06769c7a32c352397ca503af25251c26222b8c468d8b439788c416ebe2c6745e",
     "docs/releases/HOTFIX-1.1.6.md.sha256": "570cbb405ca8129ec7579e1414f2fbf8c4492b90c044c75d186d8fba38735a03",
     "docs/releases/HOTFIX-1.1.7.md.sha256": "ff933198773788193d73d87f861d7abaabd0b3299f6e87090c049b7d5589899e",
@@ -674,7 +674,7 @@
     "setup/legacy/Portable-Setup-1.1.8.hta.sha256": "bb1568b7dcc606d0f6f19f78625a3bb18115190399761a8869abb95b84768b94",
     "setup/logged-launcher.cjs.sha256": "f5831f29ab3b5294fdf0304de1f681e0a1cd57148ebaa79df8a15c3e6ac2db5a",
     "setup/native/DevSpaceBrandIcon.cs.sha256": "b8094cc3c68f7ba4962a8ac1d2aef7107dd08d2cc7f6eed93c49bfb4c189e96c",
-    "setup/native/DevSpacePortableApp.cs.sha256": "2dcb4816a6a066ac085edd5cde6a93e9563dc2ba633e610339036706bd76f765",
+    "setup/native/DevSpacePortableApp.cs.sha256": "2b619b6cf54cf09cf14e62eb0dee1adb1fc50e2a49e3319f72c682c0e54d0fa6",
     "setup/native/DevSpaceSshAskPass.cs.sha256": "cc532a01d394b9815d1ff7c7ee24485c962b01c36d9739f6471de3cb12353753",
     "setup/native/DevSpaceUpdaterApp.cs.sha256": "3df3330cb7dd0629ad70cd791890e7b58a3879af390ede83396df6ed83d647e9",
     "setup/native/computer-use-capture.cpp.sha256": "2ffa35a5b6b941e2aa87173621f7ab5393c5d67871d18652a723afd8e2aef0a1",
@@ -700,9 +700,9 @@
     "setup/test-oauth-client-compatibility.mjs.sha256": "5a9bb73944d850fbeab2d0bf90314bcccdcfb75474cdecc5a77eb451f738f0ae",
     "setup/test-online-updater-contract.mjs.sha256": "03bcc5d94f583b80c38f67d2f37448c21c3f59fbbb16922a314f4d967f57042c",
     "setup/test-plugin-manager.mjs.sha256": "b304bea5b33126b450d34277d959570992140ae84b1c2689f57d4728e842cf52",
-    "setup/test-portable-ui-heartbeat.mjs.sha256": "d12c40294f7c86a8d262650af9c80f681138b9ab58d183a15e86eeb68bed2b8c",
+    "setup/test-portable-ui-heartbeat.mjs.sha256": "7c5b670e6dd6866144f6c8007303b82a26b096216c040b01629c359faf707f2a",
     "setup/test-portable-ui-workflows.mjs.sha256": "8f868eda03882b37ba8fe8a5557d07ff1e8f627fb890a088401583393a8a46cf",
-    "setup/test-release-migration-contract.mjs.sha256": "8af08367579987c4dd3a5bb7d34600be003f9a7ea402fafb89640d59780f8bf0",
+    "setup/test-release-migration-contract.mjs.sha256": "a4ba315f0104ca91cec4adc068581247f23261e7ad1f9bf1ad311b10e9e88ea8",
     "setup/test-release-plugin-layout.py.sha256": "1ecb02208b17a1da8f5cc6f47a57462c108b0f37e0f19e3ab96243fa44b4b501",
     "setup/test-remote-agent-ssh-rescue.mjs.sha256": "22b106db702a60b955c0d55f40b95455160f8f0395b183a611a7b10f61b6bddb",
     "setup/test-remote-workspace-backend.mjs.sha256": "8032c4c39b3f6f44b55af004be9bcb019cf4369cc885fd1add9201845639f693",

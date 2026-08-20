@@ -58,9 +58,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $target = [version]$env:VERSION
+          $releaseRows = gh release list `
+            --repo "${{ github.repository }}" `
+            --limit 100 `
+            --json tagName,isDraft,isPrerelease | ConvertFrom-Json
+          $previous = $releaseRows |
+            Where-Object {
+              $candidateTag = ([string]$_.tagName).TrimStart('v')
+              if ($_.isDraft -or $_.isPrerelease -or $candidateTag -notmatch '^\d+\.\d+\.\d+$') {
+                return $false
+              }
+              return ([version]$candidateTag) -lt $target
+            } |
+            Sort-Object { [version](([string]$_.tagName).TrimStart('v')) } -Descending |
+            Select-Object -First 1
+          if (-not $previous) {
+            throw "No previous stable Release exists below v$env:VERSION."
+          }
+          $previousVersion = ([string]$previous.tagName).TrimStart('v')
+          Write-Host "Using v$previousVersion as the canonical previous stable base for v$env:VERSION."
           $temporaryBase = Join-Path $env:RUNNER_TEMP "devspace-base-release.zip"
           $baseMeta = Join-Path $env:RUNNER_TEMP "devspace-base-release.json"
           ./scripts/hydrate-runtime-from-release.ps1 `
+            -Version $previousVersion `
             -Repository "${{ github.repository }}" `
             -Force `
             -ArchiveOutput $temporaryBase `

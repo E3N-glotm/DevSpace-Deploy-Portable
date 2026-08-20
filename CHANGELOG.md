@@ -4,6 +4,8 @@
 
 ## 1.1.42
 
+- 同版本热修复：修正“远程服务器”一级页面在非全屏窗口中滚动到底仍有底部文字被主窗口 footer 遮住的问题；改为外层滚动 viewport + 完整固定高度内容面板，滚动范围与真实内容高度一致。
+- 同版本热修复：修正 Remote Agent 一键恢复对 `online-recent` 的误判。原生 UI 通过短生命周期管理进程读取 Agent 状态，无法持有运行中 DevSpace 的 WebSocket connection set，因此健康 Agent 会在该管理通道显示为 `online-recent`；现在 `online` / `online-recent` 均作为 heartbeat 已恢复，`offline` / `revoked` 仍按失败处理。已在线 Agent 点击“一键恢复 / 安装”时直接返回，不再无意义 repair。
 - 将 Remote Agent SSH 救援升级为“进程拉起 + heartbeat 验证 + 原 Agent repair enrollment”。已有 Agent 启动后仍不回 heartbeat 时，自动刷新同一 Agent ID 的 endpoint/Secret 并原位修复，不再只弹出“SSH 操作完成但 heartbeat 未恢复”。
 - 一键 SSH 安装改为 Windows 端直接传输随包 `install.sh` 与 `devspace-agent.py`，Linux 端仅需 SSH、Bash、Python 3 和 allowedRoot 写权限；不再要求远端存在 `curl`、`sha256sum` 或具备公网下载能力。
 - 默认用户级状态目录改为 `<第一条 allowedRoot>/.devspace-agent/<独立实例>/`。实例目录由 enrollment 唯一标识生成，多用户共享同一服务器、同一 Linux 用户和同一 allowedRoot 时不会覆盖彼此的 `config.json`、PID、日志或 Agent 文件；repair 会按 Agent ID 找到原实例目录。

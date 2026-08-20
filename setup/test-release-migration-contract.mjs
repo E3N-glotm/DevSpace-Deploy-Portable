@@ -9,6 +9,9 @@ const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"),
 assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.40'/);
 assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.41'/);
 assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.42'/);
+assert.match(workflow, /No previous stable Release exists below v\$env:VERSION/);
+assert.match(workflow, /Using v\$previousVersion as the canonical previous stable base/);
+assert.match(workflow, /-Version \$previousVersion/);
 for (let patch = 32; patch <= 39; patch += 1) {
   const version = `1.1.${patch}`;
   assert.ok(workflow.includes(`"${version}"`), `legacy migration base missing: ${version}`);
@@ -39,4 +42,5 @@ console.log(JSON.stringify({
   futureAdjacentDeltaOnlyAfterStableCompatibilityRelease: true,
   carryForwardGraphManifest: true,
   legacy113RescueOnCompatibilityReleases: true,
+  sameVersionRepackUsesPreviousStableBase: true,
 }));

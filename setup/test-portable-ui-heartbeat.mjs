@@ -38,6 +38,9 @@ assert.match(nativeSource, /默认无 sudo/);
 assert.match(nativeSource, /AddNavigation\(navStack, 5, "远程服务器", "LINUX AGENTS", 2\)/);
 assert.match(nativeSource, /BuildRemoteAgentsTab\(\)/);
 assert.doesNotMatch(nativeSource, /ActionButton\("远程服务器 \/ Linux Agent", delegate \{ OpenRemoteAgentsDialog\(\); \}\)/);
+assert.match(nativeSource, /Name = "RemoteAgentScrollViewport"/);
+assert.match(nativeSource, /Name = "RemoteAgentScrollableContent"/);
+assert.match(nativeSource, /IsAgentHeartbeatHealthy\("online-recent"\)/);
 assert.match(nativeSource, /AutoScaleMode\s*=\s*AutoScaleMode\.Dpi/);
 assert.doesNotMatch(nativeSource, /SplitterDistance\s*=\s*610/);
 
@@ -69,6 +72,11 @@ try {
     ssh: [report.splitterLayout?.remoteAgentSshHintPreferredHeight, report.splitterLayout?.remoteAgentSshHintHeight],
     privilege: [report.splitterLayout?.remoteAgentPrivilegeHintPreferredHeight, report.splitterLayout?.remoteAgentPrivilegeHintHeight],
   }));
+  assert.equal(report.splitterLayout?.remoteAgentScrollableLayout, true, JSON.stringify({
+    contentHeight: report.splitterLayout?.remoteAgentScrollContentHeight,
+    viewportHeight: report.splitterLayout?.remoteAgentScrollViewportHeight,
+  }));
+  assert.equal(report.splitterLayout?.remoteAgentAdminHeartbeatStatus, true);
   assert.equal(report.splitterLayout?.inputHostsFullHitTarget, true);
   assert.equal(report.splitterLayout?.fieldHostLowerHalfHitTarget, true);
   assert.equal(report.splitterLayout?.remoteInputLowerHalfHitTarget, true);

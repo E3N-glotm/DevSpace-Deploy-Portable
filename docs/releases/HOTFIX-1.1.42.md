@@ -2,6 +2,13 @@
 
 1.1.42 is the Remote Workspace Agent recovery/install stability release. Portable Protocol remains 1.5. The release keeps direct incremental compatibility for installed 1.1.32-1.1.39 clients while adding the normal 1.1.41 -> 1.1.42 edge for graph-capable updaters.
 
+## Same-version UI / SSH hotfix
+
+- Fix the embedded **Remote server** page on non-maximized windows. Scrolling is now owned by a dedicated outer viewport with a full-height content surface, so reaching the bottom of the scrollbar also exposes the final status/help rows instead of leaving text hidden behind the main-window footer.
+- Fix false SSH-recovery failures for healthy Agents. The native UI reads Agent state through a short-lived administrative process, which cannot observe the running DevSpace server's in-memory WebSocket set; a healthy, freshly heartbeating Agent is therefore reported to that UI as `online-recent`. 1.1.42 now treats both `online` and fresh `online-recent` as a recovered heartbeat in this administrative channel, while `offline` and `revoked` still fail closed.
+- Clicking **One-click recover / install Agent** for an already healthy selected Agent now exits without needlessly restarting or repairing it.
+- The Release workflow now selects the newest stable Release strictly below the target version as its canonical delta/runtime base. This makes an intentional same-version 1.1.42 repack continue to use v1.1.41 as the base instead of accidentally selecting the already-published v1.1.42 Release itself.
+
 ## Remote Agent SSH recovery
 
 - The SSH rescue path no longer treats “the process started” as success. If the selected Agent still does not restore heartbeat, DevSpace creates a repair enrollment bound to the same Agent ID, rotates the stale Agent credential, repairs the configured control-plane endpoint, and restarts the Agent in place.

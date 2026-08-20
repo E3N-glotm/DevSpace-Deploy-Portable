@@ -1420,6 +1420,17 @@ namespace DevSpacePortable.NativeUI
                 int remoteTileCount = FindControls<RemoteAgentTile>(agents).Count();
                 int remoteInputCount = FindControls<RemoteInputHost>(agents).Count();
                 int remoteCardCount = FindControls<RemoteCard>(agents).Count();
+                Panel scrollViewport = FindControls<Panel>(agents).FirstOrDefault(panel => panel.Name == "RemoteAgentScrollViewport");
+                TableLayoutPanel scrollContent = FindControls<TableLayoutPanel>(agents).FirstOrDefault(panel => panel.Name == "RemoteAgentScrollableContent");
+                agents.Size = new Size(1040, 760);
+                agents.PerformLayout();
+                if (scrollViewport != null) scrollViewport.PerformLayout();
+                bool remoteScrollableLayout = scrollViewport != null
+                    && scrollViewport.AutoScroll
+                    && scrollContent != null
+                    && !scrollContent.AutoSize
+                    && scrollContent.Height > scrollViewport.ClientSize.Height
+                    && scrollViewport.DisplayRectangle.Height >= scrollContent.Bottom;
                 bool remoteButtonsUnclipped = FindControls<ModernButton>(agents).All(button => button.Parent == null || button.Bottom <= button.Parent.ClientSize.Height + 1);
                 Label sshHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("优先通过现有 Agent", StringComparison.Ordinal));
                 Label privilegeHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("无管理员权限", StringComparison.Ordinal));
@@ -1443,6 +1454,7 @@ namespace DevSpacePortable.NativeUI
                     && remoteButtonMinHeight >= 44
                     && remoteButtonsUnclipped
                     && remoteHintsUnclipped
+                    && remoteScrollableLayout
                     && commandBox != null
                     && commandHost != null
                     && commandHost.Height >= 64;
@@ -1452,6 +1464,9 @@ namespace DevSpacePortable.NativeUI
                 report["remoteAgentButtonMinHeight"] = remoteButtonMinHeight;
                 report["remoteAgentButtonsUnclipped"] = remoteButtonsUnclipped;
                 report["remoteAgentHintsUnclipped"] = remoteHintsUnclipped;
+                report["remoteAgentScrollableLayout"] = remoteScrollableLayout;
+                report["remoteAgentScrollContentHeight"] = scrollContent == null ? 0 : scrollContent.Height;
+                report["remoteAgentScrollViewportHeight"] = scrollViewport == null ? 0 : scrollViewport.ClientSize.Height;
                 report["remoteAgentSshHintHeight"] = sshHint == null ? 0 : sshHint.ClientSize.Height;
                 report["remoteAgentSshHintPreferredHeight"] = sshHint == null ? 0 : sshHint.GetPreferredSize(new Size(Math.Max(1, sshHint.ClientSize.Width - sshHint.Padding.Horizontal), 0)).Height;
                 report["remoteAgentPrivilegeHintHeight"] = privilegeHint == null ? 0 : privilegeHint.ClientSize.Height;
@@ -1484,6 +1499,13 @@ namespace DevSpacePortable.NativeUI
                 report["remoteAgentOfflineSshInstall"] = offlineSshInstall;
                 if (!offlineSshInstall)
                     throw new InvalidOperationException("Offline SSH Agent installation script regressed.");
+                bool heartbeatStatusContract = RemoteAgentsDialog.IsAgentHeartbeatHealthy("online")
+                    && RemoteAgentsDialog.IsAgentHeartbeatHealthy("online-recent")
+                    && !RemoteAgentsDialog.IsAgentHeartbeatHealthy("offline")
+                    && !RemoteAgentsDialog.IsAgentHeartbeatHealthy("revoked");
+                report["remoteAgentAdminHeartbeatStatus"] = heartbeatStatusContract;
+                if (!heartbeatStatusContract)
+                    throw new InvalidOperationException("Remote Agent administrative heartbeat status contract regressed.");
                 report["remoteAgentSizes"] = remoteSizes.Select(size => size.Width + "x" + size.Height).ToArray();
             }
 
@@ -2443,25 +2465,48 @@ namespace DevSpacePortable.NativeUI
 
         private void BuildUi()
         {
+            Panel viewport = new Panel
+            {
+                Name = "RemoteAgentScrollViewport",
+                Dock = DockStyle.Fill,
+                AutoScroll = true,
+                BackColor = UiPalette.Background,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+            };
             TableLayoutPanel root = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
+                Name = "RemoteAgentScrollableContent",
+                AutoSize = false,
+                Height = 1000,
                 ColumnCount = 1,
                 RowCount = 5,
                 Padding = new Padding(22),
                 BackColor = UiPalette.Background,
-                AutoScroll = true,
+                Margin = new Padding(0),
             };
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
-            // Keep the Remote Agent cards at a stable preferred height and let
-            // the outer dialog scroll vertically on shorter screens. The old
-            // Percent row silently donated height from the two lower cards;
-            // at 125%-150% DPI their explanatory labels were partially hidden
-            // behind the rounded card border even though the controls existed.
+            // Keep a real, AutoSize content surface inside a separate scrolling
+            // viewport. A scrollable TableLayoutPanel that also Dock=Fill can
+            // under-report its final row when this Form is embedded as a
+            // top-level tab; the scrollbar then reaches its maximum while the
+            // last rows are still hidden behind the main-window footer.
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 226));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 400));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+
+            Action fitScrollableContent = delegate
+            {
+                int scrollbar = viewport.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0;
+                root.Width = Math.Max(900, viewport.ClientSize.Width - scrollbar - 2);
+            };
+            viewport.Resize += delegate
+            {
+                fitScrollableContent();
+                ResizeAgentTiles();
+            };
 
             Panel intro = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent };
             Label title = new Label
@@ -2699,7 +2744,9 @@ namespace DevSpacePortable.NativeUI
             _status.TextAlign = ContentAlignment.MiddleLeft;
             _status.Text = "准备读取远程 Agent。";
             root.Controls.Add(_status, 0, 4);
-            Controls.Add(root);
+            viewport.Controls.Add(root);
+            Controls.Add(viewport);
+            fitScrollableContent();
         }
 
         private void ResizeAgentTiles()
@@ -3300,10 +3347,23 @@ echo DEVSPACE_AGENT_STARTED
                 {
                     bool same = (!string.IsNullOrWhiteSpace(previousId) && string.Equals(ValueText(agent, "id"), previousId, StringComparison.Ordinal))
                         || (!string.IsNullOrWhiteSpace(name) && string.Equals(ValueText(agent, "name"), name, StringComparison.OrdinalIgnoreCase));
-                    if (same && string.Equals(ValueText(agent, "status"), "online", StringComparison.OrdinalIgnoreCase)) return true;
+                    if (same && IsAgentHeartbeatHealthy(ValueText(agent, "status"))) return true;
                 }
             }
             return false;
+        }
+
+        internal static bool IsAgentHeartbeatHealthy(string status)
+        {
+            // RemoteAgentsDialog queries through portable-manager.cjs, which is
+            // a short-lived administrative process and therefore does not own
+            // the running server's in-memory WebSocket connection set. A live
+            // Agent is consequently represented as `online-recent` in this UI
+            // channel while its SQLite heartbeat is fresh. The running server
+            // marks the row `offline` on a real disconnect, so online-recent is
+            // the correct healthy heartbeat signal for administrative polling.
+            return string.Equals(status, "online", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "online-recent", StringComparison.OrdinalIgnoreCase);
         }
 
         private Task<bool> WaitForAgentOnlineAsync(string previousId, string name, int attempts = 8)
@@ -3389,6 +3449,11 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 string agentId = ValueText(_selectedAgent, "id");
                 string agentName = ValueText(_selectedAgent, "name");
                 if (string.IsNullOrWhiteSpace(agentName)) agentName = (_name.Text ?? "").Trim();
+                if (IsAgentHeartbeatHealthy(ValueText(_selectedAgent, "status")))
+                {
+                    _status.Text = "Remote Workspace Agent 最近 heartbeat 正常，当前无需执行 SSH 救援。";
+                    return;
+                }
                 string[] selectedRoots = Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
                 string[] roots = selectedRoots.Length > 0
                     ? selectedRoots
