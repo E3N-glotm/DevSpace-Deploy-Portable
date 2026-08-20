@@ -66,8 +66,11 @@ required because installed 1.1.32-1.1.39 clients can only select one exact
 fromVersion -> latest edge. Version 1.1.42 repeats the same legacy exact edges
 because it is the Remote Agent recovery/install stability Release, and also
 publishes the adjacent 1.1.41 -> 1.1.42 edge. These generated ZIPs live only on
-the Release. After 1.1.42, ordinary Releases return to previous -> current
-deltas only unless another explicit legacy-compatibility Release is required.
+the Release. Version 1.1.42 is also the final updater that does not understand
+`block-pack-v2`. Starting with 1.1.43, the long-term topology changes from a
+historical delta graph to a content-addressed latest-target blockmap. Each new
+Release keeps one direct `1.1.42 -> current` legacy delta only as a bootstrap
+bridge; blockmap-capable clients do not need previous -> current edges.
 
 ## Tag release
 
@@ -88,17 +91,22 @@ runs tests, rebuilds the Portable ZIP, and uploads:
   plus `DevSpacePortable-Update-1.1.40-to-1.1.41.zip`;
 - for `v1.1.42`, eight direct legacy deltas from `1.1.32` through `1.1.39`
   plus `DevSpacePortable-Update-1.1.41-to-1.1.42.zip`;
-- after `v1.1.42`, only `DevSpacePortable-Update-<previous>-to-<version>.zip`;
+- after `v1.1.42`, one `DevSpacePortable-Update-1.1.42-to-<version>.zip`
+  bootstrap edge for the legacy 1.1.42 updater;
+- after `v1.1.42`, `DevSpacePortable-Windows-x64-<version>.blockmap`, the
+  content-addressed Range-download asset used by all blockmap-capable clients;
 - the `1.1.33 -> target` Rescue overlay on the 1.1.40, 1.1.41 and 1.1.42 compatibility Releases;
 - `release-assets/update-manifest.json`
 - `release-assets/SHA256SUMS-release.txt`
 
-The latest manifest carries `incrementalGraphAssets`, a compact SHA-256/size/
-download-URL graph copied forward from the previous manifest plus the current
-Release edge. This preserves historical routing metadata without copying the
-historical ZIPs. A 1.1.40+ updater first tries that small graph, then falls back
-to bounded stable-Release enumeration if necessary, and finally uses the full
-ZIP if no validated path exists.
+The 1.1.40-1.1.42 compatibility manifests carry `incrementalGraphAssets`, a
+compact SHA-256/size/download-URL graph copied forward from the previous
+manifest plus the current Release edge. New 1.1.43+ manifests no longer carry
+that graph forward. Their primary metadata is `blockmapAsset`, including the
+block-pack SHA-256, compressed-header size and compressed-header SHA-256. The
+client validates that header, reuses matching local 1 MiB chunks and downloads
+only missing packed chunks with HTTP Range. Legacy incremental and full ZIP
+paths remain bounded fallbacks.
 
 Use the `Backfill Incremental Update` workflow for that case. It downloads the
 already-published canonical full ZIPs for both versions on a GitHub runner,
@@ -117,13 +125,14 @@ repeats the same direct legacy matrix and adds `1.1.41 -> 1.1.42` so installed
 1.1.32-1.1.39 clients remain incremental-first while the Remote Agent recovery
 and offline SSH installer fixes become the new stable target.
 
-Starting with the Release after 1.1.42, publish only the normal previous-to-
-current incremental ZIP. Pass the previous Release's `update-manifest.json` to
-`create-update-manifest.py --carry-forward-manifest`; the workflow does this
-automatically. The 1.1.40+ updater composes a byte-minimal path to the latest
-version, stages all selected edges before shutdown and applies them in one
-rollback transaction, so neither Git history nor the latest Release accumulates
-an ever-growing matrix of legacy-version ZIPs.
+Starting with 1.1.43, do **not** pass the previous manifest through
+`--carry-forward-manifest`. Generate the latest full ZIP, the latest `.blockmap`
+and one `1.1.42 -> latest` compatibility delta. The 1.1.42 bridge exists only to
+bootstrap an already-installed old updater into the blockmap-capable runtime;
+after that, any 1.1.43+ client can jump straight to the newest Release by
+reconstructing the target from local blocks plus missing Range data. This keeps
+Git history free of binary update artifacts and prevents the latest Release
+metadata from accumulating an unbounded historical edge graph.
 
 ## First bootstrap Release
 

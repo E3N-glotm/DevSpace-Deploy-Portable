@@ -2,6 +2,15 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.43
+
+- 在线更新切换为 `block-pack-v2` 差分架构：目标 Portable 按 1 MiB 内容块索引并独立压缩，客户端直接扫描当前安装中可复用的相同块，只通过 HTTP Range 下载最新版缺失块，再在 staging 中重组并逐文件 SHA-256 校验；不再要求新客户端维护或串行下载不断增长的历史 `fromVersion -> toVersion` 图。
+- blockmap Range 引擎会并行探测已配置镜像、环境/Windows 显式代理与官方直连，要求端点真实返回 HTTP 206，并按实测 RTT/吞吐排序；实际块下载在首选路径失败时按排序结果自动 failover。完整 ZIP 和旧 `file-delta-v1` 仍作为后备路线。
+- 为现有 1.1.42 updater 保留唯一 bootstrap 兼容边：每个 1.1.43+ Release 只额外生成 `1.1.42 -> 当前最新版` 的传统 delta。1.1.42 用户即使跳过多个版本也可直接进入新版更新器；升级到 1.1.43+ 后，后续跳版不再依赖这个历史图。
+- 新增 blockmap header 摘要、chunk SHA-256、最终文件 SHA-256 三层完整性检查，以及“服务端不支持 Range”“header 被篡改”“Windows 临时文件句柄”等回归测试；blockmap 失败时自动退到 legacy incremental，再退到完整 ZIP。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.43.md)
+
 ## 1.1.42
 
 - 同版本热修复：修正“远程服务器”一级页面在非全屏窗口中滚动到底仍有底部文字被主窗口 footer 遮住的问题；改为外层滚动 viewport + 完整固定高度内容面板，滚动范围与真实内容高度一致。

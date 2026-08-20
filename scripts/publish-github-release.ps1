@@ -54,11 +54,12 @@ function Get-GitHubCli {
 $Tag = "v$Version"
 $ReleaseNotes = Join-Path $Root "docs\releases\HOTFIX-$Version.md"
 $Zip = Join-Path $Root "DevSpacePortable-Windows-x64-$Version.zip"
+$Blockmap = Join-Path $Root "DevSpacePortable-Windows-x64-$Version.blockmap"
 $UpdateManifest = Join-Path $Root "release-assets\update-manifest.json"
 $ReleaseChecksums = Join-Path $Root "release-assets\SHA256SUMS-release.txt"
 $IncrementalAssets = @(Get-ChildItem -LiteralPath $Root -Filter "DevSpacePortable-Update-*-to-$Version.zip" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
 $RescueAssets = @(Get-ChildItem -LiteralPath $Root -Filter "DevSpacePortable-Rescue-*-to-$Version.zip" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-$Assets = @($Zip) + $IncrementalAssets + $RescueAssets + @($UpdateManifest, $ReleaseChecksums)
+$Assets = @($Zip, $Blockmap) + $IncrementalAssets + $RescueAssets + @($UpdateManifest, $ReleaseChecksums)
 
 foreach ($Required in @($ReleaseNotes) + $Assets) {
     if (-not (Test-Path $Required)) { throw "Required release file is missing: $Required" }

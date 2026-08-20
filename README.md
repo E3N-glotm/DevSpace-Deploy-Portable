@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.42**
+当前稳定版本：**1.1.43**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.42.zip
+DevSpacePortable-Windows-x64-1.1.43.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -338,10 +338,21 @@ https://你的域名/mcp
 
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - **1.1.40 是更新协议迁移点。** 为让旧更新器直接识别，1.1.40 Release 一次性发布 `1.1.32`～`1.1.39` 各自直达 `1.1.40` 的精确增量包；这些 ZIP 只存在于 GitHub Release，不进入 Git 仓库。
-- **1.1.40+ 新更新器使用历史增量图，不要求源码仓库保存差分 ZIP。** 正常 Release 只需要“上一版 → 当前版”邻接差分；1.1.40+ 更新器会从历史稳定 Release 自动拼出到最新版的最小下载量增量链，在一次停服、一次事务中应用全部步骤，任一步失败整体回滚，完整 ZIP 继续作为最终兜底。由于 1.1.32～1.1.39 的旧 updater 还不支持图规划，1.1.41 与 1.1.42 仍额外发布八条直达最新版的兼容差分；这些 ZIP 只在 GitHub Release 中生成，不进入 Git 历史。
+- **1.1.43 起使用 blockmap differential update。** 每个最新版额外发布一个 `DevSpacePortable-Windows-x64-<版本>.blockmap` 内容块资产。客户端按 1 MiB 块扫描当前安装，复用哈希相同的本地块，只下载最新版缺失块；下载后在 staging 中重组完整目标树并逐文件 SHA-256 校验，再复用原有事务 Apply/Rollback。新客户端因此可以从任意 1.1.43+ 旧版本直接差分到最新版，不再需要把所有中间版本 delta 串起来。
+- **1.1.42 是 blockmap 的 bootstrap 边界。** 为让已经安装的 1.1.42 updater 在不了解 blockmap 的情况下仍可直接跳到任意后续最新版，每个 1.1.43+ Release 只额外保留一个 `DevSpacePortable-Update-1.1.42-to-<版本>.zip` 兼容包；进入 1.1.43+ 后便切换到 blockmap，不再为每个旧版本生成一整套 `to-latest` ZIP。
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
-- 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
+- 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.43+ 的清单还固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.43 主要变化
+
+- **从历史增量链迁移到 content-addressed blockmap。** Release 仍保留正常完整 ZIP，但同时生成一个按 1 MiB 内容块组织的 `block-pack-v2`；相同块只存一次，每块单独 `zlib` 压缩或在不可压缩时原样保存，因此可以被 HTTP Range 独立获取。
+- **客户端下载量取决于真实变化量，而不是跨了多少版本。** 更新器先校验签名清单中的 blockmap header digest，再扫描当前安装相同路径/偏移的块；可复用块不下载，缺失块按相邻 Range 合并，下载后逐块 SHA-256 校验，最后对每个重组文件再次校验完整 SHA-256。
+- **下载源不再固定“盲试某个镜像”。** blockmap 引擎对镜像、显式代理和官方直连做并行 128 KiB Range probe，仅接受 HTTP 206，并按实测速率/TTFB 排序；首选源失败时继续尝试下一条已验证路径。这样避免一个不可用或限速镜像把整个大包下载长期卡住。
+- **保留三层 fallback。** blockmap 不可用时先尝试旧 `file-delta-v1` 兼容路径，再回退完整 ZIP；Apply 仍沿用现有一次停服、持久数据排除、事务 backup 与 rollback 机制。
+- **1.1.42 用户无需逐版本升级。** GitHub Release 仅为旧 updater 额外提供一个 `1.1.42 -> 当前最新版` bootstrap delta；升级完成后后续均走 blockmap。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.43.md)
 
 ## 1.1.42 主要变化
 

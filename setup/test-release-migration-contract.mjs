@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+const backfillWorkflow = readFileSync(join(root, ".github", "workflows", "backfill-incremental.yml"), "utf8");
 
 assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.40'/);
 assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.41'/);
@@ -26,12 +27,20 @@ assert.match(workflow, /DevSpacePortable-Update-1\.1\.40-to-1\.1\.41\.zip/);
 assert.match(workflow, /1\.1\.41 release requires v1\.1\.40 as the previous stable base/);
 assert.match(workflow, /DevSpacePortable-Update-1\.1\.41-to-1\.1\.42\.zip/);
 assert.match(workflow, /1\.1\.42 release requires v1\.1\.41 as the previous stable base/);
-assert.match(workflow, /After the 1\.1\.42 compatibility Release/);
-assert.match(workflow, /DevSpacePortable-Update-\$env:BASE_VERSION-to-\$env:VERSION\.zip/);
+assert.match(workflow, /Download 1\.1\.42 blockmap bootstrap base/);
+assert.match(workflow, /DevSpacePortable-Windows-x64-1\.1\.42\.zip/);
+assert.match(workflow, /BLOCKMAP_BOOTSTRAP_BASE/);
+assert.match(workflow, /DevSpacePortable-Update-1\.1\.42-to-\$env:VERSION\.zip/);
+assert.match(workflow, /v1\.1\.42 is the final updater that cannot consume block-pack-v2/);
+assert.match(workflow, /DevSpacePortable-Windows-x64-\$env:VERSION\.blockmap/);
+assert.match(workflow, /DevSpacePortable-Windows-x64-\$\{\{ steps\.version\.outputs\.version \}\}\.blockmap/);
 assert.match(workflow, /create-update-manifest\.py @manifestArgs/);
 assert.match(workflow, /BASE_UPDATE_MANIFEST/);
 assert.match(workflow, /--carry-forward-manifest/);
+assert.match(workflow, /\$env:VERSION -eq "1\.1\.41" -or \$env:VERSION -eq "1\.1\.42"/);
 assert.doesNotMatch(workflow, /git add .*DevSpacePortable-Update/);
+assert.match(backfillWorkflow, /\.blockmapAsset\.name \/\/ empty/);
+assert.match(backfillWorkflow, /--blockmap "backfill\/\$blockmap_name"/);
 
 console.log(JSON.stringify({
   migrationCheckpoint: "1.1.40",
@@ -39,8 +48,11 @@ console.log(JSON.stringify({
   legacyExactMigrationBases: 8,
   stableReleaseCurrentEdges: 9,
   releaseAssetsOnly: true,
-  futureAdjacentDeltaOnlyAfterStableCompatibilityRelease: true,
-  carryForwardGraphManifest: true,
+  postCompatibilityBlockmap: true,
+  singleLegacyBootstrapEdgeFrom1142: true,
+  noNewCarryForwardGraphAfter1142: true,
+  carryForwardGraphRetainedForCompatibilityReleases: true,
   legacy113RescueOnCompatibilityReleases: true,
   sameVersionRepackUsesPreviousStableBase: true,
+  backfillPreservesBlockmapMetadata: true,
 }));

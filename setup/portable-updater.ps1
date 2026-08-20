@@ -734,6 +734,20 @@ function Assert-ReleaseAssetMetadata([object]$Asset, [string]$Version, [string]$
     }
 }
 
+function Assert-BlockmapAssetMetadata([object]$Asset, [string]$Version) {
+    if (-not $Asset) { throw "Release metadata has no blockmap asset." }
+    $expectedName = "DevSpacePortable-Windows-x64-$Version.blockmap"
+    Assert-ReleaseAssetMetadata -Asset $Asset -Version $Version -ExpectedName $expectedName
+    if ([string]$Asset.format -ne "block-pack-v2") { throw "Release metadata references an unsupported blockmap format." }
+    if ([string]$Asset.targetVersion -ne $Version) { throw "Blockmap target version does not match the Release version." }
+    $headerSize = [int64]$Asset.headerCompressedSize
+    $headerRawSize = [int64]$Asset.headerRawSize
+    $headerSha256 = ([string]$Asset.headerSha256).Trim().ToLowerInvariant()
+    if ($headerSize -le 0 -or $headerSize -gt 67108864) { throw "Blockmap headerCompressedSize is invalid." }
+    if ($headerRawSize -le 0 -or $headerRawSize -gt 134217728) { throw "Blockmap headerRawSize is invalid." }
+    if ($headerSha256 -notmatch '^[0-9a-f]{64}$') { throw "Blockmap header SHA-256 is invalid." }
+}
+
 function Get-LatestReleaseFromPublishedManifest {
     $manifestUrl = "https://github.com/$Repository/releases/latest/download/update-manifest.json"
     $manifest = Invoke-GitHubJson -Uri $manifestUrl -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -TimeoutSec 45 -Description "GitHub latest published update-manifest request"
@@ -751,6 +765,17 @@ function Get-LatestReleaseFromPublishedManifest {
         browser_download_url = [string]$manifest.asset.downloadUrl
     }
     [void]$assets.Add($zipAsset)
+    $blockmapAsset = $null
+    if ($manifest.blockmapAsset) {
+        Assert-BlockmapAssetMetadata -Asset $manifest.blockmapAsset -Version $version
+        $blockmapAsset = [pscustomobject]@{
+            name = [string]$manifest.blockmapAsset.name
+            size = [int64]$manifest.blockmapAsset.size
+            digest = "sha256:$(([string]$manifest.blockmapAsset.sha256).ToLowerInvariant())"
+            browser_download_url = [string]$manifest.blockmapAsset.downloadUrl
+        }
+        [void]$assets.Add($blockmapAsset)
+    }
     foreach ($candidate in @($manifest.incrementalAssets)) {
         $name = [string]$candidate.name
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
@@ -779,6 +804,7 @@ function Get-LatestReleaseFromPublishedManifest {
         manifestSource = "release-latest-update-manifest"
         zipAsset = $zipAsset
         zipName = $zipName
+        blockmapAsset = $blockmapAsset
     }
 }
 
@@ -800,15 +826,49 @@ function Get-LatestRelease {
     $zipName = "DevSpacePortable-Windows-x64-$version.zip"
     $zipAsset = @($release.assets) | Where-Object { $_.name -eq $zipName } | Select-Object -First 1
     if (-not $zipAsset) { throw "Latest Release has no $zipName asset." }
+    $blockmapName = "DevSpacePortable-Windows-x64-$version.blockmap"
+    $blockmapAsset = @($release.assets) | Where-Object { $_.name -eq $blockmapName } | Select-Object -First 1
     $zipSha256 = Get-GitHubAssetSha256 $zipAsset
     $manifestSource = ""
     $manifest = $null
+
+    # Blockmap metadata contains the authenticated header digest and exact
+    # Range layout needed before any partial block download can be trusted.
+    # Therefore, when a blockmap asset is present, the published manifest is
+    # the trust anchor even if GitHub also exposes server-side asset digests.
+    if ($blockmapAsset -and $manifestAsset) {
+        try {
+            $published = Invoke-GitHubJson -Uri $manifestAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -TimeoutSec 60 -Description "GitHub blockmap update-manifest request"
+            if ([string]$published.version -ne $version) { throw "Release tag and blockmap update manifest version do not match." }
+            if ([string]$published.repository -ne $Repository) { throw "Blockmap update manifest repository does not match the configured repository." }
+            Assert-ReleaseAssetMetadata -Asset $published.asset -Version $version -ExpectedName $zipName
+            Assert-BlockmapAssetMetadata -Asset $published.blockmapAsset -Version $version
+            if ([string]$published.blockmapAsset.name -ne [string]$blockmapAsset.name -or [int64]$published.blockmapAsset.size -ne [int64]$blockmapAsset.size) {
+                throw "Blockmap Release asset metadata does not match update-manifest.json."
+            }
+            if ($zipSha256 -and ([string]$published.asset.sha256).ToLowerInvariant() -ne $zipSha256) {
+                throw "Full ZIP SHA-256 differs between GitHub Release metadata and update-manifest.json."
+            }
+            $blockmapSha256 = Get-GitHubAssetSha256 $blockmapAsset
+            if ($blockmapSha256 -and ([string]$published.blockmapAsset.sha256).ToLowerInvariant() -ne $blockmapSha256) {
+                throw "Blockmap SHA-256 differs between GitHub Release metadata and update-manifest.json."
+            }
+            $manifest = $published
+            $manifestSource = "release-update-manifest-blockmap"
+        } catch {
+            # A malformed or temporarily inaccessible new-format manifest must
+            # not strand an installed client. Log the rejection and continue
+            # through the previously proven legacy/full Release path.
+            Write-UpdateLog "Blockmap manifest path is unavailable or invalid; legacy/full fallback remains available: $($_.Exception.Message)"
+            $manifest = $null
+        }
+    }
 
     # GitHub's Release API exposes a server-computed SHA-256 digest for uploaded
     # assets. Prefer that API metadata so "check for updates" does not depend on
     # a second request to the Release CDN just to read update-manifest.json.
     # Older GitHub responses without asset digests still use the signed manifest.
-    if ($zipSha256) {
+    if (-not $manifest -and $zipSha256) {
         $incrementalAssets = @()
         $deltaName = "DevSpacePortable-Update-$CurrentVersion-to-$version.zip"
         $deltaAsset = @($release.assets) | Where-Object { $_.name -eq $deltaName } | Select-Object -First 1
@@ -842,7 +902,7 @@ function Get-LatestRelease {
             incrementalAssets = $incrementalAssets
         }
         $manifestSource = "github-release-asset-digest"
-    } else {
+    } elseif (-not $manifest) {
         if (-not $manifestAsset) { throw "Latest Release has neither asset SHA-256 digests nor update-manifest.json." }
         $manifest = Invoke-GitHubJson -Uri $manifestAsset.browser_download_url -Headers @{ "User-Agent" = "DevSpace-Portable-Updater/$CurrentVersion" } -TimeoutSec 60 -Description "GitHub update-manifest request"
         if ([string]$manifest.version -ne $version) { throw "Release tag and update manifest version do not match." }
@@ -858,6 +918,7 @@ function Get-LatestRelease {
         manifestSource = $manifestSource
         zipAsset = $zipAsset
         zipName = $zipName
+        blockmapAsset = $blockmapAsset
     }
 }
 
@@ -872,6 +933,21 @@ function ConvertTo-SafeRelativePath([string]$Value) {
         throw "Incremental updates may not modify persistent path: $normalized"
     }
     return $normalized
+}
+
+function Get-BlockmapCandidate([object]$Latest) {
+    $candidate = $Latest.manifest.blockmapAsset
+    if (-not $candidate) { return $null }
+    Assert-BlockmapAssetMetadata -Asset $candidate -Version ([string]$Latest.version)
+    $asset = @($Latest.release.assets) | Where-Object { $_.name -eq [string]$candidate.name } | Select-Object -First 1
+    if (-not $asset -and $Latest.blockmapAsset) { $asset = $Latest.blockmapAsset }
+    if (-not $asset) { throw "Release manifest references a missing blockmap asset: $($candidate.name)" }
+    if ([int64]$asset.size -ne [int64]$candidate.size) { throw "Blockmap asset size does not match the release manifest." }
+    $releaseDigest = Get-GitHubAssetSha256 $asset
+    if ($releaseDigest -and $releaseDigest -ne ([string]$candidate.sha256).ToLowerInvariant()) {
+        throw "Blockmap asset SHA-256 does not match GitHub Release metadata."
+    }
+    return [pscustomobject]@{ manifest = $candidate; asset = $asset }
 }
 
 function Get-IncrementalCandidate([object]$Latest) {
@@ -1066,11 +1142,17 @@ function Get-IncrementalUpdatePlan([object]$Latest) {
 function Get-UpdateStatus {
     $latest = Get-LatestRelease
     $comparison = Compare-Version $latest.version $CurrentVersion
+    $blockmap = $null
+    $blockmapFallbackReason = ""
     $incrementalPlan = $null
     $incrementalFallbackReason = ""
     if ($comparison -gt 0) {
-        try { $incrementalPlan = Get-IncrementalUpdatePlan $latest }
-        catch { $incrementalFallbackReason = $_.Exception.Message }
+        try { $blockmap = Get-BlockmapCandidate $latest }
+        catch { $blockmapFallbackReason = $_.Exception.Message }
+        if (-not $blockmap) {
+            try { $incrementalPlan = Get-IncrementalUpdatePlan $latest }
+            catch { $incrementalFallbackReason = $_.Exception.Message }
+        }
     }
     $incrementalSteps = if ($incrementalPlan) { @($incrementalPlan.steps) } else { @() }
     $firstIncremental = if ($incrementalSteps.Count -gt 0) { $incrementalSteps[0] } else { $null }
@@ -1086,7 +1168,12 @@ function Get-UpdateStatus {
         assetSize = [int64]$latest.manifest.asset.size
         assetSha256 = ([string]$latest.manifest.asset.sha256).ToLowerInvariant()
         updateStrategy = [string]$latest.manifest.updateStrategy
-        preferredMode = if ($incrementalPlan) { [string]$incrementalPlan.mode } else { "full" }
+        preferredMode = if ($blockmap) { "blockmap" } elseif ($incrementalPlan) { [string]$incrementalPlan.mode } else { "full" }
+        blockmapAssetName = if ($blockmap) { [string]$blockmap.manifest.name } else { "" }
+        blockmapAssetSize = if ($blockmap) { [int64]$blockmap.manifest.size } else { 0 }
+        blockmapAssetSha256 = if ($blockmap) { ([string]$blockmap.manifest.sha256).ToLowerInvariant() } else { "" }
+        blockmapHeaderCompressedSize = if ($blockmap) { [int64]$blockmap.manifest.headerCompressedSize } else { 0 }
+        blockmapFallbackReason = $blockmapFallbackReason
         incrementalAssetName = if ($firstIncremental) { [string]$firstIncremental.manifest.name } else { "" }
         incrementalAssetSize = if ($incrementalPlan) { [int64]$incrementalPlan.totalBytes } else { 0 }
         incrementalAssetSha256 = if ($incrementalSteps.Count -eq 1) { ([string]$firstIncremental.manifest.sha256).ToLowerInvariant() } else { "" }
@@ -1180,6 +1267,108 @@ function Stage-FullUpdate([object]$Latest, [string]$FallbackReason = "") {
     } catch {
         Write-UpdateLog "Update staging failed: $($_.Exception.Message)"
         Write-UpdateProgress -Phase "error" -Message "Full update staging failed: $($_.Exception.Message)"
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Stage-BlockmapUpdate([object]$Latest, [object]$Blockmap) {
+    New-Item -ItemType Directory -Force -Path $UpdateRoot | Out-Null
+    $stage = Join-Path $UpdateRoot ("{0}-blockmap-{1}" -f $Latest.version, [guid]::NewGuid().ToString("N"))
+    $payload = Join-Path $stage "payload"
+    $portableRoot = Join-Path $payload "DevSpacePortable"
+    New-Item -ItemType Directory -Force -Path $stage,$payload | Out-Null
+    try {
+        $node = Join-Path $Root "runtime\node\node.exe"
+        $engine = Join-Path $Root "setup\blockmap-updater.cjs"
+        $curl = Get-CurlExecutable
+        if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw "Portable Node runtime is missing for the blockmap updater." }
+        if (-not (Test-Path -LiteralPath $engine -PathType Leaf)) { throw "Blockmap updater engine is missing." }
+        if (-not $curl) { throw "curl.exe is unavailable for blockmap HTTP Range downloads." }
+
+        $arguments = @(
+            $engine,
+            "stage",
+            "--root", $Root,
+            "--asset-url", ([string]$Blockmap.asset.browser_download_url),
+            "--asset-size", ([string][int64]$Blockmap.manifest.size),
+            "--header-size", ([string][int64]$Blockmap.manifest.headerCompressedSize),
+            "--header-sha256", ([string]$Blockmap.manifest.headerSha256),
+            "--payload", $portableRoot,
+            "--target-version", ([string]$Latest.version),
+            "--progress-file", $ProgressFile,
+            "--curl", ([string]$curl)
+        )
+        $windowsProxy = Get-WindowsInternetProxyState
+        if ($windowsProxy.proxyEnabled -and -not [string]::IsNullOrWhiteSpace([string]$windowsProxy.proxyUrl) -and (Test-LocalProxyHealthy ([string]$windowsProxy.proxyUrl))) {
+            $arguments += @("--proxy", ([string]$windowsProxy.proxyUrl))
+        }
+
+        Write-UpdateLog "Starting blockmap differential staging for $CurrentVersion -> $($Latest.version)."
+        Write-UpdateProgress -Phase "probing" -Message "Selecting the fastest HTTP Range source for blockmap differential update" -BytesTotal ([int64]$Blockmap.manifest.size)
+        $rawOutput = & $node @arguments 2>&1 | Out-String
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            $diagnostic = $rawOutput.Trim()
+            if ([string]::IsNullOrWhiteSpace($diagnostic)) { $diagnostic = "blockmap helper exited with code $exitCode" }
+            throw "Blockmap differential staging failed: $diagnostic"
+        }
+        $jsonLine = @($rawOutput -split "`r?`n") | Where-Object { $_.TrimStart().StartsWith("{") } | Select-Object -Last 1
+        if (-not $jsonLine) { throw "Blockmap updater returned no structured result." }
+        try { $blockmapResult = $jsonLine | ConvertFrom-Json }
+        catch { throw "Blockmap updater returned invalid JSON: $($_.Exception.Message)" }
+        if (-not [bool]$blockmapResult.success) { throw "Blockmap updater did not report a successful staging result." }
+
+        foreach ($required in @("DevSpace-Portable.exe", "runtime\node\node.exe", "setup\portable-manager.cjs", "VERSION-MANIFEST.json")) {
+            if (-not (Test-Path (Join-Path $portableRoot $required) -PathType Leaf)) { throw "Blockmap staged update is incomplete: $required" }
+        }
+        $targetManifest = Get-Content -LiteralPath (Join-Path $portableRoot "VERSION-MANIFEST.json") -Raw | ConvertFrom-Json
+        if ([string]$targetManifest.runtime.devspacePortable -ne [string]$Latest.version) {
+            throw "Blockmap staged version manifest does not report $($Latest.version)."
+        }
+
+        Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $stage "portable-updater.ps1") -Force
+        $stageInfo = [ordered]@{
+            formatVersion = 3
+            currentVersion = $CurrentVersion
+            targetVersion = $Latest.version
+            repository = $Repository
+            updateMode = "blockmap"
+            stagedAt = (Get-Date).ToUniversalTime().ToString("o")
+            payloadRoot = $portableRoot
+            blockmapName = [string]$Blockmap.manifest.name
+            blockmapSize = [int64]$Blockmap.manifest.size
+            blockmapSha256 = ([string]$Blockmap.manifest.sha256).ToLowerInvariant()
+            blockmapHeaderSha256 = ([string]$Blockmap.manifest.headerSha256).ToLowerInvariant()
+            downloadedBytes = [int64]$blockmapResult.downloadedBytes
+            reusedBytes = [int64]$blockmapResult.reusedBytes
+            targetBytes = [int64]$blockmapResult.targetBytes
+            missingUniqueChunks = [int]$blockmapResult.missingUniqueChunks
+            rangeRequestGroups = [int]$blockmapResult.rangeRequestGroups
+            selectedTransport = [string]$blockmapResult.selectedTransport
+        }
+        $stageInfo | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $stage "stage-info.json") -Encoding UTF8
+        Write-UpdateLog "Blockmap update $CurrentVersion -> $($Latest.version) staged successfully: downloaded=$($blockmapResult.downloadedBytes), reused=$($blockmapResult.reusedBytes), ranges=$($blockmapResult.rangeRequestGroups), transport=$($blockmapResult.selectedTransport)."
+        return [pscustomobject]@{
+            currentVersion = $CurrentVersion
+            latestVersion = $Latest.version
+            updateAvailable = $true
+            staged = $true
+            updateMode = "blockmap"
+            stagingPath = $stage
+            assetSize = [int64]$blockmapResult.downloadedBytes
+            downloadedBytes = [int64]$blockmapResult.downloadedBytes
+            reusedBytes = [int64]$blockmapResult.reusedBytes
+            targetBytes = [int64]$blockmapResult.targetBytes
+            missingUniqueChunks = [int]$blockmapResult.missingUniqueChunks
+            rangeRequestGroups = [int]$blockmapResult.rangeRequestGroups
+            selectedTransport = [string]$blockmapResult.selectedTransport
+            fullFallbackSize = [int64]$Latest.manifest.asset.size
+            releaseUrl = [string]$Latest.release.html_url
+        }
+    } catch {
+        Write-UpdateLog "Blockmap staging failed: $($_.Exception.Message)"
+        Write-UpdateProgress -Phase "fallback" -Message "Blockmap differential update failed; trying the compatibility updater: $($_.Exception.Message)"
         Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         throw
     }
@@ -1452,14 +1641,32 @@ function Stage-Update {
     }
     Remove-OldStagingDirectories
     if ($ForceFull) {
-        $reason = "Forced full-package fallback after a previous incremental apply failure."
+        $reason = "Forced full-package fallback after a previous differential/incremental apply failure."
         Write-UpdateLog $reason
         return Stage-FullUpdate $latest $reason
     }
+
+    $blockmapFailure = ""
+    try {
+        $blockmap = Get-BlockmapCandidate $latest
+        if ($blockmap) {
+            try {
+                return Stage-BlockmapUpdate $latest $blockmap
+            } catch {
+                $blockmapFailure = $_.Exception.Message
+                Write-UpdateLog "Blockmap differential update cannot be used; trying the legacy incremental compatibility path: $blockmapFailure"
+            }
+        }
+    } catch {
+        $blockmapFailure = $_.Exception.Message
+        Write-UpdateLog "Blockmap Release metadata cannot be used; trying the legacy incremental compatibility path: $blockmapFailure"
+    }
+
     $plan = $null
     try { $plan = Get-IncrementalUpdatePlan $latest }
     catch {
         $reason = $_.Exception.Message
+        if ($blockmapFailure) { $reason = "Blockmap: $blockmapFailure Legacy incremental: $reason" }
         Write-UpdateLog "Incremental release metadata cannot be used; automatically falling back to the full package: $reason"
         return Stage-FullUpdate $latest $reason
     }
@@ -1472,11 +1679,14 @@ function Stage-Update {
             return Stage-IncrementalChainUpdate $latest $plan
         } catch {
             $reason = $_.Exception.Message
+            if ($blockmapFailure) { $reason = "Blockmap: $blockmapFailure Legacy incremental: $reason" }
             Write-UpdateLog "Incremental update cannot be used; automatically falling back to the full package: $reason"
             return Stage-FullUpdate $latest $reason
         }
     }
-    return Stage-FullUpdate $latest "No incremental package matches installed version $CurrentVersion."
+    $reason = "No incremental package matches installed version $CurrentVersion."
+    if ($blockmapFailure) { $reason = "Blockmap: $blockmapFailure $reason" }
+    return Stage-FullUpdate $latest $reason
 }
 
 function Invoke-Manager([string]$Command, [switch]$IgnoreFailure) {
@@ -1543,7 +1753,7 @@ function Apply-StagedUpdate {
     $targetVersion = [string]$stageInfo.targetVersion
     Assert-Version $targetVersion "Target version"
     $updateMode = if ([string]$stageInfo.updateMode) { [string]$stageInfo.updateMode } else { "full" }
-    if (@("full", "incremental", "incremental-chain") -notcontains $updateMode) { throw "Unsupported staged update mode: $updateMode" }
+    if (@("full", "blockmap", "incremental", "incremental-chain") -notcontains $updateMode) { throw "Unsupported staged update mode: $updateMode" }
     $payloadRoot = ""
     if ($updateMode -ne "incremental-chain") {
         $payloadRoot = [IO.Path]::GetFullPath([string]$stageInfo.payloadRoot).TrimEnd('\')
@@ -1551,7 +1761,7 @@ function Apply-StagedUpdate {
     }
     $deltaManifest = $null
     $deltaSteps = New-Object System.Collections.ArrayList
-    if ($updateMode -eq "full") {
+    if ($updateMode -eq "full" -or $updateMode -eq "blockmap") {
         if (-not (Test-Path (Join-Path $payloadRoot "DevSpace-Portable.exe"))) { throw "Staged Portable executable is missing." }
     } elseif ($updateMode -eq "incremental") {
         $deltaManifestPath = [IO.Path]::GetFullPath([string]$stageInfo.deltaManifestPath)

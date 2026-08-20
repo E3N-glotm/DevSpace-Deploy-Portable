@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const updater = readFileSync(join(root, "setup", "portable-updater.ps1"), "utf8");
+const blockmapUpdater = readFileSync(join(root, "setup", "blockmap-updater.cjs"), "utf8");
 const manager = readFileSync(join(root, "setup", "portable-manager.cjs"), "utf8");
 const manifestBuilder = readFileSync(join(root, "setup", "create-update-manifest.py"), "utf8");
 const deltaBuilder = readFileSync(join(root, "setup", "create-incremental-update.py"), "utf8");
@@ -60,6 +61,13 @@ assert.match(updater, /Security\.Cryptography\.SHA256/);
 assert.match(updater, /ComputeHash\(\$stream\)/);
 assert.doesNotMatch(updater, /Get-FileHash/);
 assert.match(updater, /Get-IncrementalCandidate/);
+assert.match(updater, /Assert-BlockmapAssetMetadata/);
+assert.match(updater, /Get-BlockmapCandidate/);
+assert.match(updater, /Stage-BlockmapUpdate/);
+assert.match(updater, /block-pack-v2/);
+assert.match(updater, /preferredMode = if \(\$blockmap\) \{ "blockmap" \}/);
+assert.match(updater, /updateMode = "blockmap"/);
+assert.match(updater, /\$updateMode -eq "full" -or \$updateMode -eq "blockmap"/);
 assert.match(updater, /Get-PublishedIncrementalEdges/);
 assert.match(updater, /Get-StableIncrementalEdges/);
 assert.match(updater, /Resolve-IncrementalGraphPlan/);
@@ -75,7 +83,7 @@ assert.match(updater, /Staged incremental chain is discontinuous/);
 assert.match(updater, /Incremental step did not produce expected Portable version/);
 assert.match(updater, /automatically falling back to the full package/);
 assert.match(updater, /\[switch\]\$ForceFull/);
-assert.match(updater, /Forced full-package fallback after a previous incremental apply failure/);
+assert.match(updater, /Forced full-package fallback after a previous differential\/incremental apply failure/);
 assert.match(updater, /acceptedBaseDrift/);
 assert.match(updater, /Accepting changed-file base drift/);
 assert.match(updater, /file-delta-v1 carries the complete target file/);
@@ -109,12 +117,24 @@ assert.match(manifestBuilder, /incrementalAssets/);
 assert.match(manifestBuilder, /incrementalGraphAssets/);
 assert.match(manifestBuilder, /carry-forward-manifest/);
 assert.match(manifestBuilder, /rescueAssets/);
-assert.match(manifestBuilder, /incremental-first-full-fallback/);
+assert.match(manifestBuilder, /blockmap-first-full-fallback/);
+assert.match(manifestBuilder, /BLOCKMAP_MAGIC = b"DSPBLK2\\n"/);
+assert.match(manifestBuilder, /headerCompressedSize/);
+assert.match(manifestBuilder, /headerSha256/);
+assert.match(manifestBuilder, /checksum_lines\.append\(f"\{blockmap_asset\['sha256'\]\}  \{blockmap_asset\['name'\]\}\\n"\)/);
 assert.match(deltaBuilder, /file-delta-v1/);
 assert.match(deltaBuilder, /baseSha256/);
 assert.match(rescueBuilder, /direct-overlay-v1/);
 assert.match(rescueBuilder, /PERSISTENT_ROOTS = \("data", "logs", "reports"\)/);
 assert.match(rescueBuilder, /Direct-extract rescue overlay is not safe/);
+assert.match(blockmapUpdater, /DSPBLK2\\n/);
+assert.match(blockmapUpdater, /--range/);
+assert.match(blockmapUpdater, /Promise\.all\(candidates\.map/);
+assert.match(blockmapUpdater, /status !== 206/);
+assert.match(blockmapUpdater, /localChunkReuse|analyzeLocalReuse/);
+assert.match(blockmapUpdater, /reconstructed target verification failed/);
+assert.match(blockmapUpdater, /header SHA-256 mismatch/);
+assert.match(blockmapUpdater, /missingUniqueChunks/);
 
 const transportBlock = updater.slice(
   updater.indexOf("function Get-GitHubTransportCandidates"),
@@ -162,6 +182,12 @@ console.log(JSON.stringify({
   metadataCandidateRefreshRetry: true,
   explicitDirectTunFallback: true,
   incrementalFirst: true,
+  blockmapDifferentialFirst: true,
+  parallelRangeSourceProbe: true,
+  localBlockReuse: true,
+  authenticatedBlockmapHeader: true,
+  perChunkSha256Verification: true,
+  reconstructedFileSha256Verification: true,
   historicalReleaseIncrementalGraph: true,
   transactionalIncrementalChain: true,
   automaticFullFallback: true,

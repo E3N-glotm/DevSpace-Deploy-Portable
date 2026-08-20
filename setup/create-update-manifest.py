@@ -4,12 +4,15 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_MANIFEST = ROOT / "VERSION-MANIFEST.json"
 OUTPUT_DIRECTORY = ROOT / "release-assets"
+BLOCKMAP_MAGIC = b"DSPBLK2\n"
+BLOCKMAP_PRELUDE = struct.Struct("<8sQQ")
 
 
 def sha256_file(path: Path) -> str:
@@ -18,6 +21,27 @@ def sha256_file(path: Path) -> str:
         while chunk := handle.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def read_blockmap_metadata(path: Path) -> dict[str, object]:
+    with path.open("rb") as handle:
+        prelude = handle.read(BLOCKMAP_PRELUDE.size)
+        if len(prelude) != BLOCKMAP_PRELUDE.size:
+            raise SystemExit(f"Blockmap prelude is truncated: {path}")
+        magic, compressed_size, raw_size = BLOCKMAP_PRELUDE.unpack(prelude)
+        if magic != BLOCKMAP_MAGIC:
+            raise SystemExit(f"Unsupported blockmap magic: {path}")
+        if compressed_size <= 0 or raw_size <= 0 or compressed_size > path.stat().st_size - BLOCKMAP_PRELUDE.size:
+            raise SystemExit(f"Invalid blockmap header sizes: {path}")
+        compressed_header = handle.read(compressed_size)
+        if len(compressed_header) != compressed_size:
+            raise SystemExit(f"Blockmap header is truncated: {path}")
+    return {
+        "format": "block-pack-v2",
+        "headerCompressedSize": compressed_size,
+        "headerRawSize": raw_size,
+        "headerSha256": hashlib.sha256(compressed_header).hexdigest(),
+    }
 
 
 def merge_incremental_graph(
@@ -166,15 +190,17 @@ def main() -> int:
         blockmap = Path(args.blockmap).resolve()
         if not blockmap.is_file():
             raise SystemExit(f"Blockmap not found: {blockmap}")
+        metadata = read_blockmap_metadata(blockmap)
         blockmap_asset = {
-            "format": "blockmap-v1",
+            **metadata,
             "name": blockmap.name,
             "size": blockmap.stat().st_size,
             "sha256": sha256_file(blockmap),
+            "targetVersion": version,
             "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{blockmap.name}",
         }
     manifest = {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "channel": args.channel,
         "version": version,
         "tag": f"v{version}",
@@ -186,7 +212,7 @@ def main() -> int:
         "mandatory": False,
         "restartRequired": True,
         "requiresToolSchemaRefresh": bool(release_metadata.get("requiresToolSchemaRefresh", False)),
-        "updateStrategy": "incremental-first-full-fallback",
+        "updateStrategy": "blockmap-first-full-fallback" if blockmap_asset else "incremental-first-full-fallback",
         "asset": {
             "name": asset_name,
             "size": archive.stat().st_size,
@@ -207,6 +233,8 @@ def main() -> int:
         newline="\n",
     )
     checksum_lines = [f"{digest}  {asset_name}\n"]
+    if blockmap_asset:
+        checksum_lines.append(f"{blockmap_asset['sha256']}  {blockmap_asset['name']}\n")
     checksum_lines.extend(f"{item['sha256']}  {item['name']}\n" for item in incremental_assets)
     checksum_lines.extend(f"{item['sha256']}  {item['name']}\n" for item in rescue_assets)
     (OUTPUT_DIRECTORY / "SHA256SUMS-release.txt").write_text(
