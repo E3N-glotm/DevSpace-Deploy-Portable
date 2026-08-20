@@ -5,7 +5,7 @@
   "description": "Pinned production runtime for DevSpace Portable",
   "dependencies": {
     "@waishnav/devspace": "file:../packages/waishnav-devspace-1.0.7.tgz",
-    "ws": "8.21.0",
+    "ws": "8.21.3",
     "brace-expansion": "5.0.9",
     "protobufjs": "7.6.5",
     "undici": "8.10.0"
