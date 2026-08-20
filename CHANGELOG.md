@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.42
+
+- 将 Remote Agent SSH 救援升级为“进程拉起 + heartbeat 验证 + 原 Agent repair enrollment”。已有 Agent 启动后仍不回 heartbeat 时，自动刷新同一 Agent ID 的 endpoint/Secret 并原位修复，不再只弹出“SSH 操作完成但 heartbeat 未恢复”。
+- 一键 SSH 安装改为 Windows 端直接传输随包 `install.sh` 与 `devspace-agent.py`，Linux 端仅需 SSH、Bash、Python 3 和 allowedRoot 写权限；不再要求远端存在 `curl`、`sha256sum` 或具备公网下载能力。
+- 默认用户级状态目录改为 `<第一条 allowedRoot>/.devspace-agent/<独立实例>/`。实例目录由 enrollment 唯一标识生成，多用户共享同一服务器、同一 Linux 用户和同一 allowedRoot 时不会覆盖彼此的 `config.json`、PID、日志或 Agent 文件；repair 会按 Agent ID 找到原实例目录。
+- 手动安装命令默认使用普通用户 `bash`，不包含 `sudo bash`，并显式传入受 allowedRoot 约束的 `--state-dir`；旧 `~/.local/state/devspace-agent` 与 `/var/lib/devspace-agent` 仍保留救援兼容。
+- “远程服务器”从“配置与权限”的子入口提升为左侧一级页面，位于“配置与权限”和“插件管理”之间；新 SSH profile 默认启用自动救援。
+- v1.1.42 继续为 1.1.32～1.1.39 发布各自直达最新版的精确增量，同时发布 `1.1.41 -> 1.1.42` 邻接增量、carry-forward 历史图和 1.1.33 Rescue，迁移 ZIP 仍只存在于 GitHub Release。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.42.md)
+
 ## 1.1.41
 
 - 修复 Remote Agent SSH 救援脚本的 Windows CRLF → Linux Bash 传输问题。所有送入 `ssh ... bash -s` 的脚本现在在发送前统一规范化为 POSIX LF，避免 `set -eu\r`、`do\r` 被 Bash 当成非法参数/语法。

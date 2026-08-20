@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.41**
+当前稳定版本：**1.1.42**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -12,7 +12,7 @@ Portable Protocol：**1.5**
 
 > 上图为 DevSpace Portable Windows 原生控制中心的实际界面截图；公开文档中的截图不展示 Token、Owner Password 等敏感认证信息。
 
-控制中心左侧主要页面分别用于：**状态与部署**（服务/隧道/更新/诊断）、**配置与权限**（公网域名、Token、工作目录和权限）、**插件管理**、**会话与回退**、**显式 Memories**、**日志与诊断**；右上角的 Computer Use 开关只控制桌面操作能力，不会替代目录/命令权限配置。
+控制中心左侧主要页面分别用于：**状态与部署**（服务/隧道/更新/诊断）、**配置与权限**（公网域名、Token、工作目录和权限）、**远程服务器**（Linux Agent、SSH 救援与安装）、**插件管理**、**会话与回退**、**显式 Memories**、**日志与诊断**；右上角的 Computer Use 开关只控制桌面操作能力，不会替代目录/命令权限配置。
 
 ## 这个项目是做什么的
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.41.zip
+DevSpacePortable-Windows-x64-1.1.42.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -338,10 +338,22 @@ https://你的域名/mcp
 
 - 稳定版 ZIP：在本仓库的 **Releases** 页面下载 `DevSpacePortable-Windows-x64-<版本>.zip`。
 - **1.1.40 是更新协议迁移点。** 为让旧更新器直接识别，1.1.40 Release 一次性发布 `1.1.32`～`1.1.39` 各自直达 `1.1.40` 的精确增量包；这些 ZIP 只存在于 GitHub Release，不进入 Git 仓库。
-- **1.1.40 以后不再让最新版携带一整套旧版本差分矩阵。** 每个新 Release 正常只发布“上一版 → 当前版”差分；1.1.40+ 更新器会从历史稳定 Release 自动拼出到最新版的最小下载量增量链，在一次停服、一次事务中应用全部步骤，任一步失败整体回滚，完整 ZIP 继续作为最终兜底。
-- 1.1.40 仍提供 `DevSpacePortable-Rescue-1.1.33-to-1.1.40.zip`，用于兼容 1.1.33 已知的旧 Apply 路径问题；后续版本不再默认复制这条历史 Rescue。
+- **1.1.40+ 新更新器使用历史增量图，不要求源码仓库保存差分 ZIP。** 正常 Release 只需要“上一版 → 当前版”邻接差分；1.1.40+ 更新器会从历史稳定 Release 自动拼出到最新版的最小下载量增量链，在一次停服、一次事务中应用全部步骤，任一步失败整体回滚，完整 ZIP 继续作为最终兜底。由于 1.1.32～1.1.39 的旧 updater 还不支持图规划，1.1.41 与 1.1.42 仍额外发布八条直达最新版的兼容差分；这些 ZIP 只在 GitHub Release 中生成，不进入 Git 历史。
+- 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.42 主要变化
+
+- **Remote Agent SSH 救援从“只拉起进程”升级为自动修复。** 若已有 Agent 进程通过 SSH 成功启动，但等待窗口内 heartbeat 仍未恢复，Windows 控制端会为同一个 Agent ID 创建 repair enrollment，刷新失效的 endpoint/Agent Secret，再通过 SSH 原位修复并重启；不会因为修复而留下一个新的重复 Agent 记录。
+- **一键安装不再依赖远端 `curl` 或服务器外网。** Windows 直接从本机 Portable 读取随包 `install.sh` 与 `devspace-agent.py`，校验本地 SHA-256 后把内容经现有 SSH stdin 发送到 Linux，再由目标机已有 Python 3 写入临时文件并执行。服务器只需要 SSH、Bash 和 Python 3；即使没有 `curl`、`sha256sum` 或不能访问公网，也能完成 Agent 安装/修复。
+- **默认用户级安装位置改为第一条 selected allowedRoot 下的独立实例目录。** 例如 allowedRoot 为 `/home/ubuntu` 时使用 `/home/ubuntu/.devspace-agent/<instance-key>/`；多个用户即使共用同一台服务器、同一 Linux 用户和同一 allowedRoot，也会得到不同实例目录，不会覆盖彼此的 `config.json`、PID、日志或 Agent 文件。安装器新增受 allowedRoot 约束的 `--state-dir`，普通用户目录不可写时明确失败，不再暗示通过 sudo 绕过权限。repair 会按 Agent ID 找到原实例目录；旧 `~/.local/state/devspace-agent` 与 `/var/lib/devspace-agent` 仍可被救援脚本发现和原位恢复。
+- **手动安装命令默认仍是普通用户 `bash`，不包含 `sudo bash`。** 命令会显式带上 `--state-dir <第一条 allowedRoot>/.devspace-agent`。只有用户主动以 root/sudo 运行安装器时才进入系统级 systemd 逻辑。
+- **“远程服务器”提升为左侧一级页面。** 新入口位于“配置与权限”和“插件管理”之间，原配置页里的二级按钮移除；Linux Agent 列表、SSH 主机/端口/用户名/密码、allowedRoots、安装命令和状态信息都直接在主页面内管理。
+- **SSH 自动救援默认启用。** 新建或尚未保存 SSH profile 的 Agent 默认勾选自动救援；已有 profile 继续尊重用户此前保存的开关值。托盘后台仍保留每个 Agent 至少 2 分钟的限频，避免持续 SSH 重连。
+- Portable Protocol 仍为 1.5；Remote Agent enrollment 增加 repair 语义，但现有 1.1.39～1.1.41 Agent/配置保持兼容。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.42.md)
 
 ## 1.1.41 主要变化
 

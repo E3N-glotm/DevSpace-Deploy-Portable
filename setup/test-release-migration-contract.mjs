@@ -8,6 +8,7 @@ const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"),
 
 assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.40'/);
 assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.41'/);
+assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.42'/);
 for (let patch = 32; patch <= 39; patch += 1) {
   const version = `1.1.${patch}`;
   assert.ok(workflow.includes(`"${version}"`), `legacy migration base missing: ${version}`);
@@ -20,7 +21,9 @@ assert.match(workflow, /MIGRATION_BASE_DIR/);
 assert.match(workflow, /DevSpacePortable-Rescue-1\.1\.33-to-\$env:VERSION\.zip/);
 assert.match(workflow, /DevSpacePortable-Update-1\.1\.40-to-1\.1\.41\.zip/);
 assert.match(workflow, /1\.1\.41 release requires v1\.1\.40 as the previous stable base/);
-assert.match(workflow, /After the 1\.1\.41 stable compatibility Release/);
+assert.match(workflow, /DevSpacePortable-Update-1\.1\.41-to-1\.1\.42\.zip/);
+assert.match(workflow, /1\.1\.42 release requires v1\.1\.41 as the previous stable base/);
+assert.match(workflow, /After the 1\.1\.42 compatibility Release/);
 assert.match(workflow, /DevSpacePortable-Update-\$env:BASE_VERSION-to-\$env:VERSION\.zip/);
 assert.match(workflow, /create-update-manifest\.py @manifestArgs/);
 assert.match(workflow, /BASE_UPDATE_MANIFEST/);
@@ -29,7 +32,7 @@ assert.doesNotMatch(workflow, /git add .*DevSpacePortable-Update/);
 
 console.log(JSON.stringify({
   migrationCheckpoint: "1.1.40",
-  stableCompatibilityRelease: "1.1.41",
+  stableCompatibilityRelease: "1.1.42",
   legacyExactMigrationBases: 8,
   stableReleaseCurrentEdges: 9,
   releaseAssetsOnly: true,

@@ -35,6 +35,9 @@ assert.match(nativeSource, /internal sealed class RemoteInputHost/);
 assert.match(nativeSource, /internal sealed class RemoteCard/);
 assert.match(nativeSource, /点击磁贴选择 Agent/);
 assert.match(nativeSource, /默认无 sudo/);
+assert.match(nativeSource, /AddNavigation\(navStack, 5, "远程服务器", "LINUX AGENTS", 2\)/);
+assert.match(nativeSource, /BuildRemoteAgentsTab\(\)/);
+assert.doesNotMatch(nativeSource, /ActionButton\("远程服务器 \/ Linux Agent", delegate \{ OpenRemoteAgentsDialog\(\); \}\)/);
 assert.match(nativeSource, /AutoScaleMode\s*=\s*AutoScaleMode\.Dpi/);
 assert.doesNotMatch(nativeSource, /SplitterDistance\s*=\s*610/);
 
@@ -70,15 +73,17 @@ try {
   assert.equal(report.splitterLayout?.fieldHostLowerHalfHitTarget, true);
   assert.equal(report.splitterLayout?.remoteInputLowerHalfHitTarget, true);
   assert.equal(report.splitterLayout?.comboBoxUnclipped, true);
+  assert.equal(report.splitterLayout?.remoteAgentOfflineSshInstall, true);
   assert.ok(report.splitterLayout?.remoteAgentCommandHostHeight >= 64);
   assert.deepEqual(report.splitterLayout?.remoteAgentSizes, ["1040x760", "1120x800", "1220x860", "1440x920"]);
   assert.equal(report.splitterLayout?.dpiSafeDeferredLayout, true);
   assert.deepEqual(report.splitterLayout?.verticalWidths, [120, 240, 480, 820, 940, 1180, 1800]);
   assert.deepEqual(report.splitterLayout?.horizontalHeights, [90, 180, 360, 520, 700, 980]);
-  assert.deepEqual(report.uiTabs, ["状态与部署", "配置与权限", "插件管理", "会话与回退", "显式 Memories", "日志与诊断", "会话列表", "会话详情"]);
+  assert.deepEqual(report.uiTabs, ["状态与部署", "配置与权限", "远程服务器", "插件管理", "会话与回退", "显式 Memories", "日志与诊断", "会话列表", "会话详情"]);
   const requiredButtons = [
     "添加工作目录", "安装插件", "刷新插件", "启用", "禁用",
     "绑定", "解除", "保存并部署本地 MCP", "只保存设置",
+    "保存 SSH 配置", "测试 SSH", "一键恢复 / 安装 Agent", "生成一次性安装命令", "刷新列表",
     "启动本地 MCP", "重启本地 MCP", "启动公网隧道", "重启公网隧道", "停止公网隧道",
     "停止全部并退出", "停止并禁用", "恢复并启动全部", "详细信息", "检查更新", "查看本轮修改",
     "全部折叠", "全部展开",

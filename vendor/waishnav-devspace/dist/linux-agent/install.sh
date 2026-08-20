@@ -12,6 +12,8 @@ PID_FILE=""
 LOG_FILE=""
 ALLOWED_ROOTS=()
 AGENT_SHA256=""
+AGENT_FILE=""
+REQUESTED_STATE_DIR=""
 
 while (($#)); do
   case "$1" in
@@ -21,6 +23,8 @@ while (($#)); do
     --user) RUN_USER="$2"; shift 2 ;;
     --allowed-root) ALLOWED_ROOTS+=("$2"); shift 2 ;;
     --agent-sha256) AGENT_SHA256="$2"; shift 2 ;;
+    --agent-file) AGENT_FILE="$2"; shift 2 ;;
+    --state-dir) REQUESTED_STATE_DIR="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -44,11 +48,25 @@ if [[ "$EUID" -ne 0 && "$RUN_USER" != "$(id -un)" ]]; then
 fi
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 2; }
 PYTHON_BIN="$(command -v python3)"
-command -v curl >/dev/null || { echo "curl is required" >&2; exit 2; }
-command -v sha256sum >/dev/null || { echo "sha256sum is required" >&2; exit 2; }
 [[ "$AGENT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "--agent-sha256 with a 64-character SHA-256 digest is required" >&2; exit 2; }
+if [[ -n "$AGENT_FILE" ]]; then
+  [[ -f "$AGENT_FILE" ]] || { echo "--agent-file does not exist: $AGENT_FILE" >&2; exit 2; }
+fi
 
-if [[ "$EUID" -eq 0 ]]; then
+if [[ -n "$REQUESTED_STATE_DIR" ]]; then
+  [[ "$REQUESTED_STATE_DIR" == /* ]] || { echo "--state-dir must be absolute: $REQUESTED_STATE_DIR" >&2; exit 2; }
+  [[ "$REQUESTED_STATE_DIR" != "/" ]] || { echo "--state-dir cannot be /." >&2; exit 2; }
+  state_allowed=0
+  for root in "${ALLOWED_ROOTS[@]}"; do
+    normalized_root="${root%/}"
+    if [[ "$REQUESTED_STATE_DIR" == "$normalized_root" || "$REQUESTED_STATE_DIR" == "$normalized_root/"* ]]; then
+      state_allowed=1
+      break
+    fi
+  done
+  [[ "$state_allowed" -eq 1 ]] || { echo "--state-dir must be inside one of the selected --allowed-root paths." >&2; exit 2; }
+  STATE_DIR="$REQUESTED_STATE_DIR"
+elif [[ "$EUID" -eq 0 ]]; then
   STATE_DIR="/var/lib/devspace-agent"
 else
   LEGACY_STATE_DIR="/var/lib/devspace-agent"
@@ -93,8 +111,31 @@ for root in "${ALLOWED_ROOTS[@]}"; do
 done
 
 mkdir -p "$INSTALL_DIR" "$STATE_DIR"
-curl -fsSL "${SERVER%/}/agent/v1/devspace-agent.py" -o "$INSTALL_DIR/devspace-agent.py"
-echo "${AGENT_SHA256,,}  $INSTALL_DIR/devspace-agent.py" | sha256sum -c -
+[[ -w "$STATE_DIR" && -x "$STATE_DIR" ]] || { echo "Agent state directory is not writable by the current user: $STATE_DIR" >&2; exit 2; }
+if [[ -n "$AGENT_FILE" ]]; then
+  cp "$AGENT_FILE" "$INSTALL_DIR/devspace-agent.py"
+else
+  "$PYTHON_BIN" - "${SERVER%/}/agent/v1/devspace-agent.py" "$INSTALL_DIR/devspace-agent.py" <<'PY'
+import pathlib
+import sys
+import urllib.request
+
+url, output = sys.argv[1], pathlib.Path(sys.argv[2])
+with urllib.request.urlopen(url, timeout=30) as response:
+    output.write_bytes(response.read())
+PY
+fi
+"$PYTHON_BIN" - "$INSTALL_DIR/devspace-agent.py" "${AGENT_SHA256,,}" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+expected = sys.argv[2].lower()
+actual = hashlib.sha256(path.read_bytes()).hexdigest()
+if actual != expected:
+    raise SystemExit(f"DevSpace Agent SHA-256 mismatch: expected {expected}, received {actual}")
+PY
 chmod 0755 "$INSTALL_DIR/devspace-agent.py"
 if [[ "$EUID" -eq 0 ]]; then
   chown -R "$RUN_USER":"$(id -gn "$RUN_USER")" "$STATE_DIR"

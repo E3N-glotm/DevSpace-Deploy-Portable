@@ -78,16 +78,23 @@ export class RemoteAgentStore {
         if (!name)
             throw new Error("Remote agent name is required.");
         const allowedRoots = normalizeRoots(input.allowedRoots);
+        const requestedAgentId = String(input.agentId ?? "").trim();
+        let existingAgent = undefined;
+        if (requestedAgentId) {
+            existingAgent = this.database.sqlite.prepare(`select * from remote_agents where id=?`).get(requestedAgentId);
+            if (!existingAgent || existingAgent.revoked_at)
+                throw new Error(`Remote agent cannot be repaired because it is missing or revoked: ${requestedAgentId}`);
+        }
         const ttlMinutes = Math.max(1, Math.min(Number(input.ttlMinutes ?? DEFAULT_ENROLLMENT_TTL_MINUTES), MAX_ENROLLMENT_TTL_MINUTES));
         const token = `dve_${randomBytes(32).toString("base64url")}`;
         const now = new Date();
         const expiresAt = new Date(now.getTime() + ttlMinutes * 60_000).toISOString();
         this.database.sqlite.prepare(`
       insert into remote_agent_enrollments
-        (token_hash, name, allowed_roots_json, expires_at, created_at, used_at)
-      values (?, ?, ?, ?, ?, null)
-    `).run(sha256(token), name, JSON.stringify(allowedRoots), expiresAt, now.toISOString());
-        return { token, name, allowedRoots, expiresAt, ttlMinutes };
+        (token_hash, name, allowed_roots_json, expires_at, created_at, used_at, agent_id)
+      values (?, ?, ?, ?, ?, null, ?)
+    `).run(sha256(token), name, JSON.stringify(allowedRoots), expiresAt, now.toISOString(), existingAgent?.id ?? null);
+        return { token, name, allowedRoots, expiresAt, ttlMinutes, agentId: existingAgent?.id ?? undefined, repair: Boolean(existingAgent) };
     }
     consumeEnrollment(token, hello = {}) {
         const tokenHash = sha256(token);
@@ -112,6 +119,25 @@ export class RemoteAgentStore {
           update remote_agents set secret_hash=?, status='online' where id=? and revoked_at is null
         `).run(sha256(agentSecret), row.agent_id);
                 return { agentId: row.agent_id, agentSecret, name: row.name, allowedRoots, recovered: true };
+            }
+            if (row.agent_id) {
+                const agent = this.database.sqlite.prepare(`select * from remote_agents where id=?`).get(row.agent_id);
+                if (!agent || agent.revoked_at)
+                    throw new Error("Enrollment repair target is no longer available for this Agent.");
+                const agentSecret = `dva_${randomBytes(32).toString("base64url")}`;
+                const now = new Date().toISOString();
+                this.database.sqlite.prepare(`
+          update remote_agents set
+            name=?, secret_hash=?, status='online', allowed_roots_json=?,
+            hostname=?, platform=?, agent_version=?, capabilities_json=?, metadata_json=?,
+            connected_at=?, last_seen_at=?
+          where id=? and revoked_at is null
+        `).run(row.name, sha256(agentSecret), JSON.stringify(allowedRoots), hello.hostname ?? agent.hostname ?? null,
+                    hello.platform ?? agent.platform ?? null, hello.agentVersion ?? agent.agent_version ?? null,
+                    JSON.stringify(hello.capabilities ?? parseJson(agent.capabilities_json, {})),
+                    JSON.stringify(hello.metadata ?? parseJson(agent.metadata_json, {})), now, now, row.agent_id);
+                this.database.sqlite.prepare(`update remote_agent_enrollments set used_at=? where token_hash=?`).run(now, tokenHash);
+                return { agentId: row.agent_id, agentSecret, name: row.name, allowedRoots, recovered: true, repaired: true };
             }
             const agentId = `agent_${randomBytes(5).toString("hex")}`;
             const agentSecret = `dva_${randomBytes(32).toString("base64url")}`;
@@ -218,12 +244,14 @@ export function remoteAgentAdmin({ stateDir, action, payload = {}, publicBaseUrl
             const enrollment = store.createEnrollment(payload);
             const base = String(publicBaseUrl ?? payload.publicBaseUrl ?? "").replace(/\/+$/, "");
             const rootArgs = enrollment.allowedRoots.map((root) => `--allowed-root '${root.replace(/'/g, `'"'"'`)}'`).join(" ");
+            const stateKey = enrollment.agentId || `enroll-${sha256(enrollment.token).slice(0, 12)}`;
+            const stateDir = `${enrollment.allowedRoots[0].replace(/\/+$/, "")}/.devspace-agent/${stateKey}`;
             const installer = bundledAgentAsset("install.sh");
             const agent = bundledAgentAsset("devspace-agent.py");
             const installCommand = base
-                ? `( tmp=$(mktemp); curl -fsSL '${base}/agent/v1/install.sh' -o "$tmp" && echo '${installer.sha256}  '"$tmp" | sha256sum -c - && bash "$tmp" --server '${base}' --token '${enrollment.token}' --name '${enrollment.name.replace(/'/g, `'"'"'`)}' --agent-sha256 '${agent.sha256}' ${rootArgs}; rc=$?; rm -f "$tmp"; exit $rc )`
+                ? `( tmp=$(mktemp); curl -fsSL '${base}/agent/v1/install.sh' -o "$tmp" && echo '${installer.sha256}  '"$tmp" | sha256sum -c - && bash "$tmp" --server '${base}' --token '${enrollment.token}' --name '${enrollment.name.replace(/'/g, `'"'"'`)}' --agent-sha256 '${agent.sha256}' --state-dir '${stateDir.replace(/'/g, `'"'"'`)}' ${rootArgs}; rc=$?; rm -f "$tmp"; exit $rc )`
                 : undefined;
-            return { enrollment, installCommand, installerSha256: installer.sha256, agentSha256: agent.sha256 };
+            return { enrollment, installCommand, serverUrl: base || undefined, stateDir, stateKey, installerSha256: installer.sha256, agentSha256: agent.sha256 };
         }
         if (action === "revoke")
             return { agent: store.revoke(String(payload.agentId ?? "")) };

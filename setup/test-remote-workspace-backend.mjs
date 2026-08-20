@@ -293,7 +293,22 @@ try {
   assert.equal(manager.store.authenticate(firstRecovery.agentId, firstRecovery.agentSecret), undefined);
   assert.equal(manager.store.confirmEnrollment(secondRecovery.agentId), true);
   assert.throws(() => manager.store.consumeEnrollment(recoveryEnrollment.token, {}), /invalid/i);
-  manager.store.delete(secondRecovery.agentId);
+  const repairEnrollment = manager.store.createEnrollment({
+    agentId: secondRecovery.agentId,
+    name: "recovery-probe",
+    allowedRoots: ["/home/ubuntu/workspace"],
+    ttlMinutes: 15,
+  });
+  assert.equal(repairEnrollment.repair, true);
+  assert.equal(repairEnrollment.agentId, secondRecovery.agentId);
+  const repairedRecovery = manager.store.consumeEnrollment(repairEnrollment.token, { hostname: "repair-attempt" });
+  assert.equal(repairedRecovery.agentId, secondRecovery.agentId);
+  assert.equal(repairedRecovery.repaired, true);
+  assert.equal(repairedRecovery.recovered, true);
+  assert.equal(manager.store.authenticate(secondRecovery.agentId, secondRecovery.agentSecret), undefined);
+  assert.equal(manager.store.authenticate(repairedRecovery.agentId, repairedRecovery.agentSecret)?.id, repairedRecovery.agentId);
+  assert.equal(manager.store.confirmEnrollment(repairedRecovery.agentId), true);
+  manager.store.delete(repairedRecovery.agentId);
 
   const enrollment = manager.store.createEnrollment({
     name: "gpu-01",
@@ -416,7 +431,7 @@ try {
   assert.ok(events.some((event) => event.kind === "remote.agent.enrolled"));
   assert.ok(events.some((event) => event.kind === "remote.agent.enrollment_confirmed"));
 
-  console.log("DevSpace 1.1.41 Remote Workspace Backend end-to-end protocol tests passed.");
+  console.log("DevSpace 1.1.42 Remote Workspace Backend end-to-end protocol tests passed.");
 }
 finally {
   await reconnectAgent?.close().catch(() => undefined);

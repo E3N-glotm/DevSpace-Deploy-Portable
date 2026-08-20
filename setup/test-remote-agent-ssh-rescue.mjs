@@ -25,6 +25,14 @@ assert.match(ui, /AutoRecoverConfiguredAgentsAsync/);
 assert.match(ui, /TimeSpan\.FromMinutes\(2\)/);
 assert.match(ui, /remote-agent-create-enrollment/);
 assert.match(ui, /installCommand/);
+assert.match(ui, /BuildOfflineSshInstallScript/);
+assert.match(ui, /--agent-file/);
+assert.match(ui, /base64\.b64decode/);
+assert.match(ui, /AgentBundlePath\(manager, "install\.sh"\)/);
+assert.match(ui, /AgentBundlePath\(manager, "devspace-agent\.py"\)/);
+assert.match(ui, /agentId = agentId \?\? ""/);
+assert.match(ui, /heartbeat 未恢复；正在通过本机 SSH 修复 endpoint\/凭据并重新登记原 Agent/);
+assert.match(ui, /_sshAutoRecover\.Checked = true/);
 assert.match(ui, /NormalizeSshScriptForBash/);
 assert.match(ui, /Replace\("\\r\\n", "\\n"\)\.Replace\("\\r", "\\n"\)/);
 assert.match(ui, /process\.StandardInput\.NewLine = "\\n"/);
@@ -55,6 +63,9 @@ console.log(JSON.stringify({
   existingAgentRestartFirst: true,
   systemdAndNohupRecovery: true,
   enrollmentInstallFallback: true,
+  localSshInstallerPayload: true,
+  repairEnrollmentAfterHeartbeatFailure: true,
+  autoRecoveryDefaultEnabled: true,
   backgroundRecoveryBackoff: true,
   posixLfShellTransport: true,
   manualInstallFallbackPreserved: true,

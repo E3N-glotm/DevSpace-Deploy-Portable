@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const SOURCE_AGENT = join(ROOT, "vendor", "waishnav-devspace", "dist", "linux-agent", "devspace-agent.py");
@@ -58,9 +59,14 @@ for (const contract of [
   /LEGACY_STATE_DIR="\/var\/lib\/devspace-agent"/,
   /run_as_agent_user\(\)/,
   /PYTHON_BIN="\$\(command -v python3\)"/,
+  /--agent-file\) AGENT_FILE=/,
+  /--state-dir\) REQUESTED_STATE_DIR=/,
+  /if \[\[ -n "\$AGENT_FILE" \]\]/,
+  /--state-dir must be inside one of the selected --allowed-root paths/,
+  /urllib\.request/,
+  /hashlib\.sha256/,
   /A non-root install can only run as the current Linux user/,
   /Linux allowedRoot cannot be \/\./,
-  /sha256sum -c -/,
   /User=\$RUN_USER/,
   /NoNewPrivileges=true/,
   /ProtectSystem=strict/,
@@ -77,6 +83,8 @@ for (const contract of [
 ]) {
   assert.match(installer, contract);
 }
+assert.doesNotMatch(installer, /curl is required/);
+assert.doesNotMatch(installer, /sha256sum is required/);
 
 const python = spawnSync("python", ["-c", [
   "import ast, pathlib, sys",
@@ -96,9 +104,41 @@ assert.equal(
 
 assert.match(remoteAgentStore, /\? `\( tmp=\$\(mktemp\);/);
 assert.match(remoteAgentStore, /&& bash "\$tmp" --server/);
+assert.match(remoteAgentStore, /--state-dir '\$\{stateDir\.replace/);
+assert.match(remoteAgentStore, /const stateDir = `\$\{enrollment\.allowedRoots\[0\]/);
+assert.match(remoteAgentStore, /const stateKey = enrollment\.agentId \|\| `enroll-\$\{sha256\(enrollment\.token\)\.slice\(0, 12\)\}`/);
 assert.match(remoteAgentStore, /rm -f "\$tmp"; exit \$rc \)`/);
+assert.match(remoteAgentStore, /requestedAgentId/);
+assert.match(remoteAgentStore, /repaired: true/);
+assert.match(remoteAgentStore, /serverUrl: base \|\| undefined/);
 assert.doesNotMatch(remoteAgentStore, /\? `tmp=\$\(mktemp\);[^`]+exit \$rc`/);
 assert.doesNotMatch(remoteAgentStore, /sudo bash "\$tmp"/);
+
+const packagedRemoteAgentStore = join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "remote-agent-store.js");
+const { remoteAgentAdmin } = await import(`${pathToFileURL(packagedRemoteAgentStore).href}?contract=${Date.now()}`);
+const stateDir = mkdtempSync(join(tmpdir(), "devspace-agent-contract-"));
+try {
+  const first = remoteAgentAdmin({
+    stateDir,
+    action: "create-enrollment",
+    payload: { name: "shared-server", allowedRoots: ["/home/ubuntu"], ttlMinutes: 15 },
+    publicBaseUrl: "https://example.invalid",
+  });
+  const second = remoteAgentAdmin({
+    stateDir,
+    action: "create-enrollment",
+    payload: { name: "shared-server", allowedRoots: ["/home/ubuntu"], ttlMinutes: 15 },
+    publicBaseUrl: "https://example.invalid",
+  });
+  assert.match(first.stateDir, /^\/home\/ubuntu\/\.devspace-agent\/enroll-[0-9a-f]{12}$/);
+  assert.match(second.stateDir, /^\/home\/ubuntu\/\.devspace-agent\/enroll-[0-9a-f]{12}$/);
+  assert.notEqual(first.stateDir, second.stateDir, "two users/enrollments sharing one allowedRoot must not share Agent state");
+  assert.match(first.installCommand, /--state-dir '\/home\/ubuntu\/\.devspace-agent\/enroll-[0-9a-f]{12}'/);
+  assert.doesNotMatch(first.installCommand, /sudo\s+bash/);
+}
+finally {
+  rmSync(stateDir, { recursive: true, force: true });
+}
 
 console.log(JSON.stringify({
   linuxAgentSourceMatchesInstalledCore: true,
@@ -106,6 +146,11 @@ console.log(JSON.stringify({
   installerSyntax: true,
   passwordlessUserInstall: true,
   installerAndAgentHashChain: true,
+  sshOfflineAgentFileInstall: true,
+  selectedAllowedRootStateDir: true,
+  multiInstanceStateDirectoryIsolation: true,
+  installerDoesNotRequireCurl: true,
+  repairEnrollmentPreservesAgentIdentity: true,
   recoverableEnrollmentRetry: true,
   websocketCloseDiagnostics: true,
   nonSystemdBackgroundFallback: true,
