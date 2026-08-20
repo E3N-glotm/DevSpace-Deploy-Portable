@@ -348,6 +348,7 @@ https://你的域名/mcp
 - **修复 Remote Agent SSH 救援在 Linux Bash 上收到 Windows CRLF 的问题。** 1.1.40 的内置恢复脚本来自 CRLF C# 源文件，直接写入 `ssh ... bash -s` stdin 时会把 `set -eu\r`、`do\r` 等字符送到 Linux，导致 `set: invalid option` 和 `syntax error near unexpected token '$'do\r''`。1.1.41 在 SSH 传输边界统一把 CRLF/CR 转换为 POSIX LF，并保证脚本以单个 LF 结束。
 - SSH 密码的 DPAPI / AskPass、安全参数、systemd / nohup 恢复顺序和手动安装 fallback 均保持不变；修复只改变远端 shell 文本换行格式。
 - 原生 self-test 与 SSH rescue contract 新增 CRLF 输入回归，确保编译后的 Windows 程序仍只向 `bash -s` 发送 LF shell text。
+- **1.1.41 作为稳定兼容 Release 继续为 1.1.32～1.1.39 发布各自直达最新版的精确增量包。** 同时发布 `1.1.40 -> 1.1.41` 邻接增量，并从 1.1.40 carry-forward 历史增量图；因此旧客户端仍可纯增量直达最新版，1.1.40+ 客户端则继续使用长期事务增量链模型。1.1.33 仍保留 direct-overlay Rescue 作为旧 Apply 路径的额外 fallback。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.41.md)
 

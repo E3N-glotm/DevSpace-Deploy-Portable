@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.41",
-  "builtAt": "2026-08-20T09:33:02+08:00",
+  "builtAt": "2026-08-20T09:52:33+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -633,7 +633,7 @@
     "docs/releases/HOTFIX-1.1.39.md.sha256": "88a179638f0625402eb274c77659aae3360e34d8a94427d579b19082b385425d",
     "docs/releases/HOTFIX-1.1.4.md.sha256": "deafbd8723a67d5161598264416b2331eb7b27383a579de44e1023fdf89a74f4",
     "docs/releases/HOTFIX-1.1.40.md.sha256": "b6bab133ebe038ae9d9c037d8a0973b790537701b6a3d113412f568c392dade5",
-    "docs/releases/HOTFIX-1.1.41.md.sha256": "b6a10dab23eb244c7486c65dbb633353121f6056f4c1961fd71872ba252cd51a",
+    "docs/releases/HOTFIX-1.1.41.md.sha256": "4386101c49b84e70c9120d143e8b207c4d3e6fe3c4db4542cc7d8fc5d83fd6b4",
     "docs/releases/HOTFIX-1.1.5.md.sha256": "06769c7a32c352397ca503af25251c26222b8c468d8b439788c416ebe2c6745e",
     "docs/releases/HOTFIX-1.1.6.md.sha256": "570cbb405ca8129ec7579e1414f2fbf8c4492b90c044c75d186d8fba38735a03",
     "docs/releases/HOTFIX-1.1.7.md.sha256": "ff933198773788193d73d87f861d7abaabd0b3299f6e87090c049b7d5589899e",
@@ -701,7 +701,7 @@
     "setup/test-plugin-manager.mjs.sha256": "b304bea5b33126b450d34277d959570992140ae84b1c2689f57d4728e842cf52",
     "setup/test-portable-ui-heartbeat.mjs.sha256": "524f1d109fe9f7da44c344c34b18a72ba1dea287aa09f748a8fbada807065710",
     "setup/test-portable-ui-workflows.mjs.sha256": "8f868eda03882b37ba8fe8a5557d07ff1e8f627fb890a088401583393a8a46cf",
-    "setup/test-release-migration-contract.mjs.sha256": "990e2b4e52a29bc0b733c6af5d09f114acfecbcfa5dba4abed11c4f5ea0b710d",
+    "setup/test-release-migration-contract.mjs.sha256": "3ec48745a0de53b9472dccd22bbc3f03d4bc208db0d351ecd03387585307d1e1",
     "setup/test-release-plugin-layout.py.sha256": "1ecb02208b17a1da8f5cc6f47a57462c108b0f37e0f19e3ab96243fa44b4b501",
     "setup/test-remote-agent-ssh-rescue.mjs.sha256": "36dedabd63e3304187d2d2d1374c2d098b5147fdcef6d098288defec4f9b50bb",
     "setup/test-remote-workspace-backend.mjs.sha256": "7964cb7aa591d6c6a0552c2b3f89a3216af278e98b911221764dd215abc441d1",

@@ -6,6 +6,7 @@
 
 - 修复 Remote Agent SSH 救援脚本的 Windows CRLF → Linux Bash 传输问题。所有送入 `ssh ... bash -s` 的脚本现在在发送前统一规范化为 POSIX LF，避免 `set -eu\r`、`do\r` 被 Bash 当成非法参数/语法。
 - 增加原生 self-test 和 SSH rescue contract 的 CRLF 回归；DPAPI AskPass、已有 Agent 优先恢复、systemd/nohup 以及手动安装 fallback 行为不变。
+- 将 1.1.41 作为稳定兼容 Release：继续发布 `1.1.32`～`1.1.39` 各自直达 1.1.41 的精确增量，同时发布 `1.1.40 -> 1.1.41` 邻接增量、carry-forward 历史增量图，并保留 1.1.33 Rescue fallback。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.41.md)
 

@@ -84,13 +84,13 @@ jobs:
           "BASE_ZIP=$namedBase" >> $env:GITHUB_ENV
           "BASE_UPDATE_MANIFEST=$baseUpdateManifest" >> $env:GITHUB_ENV
 
-      - name: Download 1.1.40 migration bases
-        if: ${{ steps.version.outputs.version == '1.1.40' }}
+      - name: Download legacy exact-delta migration bases
+        if: ${{ steps.version.outputs.version == '1.1.40' || steps.version.outputs.version == '1.1.41' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $migrationDir = Join-Path $env:RUNNER_TEMP "devspace-1.1.40-migration-bases"
+          $migrationDir = Join-Path $env:RUNNER_TEMP "devspace-legacy-migration-bases"
           New-Item -ItemType Directory -Force -Path $migrationDir | Out-Null
           foreach ($baseVersion in @("1.1.32", "1.1.33", "1.1.34", "1.1.35", "1.1.36", "1.1.37", "1.1.38", "1.1.39")) {
             $baseName = "DevSpacePortable-Windows-x64-$baseVersion.zip"
@@ -101,7 +101,7 @@ jobs:
               --clobber
             $baseZip = Join-Path $migrationDir $baseName
             if (-not (Test-Path -LiteralPath $baseZip)) {
-              throw "Missing 1.1.40 migration base: $baseZip"
+              throw "Missing legacy exact-delta migration base: $baseZip"
             }
           }
           "MIGRATION_BASE_DIR=$migrationDir" >> $env:GITHUB_ENV
@@ -140,26 +140,38 @@ jobs:
           $incrementalZips = New-Object System.Collections.Generic.List[string]
           $rescueZip = $null
 
-          if ($env:VERSION -eq "1.1.40") {
-            # 1.1.40 is the migration checkpoint. Old 1.1.32-1.1.39 updaters
-            # only understand one exact fromVersion -> latest edge, so publish
-            # one compatibility delta for each installed version exactly once.
+          if ($env:VERSION -eq "1.1.40" -or $env:VERSION -eq "1.1.41") {
+            # 1.1.32-1.1.39 updaters only understand one exact
+            # fromVersion -> latest edge. 1.1.40 was the migration checkpoint;
+            # 1.1.41 is the stable follow-up and must preserve that compatibility
+            # while also publishing the normal 1.1.40 -> 1.1.41 adjacent edge.
             foreach ($baseVersion in @("1.1.32", "1.1.33", "1.1.34", "1.1.35", "1.1.36", "1.1.37", "1.1.38", "1.1.39")) {
               $baseZip = Join-Path $env:MIGRATION_BASE_DIR "DevSpacePortable-Windows-x64-$baseVersion.zip"
               $deltaZip = Join-Path $PWD "DevSpacePortable-Update-$baseVersion-to-$env:VERSION.zip"
               python setup/create-incremental-update.py --base-zip "$baseZip" --target-zip "$targetZip" --output "$deltaZip"
               $incrementalZips.Add($deltaZip)
             }
+
+            if ($env:VERSION -eq "1.1.41") {
+              if ($env:BASE_VERSION -ne "1.1.40") {
+                throw "1.1.41 release requires v1.1.40 as the previous stable base, received $env:BASE_VERSION"
+              }
+              $adjacentDeltaZip = Join-Path $PWD "DevSpacePortable-Update-1.1.40-to-1.1.41.zip"
+              python setup/create-incremental-update.py --base-zip "$env:BASE_ZIP" --target-zip "$targetZip" --output "$adjacentDeltaZip"
+              $incrementalZips.Add($adjacentDeltaZip)
+            }
+
             # Keep the historical 1.1.33 direct-extract rescue path for this
-            # migration Release because that installed updater had a known
+            # compatibility Release because that installed updater had a known
             # apply-path failure mode before 1.1.36 hardened the transaction.
             $legacy113 = Join-Path $env:MIGRATION_BASE_DIR "DevSpacePortable-Windows-x64-1.1.33.zip"
             $rescueZip = Join-Path $PWD "DevSpacePortable-Rescue-1.1.33-to-$env:VERSION.zip"
             python setup/create-rescue-overlay.py --base-zip "$legacy113" --target-zip "$targetZip" --output "$rescueZip"
           } else {
-            # After the 1.1.40 migration checkpoint, each Release carries only
-            # its previous -> current edge. The 1.1.40+ updater composes these
-            # historical Release edges into one transactional incremental chain.
+            # After the 1.1.41 stable compatibility Release, each Release
+            # carries only its previous -> current edge. The 1.1.40+ updater
+            # composes these historical Release edges into one transactional
+            # incremental chain.
             $deltaZip = Join-Path $PWD "DevSpacePortable-Update-$env:BASE_VERSION-to-$env:VERSION.zip"
             python setup/create-incremental-update.py --base-zip "$env:BASE_ZIP" --target-zip "$targetZip" --output "$deltaZip"
             $incrementalZips.Add($deltaZip)

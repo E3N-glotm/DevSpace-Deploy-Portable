@@ -2,7 +2,9 @@
 
 ## Scope
 
-1.1.41 is a focused Remote Workspace Agent SSH-rescue hotfix. It fixes the Windows-to-Linux shell transport used by **Test SSH**, **One-click recover / install Agent**, and background SSH recovery. Portable Protocol remains 1.5 and the MCP tool schema is unchanged from 1.1.40.
+1.1.41 is the stable Remote Workspace Agent SSH-rescue hotfix. It fixes the Windows-to-Linux shell transport used by **Test SSH**, **One-click recover / install Agent**, and background SSH recovery. Portable Protocol remains 1.5 and the MCP tool schema is unchanged from 1.1.40.
+
+Because 1.1.32-1.1.39 clients predate the multi-Release incremental planner and require one exact `fromVersion -> latest` edge, the 1.1.41 Release preserves direct incremental compatibility for all of those installed versions. In addition, it publishes the normal `1.1.40 -> 1.1.41` adjacent delta and carries forward the validated historical incremental graph from 1.1.40. Therefore 1.1.32-1.1.39 users can still update directly to the latest stable Release without downloading the full Portable ZIP, while 1.1.40+ clients retain the long-term transactional chain model.
 
 ## SSH rescue CRLF fix
 
@@ -34,3 +36,5 @@ The normalization is applied centrally in `RunSshScriptWithProfileAsync`, so exp
 ## Regression coverage
 
 The native self-test now sends a synthetic shell string containing CRLF and a lone CR through the same normalization helper and fails unless the result contains LF only and ends in LF. The SSH rescue contract also requires the transport normalization call and forbids the previous implicit Windows `WriteLine()` fallback.
+
+The Release contract additionally requires 1.1.41 to publish exact deltas from 1.1.32 through 1.1.39, the adjacent 1.1.40-to-1.1.41 delta, the 1.1.33 Rescue fallback, and a carry-forward incremental graph manifest.

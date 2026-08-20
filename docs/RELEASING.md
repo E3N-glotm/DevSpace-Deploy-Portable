@@ -57,12 +57,14 @@ archive, so an older TGZ is inert; retaining it avoids rejecting historical
 same-version repacks whose generated TGZ bytes differ from the canonical base.
 All ordinary deleted program files keep the existing base-SHA drift guard.
 
-Version 1.1.40 is the one-time updater migration checkpoint. Its GitHub
-workflow builds exact deltas from every canonical 1.1.32-1.1.39 full ZIP plus
-the historical 1.1.33 direct-extract rescue overlay. Those generated ZIPs live
-only on the Release. After 1.1.40, ordinary Releases build only the previous ->
-current delta and do not keep expanding the current Release with old-version
-ZIPs.
+Version 1.1.40 is the updater migration checkpoint. Its GitHub workflow builds
+exact deltas from every canonical 1.1.32-1.1.39 full ZIP plus the historical
+1.1.33 direct-extract rescue overlay. Version 1.1.41 is the stable follow-up to
+that migration and intentionally repeats the exact 1.1.32-1.1.39 compatibility
+edges while also publishing the normal 1.1.40 -> 1.1.41 adjacent edge. This is
+required because installed 1.1.32-1.1.39 clients can only select one exact
+fromVersion -> latest edge. These generated ZIPs live only on the Release.
+After 1.1.41, ordinary Releases return to previous -> current deltas only.
 
 ## Tag release
 
@@ -79,8 +81,10 @@ runs tests, rebuilds the Portable ZIP, and uploads:
 
 - `DevSpacePortable-Windows-x64-<version>.zip`
 - for `v1.1.40`, eight migration deltas from `1.1.32` through `1.1.39`;
-- after `v1.1.40`, only `DevSpacePortable-Update-<previous>-to-<version>.zip`;
-- the `1.1.33 -> 1.1.40` Rescue overlay only at the migration checkpoint;
+- for `v1.1.41`, eight direct legacy deltas from `1.1.32` through `1.1.39`
+  plus `DevSpacePortable-Update-1.1.40-to-1.1.41.zip`;
+- after `v1.1.41`, only `DevSpacePortable-Update-<previous>-to-<version>.zip`;
+- the `1.1.33 -> target` Rescue overlay on the 1.1.40 and 1.1.41 compatibility Releases;
 - `release-assets/update-manifest.json`
 - `release-assets/SHA256SUMS-release.txt`
 
@@ -101,11 +105,11 @@ supplemental updater assets. It never rebuilds or replaces the target full ZIP.
 Version 1.1.40 is the migration checkpoint for the long-term updater topology.
 Its Release workflow downloads the canonical 1.1.32 through 1.1.39 full ZIPs on
 the GitHub runner and publishes eight exact `*-to-1.1.40.zip` migration deltas.
-Those generated ZIPs are Release assets only; they are never committed to Git.
-This is required because the installed 1.1.32-1.1.39 updater can only select a
-single exact edge to the current latest Release.
+Version 1.1.41 repeats those eight legacy compatibility edges to the new latest
+stable target and adds the adjacent `1.1.40 -> 1.1.41` edge. Those generated
+ZIPs are Release assets only; they are never committed to Git.
 
-Starting with the Release after 1.1.40, publish only the normal previous-to-
+Starting with the Release after 1.1.41, publish only the normal previous-to-
 current incremental ZIP. Pass the previous Release's `update-manifest.json` to
 `create-update-manifest.py --carry-forward-manifest`; the workflow does this
 automatically. The 1.1.40+ updater composes a byte-minimal path to the latest
