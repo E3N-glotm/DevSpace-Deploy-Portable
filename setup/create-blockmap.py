@@ -8,6 +8,7 @@ import re
 import shutil
 import struct
 import tempfile
+import time
 import zlib
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,7 @@ BLOCK_SIZE = 1024 * 1024
 MAGIC = b"DSPBLK2\n"
 PRELUDE_STRUCT = struct.Struct("<8sQQ")
 PERSISTENT_ROOTS = {"data", "logs", "reports"}
+ALLOWED_PERSISTENT_PREFIXES = ("data/plugins/installed/codex-runtime-bridge/",)
 
 
 def sha256_file(path: Path) -> str:
@@ -36,6 +38,42 @@ def validate_relative_path(value: str) -> str:
     if len(path.parts) > 0 and path.parts[0].endswith(":"):
         raise ValueError(f"unsafe blockmap path: {value}")
     return path.as_posix()
+
+
+def include_release_path(relative: str) -> bool:
+    first = PurePosixPath(relative).parts[0]
+    if first not in PERSISTENT_ROOTS:
+        return True
+    return any(relative.startswith(prefix) for prefix in ALLOWED_PERSISTENT_PREFIXES)
+
+
+def create_block_payload_file(parent: Path) -> tuple[Path, BinaryIO]:
+    # NamedTemporaryFile retains platform-specific delete/share semantics on
+    # Windows, and Python 3.14 can still reject an explicit unlink even after
+    # close() while the wrapper context is active. mkstemp followed by an
+    # ordinary binary handle has deterministic close/delete behavior.
+    descriptor, raw_path = tempfile.mkstemp(prefix="devspace-blocks-", suffix=".bin", dir=parent)
+    os.close(descriptor)
+    path = Path(raw_path)
+    try:
+        return path, path.open("w+b")
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def unlink_with_retry(path: Path, attempts: int = 20, delay_seconds: float = 0.1) -> None:
+    for attempt in range(attempts):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt + 1 >= attempts:
+                raise
+            # Large temporary payloads may be held briefly by Windows file
+            # scanning after the writer closes. Keep the retry bounded and
+            # preserve the final exception if the sharing violation persists.
+            time.sleep(delay_seconds)
 
 
 def iter_zip_files(path: Path) -> Iterator[tuple[str, int, BinaryIO]]:
@@ -106,12 +144,11 @@ def build_block_pack(source: Path, output: Path, explicit_target_version: str = 
         raise ValueError("target version is required when the block-pack source is a directory")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.NamedTemporaryFile(prefix="devspace-blocks-", suffix=".bin", delete=False, dir=output.parent) as block_file:
-        block_path = Path(block_file.name)
+    block_path, block_handle = create_block_payload_file(output.parent)
+    with block_handle as block_file:
         try:
             for relative, declared_size, handle in iterator_factory(source):
-                first = PurePosixPath(relative).parts[0]
-                if first in PERSISTENT_ROOTS:
+                if not include_release_path(relative):
                     # Release packages intentionally do not carry durable user
                     # state. Ignore any accidental payload here rather than
                     # teaching the differential engine to overwrite it.
@@ -159,6 +196,7 @@ def build_block_pack(source: Path, output: Path, explicit_target_version: str = 
                 "format": "devspace-block-pack-v2",
                 "blockSize": BLOCK_SIZE,
                 "persistentRoots": sorted(PERSISTENT_ROOTS),
+                "allowedPersistentPrefixes": list(ALLOWED_PERSISTENT_PREFIXES),
                 "source": "release-zip-content" if source.is_file() else "directory-content",
                 "targetVersion": target_version,
                 "sourceArchive": (
@@ -203,11 +241,10 @@ def build_block_pack(source: Path, output: Path, explicit_target_version: str = 
                 "uniqueChunkCount": len(chunks),
             }
         finally:
-            # Windows does not allow unlinking an open NamedTemporaryFile.
-            # Close explicitly before cleanup; the context manager's second
-            # close on exit is harmless.
+            # Close the ordinary binary handle before unlinking. The context
+            # manager's second close on exit is harmless.
             block_file.close()
-            block_path.unlink(missing_ok=True)
+            unlink_with_retry(block_path)
 
 
 def read_pack_metadata(path: Path) -> dict[str, object]:

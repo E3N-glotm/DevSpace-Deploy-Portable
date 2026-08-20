@@ -32,26 +32,27 @@ def edge(from_version: str, to_version: str, marker: str, *, url: str | None = N
 previous = {
     "repository": repository,
     "incrementalGraphAssets": [
-        edge("1.1.40", "1.1.41", "a"),
-        edge("1.1.41", "1.1.42", "b"),
-        edge("1.1.42", "1.1.43", "c", url="https://example.invalid/poison.zip"),
+        edge("1.1.39", "1.1.40", "a"),
+        edge("1.1.40", "1.1.41", "b"),
+        edge("1.1.41", "1.1.42", "c", url="https://example.invalid/poison.zip"),
     ],
-    "incrementalAssets": [edge("1.1.39", "1.1.40", "d")],
+    "incrementalAssets": [edge("1.1.38", "1.1.39", "d")],
 }
 current = [
-    edge("1.1.42", "1.1.43", "e"),
-    edge("1.1.41", "1.1.42", "f"),
+    edge("1.1.41", "1.1.42", "e"),
+    edge("1.1.40", "1.1.41", "f"),
 ]
 
 merged = module.merge_incremental_graph(repository, current, previous)
 keys = [(item["fromVersion"], item["toVersion"]) for item in merged]
 assert keys == [
+    ("1.1.38", "1.1.39"),
     ("1.1.39", "1.1.40"),
     ("1.1.40", "1.1.41"),
     ("1.1.41", "1.1.42"),
-    ("1.1.42", "1.1.43"),
 ]
-assert next(item for item in merged if item["toVersion"] == "1.1.42")["sha256"] == "f" * 64
+assert next(item for item in merged if item["toVersion"] == "1.1.42")["sha256"] == "e" * 64
+assert next(item for item in merged if item["toVersion"] == "1.1.41")["sha256"] == "f" * 64
 assert all(str(item["downloadUrl"]).startswith(f"https://github.com/{repository}/releases/download/v") for item in merged)
 
 try:

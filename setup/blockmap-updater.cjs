@@ -17,6 +17,7 @@ const DEFAULT_MIRRORS = [
   "https://gh-proxy.net/",
 ];
 const PERSISTENT_ROOTS = new Set(["data", "logs", "reports"]);
+const ALLOWED_PERSISTENT_PREFIXES = ["data/plugins/installed/codex-runtime-bridge/"];
 const RANGE_GROUP_LIMIT = 16 * 1024 * 1024;
 
 function fail(message) {
@@ -75,7 +76,13 @@ function safeRelative(value) {
   if (parts.some((part) => part === "" || part === "." || part === "..")) {
     fail(`unsafe blockmap path: ${value}`);
   }
-  if (PERSISTENT_ROOTS.has(parts[0])) fail(`blockmap may not write persistent path: ${normalized}`);
+  const lower = normalized.toLowerCase();
+  if (
+    PERSISTENT_ROOTS.has(parts[0].toLowerCase())
+    && !ALLOWED_PERSISTENT_PREFIXES.some((prefix) => lower.startsWith(prefix))
+  ) {
+    fail(`blockmap may not write persistent path: ${normalized}`);
+  }
   return parts.join("/");
 }
 
@@ -754,4 +761,3 @@ main().catch((error) => {
   process.stderr.write(`DevSpace blockmap error: ${error && error.message ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });
-

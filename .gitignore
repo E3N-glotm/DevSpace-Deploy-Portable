@@ -21,6 +21,7 @@ reports/
 packages/*.tgz
 packages/staging/
 DevSpacePortable-Windows-x64-*.zip
+DevSpacePortable-Windows-x64-*.blockmap
 DevSpacePortable-Update-*.zip
 DevSpacePortable-Rescue-*.zip
 SHA256SUMS.txt

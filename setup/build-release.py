@@ -25,6 +25,9 @@ REQUIRED_BUNDLED_PLUGIN_FILES = {
 }
 EMPTY_RELEASE_DIRS = ("data/", "data/run/", "logs/", "reports/")
 EXCLUDED_TOP_LEVEL_DIRS = {
+    ".test-cache",
+    ".tmp-delta-audit",
+    ".update-staging",
     "data",
     "logs",
     "reports",
@@ -35,6 +38,7 @@ EXCLUDED_TOP_LEVEL_DIRS = {
     ".vscode",
     "vendor",
     "release-assets",
+    "release-output",
 }
 EXCLUDED_TOP_LEVEL_FILES = {
     ".gitattributes",
@@ -211,6 +215,8 @@ def release_files() -> list[Path]:
                 and not name.startswith(RELEASE_DIRECTORY_PREFIX)
                 and name != "__pycache__"
             )
+        elif relative_dir == Path("packages"):
+            dir_names[:] = sorted(name for name in dir_names if name not in {"__pycache__", "staging"})
         else:
             dir_names[:] = sorted(name for name in dir_names if name != "__pycache__")
         for file_name in sorted(file_names):
@@ -221,6 +227,8 @@ def release_files() -> list[Path]:
             if relative == Path("SHA256SUMS.txt"):
                 continue
             if relative.suffix.lower() == ".zip":
+                continue
+            if relative.parent == Path(".") and relative.suffix.lower() == ".blockmap":
                 continue
             if relative.suffix.lower() in {".pyc", ".pyo"}:
                 continue

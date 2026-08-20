@@ -142,7 +142,7 @@ const temporary = mkdtempSync(join(os.tmpdir(), "devspace-blockmap-test-"));
 const base = join(temporary, "base");
 const target = join(temporary, "target");
 const payload = join(temporary, "payload");
-const pack = join(temporary, "DevSpacePortable-Windows-x64-1.1.43.blockmap");
+const pack = join(temporary, "DevSpacePortable-Windows-x64-1.1.42.blockmap");
 const progress = join(temporary, "progress.json");
 mkdirSync(base, { recursive: true });
 mkdirSync(target, { recursive: true });
@@ -161,22 +161,23 @@ const changedTarget = Buffer.concat([
 ]);
 const newFile = deterministicBytes(oneMiB + 123_456, 21);
 
-writeFixtureFile(base, "VERSION-MANIFEST.json", `${JSON.stringify({ runtime: { devspacePortable: "1.1.42" } }, null, 2)}\n`);
+writeFixtureFile(base, "VERSION-MANIFEST.json", `${JSON.stringify({ runtime: { devspacePortable: "1.1.41" } }, null, 2)}\n`);
 writeFixtureFile(base, "unchanged.bin", unchanged);
 writeFixtureFile(base, "nested/changed.bin", changedBase);
 writeFixtureFile(base, "removed.txt", "delete me\n");
 writeFixtureFile(base, "data/user-state.txt", "persistent\n");
 
-writeFixtureFile(target, "VERSION-MANIFEST.json", `${JSON.stringify({ runtime: { devspacePortable: "1.1.43" } }, null, 2)}\n`);
+writeFixtureFile(target, "VERSION-MANIFEST.json", `${JSON.stringify({ runtime: { devspacePortable: "1.1.42" } }, null, 2)}\n`);
 writeFixtureFile(target, "unchanged.bin", unchanged);
 writeFixtureFile(target, "nested/changed.bin", changedTarget);
 writeFixtureFile(target, "nested/new.bin", newFile);
+writeFixtureFile(target, "data/plugins/installed/codex-runtime-bridge/1.1.1/manifest.json", "{\"id\":\"codex-runtime-bridge\"}\n");
 
 let server;
 try {
   const generated = spawnSync(
     python,
-    [generator, target, pack, "--target-version", "1.1.43"],
+    [generator, target, pack, "--target-version", "1.1.42"],
     { cwd: root, encoding: "utf8", windowsHide: true },
   );
   assert.equal(generated.status, 0, generated.stderr || generated.stdout);
@@ -199,7 +200,7 @@ try {
     "--header-size", String(metadata.headerCompressedSize),
     "--header-sha256", metadata.headerSha256,
     "--payload", payload,
-    "--target-version", "1.1.43",
+    "--target-version", "1.1.42",
     "--progress-file", progress,
     "--curl", curl,
   ];
@@ -210,12 +211,17 @@ try {
   assert.equal(staged.code, 0, staged.stderr || staged.stdout);
   const result = JSON.parse(staged.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1));
   assert.equal(result.success, true);
-  assert.equal(result.targetVersion, "1.1.43");
+  assert.equal(result.targetVersion, "1.1.42");
   assert.ok(result.reusedBytes > 2 * oneMiB, `expected substantial local block reuse, got ${result.reusedBytes}`);
   assert.ok(result.downloadedBytes > 0);
   assert.ok(result.downloadedBytes < result.targetBytes, `${result.downloadedBytes} should be below ${result.targetBytes}`);
   assert.ok(result.missingUniqueChunks > 0);
   assert.ok(result.rangeRequestGroups > 0);
+  assert.equal(
+    statSync(join(payload, "data", "plugins", "installed", "codex-runtime-bridge", "1.1.1", "manifest.json")).isFile(),
+    true,
+    "release-owned bundled plugin files must be reconstructed",
+  );
 
   const targetFiles = listFiles(target);
   assert.deepEqual(listFiles(payload), targetFiles);
@@ -263,4 +269,3 @@ try {
   if (server) await new Promise((resolveClose) => server.close(resolveClose));
   rmSync(temporary, { recursive: true, force: true });
 }
-

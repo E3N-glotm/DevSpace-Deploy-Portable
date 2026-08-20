@@ -36,9 +36,9 @@ After the migration checkpoint, a normal Release only needs its previous-version
 
 The latest `update-manifest.json` also carries forward the validated historical edge graph. A jump update therefore normally needs only the latest small manifest to discover older adjacent deltas. Enumerating historical GitHub Releases remains a bounded compatibility fallback when that manifest cannot be fetched or does not contain a complete path. The delta ZIP bytes themselves remain attached to their original Releases and are never copied into Git or duplicated onto every new Release.
 
-For example, a machine that remains on 1.1.40 while 1.1.43 is current may select:
+For example, a machine that remains on 1.1.40 while 1.1.42 is current may select:
 
-`1.1.40 -> 1.1.41 -> 1.1.42 -> 1.1.43`
+`1.1.40 -> 1.1.41 -> 1.1.42`
 
 All selected packages are downloaded and verified while DevSpace remains running. The updater then stops the Portable-owned runtime once and applies the entire chain under one backup transaction. Intermediate versions are not launched. If any package is missing, malformed, discontinuous, hash-invalid, contains an unsafe path, fails deletion-base validation, or does not produce its declared intermediate `VERSION-MANIFEST`, the transaction rolls back to the original installed version. The existing complete ZIP remains the final fallback.
 

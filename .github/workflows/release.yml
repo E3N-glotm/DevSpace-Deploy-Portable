@@ -113,7 +113,15 @@ jobs:
         run: |
           $migrationDir = Join-Path $env:RUNNER_TEMP "devspace-legacy-migration-bases"
           New-Item -ItemType Directory -Force -Path $migrationDir | Out-Null
-          foreach ($baseVersion in @("1.1.32", "1.1.33", "1.1.34", "1.1.35", "1.1.36", "1.1.37", "1.1.38", "1.1.39")) {
+          $baseVersions = @("1.1.32", "1.1.33", "1.1.34", "1.1.35", "1.1.36", "1.1.37", "1.1.38", "1.1.39")
+          if ($env:VERSION -eq "1.1.42") {
+            # The final 1.1.42 repack refreshes the requested direct matrix but
+            # intentionally does not publish a 1.1.35 edge. 1.1.40 is fetched
+            # here; 1.1.41 is already BASE_ZIP.
+            $baseVersions = @($baseVersions | Where-Object { $_ -ne "1.1.35" })
+            $baseVersions += "1.1.40"
+          }
+          foreach ($baseVersion in $baseVersions) {
             $baseName = "DevSpacePortable-Windows-x64-$baseVersion.zip"
             gh release download "v$baseVersion" `
               --repo "${{ github.repository }}" `
@@ -187,12 +195,20 @@ jobs:
           $rescueZip = $null
 
           if ($env:VERSION -eq "1.1.40" -or $env:VERSION -eq "1.1.41" -or $env:VERSION -eq "1.1.42") {
-            # 1.1.32-1.1.39 updaters only understand one exact
+            # Legacy updaters only understand one exact
             # fromVersion -> latest edge. Keep direct legacy edges on the
             # migration/stability Releases so those installed clients do not
             # regress to a 500+ MiB full package while newer updaters use the
             # carry-forward graph.
-            foreach ($baseVersion in @("1.1.32", "1.1.33", "1.1.34", "1.1.35", "1.1.36", "1.1.37", "1.1.38", "1.1.39")) {
+            $migrationBaseVersions = @("1.1.32", "1.1.33", "1.1.34", "1.1.35", "1.1.36", "1.1.37", "1.1.38", "1.1.39")
+            if ($env:VERSION -eq "1.1.42") {
+              # Keep the requested 1.1.33-1.1.41 -> 1.1.42 direct matrix in
+              # sync except for the explicitly omitted 1.1.35 edge.
+              # 1.1.32 remains supported too.
+              $migrationBaseVersions = @($migrationBaseVersions | Where-Object { $_ -ne "1.1.35" })
+              $migrationBaseVersions += "1.1.40"
+            }
+            foreach ($baseVersion in $migrationBaseVersions) {
               $baseZip = Join-Path $env:MIGRATION_BASE_DIR "DevSpacePortable-Windows-x64-$baseVersion.zip"
               $deltaZip = Join-Path $PWD "DevSpacePortable-Update-$baseVersion-to-$env:VERSION.zip"
               python setup/create-incremental-update.py --base-zip "$baseZip" --target-zip "$targetZip" --output "$deltaZip"
@@ -224,12 +240,11 @@ jobs:
             $rescueZip = Join-Path $PWD "DevSpacePortable-Rescue-1.1.33-to-$env:VERSION.zip"
             python setup/create-rescue-overlay.py --base-zip "$legacy113" --target-zip "$targetZip" --output "$rescueZip"
           } else {
-            # v1.1.42 is the final updater that cannot consume block-pack-v2.
-            # Keep one direct 1.1.42 -> current bridge on every new Release so
-            # an old 1.1.42 installation may skip arbitrarily many Releases and
-            # still bootstrap into the new engine. Newer clients do not need a
-            # fromVersion graph: they reconstruct the latest target directly
-            # from the latest blockmap plus locally reusable 1 MiB chunks.
+            # v1.1.42 is the compatibility floor for block-pack-v2. Keep one
+            # direct 1.1.42 -> current bridge on every later Release so an
+            # installation made from an earlier 1.1.42 repack can still enter
+            # the new engine. Blockmap-capable clients reconstruct the latest
+            # target directly from the newest pack and reusable local chunks.
             if (-not $env:BLOCKMAP_BOOTSTRAP_BASE) {
               throw "BLOCKMAP_BOOTSTRAP_BASE is required for post-1.1.42 Releases."
             }
@@ -263,4 +278,3 @@ jobs:
             DevSpacePortable-Windows-x64-${{ steps.version.outputs.version }}.blockmap
             release-assets/update-manifest.json
             release-assets/SHA256SUMS-release.txt
-

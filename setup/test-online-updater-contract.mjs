@@ -8,6 +8,7 @@ const updater = readFileSync(join(root, "setup", "portable-updater.ps1"), "utf8"
 const blockmapUpdater = readFileSync(join(root, "setup", "blockmap-updater.cjs"), "utf8");
 const manager = readFileSync(join(root, "setup", "portable-manager.cjs"), "utf8");
 const manifestBuilder = readFileSync(join(root, "setup", "create-update-manifest.py"), "utf8");
+const blockmapBuilder = readFileSync(join(root, "setup", "create-blockmap.py"), "utf8");
 const deltaBuilder = readFileSync(join(root, "setup", "create-incremental-update.py"), "utf8");
 const rescueBuilder = readFileSync(join(root, "setup", "create-rescue-overlay.py"), "utf8");
 
@@ -135,6 +136,12 @@ assert.match(blockmapUpdater, /localChunkReuse|analyzeLocalReuse/);
 assert.match(blockmapUpdater, /reconstructed target verification failed/);
 assert.match(blockmapUpdater, /header SHA-256 mismatch/);
 assert.match(blockmapUpdater, /missingUniqueChunks/);
+assert.match(blockmapBuilder, /tempfile\.mkstemp/);
+assert.doesNotMatch(blockmapBuilder, /tempfile\.NamedTemporaryFile/);
+assert.match(blockmapBuilder, /def unlink_with_retry/);
+assert.match(blockmapBuilder, /except PermissionError/);
+assert.match(blockmapBuilder, /data\/plugins\/installed\/codex-runtime-bridge\//);
+assert.match(blockmapUpdater, /ALLOWED_PERSISTENT_PREFIXES/);
 
 const transportBlock = updater.slice(
   updater.indexOf("function Get-GitHubTransportCandidates"),

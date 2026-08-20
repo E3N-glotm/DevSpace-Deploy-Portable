@@ -13,7 +13,7 @@ assert.match(workflow, /steps\.version\.outputs\.version == '1\.1\.42'/);
 assert.match(workflow, /No previous stable Release exists below v\$env:VERSION/);
 assert.match(workflow, /Using v\$previousVersion as the canonical previous stable base/);
 assert.match(workflow, /-Version \$previousVersion/);
-for (let patch = 32; patch <= 39; patch += 1) {
+for (let patch = 32; patch <= 40; patch += 1) {
   const version = `1.1.${patch}`;
   assert.ok(workflow.includes(`"${version}"`), `legacy migration base missing: ${version}`);
   assert.ok(
@@ -22,6 +22,7 @@ for (let patch = 32; patch <= 39; patch += 1) {
   );
 }
 assert.match(workflow, /MIGRATION_BASE_DIR/);
+assert.match(workflow, /Where-Object \{ \$_ -ne "1\.1\.35" \}/);
 assert.match(workflow, /DevSpacePortable-Rescue-1\.1\.33-to-\$env:VERSION\.zip/);
 assert.match(workflow, /DevSpacePortable-Update-1\.1\.40-to-1\.1\.41\.zip/);
 assert.match(workflow, /1\.1\.41 release requires v1\.1\.40 as the previous stable base/);
@@ -31,7 +32,7 @@ assert.match(workflow, /Download 1\.1\.42 blockmap bootstrap base/);
 assert.match(workflow, /DevSpacePortable-Windows-x64-1\.1\.42\.zip/);
 assert.match(workflow, /BLOCKMAP_BOOTSTRAP_BASE/);
 assert.match(workflow, /DevSpacePortable-Update-1\.1\.42-to-\$env:VERSION\.zip/);
-assert.match(workflow, /v1\.1\.42 is the final updater that cannot consume block-pack-v2/);
+assert.match(workflow, /v1\.1\.42 is the compatibility floor for block-pack-v2/);
 assert.match(workflow, /DevSpacePortable-Windows-x64-\$env:VERSION\.blockmap/);
 assert.match(workflow, /DevSpacePortable-Windows-x64-\$\{\{ steps\.version\.outputs\.version \}\}\.blockmap/);
 assert.match(workflow, /create-update-manifest\.py @manifestArgs/);
@@ -47,8 +48,9 @@ console.log(JSON.stringify({
   stableCompatibilityRelease: "1.1.42",
   legacyExactMigrationBases: 8,
   stableReleaseCurrentEdges: 9,
+  omittedDirectEdge: "1.1.35->1.1.42",
   releaseAssetsOnly: true,
-  postCompatibilityBlockmap: true,
+  blockmapStartsIn1142: true,
   singleLegacyBootstrapEdgeFrom1142: true,
   noNewCarryForwardGraphAfter1142: true,
   carryForwardGraphRetainedForCompatibilityReleases: true,

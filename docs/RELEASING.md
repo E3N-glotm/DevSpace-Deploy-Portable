@@ -63,14 +63,12 @@ exact deltas from every canonical 1.1.32-1.1.39 full ZIP plus the historical
 that migration and intentionally repeats the exact 1.1.32-1.1.39 compatibility
 edges while also publishing the normal 1.1.40 -> 1.1.41 adjacent edge. This is
 required because installed 1.1.32-1.1.39 clients can only select one exact
-fromVersion -> latest edge. Version 1.1.42 repeats the same legacy exact edges
-because it is the Remote Agent recovery/install stability Release, and also
-publishes the adjacent 1.1.41 -> 1.1.42 edge. These generated ZIPs live only on
-the Release. Version 1.1.42 is also the final updater that does not understand
-`block-pack-v2`. Starting with 1.1.43, the long-term topology changes from a
-historical delta graph to a content-addressed latest-target blockmap. Each new
-Release keeps one direct `1.1.42 -> current` legacy delta only as a bootstrap
-bridge; blockmap-capable clients do not need previous -> current edges.
+fromVersion -> latest edge. The final 1.1.42 repack expands the direct matrix
+through 1.1.41 except 1.1.35 (and retains 1.1.32 compatibility), while introducing
+`block-pack-v2`. These generated ZIPs live only on the Release. Later Releases
+keep one direct `1.1.42 -> current` legacy delta as a bootstrap bridge for an
+earlier installed 1.1.42 updater; blockmap-capable clients do not need a
+growing previous -> current graph.
 
 ## Tag release
 
@@ -89,24 +87,30 @@ runs tests, rebuilds the Portable ZIP, and uploads:
 - for `v1.1.40`, eight migration deltas from `1.1.32` through `1.1.39`;
 - for `v1.1.41`, eight direct legacy deltas from `1.1.32` through `1.1.39`
   plus `DevSpacePortable-Update-1.1.40-to-1.1.41.zip`;
-- for `v1.1.42`, eight direct legacy deltas from `1.1.32` through `1.1.39`
-  plus `DevSpacePortable-Update-1.1.41-to-1.1.42.zip`;
+- for the final `v1.1.42` repack, nine direct deltas from `1.1.32`, `1.1.33`,
+  `1.1.34` and `1.1.36` through `1.1.41`; `1.1.35` is intentionally omitted;
+- for `v1.1.42` and later, `DevSpacePortable-Windows-x64-<version>.blockmap`,
+  the content-addressed Range-download asset;
 - after `v1.1.42`, one `DevSpacePortable-Update-1.1.42-to-<version>.zip`
   bootstrap edge for the legacy 1.1.42 updater;
-- after `v1.1.42`, `DevSpacePortable-Windows-x64-<version>.blockmap`, the
-  content-addressed Range-download asset used by all blockmap-capable clients;
 - the `1.1.33 -> target` Rescue overlay on the 1.1.40, 1.1.41 and 1.1.42 compatibility Releases;
 - `release-assets/update-manifest.json`
 - `release-assets/SHA256SUMS-release.txt`
 
 The 1.1.40-1.1.42 compatibility manifests carry `incrementalGraphAssets`, a
 compact SHA-256/size/download-URL graph copied forward from the previous
-manifest plus the current Release edge. New 1.1.43+ manifests no longer carry
-that graph forward. Their primary metadata is `blockmapAsset`, including the
-block-pack SHA-256, compressed-header size and compressed-header SHA-256. The
-client validates that header, reuses matching local 1 MiB chunks and downloads
-only missing packed chunks with HTTP Range. Legacy incremental and full ZIP
-paths remain bounded fallbacks.
+manifest plus the current Release edge. The 1.1.42 manifest also carries
+`blockmapAsset`, including the block-pack SHA-256, compressed-header size and
+compressed-header SHA-256. The client validates that header, reuses matching
+local 1 MiB chunks and downloads only missing packed chunks with HTTP Range.
+Later manifests use this blockmap metadata as the primary path and do not need
+to keep expanding the historical graph. Legacy incremental and full ZIP paths
+remain bounded fallbacks.
+
+The blockmap excludes persistent `data`, `logs` and `reports` content except
+for the fixed Release-owned `data/plugins/installed/codex-runtime-bridge/`
+seed prefix present in the full ZIP checksum manifest. Apply still preserves
+the live `data` tree; the existing manager seed remains non-destructive.
 
 Use the `Backfill Incremental Update` workflow for that case. It downloads the
 already-published canonical full ZIPs for both versions on a GitHub runner,
@@ -120,19 +124,19 @@ Its Release workflow downloads the canonical 1.1.32 through 1.1.39 full ZIPs on
 the GitHub runner and publishes eight exact `*-to-1.1.40.zip` migration deltas.
 Version 1.1.41 repeats those eight legacy compatibility edges to the new latest
 stable target and adds the adjacent `1.1.40 -> 1.1.41` edge. Those generated
-ZIPs are Release assets only; they are never committed to Git. Version 1.1.42
-repeats the same direct legacy matrix and adds `1.1.41 -> 1.1.42` so installed
-1.1.32-1.1.39 clients remain incremental-first while the Remote Agent recovery
-and offline SSH installer fixes become the new stable target.
+ZIPs are Release assets only; they are never committed to Git. The final
+1.1.42 repack refreshes the exact direct edges from 1.1.32 through 1.1.41 except
+1.1.35. The omitted 1.1.35 asset must not remain on the repacked Release, so no
+published same-version asset points at an older target tree.
 
-Starting with 1.1.43, do **not** pass the previous manifest through
-`--carry-forward-manifest`. Generate the latest full ZIP, the latest `.blockmap`
-and one `1.1.42 -> latest` compatibility delta. The 1.1.42 bridge exists only to
-bootstrap an already-installed old updater into the blockmap-capable runtime;
-after that, any 1.1.43+ client can jump straight to the newest Release by
-reconstructing the target from local blocks plus missing Range data. This keeps
-Git history free of binary update artifacts and prevents the latest Release
-metadata from accumulating an unbounded historical edge graph.
+After 1.1.42, do **not** pass the previous manifest through
+`--carry-forward-manifest`. Generate the latest full ZIP, latest `.blockmap`,
+and one `1.1.42 -> latest` compatibility delta. The bridge exists only to
+bootstrap an earlier installed 1.1.42 updater into the blockmap-capable runtime;
+after that, clients jump directly to the newest Release by reconstructing the
+target from local blocks plus missing Range data. This keeps Git history free
+of binary update artifacts and prevents the latest Release metadata from
+accumulating an unbounded historical edge graph.
 
 ## First bootstrap Release
 

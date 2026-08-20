@@ -2,17 +2,11 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
-## 1.1.43
-
-- 在线更新切换为 `block-pack-v2` 差分架构：目标 Portable 按 1 MiB 内容块索引并独立压缩，客户端直接扫描当前安装中可复用的相同块，只通过 HTTP Range 下载最新版缺失块，再在 staging 中重组并逐文件 SHA-256 校验；不再要求新客户端维护或串行下载不断增长的历史 `fromVersion -> toVersion` 图。
-- blockmap Range 引擎会并行探测已配置镜像、环境/Windows 显式代理与官方直连，要求端点真实返回 HTTP 206，并按实测 RTT/吞吐排序；实际块下载在首选路径失败时按排序结果自动 failover。完整 ZIP 和旧 `file-delta-v1` 仍作为后备路线。
-- 为现有 1.1.42 updater 保留唯一 bootstrap 兼容边：每个 1.1.43+ Release 只额外生成 `1.1.42 -> 当前最新版` 的传统 delta。1.1.42 用户即使跳过多个版本也可直接进入新版更新器；升级到 1.1.43+ 后，后续跳版不再依赖这个历史图。
-- 新增 blockmap header 摘要、chunk SHA-256、最终文件 SHA-256 三层完整性检查，以及“服务端不支持 Range”“header 被篡改”“Windows 临时文件句柄”等回归测试；blockmap 失败时自动退到 legacy incremental，再退到完整 ZIP。
-
-[完整更新说明](docs/releases/HOTFIX-1.1.43.md)
-
 ## 1.1.42
 
+- 同版本更新加入 `block-pack-v2` 差分架构：目标 Portable 按 1 MiB 内容块索引并独立压缩，客户端扫描当前安装中可复用的相同块，只通过 HTTP Range 下载缺失块，再在 staging 中重组并逐文件 SHA-256 校验。
+- blockmap Range 引擎并行探测已配置镜像、环境/Windows 显式代理与官方直连，只接受真实 HTTP 206，并按实测 RTT/吞吐排序和 failover；完整 ZIP 与 `file-delta-v1` 保持为后备路线。
+- 新增 blockmap header 摘要、chunk SHA-256、最终文件 SHA-256 三层完整性检查，以及无 Range、错误 header、Windows 临时文件句柄和完整重组回归。
 - 同版本热修复：修正“远程服务器”一级页面在非全屏窗口中滚动到底仍有底部文字被主窗口 footer 遮住的问题；改为外层滚动 viewport + 完整固定高度内容面板，滚动范围与真实内容高度一致。
 - 同版本热修复：修正 Remote Agent 一键恢复对 `online-recent` 的误判。原生 UI 通过短生命周期管理进程读取 Agent 状态，无法持有运行中 DevSpace 的 WebSocket connection set，因此健康 Agent 会在该管理通道显示为 `online-recent`；现在 `online` / `online-recent` 均作为 heartbeat 已恢复，`offline` / `revoked` 仍按失败处理。已在线 Agent 点击“一键恢复 / 安装”时直接返回，不再无意义 repair。
 - 将 Remote Agent SSH 救援升级为“进程拉起 + heartbeat 验证 + 原 Agent repair enrollment”。已有 Agent 启动后仍不回 heartbeat 时，自动刷新同一 Agent ID 的 endpoint/Secret 并原位修复，不再只弹出“SSH 操作完成但 heartbeat 未恢复”。
@@ -20,7 +14,7 @@
 - 默认用户级状态目录改为 `<第一条 allowedRoot>/.devspace-agent/<独立实例>/`。实例目录由 enrollment 唯一标识生成，多用户共享同一服务器、同一 Linux 用户和同一 allowedRoot 时不会覆盖彼此的 `config.json`、PID、日志或 Agent 文件；repair 会按 Agent ID 找到原实例目录。
 - 手动安装命令默认使用普通用户 `bash`，不包含 `sudo bash`，并显式传入受 allowedRoot 约束的 `--state-dir`；旧 `~/.local/state/devspace-agent` 与 `/var/lib/devspace-agent` 仍保留救援兼容。
 - “远程服务器”从“配置与权限”的子入口提升为左侧一级页面，位于“配置与权限”和“插件管理”之间；新 SSH profile 默认启用自动救援。
-- v1.1.42 继续为 1.1.32～1.1.39 发布各自直达最新版的精确增量，同时发布 `1.1.41 -> 1.1.42` 邻接增量、carry-forward 历史图和 1.1.33 Rescue，迁移 ZIP 仍只存在于 GitHub Release。
+- v1.1.42 同步重建 `1.1.32、1.1.33、1.1.34、1.1.36～1.1.41 -> 1.1.42` 的直达增量，按要求不发布 `1.1.35 -> 1.1.42`；同时保留 carry-forward 历史图和 1.1.33 Rescue。这些 ZIP 仍只存在于 GitHub Release。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.42.md)
 
