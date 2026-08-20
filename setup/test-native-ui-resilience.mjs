@@ -107,5 +107,10 @@ try {
   if (firstUi && firstUi.pid) {
     spawnSync("taskkill.exe", ["/PID", String(firstUi.pid), "/T", "/F"], { windowsHide: true, encoding: "utf8" });
   }
-  rmSync(temporary, { recursive: true, force: true });
+  // Windows can keep a just-terminated WinForms process' directory handles
+  // alive for a short interval after taskkill returns. Node's recursive rm
+  // supports bounded EPERM/EBUSY retries specifically for this case; without
+  // them the GitHub Windows runner can fail after every functional assertion
+  // has already passed.
+  rmSync(temporary, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }

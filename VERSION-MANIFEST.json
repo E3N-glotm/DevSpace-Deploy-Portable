@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.42",
-  "builtAt": "2026-08-20T12:02:36+08:00",
+  "builtAt": "2026-08-20T12:12:33+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -695,7 +695,7 @@
     "setup/test-incremental-update.py.sha256": "1a8e589fa327e7225a1d1ba456842b954b3abf76ea7d8971fce3af11a1b31626",
     "setup/test-linux-agent-contract.mjs.sha256": "78e304b169a4fec61ffa39112635d83b0390f03d839f464e2527c7299b06e037",
     "setup/test-native-close-tray.mjs.sha256": "0f013405a049e956fda1a92ba70dedf20fed0fc7209f2f449675023a6fddb359",
-    "setup/test-native-ui-resilience.mjs.sha256": "6350a1984367c81dde63aaa682a5df7deb9ddffd7bf37b7c7d86bfe776923199",
+    "setup/test-native-ui-resilience.mjs.sha256": "0227a29e5359229fdf7dcaa5f86ee193092ff5ce4e865e4f924da9f611d41f54",
     "setup/test-network-isolation-contract.mjs.sha256": "7d9a79cdb319b64a792cccb3c401236397a1e284621a6d4893ec7e463f4d00fc",
     "setup/test-oauth-client-compatibility.mjs.sha256": "5a9bb73944d850fbeab2d0bf90314bcccdcfb75474cdecc5a77eb451f738f0ae",
     "setup/test-online-updater-contract.mjs.sha256": "03bcc5d94f583b80c38f67d2f37448c21c3f59fbbb16922a314f4d967f57042c",
