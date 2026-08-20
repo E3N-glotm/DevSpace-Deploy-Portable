@@ -229,7 +229,10 @@ function Get-GitHubMirrorPrefixes {
     $configured = [Environment]::GetEnvironmentVariable("DEVSPACE_GITHUB_MIRRORS")
     $values = if ([string]::IsNullOrWhiteSpace($configured)) {
         @(
-            "https://ghproxy.net/"
+            "https://ghproxy.net/",
+            "https://gh-proxy.com/",
+            "https://github.moeyy.xyz/",
+            "https://gh-proxy.net/"
         )
     } else {
         @($configured -split '[;,\r\n]')

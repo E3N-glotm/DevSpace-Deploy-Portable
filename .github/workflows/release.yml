@@ -158,6 +158,8 @@ jobs:
           python setup/finalize-release.py $env:VERSION --hotfix "docs/releases/HOTFIX-$env:VERSION.md"
           python setup/build-release.py
           $targetZip = Join-Path $PWD "DevSpacePortable-Windows-x64-$env:VERSION.zip"
+          $blockmap = Join-Path $PWD "DevSpacePortable-Windows-x64-$env:VERSION.blockmap.json"
+          python setup/create-blockmap.py "$targetZip" "$blockmap"
           $incrementalZips = New-Object System.Collections.Generic.List[string]
           $rescueZip = $null
 
@@ -209,6 +211,7 @@ jobs:
           }
 
           $manifestArgs = @("--repository", "${{ github.repository }}", "--zip", "$targetZip")
+          $manifestArgs += @("--blockmap", "$blockmap")
           foreach ($deltaZip in $incrementalZips) { $manifestArgs += @("--incremental", "$deltaZip") }
           if ($rescueZip) { $manifestArgs += @("--rescue", "$rescueZip") }
           if ($env:VERSION -ne "1.1.40") { $manifestArgs += @("--carry-forward-manifest", "$env:BASE_UPDATE_MANIFEST") }
@@ -227,6 +230,7 @@ jobs:
             DevSpacePortable-Windows-x64-${{ steps.version.outputs.version }}.zip
             DevSpacePortable-Update-*-to-${{ steps.version.outputs.version }}.zip
             DevSpacePortable-Rescue-*-to-${{ steps.version.outputs.version }}.zip
+            DevSpacePortable-Windows-x64-${{ steps.version.outputs.version }}.blockmap.json
             release-assets/update-manifest.json
             release-assets/SHA256SUMS-release.txt
 

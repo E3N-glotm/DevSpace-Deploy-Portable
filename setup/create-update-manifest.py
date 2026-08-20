@@ -89,6 +89,7 @@ def main() -> int:
     parser.add_argument("--repository", default="E3N-glotm/DevSpace-Deploy-Portable")
     parser.add_argument("--zip")
     parser.add_argument("--incremental", action="append", default=[])
+    parser.add_argument("--blockmap")
     parser.add_argument("--rescue", action="append", default=[])
     parser.add_argument("--carry-forward-manifest")
     parser.add_argument("--channel", default="stable", choices=("stable", "beta", "nightly"))
@@ -160,6 +161,18 @@ def main() -> int:
             raise SystemExit(f"Carry-forward update manifest not found: {carry_forward}")
         previous_manifest = json.loads(carry_forward.read_text(encoding="utf-8-sig"))
     incremental_graph_assets = merge_incremental_graph(args.repository, incremental_assets, previous_manifest)
+    blockmap_asset = None
+    if args.blockmap:
+        blockmap = Path(args.blockmap).resolve()
+        if not blockmap.is_file():
+            raise SystemExit(f"Blockmap not found: {blockmap}")
+        blockmap_asset = {
+            "format": "blockmap-v1",
+            "name": blockmap.name,
+            "size": blockmap.stat().st_size,
+            "sha256": sha256_file(blockmap),
+            "downloadUrl": f"https://github.com/{args.repository}/releases/download/v{version}/{blockmap.name}",
+        }
     manifest = {
         "schemaVersion": 2,
         "channel": args.channel,
@@ -182,6 +195,7 @@ def main() -> int:
         },
         "incrementalAssets": incremental_assets,
         "incrementalGraphAssets": incremental_graph_assets,
+        "blockmapAsset": blockmap_asset,
         "rescueAssets": rescue_assets,
         "releaseNotes": f"docs/releases/HOTFIX-{version}.md",
     }
