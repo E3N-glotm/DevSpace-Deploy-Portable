@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.40**
+当前稳定版本：**1.1.41**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.40.zip
+DevSpacePortable-Windows-x64-1.1.41.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -342,6 +342,14 @@ https://你的域名/mcp
 - 1.1.40 仍提供 `DevSpacePortable-Rescue-1.1.33-to-1.1.40.zip`，用于兼容 1.1.33 已知的旧 Apply 路径问题；后续版本不再默认复制这条历史 Rescue。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.41 主要变化
+
+- **修复 Remote Agent SSH 救援在 Linux Bash 上收到 Windows CRLF 的问题。** 1.1.40 的内置恢复脚本来自 CRLF C# 源文件，直接写入 `ssh ... bash -s` stdin 时会把 `set -eu\r`、`do\r` 等字符送到 Linux，导致 `set: invalid option` 和 `syntax error near unexpected token '$'do\r''`。1.1.41 在 SSH 传输边界统一把 CRLF/CR 转换为 POSIX LF，并保证脚本以单个 LF 结束。
+- SSH 密码的 DPAPI / AskPass、安全参数、systemd / nohup 恢复顺序和手动安装 fallback 均保持不变；修复只改变远端 shell 文本换行格式。
+- 原生 self-test 与 SSH rescue contract 新增 CRLF 输入回归，确保编译后的 Windows 程序仍只向 `bash -s` 发送 LF shell text。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.41.md)
 
 ## 1.1.40 主要变化
 

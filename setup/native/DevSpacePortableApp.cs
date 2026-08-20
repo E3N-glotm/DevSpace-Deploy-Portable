@@ -1449,6 +1449,13 @@ namespace DevSpacePortable.NativeUI
                 report["remoteAgentPrivilegeHintPreferredHeight"] = privilegeHint == null ? 0 : privilegeHint.GetPreferredSize(new Size(Math.Max(1, privilegeHint.ClientSize.Width - privilegeHint.Padding.Horizontal), 0)).Height;
                 report["remoteAgentCommandHostHeight"] = commandHost == null ? 0 : commandHost.Height;
                 report["remoteAgentSshAskPass"] = File.Exists(Path.Combine(manager.Root, "DevSpace-SshAskPass.exe"));
+                string normalizedSshScript = RemoteAgentsDialog.NormalizeSshScriptForBash("set -eu\r\nfor x in a; do\r\necho $x\rdone");
+                bool sshScriptLfOnly = !normalizedSshScript.Contains("\r")
+                    && normalizedSshScript.EndsWith("\n", StringComparison.Ordinal)
+                    && normalizedSshScript.Contains("set -eu\nfor x in a; do\necho $x\ndone\n");
+                report["remoteAgentSshScriptLfOnly"] = sshScriptLfOnly;
+                if (!sshScriptLfOnly)
+                    throw new InvalidOperationException("SSH rescue shell-script newline normalization regressed.");
                 report["remoteAgentSizes"] = remoteSizes.Select(size => size.Width + "x" + size.Height).ToArray();
             }
 
@@ -2935,6 +2942,13 @@ namespace DevSpacePortable.NativeUI
             return RunSshScriptWithProfileAsync(_manager, host, port, user, password, script, timeoutMs);
         }
 
+        internal static string NormalizeSshScriptForBash(string script)
+        {
+            string normalized = (script ?? "").Replace("\r\n", "\n").Replace("\r", "\n");
+            if (!normalized.EndsWith("\n", StringComparison.Ordinal)) normalized += "\n";
+            return normalized;
+        }
+
         private static Task<SshRunResult> RunSshScriptWithProfileAsync(ManagerClient manager, string host, int port, string user, string password, string script, int timeoutMs)
         {
             string ssh = Path.Combine(manager.Root, "runtime", "git", "usr", "bin", "ssh.exe");
@@ -2976,8 +2990,16 @@ namespace DevSpacePortable.NativeUI
                 {
                     Task<string> stdout = process.StandardOutput.ReadToEndAsync();
                     Task<string> stderr = process.StandardError.ReadToEndAsync();
-                    process.StandardInput.Write(script ?? "");
-                    if (!(script ?? "").EndsWith("\n", StringComparison.Ordinal)) process.StandardInput.WriteLine();
+                    // C# source files are intentionally CRLF on Windows, and
+                    // verbatim multi-line strings therefore carry CRLF too.
+                    // Feeding those bytes unchanged to remote `bash -s` makes
+                    // Bash parse tokens such as `set -eu\r` and `do\r`, which
+                    // produces the rescue failure seen in 1.1.40. Always send
+                    // POSIX LF shell text regardless of the Windows checkout
+                    // or which SSH implementation is selected.
+                    string normalizedScript = NormalizeSshScriptForBash(script);
+                    process.StandardInput.NewLine = "\n";
+                    process.StandardInput.Write(normalizedScript);
                     process.StandardInput.Close();
                     if (!process.WaitForExit(timeoutMs))
                     {
@@ -4304,7 +4326,7 @@ echo DEVSPACE_AGENT_STARTED
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.40 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.41 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5088,7 +5110,7 @@ echo DEVSPACE_AGENT_STARTED
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.40") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.41") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }

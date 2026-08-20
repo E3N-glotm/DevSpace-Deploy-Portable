@@ -2,6 +2,13 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.41
+
+- 修复 Remote Agent SSH 救援脚本的 Windows CRLF → Linux Bash 传输问题。所有送入 `ssh ... bash -s` 的脚本现在在发送前统一规范化为 POSIX LF，避免 `set -eu\r`、`do\r` 被 Bash 当成非法参数/语法。
+- 增加原生 self-test 和 SSH rescue contract 的 CRLF 回归；DPAPI AskPass、已有 Agent 优先恢复、systemd/nohup 以及手动安装 fallback 行为不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.41.md)
+
 ## 1.1.40
 
 - 将 1.1.40 定义为更新协议迁移点：Release workflow 一次性生成 `1.1.32`～`1.1.39` 各自直达 1.1.40 的八个精确增量包，并继续为 1.1.33 提供 direct-overlay Rescue；迁移 ZIP 只发布到 GitHub Release，不进入 Git 历史。

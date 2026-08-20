@@ -25,6 +25,10 @@ assert.match(ui, /AutoRecoverConfiguredAgentsAsync/);
 assert.match(ui, /TimeSpan\.FromMinutes\(2\)/);
 assert.match(ui, /remote-agent-create-enrollment/);
 assert.match(ui, /installCommand/);
+assert.match(ui, /NormalizeSshScriptForBash/);
+assert.match(ui, /Replace\("\\r\\n", "\\n"\)\.Replace\("\\r", "\\n"\)/);
+assert.match(ui, /process\.StandardInput\.NewLine = "\\n"/);
+assert.doesNotMatch(ui, /process\.StandardInput\.WriteLine\(\)/);
 assert.doesNotMatch(ui, /-pw\s/);
 assert.doesNotMatch(ui, /password\s*=\s*[^;]+Arguments/);
 
@@ -52,5 +56,6 @@ console.log(JSON.stringify({
   systemdAndNohupRecovery: true,
   enrollmentInstallFallback: true,
   backgroundRecoveryBackoff: true,
+  posixLfShellTransport: true,
   manualInstallFallbackPreserved: true,
 }));
