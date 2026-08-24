@@ -262,6 +262,28 @@ jobs:
           }
           python setup/create-update-manifest.py @manifestArgs
 
+      - name: Resolve GitHub Release files
+        id: release_files
+        shell: pwsh
+        run: |
+          $patterns = @(
+            "DevSpacePortable-Windows-x64-$env:VERSION.zip",
+            "DevSpacePortable-Update-*-to-$env:VERSION.zip",
+            "DevSpacePortable-Windows-x64-$env:VERSION.blockmap",
+            "release-assets/update-manifest.json",
+            "release-assets/SHA256SUMS-release.txt"
+          )
+          if ($env:VERSION -in @("1.1.40", "1.1.41", "1.1.42")) {
+            # Compatibility Releases intentionally carry the historical
+            # direct-extract rescue overlay. Keep this pattern mandatory so a
+            # missing rescue asset still fails the publish step.
+            $patterns += "DevSpacePortable-Rescue-*-to-$env:VERSION.zip"
+          }
+          $delimiter = "DEVSPACE_RELEASE_FILES_$([guid]::NewGuid().ToString('N'))"
+          "files<<$delimiter" >> $env:GITHUB_OUTPUT
+          $patterns | ForEach-Object { $_ >> $env:GITHUB_OUTPUT }
+          $delimiter >> $env:GITHUB_OUTPUT
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -271,10 +293,4 @@ jobs:
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
-          files: |
-            DevSpacePortable-Windows-x64-${{ steps.version.outputs.version }}.zip
-            DevSpacePortable-Update-*-to-${{ steps.version.outputs.version }}.zip
-            DevSpacePortable-Rescue-*-to-${{ steps.version.outputs.version }}.zip
-            DevSpacePortable-Windows-x64-${{ steps.version.outputs.version }}.blockmap
-            release-assets/update-manifest.json
-            release-assets/SHA256SUMS-release.txt
+          files: ${{ steps.release_files.outputs.files }}
