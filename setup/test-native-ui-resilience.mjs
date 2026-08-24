@@ -43,6 +43,30 @@ async function waitForFile(file, timeoutMs = 30_000) {
   throw new Error(`Timed out waiting for ${file}`);
 }
 
+async function waitForChildExit(child, timeoutMs = 10_000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await Promise.race([
+    new Promise((resolveWait) => child.once("close", resolveWait)),
+    new Promise((resolveWait) => setTimeout(resolveWait, timeoutMs)),
+  ]);
+}
+
+async function removeTemporaryDirectory(path, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      rmSync(path, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 });
+      return;
+    } catch (error) {
+      if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes(error?.code)) throw error;
+      lastError = error;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    }
+  }
+  if (existsSync(path)) throw lastError;
+}
+
 mkdirSync(configDir, { recursive: true });
 writeFileSync(join(configDir, "deployment.json"), JSON.stringify({
   formatVersion: 5,
@@ -106,11 +130,12 @@ try {
 } finally {
   if (firstUi && firstUi.pid) {
     spawnSync("taskkill.exe", ["/PID", String(firstUi.pid), "/T", "/F"], { windowsHide: true, encoding: "utf8" });
+    await waitForChildExit(firstUi);
   }
   // Windows can keep a just-terminated WinForms process' directory handles
   // alive for a short interval after taskkill returns. Node's recursive rm
   // supports bounded EPERM/EBUSY retries specifically for this case; without
   // them the GitHub Windows runner can fail after every functional assertion
   // has already passed.
-  rmSync(temporary, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  await removeTemporaryDirectory(temporary);
 }
