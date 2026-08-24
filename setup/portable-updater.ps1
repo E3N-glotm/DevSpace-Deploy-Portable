@@ -51,6 +51,40 @@ function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $UpdateLog -Value $line -Encoding UTF8
 }
 
+function Get-StageMutexName {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Root.ToLowerInvariant())
+        $digest = ([BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace("-", "")
+        return "Local\DevSpacePortableStage-$($digest.Substring(0, 24))"
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Invoke-WithStageMutex([scriptblock]$Operation) {
+    $mutex = [System.Threading.Mutex]::new($false, (Get-StageMutexName))
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne(0)
+        } catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+            Write-UpdateLog "Recovered an abandoned update staging mutex for this Portable root."
+        }
+        if (-not $acquired) {
+            throw "Another update staging operation is already running for this Portable root."
+        }
+        Write-UpdateLog "Acquired the single update staging slot for this Portable root."
+        return & $Operation
+    } finally {
+        if ($acquired) {
+            try { $mutex.ReleaseMutex() } catch { }
+        }
+        $mutex.Dispose()
+    }
+}
+
 function Get-Sha256File([string]$Path) {
     $absolute = [IO.Path]::GetFullPath($Path)
     $stream = [IO.File]::Open($absolute, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -1297,6 +1331,7 @@ function Stage-BlockmapUpdate([object]$Latest, [object]$Blockmap) {
             "--payload", $portableRoot,
             "--target-version", ([string]$Latest.version),
             "--progress-file", $ProgressFile,
+            "--log-file", $UpdateLog,
             "--curl", ([string]$curl)
         )
         $windowsProxy = Get-WindowsInternetProxyState
@@ -2056,7 +2091,7 @@ try {
     Assert-Version $CurrentVersion "CurrentVersion"
     switch ($Action) {
         "Check" { Write-JsonResult (Get-UpdateStatus) }
-        "Stage" { Write-JsonResult (Stage-Update) }
+        "Stage" { Write-JsonResult (Invoke-WithStageMutex { Stage-Update }) }
         "Apply" { Write-JsonResult (Apply-StagedUpdate) }
     }
 } catch {

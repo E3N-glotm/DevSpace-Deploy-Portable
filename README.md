@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.44**
+当前稳定版本：**1.1.45**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.44.zip
+DevSpacePortable-Windows-x64-1.1.45.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -343,6 +343,16 @@ https://你的域名/mcp
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.45 主要变化
+
+- **Blockmap 下载线路恢复为明确的三级优先级：镜像站 → Windows/显式代理 → 官方直连。** 每一级内部使用实测吞吐排序；只有当前优先级没有可用 Range 通道或真实 Range 下载失败时才进入下一级，避免一个短小 probe 把慢速 GitHub 直连错误选成首选。
+- **Range probe 从 128 KiB 提升到 1 MiB。** 探测尺寸与 blockmap 内容块一致，能更可靠地区分“短请求能返回但持续吞吐不足”的线路；真实 Range 超时也会依据 probe 吞吐动态放宽，而不是所有大小固定 45 秒。
+- **Blockmap header 改为 1 MiB 分段 Range 下载。** 约数 MiB 的索引不再一次性请求，某一段失败只重试/切换该段；缺失块合并 Range 上限同步收紧到 4 MiB，降低慢链路抖动造成的大段重传。
+- **真实 Range 失败会重新测速并自动切换下一优先级。** 镜像失败后进入代理，代理失败后才进入官方直连；`update.log` 记录每个 probe 的 PASS/FAIL、吞吐、选中 tier 和 failover，便于定位下载线路。
+- **Stage 增加按 Portable 根目录隔离的单实例 Mutex。** 同一安装目录任何时刻只允许一个 Stage，防止重复点击或多 Update.exe 同时扫描、下载和写 staging，避免磁盘/网络资源互相争抢。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.45.md)
 
 ## 1.1.44 主要变化
 

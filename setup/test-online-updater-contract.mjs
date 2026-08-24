@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,6 +66,11 @@ assert.match(updater, /Get-IncrementalCandidate/);
 assert.match(updater, /Assert-BlockmapAssetMetadata/);
 assert.match(updater, /Get-BlockmapCandidate/);
 assert.match(updater, /Stage-BlockmapUpdate/);
+assert.match(updater, /Invoke-WithStageMutex/);
+assert.match(updater, /System\.Threading\.Mutex/);
+assert.match(updater, /WaitOne\(0\)/);
+assert.match(updater, /Another update staging operation is already running for this Portable root/);
+assert.match(updater, /--log-file", \$UpdateLog/);
 assert.match(updater, /block-pack-v2/);
 assert.match(updater, /preferredMode = if \(\$blockmap\) \{ "blockmap" \}/);
 assert.match(updater, /updateMode = "blockmap"/);
@@ -130,7 +136,16 @@ assert.match(rescueBuilder, /PERSISTENT_ROOTS = \("data", "logs", "reports"\)/);
 assert.match(rescueBuilder, /Direct-extract rescue overlay is not safe/);
 assert.match(blockmapUpdater, /DSPBLK2\\n/);
 assert.match(blockmapUpdater, /--range/);
-assert.match(blockmapUpdater, /Promise\.all\(candidates\.map/);
+assert.match(blockmapUpdater, /PROBE_SIZE = 1024 \* 1024/);
+assert.match(blockmapUpdater, /HEADER_RANGE_SEGMENT_SIZE = 1024 \* 1024/);
+assert.match(blockmapUpdater, /RANGE_GROUP_LIMIT = 4 \* 1024 \* 1024/);
+assert.match(blockmapUpdater, /Promise\.all\(tier\.candidates\.map/);
+assert.match(blockmapUpdater, /name: "mirror"/);
+assert.match(blockmapUpdater, /name: "proxy"/);
+assert.match(blockmapUpdater, /name: "direct"/);
+assert.match(blockmapUpdater, /reprobeCurrentRouteTier/);
+assert.match(blockmapUpdater, /advanceRouteTier/);
+assert.match(blockmapUpdater, /createDiagnosticLogger/);
 assert.match(blockmapUpdater, /status !== 206/);
 assert.match(blockmapUpdater, /localChunkReuse|analyzeLocalReuse/);
 assert.match(blockmapUpdater, /reconstructed target verification failed/);
@@ -168,6 +183,39 @@ assert.ok(
   "trusted update metadata must come from official GitHub before the official published-manifest fallback",
 );
 
+if (process.platform === "win32") {
+  const powershell = `${process.env.SystemRoot || "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`;
+  const escapedRoot = root.replaceAll("'", "''");
+  const escapedUpdater = join(root, "setup", "portable-updater.ps1").replaceAll("'", "''");
+  const lockScript = [
+    `$root='${escapedRoot}'`,
+    `$ps='${powershell.replaceAll("'", "''")}'`,
+    "$sha=[Security.Cryptography.SHA256]::Create()",
+    "$bytes=[Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant())",
+    "$digest=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','')",
+    "$sha.Dispose()",
+    "$name='Local\\DevSpacePortableStage-'+$digest.Substring(0,24)",
+    "$mutex=[System.Threading.Mutex]::new($false,$name)",
+    "$held=$mutex.WaitOne(0)",
+    "if(-not $held){exit 20}",
+    "try {",
+    `  $output=& $ps -NoProfile -ExecutionPolicy Bypass -File '${escapedUpdater}' -Action Stage -Root $root -Repository 'E3N-glotm/DevSpace-Deploy-Portable' -CurrentVersion '1.1.45' 2>&1 | Out-String`,
+    "  $code=$LASTEXITCODE",
+    "  if($code -ne 1){Write-Error ('unexpected updater exit '+$code+' '+$output); exit 21}",
+    "  if($output -notmatch 'Another update staging operation is already running for this Portable root'){Write-Error $output; exit 22}",
+    "} finally {",
+    "  if($held){$mutex.ReleaseMutex()}",
+    "  $mutex.Dispose()",
+    "}",
+  ].join("; ");
+  const mutexTest = spawnSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", lockScript], {
+    cwd: root,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(mutexTest.status, 0, mutexTest.stderr || mutexTest.stdout || "Stage mutex runtime test failed");
+}
+
 console.log(JSON.stringify({
   publicGitHubReleaseCheck: true,
   releaseApiDigestMetadata: true,
@@ -191,6 +239,12 @@ console.log(JSON.stringify({
   incrementalFirst: true,
   blockmapDifferentialFirst: true,
   parallelRangeSourceProbe: true,
+  blockmapOneMiBProbe: true,
+  blockmapMirrorProxyDirectPriority: true,
+  blockmapSegmentedHeaderDownload: true,
+  blockmapRangeReprobeAndFailover: true,
+  singleStageMutex: true,
+  singleStageMutexRuntime: true,
   localBlockReuse: true,
   authenticatedBlockmapHeader: true,
   perChunkSha256Verification: true,

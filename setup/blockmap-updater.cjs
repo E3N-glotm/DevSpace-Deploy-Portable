@@ -18,7 +18,12 @@ const DEFAULT_MIRRORS = [
 ];
 const PERSISTENT_ROOTS = new Set(["data", "logs", "reports"]);
 const ALLOWED_PERSISTENT_PREFIXES = ["data/plugins/installed/codex-runtime-bridge/"];
-const RANGE_GROUP_LIMIT = 16 * 1024 * 1024;
+const PROBE_SIZE = 1024 * 1024;
+const PROBE_TIMEOUT_SECONDS = 12;
+const HEADER_RANGE_SEGMENT_SIZE = 1024 * 1024;
+const RANGE_GROUP_LIMIT = 4 * 1024 * 1024;
+const RANGE_MIN_TIMEOUT_SECONDS = 30;
+const RANGE_MAX_TIMEOUT_SECONDS = 180;
 
 function fail(message) {
   const error = new Error(message);
@@ -121,6 +126,16 @@ function createProgressWriter(file) {
   };
 }
 
+function createDiagnosticLogger(file) {
+  const target = file ? path.resolve(file) : "";
+  return (message) => {
+    if (!target) return;
+    mkdirp(path.dirname(target));
+    const line = `[${new Date().toISOString()}] Blockmap ${message}\n`;
+    fs.appendFileSync(target, line, "utf8");
+  };
+}
+
 function normalizeMirror(value) {
   try {
     const uri = new URL(String(value).trim());
@@ -150,8 +165,7 @@ function mirrorPrefixes(args) {
   return result;
 }
 
-function endpointCandidates(assetUrl, args) {
-  const result = [];
+function validateAssetUrl(assetUrl) {
   let parsed;
   try {
     parsed = new URL(assetUrl);
@@ -160,16 +174,7 @@ function endpointCandidates(assetUrl, args) {
   }
   const loopbackHttp = parsed.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname.toLowerCase());
   if (parsed.protocol !== "https:" && !loopbackHttp) fail("blockmap URL must use HTTPS (loopback HTTP is allowed only for local tests)");
-  if (parsed.hostname.toLowerCase() === "github.com") {
-    for (const prefix of mirrorPrefixes(args)) {
-      result.push({
-        url: `${prefix}${assetUrl}`,
-        source: `mirror:${new URL(prefix).hostname}`,
-      });
-    }
-  }
-  result.push({ url: assetUrl, source: "official" });
-  return result;
+  return { parsed, loopbackHttp };
 }
 
 function proxyCandidates(args) {
@@ -197,8 +202,48 @@ function proxyCandidates(args) {
     }
     if (result.length >= 2) break;
   }
-  result.push("");
   return result;
+}
+
+function buildRangeCandidateTiers(assetUrl, args) {
+  const { parsed, loopbackHttp } = validateAssetUrl(assetUrl);
+  if (loopbackHttp) {
+    return [{
+      name: "direct",
+      label: "本地/官方直连",
+      candidates: [{ url: assetUrl, source: "official", proxy: "", transport: "official/direct" }],
+    }];
+  }
+
+  const proxies = proxyCandidates(args);
+  const tiers = [];
+  if (parsed.hostname.toLowerCase() === "github.com") {
+    const mirrors = mirrorPrefixes(args).map((prefix) => ({
+      url: `${prefix}${assetUrl}`,
+      source: `mirror:${new URL(prefix).hostname}`,
+      proxy: "",
+      transport: `mirror:${new URL(prefix).hostname}/direct`,
+    }));
+    if (mirrors.length > 0) tiers.push({ name: "mirror", label: "镜像站", candidates: mirrors });
+  }
+  if (proxies.length > 0) {
+    tiers.push({
+      name: "proxy",
+      label: "Windows/显式代理",
+      candidates: proxies.map((proxy) => ({
+        url: assetUrl,
+        source: "official",
+        proxy,
+        transport: "official/proxy",
+      })),
+    });
+  }
+  tiers.push({
+    name: "direct",
+    label: "官方直连",
+    candidates: [{ url: assetUrl, source: "official", proxy: "", transport: "official/direct" }],
+  });
+  return tiers;
 }
 
 function resolveCurl(root, explicit) {
@@ -269,7 +314,7 @@ async function probeCandidate(curl, candidate, temporaryRoot, sampleBytes) {
   try {
     const result = await runCurl(
       curl,
-      rangeCurlArgs(candidate, 0, expectedBytes - 1, file, 8, "%{http_code}|%{time_starttransfer}|%{time_total}|%{speed_download}|%{size_download}"),
+      rangeCurlArgs(candidate, 0, expectedBytes - 1, file, PROBE_TIMEOUT_SECONDS, "%{http_code}|%{time_starttransfer}|%{time_total}|%{speed_download}|%{size_download}"),
       { env: curlEnvironment() },
     );
     const elapsedMs = Date.now() - started;
@@ -288,68 +333,140 @@ async function probeCandidate(curl, candidate, temporaryRoot, sampleBytes) {
   }
 }
 
-async function rankRangeCandidates(curl, assetUrl, assetSize, args, temporaryRoot, progress) {
-  const endpoints = endpointCandidates(assetUrl, args);
-  const proxies = proxyCandidates(args);
-  const candidates = [];
-  for (const endpoint of endpoints) {
-    for (const proxy of proxies) {
-      candidates.push({
-        url: endpoint.url,
-        source: endpoint.source,
-        proxy,
-        transport: `${endpoint.source}/${proxy ? "proxy" : "direct"}`,
-      });
-    }
-  }
-  progress("probing", "并行测速 GitHub Release 镜像、代理与直连 Range 通道", { transport: "parallel-range-probe" });
-  const sampleBytes = Math.max(1, Math.min(128 * 1024, assetSize));
-  const probes = await Promise.all(candidates.map((candidate) => probeCandidate(curl, candidate, temporaryRoot, sampleBytes)));
-  const healthy = probes.filter((item) => item.ok);
+function sortHealthyCandidates(healthy) {
   healthy.sort((left, right) => {
+    if (Number(right.speed) !== Number(left.speed)) return Number(right.speed) - Number(left.speed);
     const totalDelta = Number(left.total) - Number(right.total);
     if (Math.abs(totalDelta) > 0.02) return totalDelta;
-    if (Number(right.speed) !== Number(left.speed)) return Number(right.speed) - Number(left.speed);
     return Number(left.ttfb) - Number(right.ttfb);
   });
-  if (healthy.length === 0) {
-    const diagnostics = probes.slice(0, 12).map((item) => `${item.transport}: ${item.error || "range probe failed"}`);
-    fail(`no mirror/proxy/direct endpoint supports a bounded HTTP Range request. ${diagnostics.join("; ")}`);
-  }
   return healthy;
 }
 
-async function downloadRange(curl, rankedCandidates, start, end, output, temporaryRoot) {
+async function selectRangeCandidates(curl, assetUrl, assetSize, args, temporaryRoot, progress, log, minimumTierIndex = 0) {
+  const tiers = buildRangeCandidateTiers(assetUrl, args);
+  const diagnostics = [];
+  const sampleBytes = Math.max(1, Math.min(PROBE_SIZE, assetSize));
+  for (let tierIndex = minimumTierIndex; tierIndex < tiers.length; tierIndex += 1) {
+    const tier = tiers[tierIndex];
+    progress("probing", `测速更新线路：镜像站 → 代理 → 官方直连；当前 ${tier.label}`, { transport: `probe:${tier.name}` });
+    const probes = await Promise.all(tier.candidates.map((candidate) => probeCandidate(curl, candidate, temporaryRoot, sampleBytes)));
+    for (const probe of probes) {
+      if (probe.ok) {
+        log(`probe PASS tier=${tier.name} source=${probe.source} proxied=${Boolean(probe.proxy)} bytes=${sampleBytes} total=${Number(probe.total).toFixed(3)}s speed=${Math.round(Number(probe.speed || 0))}B/s`);
+      } else {
+        const error = String(probe.error || "range probe failed").replace(/[\r\n]+/g, " ").slice(0, 500);
+        log(`probe FAIL tier=${tier.name} source=${probe.source} proxied=${Boolean(probe.proxy)} bytes=${sampleBytes} error=${error}`);
+        diagnostics.push(`${probe.transport}: ${error}`);
+      }
+    }
+    const healthy = sortHealthyCandidates(probes.filter((item) => item.ok));
+    if (healthy.length > 0) {
+      log(`selected tier=${tier.name} source=${healthy[0].source} proxied=${Boolean(healthy[0].proxy)} speed=${Math.round(Number(healthy[0].speed || 0))}B/s`);
+      return { candidates: healthy, tierIndex, tierName: tier.name, tierCount: tiers.length };
+    }
+  }
+  fail(`no mirror/proxy/direct endpoint supports a bounded ${sampleBytes}-byte HTTP Range probe. ${diagnostics.slice(0, 16).join("; ")}`);
+}
+
+function rangeTimeoutSeconds(candidate, expectedBytes) {
+  const measured = Number(candidate.speed || 0);
+  const conservativeSpeed = measured > 0 ? Math.max(32 * 1024, measured * 0.5) : 128 * 1024;
+  const estimated = Math.ceil(expectedBytes / conservativeSpeed) + 15;
+  return Math.max(RANGE_MIN_TIMEOUT_SECONDS, Math.min(RANGE_MAX_TIMEOUT_SECONDS, estimated));
+}
+
+function applyRouteSelection(routeState, selected) {
+  routeState.candidates = selected.candidates;
+  routeState.tierIndex = selected.tierIndex;
+  routeState.tierName = selected.tierName;
+  routeState.tierCount = selected.tierCount;
+}
+
+async function reprobeCurrentRouteTier(curl, routeState) {
+  const previousTier = routeState.tierIndex;
+  const selected = await selectRangeCandidates(
+    curl,
+    routeState.assetUrl,
+    routeState.assetSize,
+    routeState.args,
+    routeState.temporaryRoot,
+    routeState.progress,
+    routeState.log,
+    previousTier,
+  );
+  applyRouteSelection(routeState, selected);
+  routeState.refreshes += 1;
+  routeState.sameTierReprobeUsed = selected.tierIndex === previousTier;
+  routeState.log(`range re-probe selected tier=${routeState.tierName} refreshes=${routeState.refreshes}`);
+  return true;
+}
+
+async function advanceRouteTier(curl, routeState) {
+  const nextTier = routeState.tierIndex + 1;
+  if (nextTier >= routeState.tierCount) return false;
+  const selected = await selectRangeCandidates(
+    curl,
+    routeState.assetUrl,
+    routeState.assetSize,
+    routeState.args,
+    routeState.temporaryRoot,
+    routeState.progress,
+    routeState.log,
+    nextTier,
+  );
+  applyRouteSelection(routeState, selected);
+  routeState.refreshes += 1;
+  routeState.sameTierReprobeUsed = false;
+  routeState.log(`range failover selected next tier=${routeState.tierName} refreshes=${routeState.refreshes}`);
+  return true;
+}
+
+async function downloadRange(curl, routeState, start, end, output) {
   const expectedBytes = end - start + 1;
   const errors = [];
-  for (const candidate of rankedCandidates) {
-    const temporary = path.join(temporaryRoot, `range-${crypto.randomUUID()}.part`);
-    try {
-      const result = await runCurl(
-        curl,
-        rangeCurlArgs(candidate, start, end, temporary, 45, "%{http_code}"),
-        { env: curlEnvironment() },
-      );
-      const status = Number(result.stdout.trim().split(/\s+/).pop() || 0);
-      const size = fs.existsSync(temporary) ? fs.statSync(temporary).size : 0;
-      if (result.code !== 0 || status !== 206 || size !== expectedBytes) {
-        errors.push(`${candidate.transport}: ${result.stderr.trim() || `HTTP ${status}, expected ${expectedBytes}, got ${size}`}`);
-        continue;
+  for (;;) {
+    for (const candidate of routeState.candidates) {
+      const temporary = path.join(routeState.temporaryRoot, `range-${crypto.randomUUID()}.part`);
+      const timeoutSeconds = rangeTimeoutSeconds(candidate, expectedBytes);
+      try {
+        const result = await runCurl(
+          curl,
+          rangeCurlArgs(candidate, start, end, temporary, timeoutSeconds, "%{http_code}|%{time_total}|%{speed_download}|%{size_download}"),
+          { env: curlEnvironment() },
+        );
+        const fields = result.stdout.trim().split("|");
+        const status = Number(fields[0] || 0);
+        const size = fs.existsSync(temporary) ? fs.statSync(temporary).size : 0;
+        if (result.code !== 0 || status !== 206 || size !== expectedBytes) {
+          const error = result.stderr.trim() || `HTTP ${status}, expected ${expectedBytes}, got ${size}`;
+          errors.push(`${candidate.transport}: ${error}`);
+          routeState.log(`range FAIL tier=${routeState.tierName} source=${candidate.source} proxied=${Boolean(candidate.proxy)} bytes=${start}-${end} timeout=${timeoutSeconds}s error=${error.replace(/[\r\n]+/g, " ").slice(0, 500)}`);
+          continue;
+        }
+        mkdirp(path.dirname(output));
+        fs.renameSync(temporary, output);
+        return candidate;
+      } finally {
+        fs.rmSync(temporary, { force: true });
       }
-      mkdirp(path.dirname(output));
-      fs.renameSync(temporary, output);
-      return candidate;
-    } finally {
-      fs.rmSync(temporary, { force: true });
     }
+    if (!routeState.sameTierReprobeUsed) {
+      routeState.log(`all candidates failed for tier=${routeState.tierName} range=${start}-${end}; re-probing before failover`);
+      await reprobeCurrentRouteTier(curl, routeState);
+      continue;
+    }
+    routeState.log(`re-probed tier=${routeState.tierName} still failed for range=${start}-${end}; moving to the next priority tier`);
+    routeState.sameTierReprobeUsed = false;
+    if (!(await advanceRouteTier(curl, routeState))) break;
   }
   fail(`HTTP Range ${start}-${end} failed through all ranked endpoints: ${errors.join("; ")}`);
 }
 
-async function readHeader(curl, rankedCandidates, assetSize, expectedHeaderSize, expectedHeaderSha256, temporaryRoot) {
+async function readHeader(curl, routeState, assetSize, expectedHeaderSize, expectedHeaderSha256, temporaryRoot, progress) {
   if (!Number.isSafeInteger(assetSize) || assetSize <= PRELUDE_SIZE) fail("blockmap asset size is invalid");
   const preludeFile = path.join(temporaryRoot, "blockmap-prelude.bin");
-  await downloadRange(curl, rankedCandidates, 0, PRELUDE_SIZE - 1, preludeFile, temporaryRoot);
+  await downloadRange(curl, routeState, 0, PRELUDE_SIZE - 1, preludeFile);
   const prelude = fs.readFileSync(preludeFile);
   if (!prelude.subarray(0, 8).equals(MAGIC)) fail("blockmap prelude magic is invalid");
   const compressedSize = Number(prelude.readBigUInt64LE(8));
@@ -361,7 +478,29 @@ async function readHeader(curl, rankedCandidates, assetSize, expectedHeaderSize,
   if (PRELUDE_SIZE + compressedSize >= assetSize) fail("blockmap header overlaps or exceeds its data payload");
 
   const headerFile = path.join(temporaryRoot, "blockmap-header.bin");
-  await downloadRange(curl, rankedCandidates, PRELUDE_SIZE, PRELUDE_SIZE + compressedSize - 1, headerFile, temporaryRoot);
+  fs.rmSync(headerFile, { force: true });
+  const segmentCount = Math.ceil(compressedSize / HEADER_RANGE_SEGMENT_SIZE);
+  let receivedHeaderBytes = 0;
+  const headerStarted = Date.now();
+  for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
+    const relativeStart = segmentIndex * HEADER_RANGE_SEGMENT_SIZE;
+    const relativeEnd = Math.min(compressedSize, relativeStart + HEADER_RANGE_SEGMENT_SIZE) - 1;
+    const absoluteStart = PRELUDE_SIZE + relativeStart;
+    const absoluteEnd = PRELUDE_SIZE + relativeEnd;
+    const segmentFile = path.join(temporaryRoot, `blockmap-header-${String(segmentIndex + 1).padStart(3, "0")}.part`);
+    const candidate = await downloadRange(curl, routeState, absoluteStart, absoluteEnd, segmentFile);
+    const segment = fs.readFileSync(segmentFile);
+    fs.appendFileSync(headerFile, segment);
+    receivedHeaderBytes += segment.length;
+    fs.rmSync(segmentFile, { force: true });
+    const elapsedSeconds = Math.max(0.001, (Date.now() - headerStarted) / 1000);
+    progress("blockmap-header", `下载 Blockmap 索引 ${segmentIndex + 1}/${segmentCount}`, {
+      bytesReceived: receivedHeaderBytes,
+      bytesTotal: compressedSize,
+      speedBytesPerSecond: receivedHeaderBytes / elapsedSeconds,
+      transport: candidate.transport,
+    });
+  }
   const compressed = fs.readFileSync(headerFile);
   const actualHeaderSha256 = sha256Buffer(compressed);
   if (actualHeaderSha256 !== expectedHeaderSha256) {
@@ -523,21 +662,23 @@ function groupChunks(chunks) {
   return groups;
 }
 
-async function downloadMissingChunks(curl, rankedCandidates, header, dataOffset, chunks, cacheRoot, temporaryRoot, progress, reusedBytes, targetBytes) {
+async function downloadMissingChunks(curl, routeState, header, dataOffset, chunks, cacheRoot, temporaryRoot, progress, reusedBytes, targetBytes) {
   mkdirp(cacheRoot);
   const groups = groupChunks(chunks);
   const totalCompressedBytes = chunks.reduce((sum, chunk) => sum + chunk.compressedSize, 0);
   let downloadedBytes = 0;
   const started = Date.now();
-  let transport = rankedCandidates[0].transport;
+  let transport = routeState.candidates[0].transport;
+  let selectedCandidate = routeState.candidates[0];
 
   for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
     const group = groups[groupIndex];
     const rangeFile = path.join(temporaryRoot, `group-${String(groupIndex + 1).padStart(5, "0")}.bin`);
     const absoluteStart = dataOffset + group.start;
     const absoluteEnd = dataOffset + group.end - 1;
-    const candidate = await downloadRange(curl, rankedCandidates, absoluteStart, absoluteEnd, rangeFile, temporaryRoot);
+    const candidate = await downloadRange(curl, routeState, absoluteStart, absoluteEnd, rangeFile);
     transport = candidate.transport;
+    selectedCandidate = candidate;
     const packed = fs.readFileSync(rangeFile);
     for (const chunk of group.chunks) {
       const relativeOffset = chunk.offset - group.start;
@@ -564,7 +705,7 @@ async function downloadMissingChunks(curl, rankedCandidates, header, dataOffset,
       targetBytes,
     });
   }
-  return { downloadedBytes, totalCompressedBytes, transport, groupCount: groups.length };
+  return { downloadedBytes, totalCompressedBytes, transport, groupCount: groups.length, selectedCandidate };
 }
 
 function copyRange(sourceFile, sourceOffset, size, output) {
@@ -646,6 +787,7 @@ async function stage(args) {
   const headerSha256 = requireArg(args, "header-sha256").toLowerCase();
   const targetVersion = requireArg(args, "target-version");
   const progress = createProgressWriter(args["progress-file"] ? path.resolve(args["progress-file"]) : "");
+  const log = createDiagnosticLogger(args["log-file"] ? path.resolve(args["log-file"]) : "");
   if (!/^\d+\.\d+\.\d+$/.test(targetVersion)) fail(`invalid target version: ${targetVersion}`);
   if (!/^[0-9a-f]{64}$/.test(headerSha256)) fail("blockmap header SHA-256 is invalid");
   if (!Number.isSafeInteger(headerSize) || headerSize <= 0 || headerSize > 64 * 1024 * 1024) fail("blockmap header size is invalid");
@@ -654,8 +796,22 @@ async function stage(args) {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "devspace-blockmap-"));
   const cacheRoot = path.join(temporaryRoot, "chunks");
   try {
-    const ranked = await rankRangeCandidates(curl, assetUrl, assetSize, args, temporaryRoot, progress);
-    const { header, dataOffset } = await readHeader(curl, ranked, assetSize, headerSize, headerSha256, temporaryRoot);
+    const selected = await selectRangeCandidates(curl, assetUrl, assetSize, args, temporaryRoot, progress, log, 0);
+    const routeState = {
+      assetUrl,
+      assetSize,
+      args,
+      temporaryRoot,
+      progress,
+      log,
+      candidates: selected.candidates,
+      tierIndex: selected.tierIndex,
+      tierName: selected.tierName,
+      tierCount: selected.tierCount,
+      refreshes: 0,
+      sameTierReprobeUsed: false,
+    };
+    const { header, dataOffset } = await readHeader(curl, routeState, assetSize, headerSize, headerSha256, temporaryRoot, progress);
     const validated = validateHeader(header, targetVersion);
     progress("analyzing", "分析当前安装文件并计算可复用块", {
       bytesReceived: 0,
@@ -672,13 +828,14 @@ async function stage(args) {
     let download = {
       downloadedBytes: 0,
       totalCompressedBytes: 0,
-      transport: ranked[0].transport,
+      transport: routeState.candidates[0].transport,
       groupCount: 0,
+      selectedCandidate: routeState.candidates[0],
     };
     if (missing.length > 0) {
       download = await downloadMissingChunks(
         curl,
-        ranked,
+        routeState,
         header,
         dataOffset,
         missing,
@@ -734,9 +891,11 @@ async function stage(args) {
       writtenBytes,
       rangeRequestGroups: download.groupCount,
       selectedTransport: download.transport,
-      selectedSource: ranked[0].source,
-      selectedProxy: Boolean(ranked[0].proxy),
-      rangeCandidates: ranked.slice(0, 8).map((item) => ({
+      selectedSource: download.selectedCandidate.source,
+      selectedProxy: Boolean(download.selectedCandidate.proxy),
+      selectedPriorityTier: routeState.tierName,
+      rangeCandidateRefreshes: routeState.refreshes,
+      rangeCandidates: routeState.candidates.slice(0, 8).map((item) => ({
         source: item.source,
         proxied: Boolean(item.proxy),
         ttfb: item.ttfb,
@@ -749,11 +908,33 @@ async function stage(args) {
   }
 }
 
+function selfTest() {
+  const tiers = buildRangeCandidateTiers(
+    "https://github.com/example/example/releases/download/v1.0.0/example.blockmap",
+    {
+      mirror: ["https://mirror.example/"],
+      proxy: "http://127.0.0.1:10809",
+    },
+  );
+  return {
+    probeBytes: PROBE_SIZE,
+    probeTimeoutSeconds: PROBE_TIMEOUT_SECONDS,
+    headerRangeSegmentBytes: HEADER_RANGE_SEGMENT_SIZE,
+    rangeGroupLimitBytes: RANGE_GROUP_LIMIT,
+    priorityTiers: tiers.map((tier) => tier.name),
+    mirrorDirectFirst: tiers[0]?.name === "mirror" && tiers[0].candidates.every((candidate) => !candidate.proxy),
+    proxyBeforeDirect: tiers.findIndex((tier) => tier.name === "proxy") < tiers.findIndex((tier) => tier.name === "direct"),
+    officialDirectLast: tiers.at(-1)?.name === "direct",
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const action = args._[0] || "stage";
-  if (action !== "stage") fail(`unsupported blockmap updater action: ${action}`);
-  const result = await stage(args);
+  let result;
+  if (action === "self-test") result = selfTest();
+  else if (action === "stage") result = await stage(args);
+  else fail(`unsupported blockmap updater action: ${action}`);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

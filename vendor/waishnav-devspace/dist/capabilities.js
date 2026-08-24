@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.44";
+export const DEVSPACE_SERVER_VERSION = "1.1.45";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -138,6 +138,9 @@ const FEATURE_CATALOG = [
     { id: "remote-agent-landlock-write-confinement", maturity: "stable", since: "1.1.43" },
     { id: "remote-agent-full-access", maturity: "stable", since: "1.1.43" },
     { id: "github-updater-blockmap-ui-clarity", maturity: "stable", since: "1.1.44" },
+    { id: "github-updater-blockmap-priority-routing", maturity: "stable", since: "1.1.45" },
+    { id: "github-updater-blockmap-segmented-header", maturity: "stable", since: "1.1.45" },
+    { id: "github-updater-stage-single-flight", maturity: "stable", since: "1.1.45" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

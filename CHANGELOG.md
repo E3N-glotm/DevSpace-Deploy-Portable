@@ -2,6 +2,16 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.45
+
+- Blockmap Range 线路按“镜像站 → Windows/显式代理 → 官方直连”分级选择，每一级内部按 1 MiB 实测吞吐排序；真实 Range 失败后重新探测并自动进入下一优先级。
+- probe 从 128 KiB 提升为 1 MiB，Range 超时改为按 probe 吞吐动态估算，避免短请求误判慢速 GitHub 直连为健康线路。
+- Blockmap header 改为 1 MiB 分段 Range，缺失块合并 Range 上限收紧到 4 MiB，降低慢速/抖动链路一次失败造成的重复下载量。
+- Blockmap helper 把每条 probe、选中线路和 failover 直接写入 `logs/update.log`；Windows 系统代理仍由 PowerShell updater 检测并显式传递给 helper。
+- Stage 增加根目录级单实例 Mutex，拒绝同一 Portable 安装同时运行两个 staging 流程。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.45.md)
+
 ## 1.1.44
 
 - 修复 Update.exe 未识别 `preferredMode=blockmap`，导致 Blockmap 差分更新在检查页和暂存完成页被错误显示为“完整包更新”的问题。

@@ -85,6 +85,7 @@ function runProcess(executable, args, options = {}) {
 }
 
 function startRangeServer(asset) {
+  let flakyHeaderFailures = 0;
   const server = http.createServer((request, response) => {
     const url = new URL(request.url || "/", "http://127.0.0.1");
     if (url.pathname === "/no-range") {
@@ -95,7 +96,7 @@ function startRangeServer(asset) {
       response.end(asset);
       return;
     }
-    if (url.pathname !== "/asset") {
+    if (!["/asset", "/flaky-asset"].includes(url.pathname)) {
       response.writeHead(404);
       response.end();
       return;
@@ -115,6 +116,12 @@ function startRangeServer(asset) {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= asset.length) {
       response.writeHead(416, { "Content-Range": `bytes */${asset.length}` });
       response.end();
+      return;
+    }
+    if (url.pathname === "/flaky-asset" && start === 24 && flakyHeaderFailures === 0) {
+      flakyHeaderFailures += 1;
+      response.writeHead(503, { "Content-Type": "text/plain" });
+      response.end("transient range failure");
       return;
     }
     const body = asset.subarray(start, end + 1);
@@ -192,6 +199,17 @@ try {
   server = started.server;
   const curl = locateCurl();
 
+  const selfTest = spawnSync(node, [updater, "self-test"], { cwd: root, encoding: "utf8", windowsHide: true });
+  assert.equal(selfTest.status, 0, selfTest.stderr || selfTest.stdout);
+  const selfTestReport = JSON.parse(selfTest.stdout.trim());
+  assert.equal(selfTestReport.probeBytes, oneMiB);
+  assert.equal(selfTestReport.headerRangeSegmentBytes, oneMiB);
+  assert.equal(selfTestReport.rangeGroupLimitBytes, 4 * oneMiB);
+  assert.deepEqual(selfTestReport.priorityTiers, ["mirror", "proxy", "direct"]);
+  assert.equal(selfTestReport.mirrorDirectFirst, true);
+  assert.equal(selfTestReport.proxyBeforeDirect, true);
+  assert.equal(selfTestReport.officialDirectLast, true);
+
   const commonArgs = [
     updater,
     "stage",
@@ -235,6 +253,16 @@ try {
   assert.equal(statSync(join(base, "data", "user-state.txt")).isFile(), true, "persistent base data must remain untouched");
 
   rmSync(payload, { recursive: true, force: true });
+  const flaky = await runProcess(node, [
+    ...commonArgs,
+    "--asset-url", `${started.baseUrl}/flaky-asset`,
+  ]);
+  assert.equal(flaky.code, 0, flaky.stderr || flaky.stdout);
+  const flakyResult = JSON.parse(flaky.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1));
+  assert.equal(flakyResult.success, true);
+  assert.ok(flakyResult.rangeCandidateRefreshes >= 1, "transient Range failure should trigger a route re-probe");
+
+  rmSync(payload, { recursive: true, force: true });
   const badHeader = await runProcess(node, [
     ...commonArgs.filter((value, index, array) => !(array[index - 1] === "--header-sha256") && value !== "--header-sha256"),
     "--header-sha256", "0".repeat(64),
@@ -257,6 +285,10 @@ try {
     blockPackV2: true,
     localChunkReuse: true,
     missingChunkRangeDownload: true,
+    oneMiBRangeProbe: true,
+    mirrorProxyDirectPriority: true,
+    segmentedBlockmapHeader: true,
+    rangeFailureReprobe: true,
     reconstructedFileSha256Validation: true,
     headerTamperFailsClosed: true,
     noRangeServerRejected: true,

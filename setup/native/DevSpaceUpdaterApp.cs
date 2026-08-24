@@ -696,6 +696,7 @@ namespace DevSpacePortableUpdater
             {
                 case "metadata": return "正在读取 GitHub Release";
                 case "probing": return "正在选择 Blockmap Range 下载源";
+                case "blockmap-header": return "正在下载 Blockmap 索引";
                 case "analyzing": return "正在分析本地可复用块";
                 case "downloading": return (transport ?? "").IndexOf("range", StringComparison.OrdinalIgnoreCase) >= 0 ? "正在下载缺失文件块" : "正在下载更新包";
                 case "downloaded": return "更新包下载完成";
