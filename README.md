@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.42**
+当前稳定版本：**1.1.43**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.42.zip
+DevSpacePortable-Windows-x64-1.1.43.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -343,6 +343,16 @@ https://你的域名/mcp
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.43 主要变化
+
+- **Remote Workspace 非 Git 目录不再误报失败。** Linux Agent 不再把缺失的 Git `sha/branch/originUrl` 序列化成 `null`，因此普通目录、无 origin 仓库和 detached/未提交场景不会再触发 `open_workspace` structured output 校验错误。
+- **安装位置与权限边界彻底拆分。** 每台 Linux 主机仍只部署一个 Agent；`installRoot` 只决定 Agent 程序与状态保存位置，`writableRoots` 只决定 scoped 模式允许写入的位置。
+- **Scoped 模式默认“可读随 Linux 用户、可写只限指定目录”。** Remote Workspace 可以打开 Linux/SSH 用户有读取权限的其他目录，包括只读数据集；结构化写操作和 Shell/持久进程写入仍被限制到 `writableRoots`。Linux Shell 写限制使用 Landlock 并在不可用时 fail closed。
+- **新增 Full Access。** 开启后 `installRoot` 仅作为 Agent 安装目录，文件读取、写入和命令执行均遵循 Linux/SSH 用户本身的权限，不再施加 DevSpace writable-root 限制。
+- **systemd 与无 systemd 安装路径统一。** scoped systemd 服务把主机其余目录保持只读并开放 state/writable roots；Full Access 不启用额外文件系统只读沙箱。SSH 离线安装、自动救援、Agent 自更新和旧 `allowedRoots` 配置保持向后兼容。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.43.md)
 
 ## 1.1.42 主要变化
 

@@ -25,7 +25,10 @@ function parseJson(value, fallback) {
     }
 }
 
-function normalizeRoots(value) {
+function normalizeAccessMode(value) {
+    return String(value ?? "scoped").trim().toLowerCase() === "full-access" ? "full-access" : "scoped";
+}
+function normalizeRoots(value, required = true) {
     const roots = Array.isArray(value) ? value : [value];
     const normalized = [];
     const seen = new Set();
@@ -43,19 +46,36 @@ function normalizeRoots(value) {
             normalized.push(root);
         }
     }
-    if (normalized.length === 0)
+    if (required && normalized.length === 0)
         throw new Error("At least one Linux agent allowed root is required.");
     return normalized;
+}
+function normalizeInstallRoot(value) {
+    let root = String(value ?? "").trim().replace(/\\/g, "/");
+    if (!root)
+        throw new Error("A writable Linux Agent install root is required.");
+    if (!root.startsWith("/"))
+        throw new Error(`Linux Agent install root must be absolute: ${root}`);
+    root = root.replace(/\/{2,}/g, "/").replace(/\/$/, "") || "/";
+    if (root === "/")
+        throw new Error("Linux Agent install root cannot be the filesystem root '/'. Choose a writable directory owned by the SSH user.");
+    return root;
 }
 
 function publicAgent(row, connected = false) {
     const recentlySeen = row.last_seen_at && (Date.now() - Date.parse(row.last_seen_at) < 45_000);
+    const writableRoots = normalizeRoots(parseJson(row.allowed_roots_json, []), false);
+    const accessMode = normalizeAccessMode(row.access_mode);
+    const installRoot = row.install_root ? normalizeInstallRoot(row.install_root) : writableRoots[0];
     return {
         id: row.id,
         name: row.name,
         status: row.revoked_at ? "revoked" : connected ? "online" : row.status === "online" && recentlySeen ? "online-recent" : "offline",
         connected,
-        allowedRoots: parseJson(row.allowed_roots_json, []),
+        allowedRoots: writableRoots,
+        writableRoots,
+        accessMode,
+        installRoot,
         hostname: row.hostname ?? undefined,
         platform: row.platform ?? undefined,
         agentVersion: row.agent_version ?? undefined,
@@ -77,7 +97,10 @@ export class RemoteAgentStore {
         const name = String(input.name ?? "").trim();
         if (!name)
             throw new Error("Remote agent name is required.");
-        const allowedRoots = normalizeRoots(input.allowedRoots);
+        const accessMode = normalizeAccessMode(input.accessMode ?? (input.fullAccess ? "full-access" : "scoped"));
+        const writableRoots = normalizeRoots(input.writableRoots ?? (accessMode === "full-access" ? [] : input.allowedRoots), accessMode !== "full-access");
+        const legacyRoots = normalizeRoots(input.allowedRoots, false);
+        const installRoot = normalizeInstallRoot(input.installRoot ?? legacyRoots[0] ?? writableRoots[0]);
         const requestedAgentId = String(input.agentId ?? "").trim();
         let existingAgent = undefined;
         if (requestedAgentId) {
@@ -91,10 +114,10 @@ export class RemoteAgentStore {
         const expiresAt = new Date(now.getTime() + ttlMinutes * 60_000).toISOString();
         this.database.sqlite.prepare(`
       insert into remote_agent_enrollments
-        (token_hash, name, allowed_roots_json, expires_at, created_at, used_at, agent_id)
-      values (?, ?, ?, ?, ?, null, ?)
-    `).run(sha256(token), name, JSON.stringify(allowedRoots), expiresAt, now.toISOString(), existingAgent?.id ?? null);
-        return { token, name, allowedRoots, expiresAt, ttlMinutes, agentId: existingAgent?.id ?? undefined, repair: Boolean(existingAgent) };
+        (token_hash, name, allowed_roots_json, access_mode, install_root, expires_at, created_at, used_at, agent_id)
+      values (?, ?, ?, ?, ?, ?, ?, null, ?)
+    `).run(sha256(token), name, JSON.stringify(writableRoots), accessMode, installRoot, expiresAt, now.toISOString(), existingAgent?.id ?? null);
+        return { token, name, allowedRoots: writableRoots, writableRoots, accessMode, installRoot, expiresAt, ttlMinutes, agentId: existingAgent?.id ?? undefined, repair: Boolean(existingAgent) };
     }
     consumeEnrollment(token, hello = {}) {
         const tokenHash = sha256(token);
@@ -106,7 +129,9 @@ export class RemoteAgentStore {
                 throw new Error("Enrollment token is invalid.");
             if (Date.parse(row.expires_at) <= Date.now())
                 throw new Error("Enrollment token has expired.");
-            const allowedRoots = normalizeRoots(parseJson(row.allowed_roots_json, []));
+            const accessMode = normalizeAccessMode(row.access_mode);
+            const writableRoots = normalizeRoots(parseJson(row.allowed_roots_json, []), accessMode !== "full-access");
+            const installRoot = normalizeInstallRoot(row.install_root ?? writableRoots[0]);
             if (row.used_at) {
                 const recoveryAge = Date.now() - Date.parse(row.used_at);
                 if (!row.agent_id || !Number.isFinite(recoveryAge) || recoveryAge < 0 || recoveryAge > ENROLLMENT_RECOVERY_WINDOW_MS)
@@ -118,7 +143,7 @@ export class RemoteAgentStore {
                 this.database.sqlite.prepare(`
           update remote_agents set secret_hash=?, status='online' where id=? and revoked_at is null
         `).run(sha256(agentSecret), row.agent_id);
-                return { agentId: row.agent_id, agentSecret, name: row.name, allowedRoots, recovered: true };
+                return { agentId: row.agent_id, agentSecret, name: row.name, allowedRoots: writableRoots, writableRoots, accessMode, installRoot, recovered: true };
             }
             if (row.agent_id) {
                 const agent = this.database.sqlite.prepare(`select * from remote_agents where id=?`).get(row.agent_id);
@@ -128,29 +153,29 @@ export class RemoteAgentStore {
                 const now = new Date().toISOString();
                 this.database.sqlite.prepare(`
           update remote_agents set
-            name=?, secret_hash=?, status='online', allowed_roots_json=?,
+            name=?, secret_hash=?, status='online', allowed_roots_json=?, access_mode=?, install_root=?,
             hostname=?, platform=?, agent_version=?, capabilities_json=?, metadata_json=?,
             connected_at=?, last_seen_at=?
           where id=? and revoked_at is null
-        `).run(row.name, sha256(agentSecret), JSON.stringify(allowedRoots), hello.hostname ?? agent.hostname ?? null,
+        `).run(row.name, sha256(agentSecret), JSON.stringify(writableRoots), accessMode, installRoot, hello.hostname ?? agent.hostname ?? null,
                     hello.platform ?? agent.platform ?? null, hello.agentVersion ?? agent.agent_version ?? null,
                     JSON.stringify(hello.capabilities ?? parseJson(agent.capabilities_json, {})),
                     JSON.stringify(hello.metadata ?? parseJson(agent.metadata_json, {})), now, now, row.agent_id);
                 this.database.sqlite.prepare(`update remote_agent_enrollments set used_at=? where token_hash=?`).run(now, tokenHash);
-                return { agentId: row.agent_id, agentSecret, name: row.name, allowedRoots, recovered: true, repaired: true };
+                return { agentId: row.agent_id, agentSecret, name: row.name, allowedRoots: writableRoots, writableRoots, accessMode, installRoot, recovered: true, repaired: true };
             }
             const agentId = `agent_${randomBytes(5).toString("hex")}`;
             const agentSecret = `dva_${randomBytes(32).toString("base64url")}`;
             const now = new Date().toISOString();
             this.database.sqlite.prepare(`
         insert into remote_agents (
-          id, name, secret_hash, status, allowed_roots_json, hostname, platform,
+          id, name, secret_hash, status, allowed_roots_json, access_mode, install_root, hostname, platform,
           agent_version, capabilities_json, metadata_json, created_at,
           connected_at, last_seen_at, revoked_at
-        ) values (?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?, null)
-      `).run(agentId, row.name, sha256(agentSecret), JSON.stringify(allowedRoots), hello.hostname ?? null, hello.platform ?? null, hello.agentVersion ?? null, JSON.stringify(hello.capabilities ?? {}), JSON.stringify(hello.metadata ?? {}), now, now, now);
+        ) values (?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, null)
+      `).run(agentId, row.name, sha256(agentSecret), JSON.stringify(writableRoots), accessMode, installRoot, hello.hostname ?? null, hello.platform ?? null, hello.agentVersion ?? null, JSON.stringify(hello.capabilities ?? {}), JSON.stringify(hello.metadata ?? {}), now, now, now);
             this.database.sqlite.prepare(`update remote_agent_enrollments set used_at=?, agent_id=? where token_hash=?`).run(now, agentId, tokenHash);
-            return { agentId, agentSecret, name: row.name, allowedRoots, recovered: false };
+            return { agentId, agentSecret, name: row.name, allowedRoots: writableRoots, writableRoots, accessMode, installRoot, recovered: false };
         });
         return transaction();
     }
@@ -243,15 +268,15 @@ export function remoteAgentAdmin({ stateDir, action, payload = {}, publicBaseUrl
         if (action === "create-enrollment") {
             const enrollment = store.createEnrollment(payload);
             const base = String(publicBaseUrl ?? payload.publicBaseUrl ?? "").replace(/\/+$/, "");
-            const rootArgs = enrollment.allowedRoots.map((root) => `--allowed-root '${root.replace(/'/g, `'"'"'`)}'`).join(" ");
+            const rootArgs = enrollment.writableRoots.map((root) => `--writable-root '${root.replace(/'/g, `'"'"'`)}'`).join(" ");
             const stateKey = enrollment.agentId || `enroll-${sha256(enrollment.token).slice(0, 12)}`;
-            const stateDir = `${enrollment.allowedRoots[0].replace(/\/+$/, "")}/.devspace-agent/${stateKey}`;
+            const stateDir = `${enrollment.installRoot.replace(/\/+$/, "")}/.devspace-agent/${stateKey}`;
             const installer = bundledAgentAsset("install.sh");
             const agent = bundledAgentAsset("devspace-agent.py");
             const installCommand = base
-                ? `( tmp=$(mktemp); curl -fsSL '${base}/agent/v1/install.sh' -o "$tmp" && echo '${installer.sha256}  '"$tmp" | sha256sum -c - && bash "$tmp" --server '${base}' --token '${enrollment.token}' --name '${enrollment.name.replace(/'/g, `'"'"'`)}' --agent-sha256 '${agent.sha256}' --state-dir '${stateDir.replace(/'/g, `'"'"'`)}' ${rootArgs}; rc=$?; rm -f "$tmp"; exit $rc )`
+                ? `( tmp=$(mktemp); curl -fsSL '${base}/agent/v1/install.sh' -o "$tmp" && echo '${installer.sha256}  '"$tmp" | sha256sum -c - && bash "$tmp" --server '${base}' --token '${enrollment.token}' --name '${enrollment.name.replace(/'/g, `'"'"'`)}' --agent-sha256 '${agent.sha256}' --access-mode '${enrollment.accessMode}' --install-root '${enrollment.installRoot.replace(/'/g, `'"'"'`)}' --state-dir '${stateDir.replace(/'/g, `'"'"'`)}' ${rootArgs}; rc=$?; rm -f "$tmp"; exit $rc )`
                 : undefined;
-            return { enrollment, installCommand, serverUrl: base || undefined, stateDir, stateKey, installerSha256: installer.sha256, agentSha256: agent.sha256 };
+            return { enrollment, installCommand, serverUrl: base || undefined, stateDir, stateKey, installRoot: enrollment.installRoot, accessMode: enrollment.accessMode, writableRoots: enrollment.writableRoots, installerSha256: installer.sha256, agentSha256: agent.sha256 };
         }
         if (action === "revoke")
             return { agent: store.revoke(String(payload.agentId ?? "")) };

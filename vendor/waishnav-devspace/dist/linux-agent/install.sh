@@ -10,7 +10,9 @@ CONFIG=""
 INSTALL_DIR=""
 PID_FILE=""
 LOG_FILE=""
-ALLOWED_ROOTS=()
+WRITABLE_ROOTS=()
+ACCESS_MODE="scoped"
+INSTALL_ROOT=""
 AGENT_SHA256=""
 AGENT_FILE=""
 REQUESTED_STATE_DIR=""
@@ -21,7 +23,9 @@ while (($#)); do
     --token) TOKEN="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --user) RUN_USER="$2"; shift 2 ;;
-    --allowed-root) ALLOWED_ROOTS+=("$2"); shift 2 ;;
+    --writable-root|--allowed-root) WRITABLE_ROOTS+=("$2"); shift 2 ;;
+    --access-mode) ACCESS_MODE="$2"; shift 2 ;;
+    --install-root) INSTALL_ROOT="$2"; shift 2 ;;
     --agent-sha256) AGENT_SHA256="$2"; shift 2 ;;
     --agent-file) AGENT_FILE="$2"; shift 2 ;;
     --state-dir) REQUESTED_STATE_DIR="$2"; shift 2 ;;
@@ -32,7 +36,10 @@ done
 [[ -n "$SERVER" ]] || { echo "--server is required" >&2; exit 2; }
 [[ -n "$TOKEN" ]] || { echo "--token is required" >&2; exit 2; }
 [[ -n "$NAME" ]] || { echo "--name is required" >&2; exit 2; }
-((${#ALLOWED_ROOTS[@]} > 0)) || { echo "At least one --allowed-root is required" >&2; exit 2; }
+[[ "$ACCESS_MODE" == "scoped" || "$ACCESS_MODE" == "full-access" ]] || { echo "--access-mode must be scoped or full-access" >&2; exit 2; }
+if [[ "$ACCESS_MODE" == "scoped" ]]; then
+  ((${#WRITABLE_ROOTS[@]} > 0)) || { echo "Scoped mode requires at least one --writable-root" >&2; exit 2; }
+fi
 if [[ "$EUID" -eq 0 && "$RUN_USER" == "root" ]]; then
   if id ubuntu >/dev/null 2>&1; then
     RUN_USER="ubuntu"
@@ -53,33 +60,24 @@ if [[ -n "$AGENT_FILE" ]]; then
   [[ -f "$AGENT_FILE" ]] || { echo "--agent-file does not exist: $AGENT_FILE" >&2; exit 2; }
 fi
 
+if [[ -z "$INSTALL_ROOT" ]]; then
+  if ((${#WRITABLE_ROOTS[@]} > 0)); then
+    INSTALL_ROOT="${WRITABLE_ROOTS[0]}"
+  else
+    INSTALL_ROOT="${HOME:?HOME is required for a full-access user-mode install}/.local/state"
+  fi
+fi
+[[ "$INSTALL_ROOT" == /* ]] || { echo "--install-root must be absolute: $INSTALL_ROOT" >&2; exit 2; }
+[[ "$INSTALL_ROOT" != "/" ]] || { echo "--install-root cannot be /." >&2; exit 2; }
+
 if [[ -n "$REQUESTED_STATE_DIR" ]]; then
   [[ "$REQUESTED_STATE_DIR" == /* ]] || { echo "--state-dir must be absolute: $REQUESTED_STATE_DIR" >&2; exit 2; }
   [[ "$REQUESTED_STATE_DIR" != "/" ]] || { echo "--state-dir cannot be /." >&2; exit 2; }
-  state_allowed=0
-  for root in "${ALLOWED_ROOTS[@]}"; do
-    normalized_root="${root%/}"
-    if [[ "$REQUESTED_STATE_DIR" == "$normalized_root" || "$REQUESTED_STATE_DIR" == "$normalized_root/"* ]]; then
-      state_allowed=1
-      break
-    fi
-  done
-  [[ "$state_allowed" -eq 1 ]] || { echo "--state-dir must be inside one of the selected --allowed-root paths." >&2; exit 2; }
+  normalized_install_root="${INSTALL_ROOT%/}"
+  [[ "$REQUESTED_STATE_DIR" == "$normalized_install_root" || "$REQUESTED_STATE_DIR" == "$normalized_install_root/"* ]] || { echo "--state-dir must be inside --install-root." >&2; exit 2; }
   STATE_DIR="$REQUESTED_STATE_DIR"
-elif [[ "$EUID" -eq 0 ]]; then
-  STATE_DIR="/var/lib/devspace-agent"
 else
-  LEGACY_STATE_DIR="/var/lib/devspace-agent"
-  USER_STATE_HOME="${XDG_STATE_HOME:-${HOME:?HOME is required for a user-mode install}/.local/state}"
-  if [[ -d "$LEGACY_STATE_DIR" && -w "$LEGACY_STATE_DIR" && -x "$LEGACY_STATE_DIR" ]]; then
-    # 1.1.39 revision 2 installed the background Agent under /var/lib but
-    # chowned it to the ordinary service user. Reuse that writable location so
-    # a subsequent passwordless reinstall upgrades the existing Agent in place
-    # instead of starting a duplicate identity from a second state directory.
-    STATE_DIR="$LEGACY_STATE_DIR"
-  else
-    STATE_DIR="$USER_STATE_HOME/devspace-agent"
-  fi
+  STATE_DIR="${INSTALL_ROOT%/}/.devspace-agent"
 fi
 CONFIG="$STATE_DIR/config.json"
 INSTALL_DIR="$STATE_DIR/bin"
@@ -103,11 +101,18 @@ run_as_agent_user() {
   return 1
 }
 
-for root in "${ALLOWED_ROOTS[@]}"; do
-  [[ "$root" == /* ]] || { echo "Linux allowedRoot must be absolute: $root" >&2; exit 2; }
-  [[ "$root" != "/" ]] || { echo "Linux allowedRoot cannot be /." >&2; exit 2; }
-  [[ -d "$root" ]] || { echo "Linux allowedRoot does not exist or is not a directory: $root" >&2; exit 2; }
-  run_as_agent_user test -x "$root" || { echo "Linux Agent user cannot traverse allowedRoot: $RUN_USER -> $root" >&2; exit 2; }
+[[ -d "$INSTALL_ROOT" ]] || { echo "Linux Agent install root does not exist or is not a directory: $INSTALL_ROOT" >&2; exit 2; }
+run_as_agent_user test -r "$INSTALL_ROOT" || { echo "Linux Agent user cannot read install root: $RUN_USER -> $INSTALL_ROOT" >&2; exit 2; }
+run_as_agent_user test -w "$INSTALL_ROOT" || { echo "Linux Agent install root must be writable: $RUN_USER -> $INSTALL_ROOT" >&2; exit 2; }
+run_as_agent_user test -x "$INSTALL_ROOT" || { echo "Linux Agent user cannot traverse install root: $RUN_USER -> $INSTALL_ROOT" >&2; exit 2; }
+
+for root in "${WRITABLE_ROOTS[@]}"; do
+  [[ "$root" == /* ]] || { echo "Linux writableRoot must be absolute: $root" >&2; exit 2; }
+  [[ "$root" != "/" ]] || { echo "Linux writableRoot cannot be /." >&2; exit 2; }
+  [[ -d "$root" ]] || { echo "Linux writableRoot does not exist or is not a directory: $root" >&2; exit 2; }
+  run_as_agent_user test -r "$root" || { echo "Linux Agent user cannot read writableRoot: $RUN_USER -> $root" >&2; exit 2; }
+  run_as_agent_user test -w "$root" || { echo "Linux writableRoot must be writable: $RUN_USER -> $root" >&2; exit 2; }
+  run_as_agent_user test -x "$root" || { echo "Linux Agent user cannot traverse writableRoot: $RUN_USER -> $root" >&2; exit 2; }
 done
 
 mkdir -p "$INSTALL_DIR" "$STATE_DIR"
@@ -197,8 +202,8 @@ start_background_agent() {
   }
 }
 
-ARGS=("$INSTALL_DIR/devspace-agent.py" enroll --config "$CONFIG" --server "$SERVER" --token "$TOKEN" --name "$NAME" --state-dir "$STATE_DIR")
-for root in "${ALLOWED_ROOTS[@]}"; do ARGS+=(--allowed-root "$root"); done
+ARGS=("$INSTALL_DIR/devspace-agent.py" enroll --config "$CONFIG" --server "$SERVER" --token "$TOKEN" --name "$NAME" --access-mode "$ACCESS_MODE" --install-root "$INSTALL_ROOT" --state-dir "$STATE_DIR")
+for root in "${WRITABLE_ROOTS[@]}"; do ARGS+=(--writable-root "$root"); done
 WAS_ACTIVE=0
 SERVICE_MODE="background"
 if [[ "$EUID" -eq 0 ]] && has_systemd; then
@@ -239,11 +244,26 @@ User=$RUN_USER
 ExecStart=$PYTHON_BIN $INSTALL_DIR/devspace-agent.py --config $CONFIG run
 Restart=on-failure
 RestartSec=3
+EOF
+
+  if [[ "$ACCESS_MODE" == "full-access" ]]; then
+    cat >>/etc/systemd/system/devspace-agent.service <<EOF
+NoNewPrivileges=false
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
+EOF
+  else
+    cat >>/etc/systemd/system/devspace-agent.service <<EOF
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=$STATE_DIR ${ALLOWED_ROOTS[*]}
+ReadWritePaths=$STATE_DIR ${WRITABLE_ROOTS[*]}
+EOF
+  fi
+
+  cat >>/etc/systemd/system/devspace-agent.service <<EOF
 
 [Install]
 WantedBy=multi-user.target
@@ -264,4 +284,6 @@ else
   fi
   echo "Background log: $LOG_FILE"
 fi
-echo "Allowed roots: ${ALLOWED_ROOTS[*]}"
+echo "Access mode: $ACCESS_MODE"
+echo "Install root: $INSTALL_ROOT"
+echo "Writable roots: ${WRITABLE_ROOTS[*]}"

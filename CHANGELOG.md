@@ -2,6 +2,18 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.43
+
+- 修复 Remote Workspace 在非 Git 目录中把 Git metadata 的 `None` 序列化为 `null`，进而使 `open_workspace` structured output 校验失败的问题。缺失的 `sha`、`branch`、`originUrl` 现在直接省略。
+- 重构 Linux Remote Agent 权限模型：每台主机只安装一个 Agent，新增独立 `installRoot`、`writableRoots` 与 `accessMode`，不再把第一个 allowedRoot 同时当作安装目录和权限根。
+- scoped 模式下，读取权限跟随 Linux/SSH 用户，可直接打开未列入 writable roots 的只读数据集；DevSpace 的结构化写工具只允许写入 `writableRoots`。
+- scoped 模式的 Shell 与持久进程增加 Linux Landlock 写限制，防止通过绝对路径绕过 writable-root 约束；当前目标 Ubuntu 5.15 内核已验证 Landlock ABI 可用。无 Landlock 时 scoped Shell fail closed。
+- Scoped Landlock 仅额外允许向非持久化伪设备 `/dev/null` 写入，保证常见的 `command >/dev/null` 重定向可用；不会因此开放 `/tmp` 或其他真实目录的写权限。
+- 新增 Full Access：`installRoot` 只负责保存 Agent，Remote 文件和命令读写权限与 SSH/Linux 用户完全一致。
+- systemd、无 systemd 后台 Agent、SSH 离线安装、自动救援和旧 `allowedRoots` 配置同步兼容新的权限模型。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.43.md)
+
 ## 1.1.42
 
 - 同版本更新加入 `block-pack-v2` 差分架构：目标 Portable 按 1 MiB 内容块索引并独立压缩，客户端扫描当前安装中可复用的相同块，只通过 HTTP Range 下载缺失块，再在 staging 中重组并逐文件 SHA-256 校验。

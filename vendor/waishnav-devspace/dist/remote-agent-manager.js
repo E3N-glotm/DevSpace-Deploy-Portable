@@ -6,7 +6,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createRemoteAgentStore } from "./remote-agent-store.js";
 
 export const DEVSPACE_REMOTE_AGENT_PROTOCOL = 1;
-export const DEVSPACE_LINUX_AGENT_VERSION = "1.0.0";
+export const DEVSPACE_LINUX_AGENT_VERSION = "1.1.43";
 const AGENT_PATH = "/agent/v1/connect";
 const MAX_RPC_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;
@@ -221,7 +221,14 @@ export class RemoteAgentManager {
             const agent = this.store.authenticate(String(message.agentId ?? ""), String(message.agentSecret ?? ""));
             if (!agent)
                 throw new Error("Remote agent authentication failed.");
-            identity = { agentId: agent.id, name: agent.name, allowedRoots: agent.allowedRoots };
+            identity = {
+                agentId: agent.id,
+                name: agent.name,
+                allowedRoots: agent.allowedRoots,
+                writableRoots: agent.writableRoots ?? agent.allowedRoots,
+                accessMode: agent.accessMode ?? "scoped",
+                installRoot: agent.installRoot,
+            };
         }
         const previous = this.connections.get(identity.agentId);
         if (previous && previous !== state) {
@@ -241,6 +248,9 @@ export class RemoteAgentManager {
             agentSecret: enrolled ? identity.agentSecret : undefined,
             name: identity.name,
             allowedRoots: identity.allowedRoots,
+            writableRoots: identity.writableRoots ?? identity.allowedRoots ?? [],
+            accessMode: identity.accessMode ?? "scoped",
+            installRoot: identity.installRoot,
             serverTime: new Date().toISOString(),
             agentVersion: DEVSPACE_LINUX_AGENT_VERSION,
             agentScriptSha256: agentScript.sha256,

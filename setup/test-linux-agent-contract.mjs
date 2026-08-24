@@ -34,7 +34,7 @@ assert.equal(readFileSync(PACKAGED_AGENT, "utf8"), agent, "installed Portable Ag
 assert.equal(readFileSync(PACKAGED_INSTALLER, "utf8"), installer, "installed Portable installer must match maintained source");
 
 for (const contract of [
-  /AGENT_VERSION = "1\.0\.0"/,
+  /AGENT_VERSION = "1\.1\.43"/,
   /MAX_MESSAGE_BYTES = 8 \* 1024 \* 1024/,
   /TRANSFER_CHUNK_BYTES = 512 \* 1024/,
   /MAX_WATCHES = 64/,
@@ -47,6 +47,12 @@ for (const contract of [
   /"type": "enrollment_confirm"/,
   /WebSocket was closed by the server\{detail\}/,
   /self\.guard\.absolute\(root, resolved_link_target\)/,
+  /git_metadata\(root: str\).*?item is not None/s,
+  /def writable\(self, root: str, path: str \| None = None\)/,
+  /def command_preexec_fn\(self\)/,
+  /apply_write_landlock/,
+  /landlock_add_rule failed for \/dev\/null/,
+  /access_mode.*full-access/,
 ]) {
   assert.match(agent, contract);
 }
@@ -54,23 +60,27 @@ for (const contract of [
 for (const contract of [
   /INSTALL_DIR="\$STATE_DIR\/bin"/,
   /Refusing to run the DevSpace Agent service as root/,
-  /XDG_STATE_HOME/,
   /\.local\/state/,
-  /LEGACY_STATE_DIR="\/var\/lib\/devspace-agent"/,
   /run_as_agent_user\(\)/,
   /PYTHON_BIN="\$\(command -v python3\)"/,
   /--agent-file\) AGENT_FILE=/,
   /--state-dir\) REQUESTED_STATE_DIR=/,
+  /--install-root\) INSTALL_ROOT=/,
+  /--access-mode\) ACCESS_MODE=/,
+  /--writable-root\|--allowed-root/,
   /if \[\[ -n "\$AGENT_FILE" \]\]/,
-  /--state-dir must be inside one of the selected --allowed-root paths/,
+  /--state-dir must be inside --install-root/,
   /urllib\.request/,
   /hashlib\.sha256/,
   /A non-root install can only run as the current Linux user/,
-  /Linux allowedRoot cannot be \/\./,
+  /Linux writableRoot cannot be \/\./,
   /User=\$RUN_USER/,
   /NoNewPrivileges=true/,
+  /NoNewPrivileges=false/,
   /ProtectSystem=strict/,
+  /ProtectSystem=false/,
   /ProtectHome=read-only/,
+  /ProtectHome=false/,
   /ReadWritePaths=\$STATE_DIR/,
   /systemctl stop devspace-agent\.service/,
   /has_systemd\(\)/,
@@ -105,7 +115,10 @@ assert.equal(
 assert.match(remoteAgentStore, /\? `\( tmp=\$\(mktemp\);/);
 assert.match(remoteAgentStore, /&& bash "\$tmp" --server/);
 assert.match(remoteAgentStore, /--state-dir '\$\{stateDir\.replace/);
-assert.match(remoteAgentStore, /const stateDir = `\$\{enrollment\.allowedRoots\[0\]/);
+assert.match(remoteAgentStore, /const stateDir = `\$\{enrollment\.installRoot\.replace/);
+assert.match(remoteAgentStore, /--access-mode '\$\{enrollment\.accessMode\}'/);
+assert.match(remoteAgentStore, /--install-root '\$\{enrollment\.installRoot\.replace/);
+assert.match(remoteAgentStore, /--writable-root/);
 assert.match(remoteAgentStore, /const stateKey = enrollment\.agentId \|\| `enroll-\$\{sha256\(enrollment\.token\)\.slice\(0, 12\)\}`/);
 assert.match(remoteAgentStore, /rm -f "\$tmp"; exit \$rc \)`/);
 assert.match(remoteAgentStore, /requestedAgentId/);
@@ -121,20 +134,35 @@ try {
   const first = remoteAgentAdmin({
     stateDir,
     action: "create-enrollment",
-    payload: { name: "shared-server", allowedRoots: ["/home/ubuntu"], ttlMinutes: 15 },
+    payload: { name: "shared-server", installRoot: "/home/ubuntu/agent-home", writableRoots: ["/home/ubuntu/workspace"], accessMode: "scoped", ttlMinutes: 15 },
     publicBaseUrl: "https://example.invalid",
   });
   const second = remoteAgentAdmin({
     stateDir,
     action: "create-enrollment",
-    payload: { name: "shared-server", allowedRoots: ["/home/ubuntu"], ttlMinutes: 15 },
+    payload: { name: "shared-server", installRoot: "/home/ubuntu/agent-home", writableRoots: ["/home/ubuntu/workspace"], accessMode: "scoped", ttlMinutes: 15 },
     publicBaseUrl: "https://example.invalid",
   });
-  assert.match(first.stateDir, /^\/home\/ubuntu\/\.devspace-agent\/enroll-[0-9a-f]{12}$/);
-  assert.match(second.stateDir, /^\/home\/ubuntu\/\.devspace-agent\/enroll-[0-9a-f]{12}$/);
-  assert.notEqual(first.stateDir, second.stateDir, "two users/enrollments sharing one allowedRoot must not share Agent state");
-  assert.match(first.installCommand, /--state-dir '\/home\/ubuntu\/\.devspace-agent\/enroll-[0-9a-f]{12}'/);
+  assert.match(first.stateDir, /^\/home\/ubuntu\/agent-home\/\.devspace-agent\/enroll-[0-9a-f]{12}$/);
+  assert.match(second.stateDir, /^\/home\/ubuntu\/agent-home\/\.devspace-agent\/enroll-[0-9a-f]{12}$/);
+  assert.notEqual(first.stateDir, second.stateDir, "two enrollments sharing one installRoot must not share Agent state");
+  assert.equal(first.accessMode, "scoped");
+  assert.equal(first.installRoot, "/home/ubuntu/agent-home");
+  assert.deepEqual(first.writableRoots, ["/home/ubuntu/workspace"]);
+  assert.match(first.installCommand, /--state-dir '\/home\/ubuntu\/agent-home\/\.devspace-agent\/enroll-[0-9a-f]{12}'/);
+  assert.match(first.installCommand, /--writable-root '\/home\/ubuntu\/workspace'/);
   assert.doesNotMatch(first.installCommand, /sudo\s+bash/);
+
+  const full = remoteAgentAdmin({
+    stateDir,
+    action: "create-enrollment",
+    payload: { name: "full-server", installRoot: "/home/ubuntu/agent-full", accessMode: "full-access", writableRoots: [], ttlMinutes: 15 },
+    publicBaseUrl: "https://example.invalid",
+  });
+  assert.equal(full.accessMode, "full-access");
+  assert.deepEqual(full.writableRoots, []);
+  assert.match(full.installCommand, /--access-mode 'full-access'/);
+  assert.doesNotMatch(full.installCommand, /--writable-root/);
 }
 finally {
   rmSync(stateDir, { recursive: true, force: true });
@@ -147,16 +175,17 @@ console.log(JSON.stringify({
   passwordlessUserInstall: true,
   installerAndAgentHashChain: true,
   sshOfflineAgentFileInstall: true,
-  selectedAllowedRootStateDir: true,
+  dedicatedInstallRootStateDir: true,
   multiInstanceStateDirectoryIsolation: true,
   installerDoesNotRequireCurl: true,
   repairEnrollmentPreservesAgentIdentity: true,
   recoverableEnrollmentRetry: true,
   websocketCloseDiagnostics: true,
   nonSystemdBackgroundFallback: true,
-  legacyWritableStateReuse: true,
+  scopedReadWriteSplit: true,
+  fullAccessMode: true,
   generatedInstallCommandRequiresSudo: false,
   installCommandKeepsInteractiveShellOpen: true,
   boundedRpcAndResources: true,
-  allowedRootAndSymlinkGuard: true,
+  workspaceAndSymlinkGuard: true,
 }));

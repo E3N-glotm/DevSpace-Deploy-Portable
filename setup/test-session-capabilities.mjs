@@ -381,7 +381,7 @@ try {
   testMemories();
   await testHooks();
   testUiLease();
-console.log("DevSpace 1.1.42 sparse historical session capability tests passed.");
+console.log("DevSpace 1.1.43 sparse historical session capability tests passed.");
 }
 finally {
   rmSync(temporaryRoot, { recursive: true, force: true });

@@ -54,6 +54,11 @@ const migrations = [
         name: "remote-agent-enrollment-recovery",
         up: migrateRemoteAgentEnrollmentRecovery,
     },
+    {
+        version: 12,
+        name: "remote-agent-access-model",
+        up: migrateRemoteAgentAccessModel,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -415,6 +420,12 @@ function migrateRemoteAgentEnrollmentRecovery(sqlite) {
     create index if not exists remote_agent_enrollments_agent_id_idx
       on remote_agent_enrollments(agent_id);
   `);
+}
+function migrateRemoteAgentAccessModel(sqlite) {
+    addColumnIfMissing(sqlite, "remote_agents", "access_mode", "text not null default 'scoped'");
+    addColumnIfMissing(sqlite, "remote_agents", "install_root", "text");
+    addColumnIfMissing(sqlite, "remote_agent_enrollments", "access_mode", "text not null default 'scoped'");
+    addColumnIfMissing(sqlite, "remote_agent_enrollments", "install_root", "text");
 }
 function addColumnIfMissing(sqlite, table, column, definition) {
     const columns = sqlite.prepare(`pragma table_info(${table})`).all();

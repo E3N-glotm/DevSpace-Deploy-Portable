@@ -163,7 +163,7 @@ const toolNames = {
 function permissionInstruction(config) {
     const permissions = config.permissions;
     if (permissions.profile === "full-access") {
-        return "The owner has explicitly enabled full local-user access on the Windows control plane. Local commands may use any current-user-accessible Windows path. Remote Linux workspaces are still independently confined by the enrolled Agent's allowedRoots and the Linux service user's OS permissions. Commands may perform requested network access, credential-manager access, shell-based file changes, installers, package managers, and long-running or interactive processes within the active backend's OS boundary. This does not grant administrator, SYSTEM, UAC-elevated, root, or sudo privileges.";
+        return "The owner has explicitly enabled full local-user access on the Windows control plane. Local commands may use any current-user-accessible Windows path. Remote Linux workspaces follow each enrolled Agent's own remote access mode and the Linux service user's OS permissions. Commands may perform requested network access, credential-manager access, shell-based file changes, installers, package managers, and long-running or interactive processes within the active backend's OS boundary. This does not grant administrator, SYSTEM, UAC-elevated, root, or sudo privileges.";
     }
     if (permissions.profile === "custom") {
         const enabled = [
@@ -292,6 +292,9 @@ const remoteWorkspaceAgentOutputSchema = z.object({
     hostname: z.string().optional(),
     agentVersion: z.string().optional(),
     allowedRoots: z.array(z.string()),
+    writableRoots: z.array(z.string()).optional(),
+    accessMode: z.enum(["scoped", "full-access"]).optional(),
+    installRoot: z.string().optional(),
     system: z.unknown().optional(),
 });
 const reviewFileOutputSchema = z.object({
@@ -1670,6 +1673,9 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 hostname: agent.hostname,
                 agentVersion: agent.agentVersion,
                 allowedRoots: agent.allowedRoots,
+                writableRoots: agent.writableRoots ?? agent.allowedRoots,
+                accessMode: agent.accessMode ?? "scoped",
+                installRoot: agent.installRoot,
                 system,
             };
         }
@@ -1712,7 +1718,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                         ? `Explicit memories: ${memories.map((memory) => `${memory.title}: ${memory.content}`).join(" | ")}`
                         : undefined,
                     remoteAgent
-                        ? `Remote Agent: ${remoteAgent.name} (${remoteAgent.id}), host=${remoteAgent.hostname ?? "unknown"}, version=${remoteAgent.agentVersion ?? "unknown"}, allowedRoots=${remoteAgent.allowedRoots.join(", ")}`
+                        ? `Remote Agent: ${remoteAgent.name} (${remoteAgent.id}), host=${remoteAgent.hostname ?? "unknown"}, version=${remoteAgent.agentVersion ?? "unknown"}, access=${remoteAgent.accessMode ?? "scoped"}, installRoot=${remoteAgent.installRoot ?? "unknown"}, writableRoots=${(remoteAgent.writableRoots ?? remoteAgent.allowedRoots).join(", ") || "none"}`
                         : undefined,
                     Array.isArray(remoteAgent?.system?.gpus) && remoteAgent.system.gpus.length > 0
                         ? `Remote GPUs: ${remoteAgent.system.gpus.map((gpu) => `GPU${gpu.index} ${gpu.name}, ${gpu.memoryUsedMiB}/${gpu.memoryTotalMiB} MiB, util ${gpu.utilizationPercent}%`).join(" | ")}`

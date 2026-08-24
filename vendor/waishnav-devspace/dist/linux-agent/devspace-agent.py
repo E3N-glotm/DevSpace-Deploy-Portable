@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import errno
 import fnmatch
 import glob
@@ -37,7 +38,7 @@ import urllib.request
 from pathlib import Path
 
 
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.1.43"
 PROTOCOL_VERSION = 1
 DEFAULT_CONFIG = "/etc/devspace-agent/config.json"
 DEFAULT_STATE_DIR = "/var/lib/devspace-agent"
@@ -105,7 +106,7 @@ def decode_bytes(value: dict | None) -> bytes:
 def normalize_root(value: str) -> str:
     text = os.path.abspath(os.path.expanduser(str(value).strip()))
     if text == os.path.sep:
-        raise ValueError("Agent allowed root cannot be '/'.")
+        raise ValueError("Agent writable root cannot be '/'.")
     return os.path.realpath(text) if os.path.exists(text) else text
 
 
@@ -126,14 +127,114 @@ def closest_existing(path: str) -> str:
     return current
 
 
+LANDLOCK_CREATE_RULESET_VERSION = 1
+LANDLOCK_RULE_PATH_BENEATH = 1
+LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
+LANDLOCK_ACCESS_FS_REMOVE_DIR = 1 << 4
+LANDLOCK_ACCESS_FS_REMOVE_FILE = 1 << 5
+LANDLOCK_ACCESS_FS_MAKE_CHAR = 1 << 6
+LANDLOCK_ACCESS_FS_MAKE_DIR = 1 << 7
+LANDLOCK_ACCESS_FS_MAKE_REG = 1 << 8
+LANDLOCK_ACCESS_FS_MAKE_SOCK = 1 << 9
+LANDLOCK_ACCESS_FS_MAKE_FIFO = 1 << 10
+LANDLOCK_ACCESS_FS_MAKE_BLOCK = 1 << 11
+LANDLOCK_ACCESS_FS_MAKE_SYM = 1 << 12
+LANDLOCK_ACCESS_FS_REFER = 1 << 13
+LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14
+PR_SET_NO_NEW_PRIVS = 38
+SYS_LANDLOCK_CREATE_RULESET = 444
+SYS_LANDLOCK_ADD_RULE = 445
+SYS_LANDLOCK_RESTRICT_SELF = 446
+
+
+class LandlockRulesetAttr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+
+class LandlockPathBeneathAttr(ctypes.Structure):
+    _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
+
+
+def landlock_abi() -> int:
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.syscall(SYS_LANDLOCK_CREATE_RULESET, 0, 0, LANDLOCK_CREATE_RULESET_VERSION)
+    return int(result) if result >= 1 else 0
+
+
+def apply_write_landlock(roots: list[str], abi: int) -> None:
+    handled = (
+        LANDLOCK_ACCESS_FS_WRITE_FILE
+        | LANDLOCK_ACCESS_FS_REMOVE_DIR
+        | LANDLOCK_ACCESS_FS_REMOVE_FILE
+        | LANDLOCK_ACCESS_FS_MAKE_CHAR
+        | LANDLOCK_ACCESS_FS_MAKE_DIR
+        | LANDLOCK_ACCESS_FS_MAKE_REG
+        | LANDLOCK_ACCESS_FS_MAKE_SOCK
+        | LANDLOCK_ACCESS_FS_MAKE_FIFO
+        | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+        | LANDLOCK_ACCESS_FS_MAKE_SYM
+    )
+    if abi >= 2:
+        handled |= LANDLOCK_ACCESS_FS_REFER
+    if abi >= 3:
+        handled |= LANDLOCK_ACCESS_FS_TRUNCATE
+    libc = ctypes.CDLL(None, use_errno=True)
+    ruleset_attr = LandlockRulesetAttr(handled_access_fs=handled)
+    ruleset_fd = libc.syscall(SYS_LANDLOCK_CREATE_RULESET, ctypes.byref(ruleset_attr), ctypes.sizeof(ruleset_attr), 0)
+    if ruleset_fd < 0:
+        raise OSError(ctypes.get_errno(), "landlock_create_ruleset failed")
+    opened: list[int] = []
+    try:
+        for root in roots:
+            fd = os.open(root, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+            opened.append(fd)
+            path_attr = LandlockPathBeneathAttr(allowed_access=handled, parent_fd=fd)
+            if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0) < 0:
+                raise OSError(ctypes.get_errno(), f"landlock_add_rule failed for {root}")
+        # /dev/null is a non-persistent sink used pervasively by ordinary shell
+        # commands (for example `command >/dev/null`).  Treating that redirection
+        # as a data write outside writableRoots makes scoped mode unnecessarily
+        # incompatible without strengthening the filesystem boundary.  Grant
+        # WRITE_FILE only to this single character device; no real directory or
+        # regular file outside writableRoots is made writable.
+        if os.path.exists("/dev/null"):
+            fd = os.open("/dev/null", getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+            opened.append(fd)
+            null_attr = LandlockPathBeneathAttr(allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE, parent_fd=fd)
+            if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(null_attr), 0) < 0:
+                raise OSError(ctypes.get_errno(), "landlock_add_rule failed for /dev/null")
+        if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) failed")
+        if libc.syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0) < 0:
+            raise OSError(ctypes.get_errno(), "landlock_restrict_self failed")
+    finally:
+        for fd in opened:
+            os.close(fd)
+        os.close(ruleset_fd)
+
+
 class PathGuard:
-    def __init__(self, roots: list[str]):
+    def __init__(self, roots: list[str], access_mode: str = "scoped"):
+        self.configure(roots, access_mode)
+
+    def configure(self, roots: list[str], access_mode: str = "scoped") -> None:
+        self.access_mode = "full-access" if str(access_mode).strip().lower() == "full-access" else "scoped"
         self.roots = [normalize_root(root) for root in roots]
-        if not self.roots:
-            raise ValueError("At least one allowed root is required.")
+        if self.access_mode != "full-access" and not self.roots:
+            raise ValueError("Scoped Remote Agent access requires at least one writable root.")
+
+    @property
+    def full_access(self) -> bool:
+        return self.access_mode == "full-access"
+
+    def workspace_root(self, root: str) -> str:
+        candidate = os.path.realpath(os.path.abspath(os.path.expanduser(root)))
+        if not os.path.isdir(candidate):
+            raise NotADirectoryError(candidate)
+        return candidate
 
     def absolute(self, root: str, path: str | None = None) -> str:
-        workspace_root = os.path.abspath(os.path.expanduser(root))
+        workspace_root = self.workspace_root(root)
         if path is None or str(path) in ("", "."):
             candidate = workspace_root
         elif os.path.isabs(str(path)):
@@ -142,26 +243,45 @@ class PathGuard:
             candidate = os.path.abspath(os.path.join(workspace_root, str(path)))
         existing = closest_existing(candidate)
         resolved_existing = os.path.realpath(existing)
+        if not inside(workspace_root, resolved_existing):
+            raise PermissionError(f"Path is outside the opened Remote Workspace: {candidate}")
+        if os.path.exists(candidate):
+            resolved = os.path.realpath(candidate)
+            if not inside(workspace_root, resolved):
+                raise PermissionError(f"Path resolves outside the opened Remote Workspace: {candidate}")
+        return candidate
+
+    def writable(self, root: str, path: str | None = None) -> str:
+        candidate = self.absolute(root, path)
+        if self.full_access:
+            return candidate
+        existing = closest_existing(candidate)
+        resolved_existing = os.path.realpath(existing)
         if not any(inside(allowed, resolved_existing) for allowed in self.roots):
-            raise PermissionError(f"Path is outside Linux agent allowed roots: {candidate}")
+            raise PermissionError(f"Remote Agent write is outside configured writable roots: {candidate}")
         if os.path.exists(candidate):
             resolved = os.path.realpath(candidate)
             if not any(inside(allowed, resolved) for allowed in self.roots):
-                raise PermissionError(f"Path resolves outside Linux agent allowed roots: {candidate}")
+                raise PermissionError(f"Remote Agent write resolves outside configured writable roots: {candidate}")
         return candidate
-
-    def workspace_root(self, root: str) -> str:
-        candidate = self.absolute(root)
-        if not os.path.isdir(candidate):
-            raise NotADirectoryError(candidate)
-        return os.path.realpath(candidate)
 
     def owning_allowed_root(self, root: str) -> str:
         resolved = self.workspace_root(root)
+        if self.full_access:
+            return resolved
         matches = [allowed for allowed in self.roots if inside(allowed, resolved)]
         if not matches:
-            raise PermissionError(resolved)
+            raise PermissionError(f"Remote worktree source must be inside a configured writable root: {resolved}")
         return max(matches, key=len)
+
+    def command_preexec_fn(self):
+        if self.full_access:
+            return None
+        abi = landlock_abi()
+        if abi < 1:
+            raise RuntimeError("Scoped Remote Agent shell execution requires Linux Landlock support so commands cannot write outside configured writable roots. Use Full Access only if unrestricted SSH-user writes are intended.")
+        roots = list(self.roots)
+        return lambda: apply_write_landlock(roots, abi)
 
 
 class WebSocketClient:
@@ -332,11 +452,11 @@ def git_metadata(root: str) -> dict:
         text = result.stdout.strip()
         return text if result.returncode == 0 and text else None
 
-    return {
+    return {key: item for key, item in {
         "sha": value(["rev-parse", "HEAD"]),
         "branch": value(["branch", "--show-current"]),
         "originUrl": value(["remote", "get-url", "origin"]),
-    }
+    }.items() if item is not None}
 
 
 def project_context(root: str, guard: PathGuard | None = None) -> tuple[list[dict], list[dict]]:
@@ -378,7 +498,7 @@ class TransferManager:
     def prepare(self, params: dict) -> dict:
         transfer_id = str(params["transferId"])
         workspace_root = str(params["root"])
-        target = self.guard.absolute(workspace_root, str(params["path"]))
+        target = self.guard.writable(workspace_root, str(params["path"]))
         transfer_dir = self.root / transfer_id
         shutil.rmtree(transfer_dir, ignore_errors=True)
         transfer_dir.mkdir(parents=True, exist_ok=True)
@@ -638,6 +758,9 @@ class ProcessRegistry:
                 "start_new_session": True,
                 "close_fds": True,
             }
+            preexec = guard.command_preexec_fn()
+            if preexec is not None:
+                popen_kwargs["preexec_fn"] = preexec
             if tty:
                 master_fd, slave_fd = pty.openpty()
                 rows = int(params.get("rows") or 24)
@@ -917,7 +1040,10 @@ class AgentRuntime:
         self.config = config
         self.state_dir = Path(config.get("stateDir") or DEFAULT_STATE_DIR)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.guard = PathGuard(list(config.get("allowedRoots") or []))
+        self.guard = PathGuard(
+            list(config.get("writableRoots") or config.get("allowedRoots") or []),
+            str(config.get("accessMode") or "scoped"),
+        )
         self.processes = ProcessRegistry(self.state_dir)
         self.transfers = TransferManager(self.state_dir, self.guard)
         self.ws: WebSocketClient | None = None
@@ -977,7 +1103,12 @@ class AgentRuntime:
         if ack.get("agentSecret"):
             self.config["agentId"] = ack["agentId"]
             self.config["agentSecret"] = ack["agentSecret"]
-            self.config["allowedRoots"] = ack.get("allowedRoots") or self.config.get("allowedRoots")
+            self.config["accessMode"] = ack.get("accessMode") or self.config.get("accessMode") or "scoped"
+            self.config["writableRoots"] = ack.get("writableRoots") if ack.get("writableRoots") is not None else (ack.get("allowedRoots") or self.config.get("writableRoots") or self.config.get("allowedRoots") or [])
+            self.config["allowedRoots"] = list(self.config["writableRoots"])
+            if ack.get("installRoot"):
+                self.config["installRoot"] = ack["installRoot"]
+            self.guard.configure(list(self.config["writableRoots"]), str(self.config["accessMode"]))
             atomic_json(self.config_path, self.config)
             try:
                 ws.send_json({"type": "enrollment_confirm", "agentId": ack["agentId"]})
@@ -1158,7 +1289,8 @@ class AgentRuntime:
         return {"descriptor": descriptor, "content": encode_bytes(content)}
 
     def fs_restore(self, params: dict) -> dict:
-        root, target = self._target(params)
+        root = self.guard.workspace_root(str(params["root"]))
+        target = self.guard.writable(root, str(params.get("path") or "."))
         descriptor = params.get("descriptor") or {}
         if not descriptor.get("exists"):
             if os.path.isdir(target) and not os.path.islink(target):
@@ -1233,7 +1365,8 @@ class AgentRuntime:
         return {"offset": offset, "bytes": len(data), "content": encode_bytes(data), "sha256": sha256_bytes(data)}
 
     def fs_write(self, params: dict) -> dict:
-        _root, target = self._target(params)
+        root = self.guard.workspace_root(str(params["root"]))
+        target = self.guard.writable(root, str(params.get("path") or "."))
         content = decode_bytes(params.get("content"))
         expected = params.get("sha256")
         if expected and sha256_bytes(content) != expected:
@@ -1247,7 +1380,8 @@ class AgentRuntime:
         return {"path": params.get("path"), "bytes": len(content), "sha256": sha256_bytes(content), "deltaTransfer": False}
 
     def fs_edit(self, params: dict) -> dict:
-        _root, target = self._target(params)
+        root = self.guard.workspace_root(str(params["root"]))
+        target = self.guard.writable(root, str(params.get("path") or "."))
         original = Path(target).read_text(encoding="utf-8")
         updated = original
         for edit in params.get("edits") or []:
@@ -1263,7 +1397,8 @@ class AgentRuntime:
         return {"path": params.get("path"), "before": original, "after": updated, "edits": len(params.get("edits") or [])}
 
     def fs_remove(self, params: dict) -> dict:
-        _root, target = self._target(params)
+        root = self.guard.workspace_root(str(params["root"]))
+        target = self.guard.writable(root, str(params.get("path") or "."))
         if os.path.isdir(target) and not os.path.islink(target):
             shutil.rmtree(target)
         else:
@@ -1275,14 +1410,15 @@ class AgentRuntime:
 
     def fs_rename(self, params: dict) -> dict:
         root = self.guard.workspace_root(str(params["root"]))
-        source = self.guard.absolute(root, str(params["path"]))
-        destination = self.guard.absolute(root, str(params["destination"]))
+        source = self.guard.writable(root, str(params["path"]))
+        destination = self.guard.writable(root, str(params["destination"]))
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         os.replace(source, destination)
         return {"path": params.get("destination"), "previousPath": params.get("path")}
 
     def fs_mkdir(self, params: dict) -> dict:
-        _root, target = self._target(params)
+        root = self.guard.workspace_root(str(params["root"]))
+        target = self.guard.writable(root, str(params.get("path") or "."))
         os.makedirs(target, exist_ok=True)
         return {"created": True, "path": params.get("path")}
 
@@ -1356,7 +1492,7 @@ class AgentRuntime:
         root = self.guard.workspace_root(str(params["root"]))
         cwd = self.guard.absolute(root, str(params.get("cwd") or root))
         timeout = max(1, min(float(params.get("timeout") or 30), 300))
-        result = subprocess.run(["/bin/bash", "-lc", str(params["command"])], cwd=cwd, env=os.environ.copy(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        result = subprocess.run(["/bin/bash", "-lc", str(params["command"])], cwd=cwd, env=os.environ.copy(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, preexec_fn=self.guard.command_preexec_fn())
         return {"output": result.stdout.decode("utf-8", "replace"), "exitCode": result.returncode}
 
     def system_status(self, _params: dict) -> dict:
@@ -1405,12 +1541,18 @@ class AgentRuntime:
 
 def enrollment_config(args) -> tuple[Path, dict]:
     config_path = Path(args.config)
-    roots = [normalize_root(value) for value in args.allowed_root]
+    roots = [normalize_root(value) for value in (args.writable_root or [])]
+    access_mode = "full-access" if args.access_mode == "full-access" else "scoped"
+    if access_mode != "full-access" and not roots:
+        raise ValueError("Scoped Remote Agent enrollment requires at least one --writable-root.")
     config = {
         "server": args.server.rstrip("/"),
         "servers": [args.server.rstrip("/")],
         "name": args.name,
+        "accessMode": access_mode,
+        "writableRoots": roots,
         "allowedRoots": roots,
+        "installRoot": args.install_root,
         "stateDir": args.state_dir,
     }
     return config_path, config
@@ -1424,7 +1566,7 @@ def enroll(args) -> int:
         for attempt in range(1, ENROLL_ATTEMPTS + 1):
             try:
                 ack = runtime.connect(config["server"], args.token)
-                print(json.dumps({"enrolled": True, "agentId": ack.get("agentId"), "name": ack.get("name"), "allowedRoots": ack.get("allowedRoots"), "recovered": bool(ack.get("enrollmentRecovered"))}, ensure_ascii=False))
+                print(json.dumps({"enrolled": True, "agentId": ack.get("agentId"), "name": ack.get("name"), "accessMode": ack.get("accessMode"), "installRoot": ack.get("installRoot"), "writableRoots": ack.get("writableRoots") or ack.get("allowedRoots") or [], "recovered": bool(ack.get("enrollmentRecovered"))}, ensure_ascii=False))
                 return 0
             except (ConnectionError, OSError, ssl.SSLError) as error:
                 last_error = error
@@ -1449,7 +1591,7 @@ def self_test() -> int:
         root = Path(raw)
         config_path = root / "config.json"
         state_dir = root / "state"
-        config = {"server": "http://127.0.0.1:1", "allowedRoots": [str(root)], "stateDir": str(state_dir)}
+        config = {"server": "http://127.0.0.1:1", "accessMode": "scoped", "writableRoots": [str(root)], "allowedRoots": [str(root)], "installRoot": str(root), "stateDir": str(state_dir)}
         runtime = AgentRuntime(config_path, config)
         try:
             project = root / "project"
@@ -1493,7 +1635,9 @@ def build_parser() -> argparse.ArgumentParser:
     enroll_parser.add_argument("--server", required=True)
     enroll_parser.add_argument("--token", required=True)
     enroll_parser.add_argument("--name", required=True)
-    enroll_parser.add_argument("--allowed-root", action="append", required=True)
+    enroll_parser.add_argument("--writable-root", "--allowed-root", dest="writable_root", action="append")
+    enroll_parser.add_argument("--access-mode", choices=("scoped", "full-access"), default="scoped")
+    enroll_parser.add_argument("--install-root")
     enroll_parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
     enroll_parser.add_argument("--config", default=DEFAULT_CONFIG)
     subparsers.add_parser("run", help="Run the persistent outbound agent")

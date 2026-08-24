@@ -1484,7 +1484,12 @@ namespace DevSpacePortable.NativeUI
                 string agentPath = RemoteAgentsDialog.AgentBundlePath(manager, "devspace-agent.py");
                 Dictionary<string, object> offlineEnrollment = new Dictionary<string, object>
                 {
-                    ["enrollment"] = new Dictionary<string, object> { ["token"] = "dve_self_test" },
+                    ["enrollment"] = new Dictionary<string, object>
+                    {
+                        ["token"] = "dve_self_test",
+                        ["accessMode"] = "scoped",
+                        ["installRoot"] = "/home/ubuntu/workspace",
+                    },
                     ["serverUrl"] = "http://127.0.0.1:7676",
                     ["stateDir"] = "/home/ubuntu/workspace/.devspace-agent/enroll-selftest",
                     ["installerSha256"] = RemoteAgentsDialog.Sha256Hex(File.ReadAllBytes(installerPath)),
@@ -1495,7 +1500,9 @@ namespace DevSpacePortable.NativeUI
                     && offlineInstall.Contains("base64.b64decode")
                     && !offlineInstall.Contains("curl ")
                     && offlineInstall.Contains("--state-dir '/home/ubuntu/workspace/.devspace-agent/enroll-selftest'")
-                    && offlineInstall.Contains("--allowed-root '/home/ubuntu/workspace'");
+                    && offlineInstall.Contains("--access-mode 'scoped'")
+                    && offlineInstall.Contains("--install-root '/home/ubuntu/workspace'")
+                    && offlineInstall.Contains("--writable-root '/home/ubuntu/workspace'");
                 report["remoteAgentOfflineSshInstall"] = offlineSshInstall;
                 if (!offlineSshInstall)
                     throw new InvalidOperationException("Offline SSH Agent installation script regressed.");
@@ -2305,10 +2312,12 @@ namespace DevSpacePortable.NativeUI
     internal sealed class RemoteInputHost : Panel
     {
         private readonly TextBox _textBox;
+        private readonly bool _centerSingleLineMultiline;
 
-        public RemoteInputHost(TextBox textBox, int height)
+        public RemoteInputHost(TextBox textBox, int height, bool centerSingleLineMultiline = false)
         {
             _textBox = textBox;
+            _centerSingleLineMultiline = centerSingleLineMultiline;
             Height = height;
             MinimumSize = new Size(60, height);
             Margin = new Padding(3, 2, 3, 6);
@@ -2318,12 +2327,13 @@ namespace DevSpacePortable.NativeUI
             textBox.BackColor = UiPalette.SurfaceMuted;
             textBox.ForeColor = UiPalette.Text;
             textBox.Font = UiTypography.Ui(9.25F);
-            textBox.Dock = textBox.Multiline ? DockStyle.Fill : DockStyle.None;
-            if (!textBox.Multiline) textBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            textBox.Dock = textBox.Multiline && !_centerSingleLineMultiline ? DockStyle.Fill : DockStyle.None;
+            if (!textBox.Multiline || _centerSingleLineMultiline) textBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
             textBox.Margin = new Padding(0);
             Controls.Add(textBox);
             textBox.Enter += delegate { Invalidate(); };
             textBox.Leave += delegate { Invalidate(); };
+            if (_centerSingleLineMultiline) textBox.TextChanged += delegate { LayoutTextBox(); };
             Cursor = Cursors.IBeam;
             Resize += delegate { LayoutTextBox(); };
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
@@ -2332,9 +2342,28 @@ namespace DevSpacePortable.NativeUI
 
         private void LayoutTextBox()
         {
-            if (_textBox.Multiline) return;
+            if (_textBox.Multiline && !_centerSingleLineMultiline) return;
             int left = Padding.Left;
             int width = Math.Max(1, ClientSize.Width - Padding.Horizontal);
+            if (_textBox.Multiline && _centerSingleLineMultiline)
+            {
+                int lineCount = Math.Max(1, _textBox.Lines.Length);
+                if (lineCount <= 1)
+                {
+                    int lineHeight = Math.Max(1, TextRenderer.MeasureText("Ag", _textBox.Font).Height + 4);
+                    int availableHeight = Math.Max(1, ClientSize.Height - Padding.Vertical);
+                    int height = Math.Min(lineHeight, availableHeight);
+                    int centeredTop = Math.Max(Padding.Top, (ClientSize.Height - height) / 2);
+                    _textBox.Bounds = new Rectangle(left, centeredTop, width, height);
+                    return;
+                }
+                _textBox.Bounds = new Rectangle(
+                    left,
+                    Padding.Top,
+                    width,
+                    Math.Max(1, ClientSize.Height - Padding.Vertical));
+                return;
+            }
             int preferredHeight = Math.Max(1, _textBox.PreferredSize.Height);
             int top = Math.Max(Padding.Top, (ClientSize.Height - preferredHeight) / 2);
             _textBox.Bounds = new Rectangle(left, top, width, Math.Min(preferredHeight, Math.Max(1, ClientSize.Height - top - Padding.Bottom)));
@@ -2409,7 +2438,9 @@ namespace DevSpacePortable.NativeUI
         private readonly ManagerClient _manager;
         private readonly FlowLayoutPanel _agentTiles = new FlowLayoutPanel();
         private readonly TextBox _name = new TextBox();
+        private readonly TextBox _installRoot = new TextBox();
         private readonly TextBox _roots = new TextBox();
+        private readonly CheckBox _fullAccess = new CheckBox();
         private readonly TextBox _installCommand = new TextBox();
         private readonly TextBox _sshHost = new TextBox();
         private readonly TextBox _sshPort = new TextBox();
@@ -2478,7 +2509,7 @@ namespace DevSpacePortable.NativeUI
             {
                 Name = "RemoteAgentScrollableContent",
                 AutoSize = false,
-                Height = 1000,
+                Height = 1024,
                 ColumnCount = 1,
                 RowCount = 5,
                 Padding = new Padding(22),
@@ -2494,7 +2525,7 @@ namespace DevSpacePortable.NativeUI
             // last rows are still hidden behind the main-window footer.
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 226));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 400));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 424));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
 
             Action fitScrollableContent = delegate
@@ -2519,7 +2550,7 @@ namespace DevSpacePortable.NativeUI
             };
             Label hint = new Label
             {
-                Text = "Ubuntu 只运行轻量出站 Agent；MCP/OAuth、审阅与权限控制仍由本机 DevSpace 负责。Agent 额外受 allowedRoots 与 Linux 用户权限约束。",
+                Text = "Ubuntu 只运行一个轻量出站 Agent。Scoped 模式下可读取 Linux 用户可读路径，但只写 writableRoots；Full Access 则完全跟随 Linux/SSH 用户权限。",
                 Font = UiTypography.Ui(9F),
                 ForeColor = UiPalette.TextMuted,
                 AutoSize = false,
@@ -2655,29 +2686,47 @@ namespace DevSpacePortable.NativeUI
                 BackColor = UiPalette.Surface,
                 Margin = new Padding(0),
             };
-            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 88));
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 118));
             form.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
             form.RowStyles.Add(new RowStyle(SizeType.Absolute, 98));
             form.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
             form.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, BackColor = UiPalette.Surface, Margin = new Padding(0) };
-            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
-            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
+            TableLayoutPanel fields = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 3, BackColor = UiPalette.Surface, Margin = new Padding(0) };
+            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
+            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            fields.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 44));
             fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
             fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+            fields.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
             fields.Controls.Add(FieldLabel("服务器显示名"), 0, 0);
             fields.Controls.Add(FieldLabel("Linux allowedRoots（每行一个）"), 1, 0);
+            Control legacyRootsLabel = fields.GetControlFromPosition(1, 0);
+            if (legacyRootsLabel != null) fields.Controls.Remove(legacyRootsLabel);
+            fields.Controls.Add(FieldLabel("Agent install root (writable)"), 1, 0);
+            fields.Controls.Add(FieldLabel("Linux writable roots (one per line)"), 2, 0);
             StyleTextBox(_name);
             _name.Text = "gpu-server";
             RemoteInputHost nameHost = new RemoteInputHost(_name, 44) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 10, 5) };
             fields.Controls.Add(nameHost, 0, 1);
+            StyleTextBox(_installRoot);
+            _installRoot.Text = "/home/ubuntu/workspace";
+            RemoteInputHost installRootHost = new RemoteInputHost(_installRoot, 44) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 10, 5) };
+            fields.Controls.Add(installRootHost, 1, 1);
             StyleTextBox(_roots);
             _roots.Multiline = true;
             _roots.ScrollBars = ScrollBars.Vertical;
             _roots.Text = "/home/ubuntu/workspace";
-            RemoteInputHost rootsHost = new RemoteInputHost(_roots, 52) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 2, 5) };
-            fields.Controls.Add(rootsHost, 1, 1);
+            RemoteInputHost rootsHost = new RemoteInputHost(_roots, 52, true) { Dock = DockStyle.Fill, Margin = new Padding(2, 1, 2, 5) };
+            fields.Controls.Add(rootsHost, 2, 1);
+            _fullAccess.Text = "完全访问：读写权限与 SSH/Linux 用户一致；将忽略可写目录限制";
+            _fullAccess.AutoSize = true;
+            _fullAccess.Font = UiTypography.Ui(9F);
+            _fullAccess.ForeColor = UiPalette.Text;
+            _fullAccess.Margin = new Padding(4, 2, 0, 0);
+            _fullAccess.CheckedChanged += delegate { _roots.Enabled = !_fullAccess.Checked; };
+            fields.Controls.Add(_fullAccess, 0, 2);
+            fields.SetColumnSpan(_fullAccess, 3);
             form.Controls.Add(fields, 0, 0);
 
             FlowLayoutPanel actions = ButtonBar();
@@ -2778,7 +2827,9 @@ namespace DevSpacePortable.NativeUI
                         ValueText(agent, "hostname"),
                         ValueText(agent, "id"),
                         ValueText(agent, "agentVersion"),
-                        string.Join("  ·  ", Strings(agent, "allowedRoots")));
+                        "access=" + (string.IsNullOrWhiteSpace(ValueText(agent, "accessMode")) ? "scoped" : ValueText(agent, "accessMode"))
+                            + "  ·  install=" + ValueText(agent, "installRoot")
+                            + "  ·  writable=" + string.Join(" ; ", Strings(agent, "writableRoots").Any() ? Strings(agent, "writableRoots") : Strings(agent, "allowedRoots")));
                     tile.Click += delegate { SelectAgentTile(tile); };
                     tile.KeyDown += delegate (object sender, KeyEventArgs args)
                     {
@@ -2812,9 +2863,11 @@ namespace DevSpacePortable.NativeUI
         private async Task CreateEnrollmentAsync()
         {
             string[] roots = _roots.Lines.Select(value => value.Trim()).Where(value => value.Length > 0).ToArray();
-            if (string.IsNullOrWhiteSpace(_name.Text) || roots.Length == 0)
+            string installRoot = (_installRoot.Text ?? "").Trim();
+            bool fullAccess = _fullAccess.Checked;
+            if (string.IsNullOrWhiteSpace(_name.Text) || string.IsNullOrWhiteSpace(installRoot) || (!fullAccess && roots.Length == 0))
             {
-                MessageBox.Show(this, "请填写服务器显示名，并至少填写一个 Linux allowedRoot。", "信息不完整", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "请填写服务器显示名和可写的 Agent 安装目录；Scoped 模式还需要至少一个 Linux 可写目录。", "信息不完整", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             try
@@ -2822,7 +2875,9 @@ namespace DevSpacePortable.NativeUI
                 Dictionary<string, object> result = await _manager.RunJsonAsync("remote-agent-create-enrollment", new
                 {
                     name = _name.Text.Trim(),
-                    allowedRoots = roots,
+                    installRoot = installRoot,
+                    accessMode = fullAccess ? "full-access" : "scoped",
+                    writableRoots = fullAccess ? new string[0] : roots,
                     ttlMinutes = 15,
                 });
                 _installCommand.Text = ValueText(result, "installCommand");
@@ -3044,6 +3099,12 @@ namespace DevSpacePortable.NativeUI
             string stateDir = !string.IsNullOrWhiteSpace(stateDirOverride)
                 ? stateDirOverride.Trim()
                 : ValueText(enrollmentResult, "stateDir");
+            string accessMode = ValueText(enrollment, "accessMode");
+            if (string.IsNullOrWhiteSpace(accessMode)) accessMode = ValueText(enrollmentResult, "accessMode");
+            if (string.IsNullOrWhiteSpace(accessMode)) accessMode = "scoped";
+            string installRoot = ValueText(enrollment, "installRoot");
+            if (string.IsNullOrWhiteSpace(installRoot)) installRoot = ValueText(enrollmentResult, "installRoot");
+            if (string.IsNullOrWhiteSpace(installRoot)) installRoot = roots != null && roots.Length > 0 ? roots[0] : stateDir;
             if (string.IsNullOrWhiteSpace(stateDir))
                 throw new InvalidOperationException("Enrollment 缺少唯一 Agent stateDir，无法保证共享服务器上的多实例隔离。 ");
             StringBuilder script = new StringBuilder();
@@ -3065,10 +3126,12 @@ namespace DevSpacePortable.NativeUI
                 + " --token " + ShellQuote(token)
                 + " --name " + ShellQuote(name)
                 + " --agent-sha256 " + ShellQuote(agentSha)
+                + " --access-mode " + ShellQuote(accessMode)
+                + " --install-root " + ShellQuote(installRoot)
                 + " --state-dir " + ShellQuote(stateDir)
                 + " --agent-file \"$tmp_dir/devspace-agent.py\"");
             foreach (string root in roots ?? new string[0])
-                script.Append(" --allowed-root " + ShellQuote(root));
+                script.Append(" --writable-root " + ShellQuote(root));
             script.Append("\n");
             return script.ToString();
         }
@@ -3212,9 +3275,10 @@ namespace DevSpacePortable.NativeUI
             finally { _sshBusy = false; }
         }
 
-        private static string ExistingAgentRecoveryScript(string agentId = null, IEnumerable<string> allowedRoots = null)
+        private static string ExistingAgentRecoveryScript(string agentId = null, IEnumerable<string> allowedRoots = null, string installRoot = null)
         {
-            List<string> instanceBases = (allowedRoots ?? Enumerable.Empty<string>())
+            List<string> instanceBases = new[] { installRoot }
+                .Concat(allowedRoots ?? Enumerable.Empty<string>())
                 .Select(value => (value ?? "").Trim().TrimEnd('/'))
                 .Where(value => value.Length > 0)
                 .Select(value => value + "/.devspace-agent")
@@ -3297,6 +3361,10 @@ echo DEVSPACE_AGENT_STARTED
                 try { password = UnprotectSshPassword(profile.ProtectedPassword); }
                 catch { continue; }
                 string[] roots = Strings(agent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+                string accessMode = ValueText(agent, "accessMode");
+                if (string.IsNullOrWhiteSpace(accessMode)) accessMode = "scoped";
+                string installRoot = ValueText(agent, "installRoot");
+                if (string.IsNullOrWhiteSpace(installRoot) && roots.Length > 0) installRoot = roots[0];
                 try
                 {
                     SshRunResult recovery = await RunSshScriptWithProfileAsync(
@@ -3305,15 +3373,15 @@ echo DEVSPACE_AGENT_STARTED
                         profile.Port,
                         profile.UserName,
                         password,
-                        ExistingAgentRecoveryScript(id, roots),
+                        ExistingAgentRecoveryScript(id, roots, installRoot),
                         30000);
                     bool notInstalled = recovery.ExitCode == 42 || recovery.Output.Contains("DEVSPACE_AGENT_NOT_INSTALLED");
                     bool online = !notInstalled && recovery.ExitCode == 0
                         && await WaitForAgentOnlineAsync(manager, id, name, 3);
                     if (!online)
                     {
-                        if (roots.Length == 0 || string.IsNullOrWhiteSpace(name)) continue;
-                        Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(manager, notInstalled ? "" : id, name, roots);
+                        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(installRoot) || (!string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) && roots.Length == 0)) continue;
+                        Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(manager, notInstalled ? "" : id, name, roots, installRoot, accessMode);
                         string existingState = notInstalled ? "" : OutputMarker(recovery.Output, "DEVSPACE_AGENT_STATE=");
                         string localInstall = BuildOfflineSshInstallScript(manager, enrollment, name, roots, existingState);
                         SshRunResult repaired = await RunSshScriptWithProfileAsync(
@@ -3371,13 +3439,15 @@ echo DEVSPACE_AGENT_STARTED
             return WaitForAgentOnlineAsync(_manager, previousId, name, attempts);
         }
 
-        private static Task<Dictionary<string, object>> CreateSshEnrollmentAsync(ManagerClient manager, string agentId, string name, string[] roots)
+        private static Task<Dictionary<string, object>> CreateSshEnrollmentAsync(ManagerClient manager, string agentId, string name, string[] roots, string installRoot = null, string accessMode = "scoped")
         {
             return manager.RunJsonAsync("remote-agent-create-enrollment", new
             {
                 agentId = agentId ?? "",
                 name = name,
-                allowedRoots = roots,
+                installRoot = string.IsNullOrWhiteSpace(installRoot) ? (roots != null && roots.Length > 0 ? roots[0] : "/home/ubuntu/workspace") : installRoot,
+                accessMode = string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) ? "full-access" : "scoped",
+                writableRoots = string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) ? new string[0] : (roots ?? new string[0]),
                 ttlMinutes = 15,
             });
         }
@@ -3390,9 +3460,10 @@ echo DEVSPACE_AGENT_STARTED
             return await RunSshScriptAsync(script, 120000);
         }
 
-        private static string AgentRecoveryDiagnosticScript(string agentId, IEnumerable<string> allowedRoots = null)
+        private static string AgentRecoveryDiagnosticScript(string agentId, IEnumerable<string> allowedRoots = null, string installRoot = null)
         {
-            List<string> explicitCandidates = (allowedRoots ?? Enumerable.Empty<string>())
+            List<string> explicitCandidates = new[] { installRoot }
+                .Concat(allowedRoots ?? Enumerable.Empty<string>())
                 .Select(value => (value ?? "").Trim().TrimEnd('/'))
                 .Where(value => value.Length > 0)
                 .Select(value => value + "/.devspace-agent")
@@ -3458,10 +3529,14 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 string[] roots = selectedRoots.Length > 0
                     ? selectedRoots
                     : _roots.Lines.Select(value => value.Trim()).Where(value => value.Length > 0).ToArray();
-                if (string.IsNullOrWhiteSpace(agentName) || roots.Length == 0)
-                    throw new InvalidOperationException("请填写服务器显示名和至少一个 Linux allowedRoot 后重试。 ");
+                string accessMode = ValueText(_selectedAgent, "accessMode");
+                if (string.IsNullOrWhiteSpace(accessMode)) accessMode = _fullAccess.Checked ? "full-access" : "scoped";
+                string installRoot = ValueText(_selectedAgent, "installRoot");
+                if (string.IsNullOrWhiteSpace(installRoot)) installRoot = (_installRoot.Text ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(agentName) || string.IsNullOrWhiteSpace(installRoot) || (!string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) && roots.Length == 0))
+                    throw new InvalidOperationException("请填写服务器显示名和 Agent 安装目录；Scoped 模式还需要至少一个 Linux 可写目录。 ");
                 _status.Text = "Agent 离线救援：正在通过 SSH 检查并启动已有 Agent…";
-                SshRunResult recovery = await RunSshScriptAsync(ExistingAgentRecoveryScript(agentId, roots), 30000);
+                SshRunResult recovery = await RunSshScriptAsync(ExistingAgentRecoveryScript(agentId, roots, installRoot), 30000);
                 bool notInstalled = recovery.ExitCode == 42 || recovery.Output.Contains("DEVSPACE_AGENT_NOT_INSTALLED");
                 bool online = false;
                 if (!notInstalled && recovery.ExitCode == 0)
@@ -3474,7 +3549,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     _status.Text = notInstalled
                         ? "服务器尚未安装 Agent；正在把本机 install.sh 与 Agent 通过 SSH 直接安装…"
                         : "已有 Agent 已启动但 heartbeat 未恢复；正在通过本机 SSH 修复 endpoint/凭据并重新登记原 Agent…";
-                    Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(_manager, notInstalled ? "" : agentId, agentName, roots);
+                    Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(_manager, notInstalled ? "" : agentId, agentName, roots, installRoot, accessMode);
                     string existingState = notInstalled ? "" : OutputMarker(recovery.Output, "DEVSPACE_AGENT_STATE=");
                     SshRunResult install = await InstallEnrollmentViaLocalSshAsync(enrollment, agentName, roots, existingState);
                     if (install.ExitCode != 0)
@@ -3490,7 +3565,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 await LoadAgentsAsync();
                 if (!online)
                 {
-                    SshRunResult diagnostic = await RunSshScriptAsync(AgentRecoveryDiagnosticScript(agentId, roots), 15000);
+                    SshRunResult diagnostic = await RunSshScriptAsync(AgentRecoveryDiagnosticScript(agentId, roots, installRoot), 15000);
                     string diagnosticText = string.Join("\r\n", new[] { diagnostic.Output, diagnostic.Error }.Where(value => !string.IsNullOrWhiteSpace(value)));
                     throw new InvalidOperationException("本机 SSH 已完成 Agent 修复，但 heartbeat 仍未恢复。远端诊断：\r\n" + (string.IsNullOrWhiteSpace(diagnosticText) ? "未返回诊断输出。" : diagnosticText));
                 }
@@ -3546,6 +3621,9 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             string name = ValueText(_selectedAgent, "name");
             string id = ValueText(_selectedAgent, "id");
             if (!string.IsNullOrWhiteSpace(name)) _name.Text = name;
+            string installRoot = ValueText(_selectedAgent, "installRoot");
+            if (!string.IsNullOrWhiteSpace(installRoot)) _installRoot.Text = installRoot;
+            _fullAccess.Checked = string.Equals(ValueText(_selectedAgent, "accessMode"), "full-access", StringComparison.OrdinalIgnoreCase);
             string[] selectedRoots = Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
             if (selectedRoots.Length > 0) _roots.Lines = selectedRoots;
             LoadSelectedSshProfile();
@@ -4647,7 +4725,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.42 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.43 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5438,7 +5516,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.42") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.43") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
