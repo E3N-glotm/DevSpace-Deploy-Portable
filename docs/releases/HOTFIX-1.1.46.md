@@ -1,5 +1,13 @@
 # DevSpace Portable 1.1.46
 
+## Refresh / tool-registration hotfix
+
+The first 1.1.46 package registered `continuation_task` with `registerAppTool()` without the required `_meta` descriptor. With `@modelcontextprotocol/ext-apps 1.7.5`, that can fail while constructing the MCP tool graph because the helper reads `config._meta.ui`, which explains the observed ChatGPT Refresh failure even while the HTTP/OAuth service remains reachable.
+
+The refreshed 1.1.46 package keeps the Continuation Task Controller and all Remote Agent GPU/Landlock fixes, but registers `continuation_task` with the same headless descriptor path as the existing shell tools via `toolWidgetDescriptorMeta(config, "shell")`. A regression assertion now requires that descriptor, and packaged-server smoke coverage verifies authenticated `initialize` + `tools/list`, including a non-empty `continuation_task._meta` and the normal `open_workspace` tool.
+
+The durable task state machine/process monitoring portion is verified in 1.1.46. Automatic ChatGPT follow-up remains a best-effort host-side MCP App behavior in this release; the long-duration live test did not produce an automatic follow-up, so that UI lifecycle path is being hardened separately rather than being treated as a release-completion guarantee.
+
 ## Continuation Guard / Task Controller
 
 1.1.46 增加一个独立于单个 ChatGPT assistant turn 生命周期的持久任务控制器。任务状态保存在 DevSpace SQLite，而不是只依赖聊天上下文，因此续轮后可以继续复用原有 workspace、processHandle、里程碑和验证证据。

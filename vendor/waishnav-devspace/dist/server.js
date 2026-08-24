@@ -1401,6 +1401,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 reason: z.string().optional(),
                 missingMilestones: z.array(z.string()).optional(),
             }),
+            ...toolWidgetDescriptorMeta(config, "shell"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async (input, { _meta } = {}) => {
             if (input.workspaceId)

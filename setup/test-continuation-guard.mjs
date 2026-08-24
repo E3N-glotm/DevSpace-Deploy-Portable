@@ -23,6 +23,7 @@ for (const pattern of [
   /CONTINUATION_GUARD_URI/,
   /ui:\/\/devspace\/continuation-guard\.html/,
   /registerAppTool\(server, "continuation_task"/,
+  /registerAppTool\(server, "continuation_task",[\s\S]{0,3200}\.\.\.toolWidgetDescriptorMeta\(config, "shell"\)/,
   /openAiConversationScopeId\(_meta\)/,
   /requiredMilestones/,
   /completion.*evidence|provide concrete evidence/is,
