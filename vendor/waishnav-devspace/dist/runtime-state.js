@@ -132,6 +132,18 @@ export class StructuredRuntimeState {
             deadlineAt: row.deadline_at ?? undefined,
             turnStartedAt: row.turn_started_at ?? undefined,
             lastContinuationAt: row.last_continuation_at ?? undefined,
+            lastActivityAt: row.last_activity_at ?? undefined,
+            lastUiHeartbeatAt: row.last_ui_heartbeat_at ?? undefined,
+            lastSendAttemptAt: row.last_send_attempt_at ?? undefined,
+            lastSendResult: row.last_send_result ? parseJson(row.last_send_result, row.last_send_result) : undefined,
+            coordinatorInstanceId: row.coordinator_instance_id ?? undefined,
+            hostProfileId: row.host_profile_id ?? undefined,
+            observedTurnBudgetMs: row.observed_turn_budget_ms ?? undefined,
+            recommendedContinueAfterMs: row.recommended_continue_after_ms ?? undefined,
+            hostTimeoutSamples: row.host_timeout_samples ?? 0,
+            lastHostSignal: row.last_host_signal ?? undefined,
+            lastHostSignalAt: row.last_host_signal_at ?? undefined,
+            watchProcessHandles: parseJson(row.watch_process_handles_json, []),
             createdAt: row.created_at,
             updatedAt: row.updated_at,
         }) : undefined;
@@ -167,13 +179,22 @@ export class StructuredRuntimeState {
                         if (item) currentRequired.add(item);
                     }
                     const objective = String(input.objective ?? existing.objective).trim() || existing.objective;
+                    const requestedWallClockMinutes = input.wallClockMinutes === undefined
+                        ? undefined
+                        : Math.max(10, Math.min(Number(input.wallClockMinutes), 24 * 60));
+                    const requestedDeadlineAt = requestedWallClockMinutes === undefined
+                        ? existing.deadline_at
+                        : new Date(now.getTime() + requestedWallClockMinutes * 60_000).toISOString();
+                    const deadlineAt = existing.deadline_at && requestedDeadlineAt
+                        ? new Date(Math.max(Date.parse(existing.deadline_at), Date.parse(requestedDeadlineAt))).toISOString()
+                        : requestedDeadlineAt ?? existing.deadline_at;
                     this.database.sqlite.prepare(`
                       update continuation_tasks set objective=?, required_milestones_json=?,
-                        max_continuations=?, max_no_progress=?, max_same_failure=?, updated_at=? where id=?
+                        max_continuations=?, max_no_progress=?, max_same_failure=?, deadline_at=?, last_activity_at=?, updated_at=? where id=?
                     `).run(objective, JSON.stringify([...currentRequired].slice(0, 64)),
                         Math.max(existing.max_continuations, Math.max(1, Math.min(Number(input.maxContinuations ?? existing.max_continuations), 100))),
                         Math.max(1, Math.min(Number(input.maxNoProgress ?? existing.max_no_progress), 20)),
-                        Math.max(1, Math.min(Number(input.maxSameFailure ?? existing.max_same_failure), 20)), nowIso, existing.id);
+                        Math.max(1, Math.min(Number(input.maxSameFailure ?? existing.max_same_failure), 20)), deadlineAt, nowIso, nowIso, existing.id);
                     return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id)), created: false, upgraded: true };
                 }
                 return { task: rowToTask(existing), created: false };
@@ -191,11 +212,11 @@ export class StructuredRuntimeState {
               insert into continuation_tasks (
                 id, conversation_scope_id, workspace_id, objective, state, required_milestones_json,
                 completed_milestones_json, evidence_json, max_continuations,
-                max_no_progress, max_same_failure, deadline_at, turn_started_at, created_at, updated_at
-              ) values (?, ?, ?, ?, 'RUNNING', ?, '[]', '{}', ?, ?, ?, ?, ?, ?, ?)
+                max_no_progress, max_same_failure, deadline_at, turn_started_at, last_activity_at, created_at, updated_at
+              ) values (?, ?, ?, ?, 'RUNNING', ?, '[]', '{}', ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(id, String(input.conversationScopeId || "unknown"), input.workspaceId ? String(input.workspaceId) : null,
                 String(input.objective ?? "Continue the current DevSpace task until the original user goal is verified complete."),
-                JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso);
+                JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso, nowIso);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(id)), created: true };
         }
         const row = find();
@@ -204,6 +225,87 @@ export class StructuredRuntimeState {
             return { task: rowToTask(row), accepted: false, reason: "task-terminal" };
         }
         const taskId = row.id;
+        if (action === "heartbeat") {
+            this.database.sqlite.prepare(`
+              update continuation_tasks set last_activity_at=?, last_ui_heartbeat_at=?, coordinator_instance_id=?, updated_at=?
+              where id=?
+            `).run(nowIso, nowIso, input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : row.coordinator_instance_id, nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "host-signal") {
+            const hostProfileId = String(input.hostProfileId ?? row.host_profile_id ?? "unknown-host").trim().slice(0, 160) || "unknown-host";
+            const hostSignal = String(input.hostSignal ?? "unknown").trim().slice(0, 80) || "unknown";
+            const elapsedRaw = Number(input.elapsedMs ?? 0);
+            const elapsedMs = Number.isFinite(elapsedRaw) ? Math.max(0, Math.min(Math.round(elapsedRaw), 24 * 60 * 60 * 1000)) : 0;
+            const profile = this.database.sqlite.prepare("select * from continuation_host_profiles where id=?").get(hostProfileId);
+            let observedTurnBudgetMs = profile?.observed_turn_budget_ms ?? row.observed_turn_budget_ms ?? null;
+            let recommendedContinueAfterMs = profile?.recommended_continue_after_ms ?? row.recommended_continue_after_ms ?? null;
+            let timeoutSamples = Number(profile?.timeout_samples ?? row.host_timeout_samples ?? 0);
+            if (hostSignal === "timeout" && elapsedMs >= 1000) {
+                if (!observedTurnBudgetMs) {
+                    observedTurnBudgetMs = elapsedMs;
+                }
+                else if (elapsedMs < observedTurnBudgetMs) {
+                    // Adapt downward immediately when the host shortens its turn budget.
+                    observedTurnBudgetMs = Math.round(elapsedMs * 0.9 + observedTurnBudgetMs * 0.1);
+                }
+                else {
+                    // Adapt upward slowly; a conservative learned budget is safer than
+                    // assuming a transient long turn means the host limit increased.
+                    observedTurnBudgetMs = Math.round(observedTurnBudgetMs * 0.9 + elapsedMs * 0.1);
+                }
+                recommendedContinueAfterMs = Math.max(1000, Math.floor(observedTurnBudgetMs * 0.88));
+                timeoutSamples += 1;
+            }
+            if (profile) {
+                this.database.sqlite.prepare(`
+                  update continuation_host_profiles set observed_turn_budget_ms=?, recommended_continue_after_ms=?,
+                    timeout_samples=?, last_timeout_at=?, last_signal=?, last_signal_at=?, updated_at=? where id=?
+                `).run(observedTurnBudgetMs, recommendedContinueAfterMs, timeoutSamples,
+                    hostSignal === "timeout" ? nowIso : profile.last_timeout_at,
+                    hostSignal, nowIso, nowIso, hostProfileId);
+            }
+            else {
+                this.database.sqlite.prepare(`
+                  insert into continuation_host_profiles (
+                    id, observed_turn_budget_ms, recommended_continue_after_ms, timeout_samples,
+                    last_timeout_at, last_signal, last_signal_at, created_at, updated_at
+                  ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `).run(hostProfileId, observedTurnBudgetMs, recommendedContinueAfterMs, timeoutSamples,
+                    hostSignal === "timeout" ? nowIso : null, hostSignal, nowIso, nowIso, nowIso);
+            }
+            this.database.sqlite.prepare(`
+              update continuation_tasks set host_profile_id=?, observed_turn_budget_ms=?, recommended_continue_after_ms=?,
+                host_timeout_samples=?, last_host_signal=?, last_host_signal_at=?, coordinator_instance_id=?, updated_at=?
+              where id=?
+            `).run(hostProfileId, observedTurnBudgetMs, recommendedContinueAfterMs, timeoutSamples,
+                hostSignal, nowIso, input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : row.coordinator_instance_id,
+                nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "watch-process" || action === "unwatch-process") {
+            const handle = String(input.processHandle ?? "").trim();
+            if (!handle) return { task: rowToTask(row), accepted: false, reason: "process-handle-required" };
+            const handles = new Set(parseJson(row.watch_process_handles_json, []));
+            if (action === "watch-process") handles.add(handle);
+            else handles.delete(handle);
+            this.database.sqlite.prepare(`
+              update continuation_tasks set watch_process_handles_json=?, last_activity_at=?, updated_at=? where id=?
+            `).run(JSON.stringify([...handles].slice(0, 64)), nowIso, nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "delivery-result") {
+            const delivery = {
+                result: String(input.deliveryResult ?? "unknown"),
+                method: input.deliveryMethod ? String(input.deliveryMethod) : undefined,
+                note: input.note ? String(input.note).slice(0, 1000) : undefined,
+            };
+            this.database.sqlite.prepare(`
+              update continuation_tasks set last_send_attempt_at=?, last_send_result=?, coordinator_instance_id=?, updated_at=?
+              where id=?
+            `).run(nowIso, JSON.stringify(delivery), input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : row.coordinator_instance_id, nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
         if (action === "checkpoint") {
             const completed = new Set(parseJson(row.completed_milestones_json, []));
             for (const value of Array.isArray(input.completedMilestones) ? input.completedMilestones : []) {

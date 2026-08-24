@@ -54,9 +54,7 @@ const MCP_SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1_000;
 const MCP_SESSION_CLEANUP_INTERVAL_MS = 60 * 1_000;
 const MCP_SESSION_MAX_ACTIVE = 32;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
-const CONTINUATION_GUARD_URI = "ui://devspace/continuation-guard.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
-const CONTINUATION_GUARD_KINDS = new Set(["workspace", "runtime", "write", "edit"]);
 let structuredRuntimeState;
 const WRITE_TOOL_ANNOTATIONS = {
     readOnlyHint: false,
@@ -82,6 +80,8 @@ const READ_ONLY_TOOL_ANNOTATIONS = {
     openWorldHint: false,
 };
 function shouldAttachWidget(config, kind) {
+    if (kind === "continuation-anchor")
+        return Boolean(config.features?.continuationGuard);
     switch (config.widgets) {
         case "off":
             return false;
@@ -110,6 +110,10 @@ function toolInvocationStatus(kind) {
             return { invoking: "正在修改文件…", invoked: "文件修改完成" };
         case "show_changes":
             return { invoking: "正在汇总文件变更…", invoked: "文件变更已汇总" };
+        case "review":
+            return { invoking: "正在读取会话变更…", invoked: "会话变更已读取" };
+        case "continuation-anchor":
+            return { invoking: "正在建立续轮锚点…", invoked: "续轮锚点已就绪" };
         case "search":
             return { invoking: "正在搜索工作区…", invoked: "工作区搜索完成" };
         case "directory":
@@ -131,20 +135,8 @@ function toolWidgetDescriptorMeta(config, kind) {
         "openai/toolInvocation/invoking": status.invoking,
         "openai/toolInvocation/invoked": status.invoked,
     };
-    if (!shouldAttachWidget(config, kind)) {
-        if (config.features?.continuationGuard && CONTINUATION_GUARD_KINDS.has(kind)) {
-            return {
-                securitySchemes,
-                _meta: {
-                    ...baseMeta,
-                    ui: {
-                        resourceUri: CONTINUATION_GUARD_URI,
-                        visibility: ["model"],
-                    },
-                    "openai/outputTemplate": CONTINUATION_GUARD_URI,
-                },
-            };
-        }
+    const attachWorkspaceApp = shouldAttachWidget(config, kind);
+    if (!attachWorkspaceApp) {
         return {
             securitySchemes,
             _meta: baseMeta,
@@ -239,7 +231,7 @@ function serverInstructions(config) {
             ? " show_changes also reports aggregate changes since the persisted workspace session captured its first structured-mutation baseline. Session rollback restores the tracked structured paths, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result. The same bounded sparse-journal model is used for local and remote-agent workspaces; arbitrary shell side effects outside tracked paths are not claimed as rollback-safe."
             : "",
         config.features?.continuationGuard
-            ? " For non-trivial multi-step work that may span a long assistant turn, use continuation_task action=begin early with the original objective and verifiable milestones. Use checkpoint only when objective progress or the failure strategy materially changes; use wait while an external condition is genuinely pending; call complete before the final response only after the original user goal is verified and provide concrete evidence. Do not mark a task complete merely because one substep finished. The MCP App may automatically request a follow-up after a host timeout only while the persisted task remains RUNNING; server-side continuation, wall-clock, no-progress, repeated-failure, cooldown, waiting-external, user-cancel, and duplicate-pending gates prevent unbounded loops."
+            ? " For non-trivial multi-step work that may span assistant turns, call continuation_anchor exactly once after opening the working workspace, supplying the original objective and verifiable milestones. The anchor reuses the existing DevSpace Workspace App and is the only continuation tool that renders UI; ordinary read/run/write/edit/process tools remain headless. If exec_command returns a running durable process that should wake the conversation when it finishes, call continuation_task action=watch-process with that processHandle; the anchor supervisor will wake on process completion independently of any fixed minute limit. Use checkpoint only when objective progress or the failure strategy materially changes; use wait while an external condition is genuinely pending; call complete before the final response only after the original user goal is verified and provide concrete evidence. Do not mark a task complete merely because one substep finished. Automatic continuation is task-event and host-event driven first, and uses a learned host turn budget only as a proactive watchdog; it is not tied to a fixed minute value. Server-side continuation, wall-clock, no-progress, repeated-failure, cooldown, waiting-external, user-cancel, and duplicate-pending gates prevent unbounded loops."
             : "",
     ].join("");
     const compactActivityInstruction = " Keep tool calls task-driven and minimal because the client may expose every MCP invocation and its JSON arguments in a native activity panel. Do not call capabilities, doctor, session_list, session_resume, or show_changes merely to demonstrate or test the UI. Do not issue no-op diagnostics after the required result is already known. Use show_changes only once after actual file modifications.";
@@ -623,6 +615,7 @@ function workspaceAppHtml(config) {
     const baseUrl = assetBaseUrl(config);
     const entry = getWorkspaceAppManifestEntry();
     const runtimeEnhancementUrl = assetUrl(baseUrl, "assets/runtime-enhancements.js");
+    const continuationCoordinatorUrl = assetUrl(baseUrl, "assets/continuation-coordinator.js");
     const runtimeEnhancementStylesheet = assetUrl(baseUrl, "assets/runtime-enhancements.css");
     const sessionReviewStylesheet = assetUrl(baseUrl, "assets/session-review.css");
     const runtimeTimelineStylesheet = assetUrl(baseUrl, "assets/runtime-timeline.css");
@@ -639,6 +632,7 @@ function workspaceAppHtml(config) {
     <link rel="stylesheet" crossorigin href="${sessionReviewStylesheet}" />
     <link rel="stylesheet" crossorigin href="${runtimeTimelineStylesheet}" />
     <script type="module" crossorigin src="${runtimeEnhancementUrl}"></script>
+    <script type="module" crossorigin src="${continuationCoordinatorUrl}"></script>
     <script type="module" crossorigin src="${assetUrl(baseUrl, entry.file)}"></script>
 ${stylesheets}
   </head>
@@ -647,24 +641,6 @@ ${stylesheets}
       <section class="empty">Waiting for a tool result.</section>
     </main>
   </body>
-</html>`;
-}
-function continuationGuardHtml(config) {
-    const baseUrl = assetBaseUrl(config);
-    const entry = getWorkspaceAppManifestEntry();
-    return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DevSpace Continuation Guard</title>
-    <style>
-      html, body, #app { width: 1px; height: 1px; min-height: 0; margin: 0; padding: 0; overflow: hidden; opacity: 0; pointer-events: none; }
-    </style>
-    <script type="module" crossorigin src="${assetUrl(baseUrl, "assets/continuation-guard.js")}"></script>
-    <script type="module" crossorigin src="${assetUrl(baseUrl, entry.file)}"></script>
-  </head>
-  <body><main id="app"></main></body>
 </html>`;
 }
 function appCsp(config) {
@@ -908,7 +884,7 @@ async function assertWorkspaceAppAssets() {
         entry.file,
         ...(entry.css ?? []),
         "assets/runtime-enhancements.js",
-        "assets/continuation-guard.js",
+        "assets/continuation-coordinator.js",
         "assets/runtime-enhancements.css",
         "assets/session-review.css",
         "assets/runtime-timeline.css",
@@ -1370,13 +1346,51 @@ function registerDoctorTool(server, config, processSessions, runtimeState) {
         return { content: [textBlock(result)], structuredContent: { result, history } };
     });
 }
-function registerRuntimeStateTools(server, config, workspaces, runtimeState, fileWatches, permissionRules, remoteAgents) {
+function registerRuntimeStateTools(server, config, workspaces, runtimeState, fileWatches, permissionRules, processSessions, remoteAgents) {
     if (config.features?.continuationGuard) {
+        registerAppTool(server, "continuation_anchor", {
+            title: "Continuation anchor",
+            description: "Mount exactly one existing DevSpace Workspace App continuation coordinator for a long-running workspace task. Call this once after open_workspace for non-trivial multi-step work. It creates or upgrades the persisted continuation task and supplies the single UI anchor used for host timeout/teardown recovery; ordinary DevSpace tools remain headless.",
+            inputSchema: {
+                workspaceId: z.string(),
+                taskId: z.string().optional(),
+                objective: z.string().max(4000).optional(),
+                requiredMilestones: z.array(z.string().max(160)).max(64).optional(),
+                maxContinuations: z.number().int().min(1).max(100).optional(),
+                maxNoProgress: z.number().int().min(1).max(20).optional(),
+                maxSameFailure: z.number().int().min(1).max(20).optional(),
+                wallClockMinutes: z.number().int().min(10).max(1440).optional(),
+            },
+            outputSchema: resultOutputSchema({
+                task: z.unknown().optional(),
+                workspaceId: z.string(),
+                continuationAnchor: z.literal(true),
+                created: z.boolean().optional(),
+                upgraded: z.boolean().optional(),
+            }),
+            ...toolWidgetDescriptorMeta(config, "continuation-anchor"),
+            annotations: EDIT_TOOL_ANNOTATIONS,
+        }, async (input, { _meta } = {}) => {
+            workspaces.getWorkspace(input.workspaceId);
+            const conversationScopeId = openAiConversationScopeId(_meta) ?? "host-scope-unavailable";
+            const outcome = runtimeState.continuationTask({
+                action: "begin",
+                ...input,
+                conversationScopeId,
+            });
+            const payload = {
+                ...outcome,
+                workspaceId: input.workspaceId,
+                continuationAnchor: true,
+            };
+            const result = JSON.stringify(payload, null, 2);
+            return { content: [textBlock(result)], structuredContent: { result, ...payload } };
+        });
         registerAppTool(server, "continuation_task", {
             title: "Continuation task state",
-            description: "Persist and verify a multi-step DevSpace task across ChatGPT assistant turns. Use begin near the start of a non-trivial task, checkpoint only for meaningful progress/failure changes, wait while an external condition is pending, complete only after the original user goal is verified with evidence, and cancel/fail for real terminal states. The invisible MCP App uses claim-continuation/release-continuation internally to deduplicate automatic follow-ups and enforce loop budgets.",
+            description: "Persist and verify a multi-step DevSpace task across ChatGPT assistant turns. continuation_anchor is the single UI-bearing entry point; this tool stays headless for status/checkpoint/wait/resume/completion and internal heartbeat/host-signal/delivery coordination. Use watch-process for a durable processHandle whose completion should wake the conversation; watch-status is used internally by the Workspace App supervisor. Use checkpoint only for meaningful progress/failure changes, wait while an external condition is pending, complete only after the original user goal is verified with evidence, and cancel/fail for real terminal states.",
             inputSchema: {
-                action: z.enum(["begin", "begin-auto", "status", "checkpoint", "wait", "resume", "complete", "fail", "cancel", "claim-continuation", "release-continuation"]),
+                action: z.enum(["begin", "begin-auto", "status", "heartbeat", "host-signal", "watch-process", "unwatch-process", "watch-status", "checkpoint", "wait", "resume", "complete", "fail", "cancel", "claim-continuation", "delivery-result", "release-continuation"]),
                 taskId: z.string().optional(),
                 workspaceId: z.string().optional(),
                 objective: z.string().max(4000).optional(),
@@ -1392,6 +1406,13 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 maxNoProgress: z.number().int().min(1).max(20).optional(),
                 maxSameFailure: z.number().int().min(1).max(20).optional(),
                 wallClockMinutes: z.number().int().min(10).max(1440).optional(),
+                coordinatorInstanceId: z.string().max(160).optional(),
+                hostProfileId: z.string().max(160).optional(),
+                hostSignal: z.enum(["connected", "timeout", "teardown", "visibility-loss", "unknown"]).optional(),
+                elapsedMs: z.number().int().min(0).max(86400000).optional(),
+                processHandle: z.string().min(1).max(128).optional(),
+                deliveryResult: z.enum(["accepted", "rejected", "failed", "fallback-accepted", "unknown"]).optional(),
+                deliveryMethod: z.string().max(160).optional(),
             },
             outputSchema: resultOutputSchema({
                 task: z.unknown().optional(),
@@ -1400,6 +1421,8 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 upgraded: z.boolean().optional(),
                 reason: z.string().optional(),
                 missingMilestones: z.array(z.string()).optional(),
+                wakeReady: z.boolean().optional(),
+                watchedProcesses: z.array(z.unknown()).optional(),
             }),
             ...toolWidgetDescriptorMeta(config, "shell"),
             annotations: EDIT_TOOL_ANNOTATIONS,
@@ -1407,6 +1430,51 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
             if (input.workspaceId)
                 workspaces.getWorkspace(input.workspaceId);
             const conversationScopeId = openAiConversationScopeId(_meta) ?? "host-scope-unavailable";
+            if (input.action === "watch-status") {
+                const status = runtimeState.continuationTask({
+                    action: "status",
+                    taskId: input.taskId,
+                    workspaceId: input.workspaceId,
+                    conversationScopeId,
+                });
+                const task = status.task;
+                const workspaceId = task?.workspaceId ?? input.workspaceId;
+                const handles = Array.isArray(task?.watchProcessHandles) ? task.watchProcessHandles : [];
+                const watchedProcesses = [];
+                const completedHandles = [];
+                if (task && workspaceId && handles.length > 0) {
+                    const workspace = workspaces.getWorkspace(workspaceId);
+                    for (const processHandle of handles) {
+                        try {
+                            const snapshot = isRemoteWorkspace(workspace)
+                                ? await remoteAgents.rpcWorkspace(workspace, "process.attach", { processHandle, yieldTimeMs: 0 }, 30_000)
+                                : await processSessions.attach({ workspaceId, processHandle, yieldTimeMs: 0 });
+                            const process = {
+                                processHandle,
+                                running: Boolean(snapshot.running),
+                                exitCode: snapshot.exitCode,
+                                signal: snapshot.signal,
+                                status: snapshot.status,
+                            };
+                            watchedProcesses.push(process);
+                            if (!snapshot.running)
+                                completedHandles.push(processHandle);
+                        }
+                        catch (error) {
+                            watchedProcesses.push({ processHandle, running: undefined, error: String(error?.message ?? error).slice(0, 500) });
+                        }
+                    }
+                    for (const processHandle of completedHandles) {
+                        runtimeState.continuationTask({ action: "unwatch-process", taskId: task.id, processHandle, conversationScopeId });
+                    }
+                }
+                const refreshed = task
+                    ? runtimeState.continuationTask({ action: "status", taskId: task.id, conversationScopeId }).task
+                    : undefined;
+                const payload = { task: refreshed, accepted: Boolean(task), wakeReady: completedHandles.length > 0, watchedProcesses };
+                const result = JSON.stringify(payload, null, 2);
+                return { content: [textBlock(result)], structuredContent: { result, ...payload } };
+            }
             const outcome = runtimeState.continuationTask({ ...input, conversationScopeId });
             const result = JSON.stringify(outcome, null, 2);
             return { content: [textBlock(result)], structuredContent: { result, ...outcome } };
@@ -1579,13 +1647,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         instructions: serverInstructions(config),
     });
     registerAppResource(server, "DevSpace Diff Card", WORKSPACE_APP_URI, {
-        description: "Interactive card for viewing DevSpace file diffs.",
+        description: "DevSpace workspace UI for operation cards, file diffs, and durable continuation coordination.",
         _meta: {
             ui: {
                 prefersBorder: true,
                 csp: appCsp(config),
             },
-            "openai/widgetDescription": "DevSpace consolidated operation timeline, file diffs, and generated artifact previews.",
+            "openai/widgetDescription": "DevSpace workspace UI, operation timeline, file diffs, generated artifact previews, and durable task continuation.",
             "openai/widgetPrefersBorder": true,
         },
     }, async () => {
@@ -1601,39 +1669,15 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                             prefersBorder: true,
                             csp: appCsp(config),
                         },
-                        "openai/widgetDescription": "DevSpace consolidated operation timeline, file diffs, and generated artifact previews.",
+                        "openai/widgetDescription": "DevSpace workspace UI, operation timeline, file diffs, generated artifact previews, and durable task continuation.",
                         "openai/widgetPrefersBorder": true,
                     },
                 },
             ],
         };
     });
-    if (config.features?.continuationGuard) {
-        registerAppResource(server, "DevSpace Continuation Guard", CONTINUATION_GUARD_URI, {
-            description: "Invisible MCP App lifecycle guard for durable unfinished-task continuation.",
-            _meta: {
-                ui: {
-                    prefersBorder: false,
-                    csp: appCsp(config),
-                },
-                "openai/widgetDescription": "DevSpace continuation guard.",
-                "openai/widgetPrefersBorder": false,
-            },
-        }, async () => ({
-            contents: [{
-                    uri: CONTINUATION_GUARD_URI,
-                    mimeType: RESOURCE_MIME_TYPE,
-                    text: continuationGuardHtml(config),
-                    _meta: {
-                        ui: { prefersBorder: false, csp: appCsp(config) },
-                        "openai/widgetDescription": "DevSpace continuation guard.",
-                        "openai/widgetPrefersBorder": false,
-                    },
-                }],
-        }));
-    }
     registerDoctorTool(server, config, processSessions, runtimeServices.runtimeState);
-    registerRuntimeStateTools(server, config, workspaces, runtimeServices.runtimeState, runtimeServices.fileWatches, runtimeServices.permissionRules, runtimeServices.remoteAgents);
+    registerRuntimeStateTools(server, config, workspaces, runtimeServices.runtimeState, runtimeServices.fileWatches, runtimeServices.permissionRules, processSessions, runtimeServices.remoteAgents);
     registerPluginManagementTools(server, config, workspaces, runtimeServices.pluginManager);
     registerPluginDispatchTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);
     registerReservedPluginSlots(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);

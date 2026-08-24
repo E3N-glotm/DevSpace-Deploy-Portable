@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.46**
+当前稳定版本：**1.1.47**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.46.zip
+DevSpacePortable-Windows-x64-1.1.47.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -343,6 +343,18 @@ https://你的域名/mcp
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.47 主要变化
+
+- **自动续轮并入现有 Workspace App，不新增第二个 MCP App 或第二个域名。** 1.1.46 的独立 hidden guard resource 被移除；1.1.47 只通过一次 `continuation_anchor` 挂载现有 `workspace-app.html`，普通 `read/exec/write/edit/process` 工具恢复为 headless，因此不会再为每条命令堆出一张 “DevSpace MCP / CSP” App 卡片。
+- **续轮路径改为正式 Apps SDK lifecycle。** coordinator 使用 `app.callServerTool()` 读取/更新持久任务，优先用 `app.sendMessage()` 请求新的 user follow-up，并在 pre-timeout 阶段用 `app.updateModelContext()` 注入 taskId、workspaceId、objective 和里程碑恢复上下文；`window.openai.sendFollowUpMessage` 仅保留为兼容 fallback，不使用 ChatGPT DOM 模拟点击或输入框。
+- **不再写死 ChatGPT 的分钟上限。** Host `toolcancelled(timeout/deadline/budget)` 是首选触发器；首次观察到真实 timeout 后，migration 15 按 Host name/version 持久学习本次 turn budget，并把后续 proactive watchdog 安排在学习值的安全比例之前。如果平台以后把限制从 26 分钟改成 10、40 或其它值，DevSpace 会从实际 Host 事件重新学习，而不是继续依赖固定 25 分钟常量。
+- **长后台任务优先按真实进程状态唤醒。** `continuation_task watch-process` 可以登记 `exec_command` 返回的 durable `processHandle`；Anchor supervisor 周期读取实际进程状态，一旦构建/训练/下载进程退出就立即请求续轮，并消费该 watch，避免下一轮重复唤醒。这个路径完全不依赖 ChatGPT 是 10、26 还是 60 分钟一轮。
+- **增加可诊断的续轮状态。** SQLite migration 14 记录 UI heartbeat、last send attempt/result 和 coordinator instance；migration 15 再记录 host profile、observed turn budget、recommended continuation threshold、timeout sample count 和最后 Host signal，因此后续能区分“Anchor 没挂载 / 没 heartbeat / Host 没发 timeout / claim 被拒绝 / `ui/message` 被 Host 拒绝 / fallback 已接受”。
+- **保留完整防循环治理。** conversation/workspace 隔离、原子 `continuationPending`、cooldown、continuation budget、wall-clock deadline、no-progress/same-failure、`WAITING_EXTERNAL`、用户取消以及 milestone+evidence completion gate 均继续生效；显式 `begin` 现在还能安全延长已有任务的 wall-clock deadline。
+- **旧 Remote Agent 不需要再次升级。** 1.1.47 没有改变 Linux Agent 协议或 Landlock runtime 语义，Remote Agent 目标版本仍为已验证的 1.1.46；GPU/NVML、PTY、shared-memory、RDMA 修复保持不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.47.md)
 
 ## 1.1.46 主要变化
 

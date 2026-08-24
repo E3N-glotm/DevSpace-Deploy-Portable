@@ -64,6 +64,16 @@ const migrations = [
         name: "continuation-task-controller",
         up: migrateContinuationTasks,
     },
+    {
+        version: 14,
+        name: "continuation-app-coordinator-observability",
+        up: migrateContinuationCoordinatorObservability,
+    },
+    {
+        version: 15,
+        name: "continuation-host-budget-learning",
+        up: migrateContinuationHostBudgetLearning,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -466,6 +476,38 @@ function migrateContinuationTasks(sqlite) {
 
     create index if not exists continuation_tasks_state_updated_idx
       on continuation_tasks(state, updated_at desc);
+  `);
+}
+function migrateContinuationCoordinatorObservability(sqlite) {
+    addColumnIfMissing(sqlite, "continuation_tasks", "last_activity_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "last_ui_heartbeat_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "last_send_attempt_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "last_send_result", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "coordinator_instance_id", "text");
+}
+function migrateContinuationHostBudgetLearning(sqlite) {
+    addColumnIfMissing(sqlite, "continuation_tasks", "host_profile_id", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "observed_turn_budget_ms", "integer");
+    addColumnIfMissing(sqlite, "continuation_tasks", "recommended_continue_after_ms", "integer");
+    addColumnIfMissing(sqlite, "continuation_tasks", "host_timeout_samples", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "last_host_signal", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "last_host_signal_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "watch_process_handles_json", "text not null default '[]'");
+    sqlite.exec(`
+    create table if not exists continuation_host_profiles (
+      id text primary key,
+      observed_turn_budget_ms integer,
+      recommended_continue_after_ms integer,
+      timeout_samples integer not null default 0,
+      last_timeout_at text,
+      last_signal text,
+      last_signal_at text,
+      created_at text not null,
+      updated_at text not null
+    );
+
+    create index if not exists continuation_host_profiles_updated_idx
+      on continuation_host_profiles(updated_at desc);
   `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

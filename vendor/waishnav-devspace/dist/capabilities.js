@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.46";
+export const DEVSPACE_SERVER_VERSION = "1.1.47";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -143,6 +143,10 @@ const FEATURE_CATALOG = [
     { id: "github-updater-stage-single-flight", maturity: "stable", since: "1.1.45" },
     { id: "mcp-continuation-task-controller", maturity: "stable", since: "1.1.46" },
     { id: "mcp-ui-auto-continuation-guard", maturity: "stable", since: "1.1.46" },
+    { id: "mcp-ui-integrated-continuation-coordinator", maturity: "stable", since: "1.1.47" },
+    { id: "mcp-ui-continuation-delivery-diagnostics", maturity: "stable", since: "1.1.47" },
+    { id: "mcp-ui-single-continuation-anchor", maturity: "stable", since: "1.1.47" },
+    { id: "mcp-ui-adaptive-host-turn-budget", maturity: "stable", since: "1.1.47" },
     { id: "remote-agent-runtime-device-compatibility", maturity: "stable", since: "1.1.46" },
     { id: "remote-agent-ephemeral-runtime-scratch", maturity: "stable", since: "1.1.46" },
 ];

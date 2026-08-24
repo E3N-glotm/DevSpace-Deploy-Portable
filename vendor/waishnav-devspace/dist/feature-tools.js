@@ -239,7 +239,10 @@ export function registerFeatureTools(server, services) {
         description: "Show aggregate file and line changes since this persisted workspace session captured its first-mutation baseline. The session remains reviewable after the local UI, MCP connection, or DevSpace service closes.",
         inputSchema: { workspaceId: z.string() },
         outputSchema: { result: z.string(), sessionReview: z.unknown() },
-        ...toolMeta("show_changes"),
+        // session_changes is a structured read API used by rollback/review
+        // workflows. Keep it headless in the default `changes` mode; only the
+        // explicit show_changes tool owns the consolidated review App card.
+        ...toolMeta("review"),
         annotations: READ_ONLY_ANNOTATIONS,
     }, async ({ workspaceId }) => {
         requireFeature(config, "uiSessionReview", "UI session review");

@@ -2,6 +2,18 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.47
+
+- 自动续轮从独立 hidden Continuation Guard resource 迁入现有 DevSpace Workspace App；继续使用同一个 MCP endpoint、OAuth 和公网域名，不需要注册第二个 App 或第二个域名。
+- 新增单一 `continuation_anchor`，并把 Portable 默认 widget 模式从逐工具 `full` 收敛为 `changes`：普通 workspace/runtime/write/edit/process 工具恢复 headless，`show_changes` 只在汇总变更时渲染 Workspace App；显式 `DEVSPACE_WIDGETS=full` 仍作为兼容选项保留，修复默认状态下每次 MCP 调用都渲染一张 DevSpace/CSP 卡片的 UI 回归。
+- 续轮 coordinator 直接复用已经完成 `App.connect()` 的 Apps SDK 实例，使用 `app.callServerTool()`、`app.updateModelContext()` 与 `app.sendMessage()`，并保留 `sendFollowUpMessage` compatibility fallback；不使用 DOM 自动化。
+- 移除 23m/25m/25.55m 固定 watchdog。Host timeout/deadline/budget 事件优先触发续轮；SQLite migration 15 按 Host profile 学习真实 turn budget，并使用学习结果驱动后续 proactive supervisor，因此宿主分钟上限变化时不需要重新写死常量。
+- 新增 process completion wake：长任务可把 durable `processHandle` 登记到 continuation task，Workspace App supervisor 直接观察本地/Remote Agent 的真实进程状态，进程退出立即续轮并消费 watch，不依赖任何 Host 分钟阈值。
+- SQLite migration 14 保留 UI heartbeat、last send attempt/result 和 coordinator instance telemetry；migration 15 新增 host profile、observed budget、recommended threshold、timeout samples 和 host-signal telemetry。显式 `begin` 支持延长已有 task wall-clock deadline；原有 dedupe、budget、WAITING_EXTERNAL、no-progress/same-failure 和 completion evidence gates 保持。
+- Linux Remote Agent 本身无新协议/权限改动，继续使用 1.1.46 Agent；GPU/NVML、PTY、shared memory 与 RDMA compatibility 修复不回退。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.47.md)
+
 ## 1.1.46
 
 - 新增持久化 Continuation Task Controller 与隐藏 MCP App guard：正式 `ui/message` 自动续轮、timeout/watchdog 双触发、原子 dedupe、continuation/wall-clock/no-progress/same-failure/cooldown 多重预算，以及 milestone+evidence 完成门。

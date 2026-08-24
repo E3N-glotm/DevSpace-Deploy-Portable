@@ -166,9 +166,14 @@ function parseLoggingConfig(env) {
     };
 }
 function parseWidgetMode(value) {
-    if (!value || value === "full")
-        return "full";
-    if (value === "off" || value === "changes")
+    // A Workspace App iframe on every ordinary MCP tool produces one ChatGPT
+    // activity card per tool call. Keep that legacy behaviour available only
+    // when the owner explicitly opts into `full`; the normal Portable default
+    // is the consolidated `show_changes` renderer plus the explicit
+    // continuation_anchor App.
+    if (!value || value === "changes")
+        return "changes";
+    if (value === "off" || value === "full")
         return value;
     throw new Error(`Invalid DEVSPACE_WIDGETS: ${value}`);
 }
