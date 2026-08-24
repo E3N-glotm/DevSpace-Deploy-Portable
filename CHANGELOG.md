@@ -2,6 +2,15 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.44
+
+- 修复 Update.exe 未识别 `preferredMode=blockmap`，导致 Blockmap 差分更新在检查页和暂存完成页被错误显示为“完整包更新”的问题。
+- Blockmap 检查页不再用完整 ZIP 大小冒充预计下载量；现在明确说明先扫描本地可复用块、仅下载缺失块，并显示索引与完整包 fallback 信息。
+- `local-sha256` 本地扫描进度明确标注“不计入网络下载”；Range 下载与本地重组分别使用独立状态标题，避免把本地哈希扫描字节数误认为网络流量。
+- 新增 standalone updater 回归断言和原生 self-test 项，锁定 Blockmap 模式名称与本地扫描状态文案。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.44.md)
+
 ## 1.1.43
 
 - 修复 Remote Workspace 在非 Git 目录中把 Git metadata 的 `None` 序列化为 `null`，进而使 `open_workspace` structured output 校验失败的问题。缺失的 `sha`、`branch`、`originUrl` 现在直接省略。

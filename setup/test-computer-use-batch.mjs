@@ -67,7 +67,7 @@ try {
   assert.equal(result.metadata.inputBackend, "native-ui-sendinput");
   assert.equal(result.image, undefined);
   assert.ok(elapsedMs < 500, `batch protocol took ${elapsedMs} ms`);
-console.log(`DevSpace 1.1.43 Computer Use batch protocol test passed in ${elapsedMs} ms.`);
+console.log(`DevSpace 1.1.44 Computer Use batch protocol test passed in ${elapsedMs} ms.`);
 }
 finally {
   rmSync(temporary, { recursive: true, force: true });

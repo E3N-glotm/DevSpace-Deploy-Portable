@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.43**
+当前稳定版本：**1.1.44**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.43.zip
+DevSpacePortable-Windows-x64-1.1.44.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -343,6 +343,16 @@ https://你的域名/mcp
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.44 主要变化
+
+- **修复 Blockmap 差分更新被 UI 错标成“完整包”的问题。** 当 updater 后端返回 `preferredMode=blockmap` 时，Update.exe 现在明确显示“Blockmap 差分增量更新”，不再把完整 ZIP 的兜底体积当作预计下载量。
+- **更新检查页明确说明真实下载机制。** Blockmap 模式会提示“先扫描并复用本地已有块，仅联网下载缺失块”，并单独显示 blockmap 索引体积与完整包兜底体积，避免用户误以为会下载整个 `.blockmap` 或完整 ZIP。
+- **本地扫描与网络下载进度彻底分开。** `local-sha256` 阶段显示为“本地扫描”并明确标注“不计入网络下载”；HTTP Range 阶段显示“正在下载缺失文件块”，重组阶段显示“正在本地重组并校验目标文件”。
+- **暂存完成与最终安装结果都使用正确的更新方式名称。** `updateMode=blockmap` 会显示“Blockmap 差分增量更新”，不再落入“完整包更新”的默认分支。
+- 更新协议仍为 Protocol 1.5；blockmap、`file-delta-v1` 与完整 ZIP fallback 逻辑不变，本版本仅修正 updater 可视化与状态语义。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.44.md)
 
 ## 1.1.43 主要变化
 

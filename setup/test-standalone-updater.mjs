@@ -35,6 +35,11 @@ assert.match(updaterSource, /ReadStagedUpdateMode/);
 assert.match(updaterSource, /CanAttemptFullFallbackAfterApplyFailure/);
 assert.match(updaterSource, /"-ForceFull"/);
 assert.match(updaterSource, /增量安装失败，正在切换完整包兜底/);
+assert.match(updaterSource, /Blockmap 差分增量更新/);
+assert.match(updaterSource, /仅联网下载缺失块/);
+assert.match(updaterSource, /不计入网络下载/);
+assert.match(updaterSource, /正在分析本地可复用块/);
+assert.match(updaterSource, /正在下载缺失文件块/);
 assert.match(updaterSource, /update-progress\.json/);
 assert.match(updaterSource, /BackendFailureMessage/);
 assert.match(updaterSource, /TryParseLastJsonObject/);
@@ -90,6 +95,8 @@ try {
   assert.equal(report.backendErrorParser, true);
   assert.equal(report.brandIcon, true);
   assert.equal(report.windowsArgumentQuoting, true);
+  assert.equal(report.blockmapModeLabel, true);
+  assert.equal(report.blockmapLocalScanLabel, true);
   console.log(JSON.stringify(report));
 }
 finally {

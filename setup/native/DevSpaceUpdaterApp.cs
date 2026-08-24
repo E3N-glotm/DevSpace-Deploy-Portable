@@ -52,6 +52,8 @@ namespace DevSpacePortableUpdater
                     ["backendErrorParser"] = parsedBackendError == "scheduled tasks are missing",
                     ["brandIcon"] = brandIcon,
                     ["windowsArgumentQuoting"] = windowsArgumentQuoting,
+                    ["blockmapModeLabel"] = UpdateForm.UpdateModeLabel("blockmap", 0) == "Blockmap 差分增量更新",
+                    ["blockmapLocalScanLabel"] = UpdateForm.PhaseTitle("analyzing", "local-sha256") == "正在分析本地可复用块",
                 };
                 File.WriteAllText(selfTest, new JavaScriptSerializer().Serialize(report), new UTF8Encoding(false));
                 return 0;
@@ -307,15 +309,26 @@ namespace DevSpacePortableUpdater
                 string mode = GetString(_lastCheck, "preferredMode", "full");
                 long fullSize = GetLong(_lastCheck, "fullAssetSize", GetLong(_lastCheck, "assetSize", 0));
                 long incrementalSize = GetLong(_lastCheck, "incrementalAssetSize", 0);
+                long blockmapHeaderSize = GetLong(_lastCheck, "blockmapHeaderCompressedSize", 0);
+                bool blockmap = string.Equals(mode, "blockmap", StringComparison.OrdinalIgnoreCase);
                 bool incremental = (string.Equals(mode, "incremental", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(mode, "incremental-chain", StringComparison.OrdinalIgnoreCase))
                     && incrementalSize > 0;
                 int chainLength = (int)GetLong(_lastCheck, "incrementalChainLength", incremental ? 1 : 0);
                 string incrementalLabel = chainLength > 1 ? "增量链更新（" + chainLength + " 段）" : "增量更新";
                 _summary.Text = "发现 DevSpace Portable " + latest;
-                _detail.Text = "首选：" + (incremental ? incrementalLabel : "完整包")
-                    + " · 预计下载 " + FormatBytes(incremental ? incrementalSize : fullSize)
-                    + (incremental ? " · 完整包兜底 " + FormatBytes(fullSize) : "");
+                if (blockmap)
+                {
+                    _detail.Text = "首选：Blockmap 差分增量更新 · 先扫描并复用本地已有块，仅联网下载缺失块"
+                        + (blockmapHeaderSize > 0 ? " · 索引约 " + FormatBytes(blockmapHeaderSize) : "")
+                        + " · 完整包兜底 " + FormatBytes(fullSize);
+                }
+                else
+                {
+                    _detail.Text = "首选：" + (incremental ? incrementalLabel : "完整包")
+                        + " · 预计下载 " + FormatBytes(incremental ? incrementalSize : fullSize)
+                        + (incremental ? " · 完整包兜底 " + FormatBytes(fullSize) : "");
+                }
                 _installButton.Text = "下载并安装 " + latest;
                 _installButton.Enabled = true;
                 _progress.Value = 0;
@@ -353,9 +366,7 @@ namespace DevSpacePortableUpdater
                 _stagingPath = GetString(staged, "stagingPath", "");
                 string actualMode = GetString(staged, "updateMode", "full");
                 string fallbackReason = GetString(staged, "fallbackReason", "");
-                string actualLabel = actualMode == "incremental-chain"
-                    ? "增量链更新（" + GetLong(staged, "chainLength", 0) + " 段）"
-                    : (actualMode == "incremental" ? "增量更新" : "完整包更新");
+                string actualLabel = UpdateModeLabel(actualMode, GetLong(staged, "chainLength", 0));
                 _summary.Text = "更新包已下载并校验";
                 _detail.Text = "实际方式：" + actualLabel
                     + (string.IsNullOrWhiteSpace(fallbackReason) ? "" : " · 兜底原因：" + fallbackReason);
@@ -473,7 +484,7 @@ namespace DevSpacePortableUpdater
                 _summary.Text = "DevSpace Portable " + target + " 更新完成";
                 bool servicesRecovered = GetBool(applied, "servicesRecovered");
                 string serviceRecoveryError = GetString(applied, "serviceRecoveryError", "");
-                _detail.Text = "实际更新方式：" + GetString(applied, "updateMode", "unknown")
+                _detail.Text = "实际更新方式：" + UpdateModeLabel(GetString(applied, "updateMode", "unknown"), GetLong(applied, "chainLength", 0))
                     + (servicesRecovered ? " · 服务已恢复。" : " · 程序已更新；服务恢复需要稍后重试。")
                     + (string.IsNullOrWhiteSpace(serviceRecoveryError) ? "" : " " + serviceRecoveryError);
                 _progress.Value = 1000;
@@ -641,28 +652,54 @@ namespace DevSpacePortableUpdater
                 string message = GetString(progress, "message", "正在处理更新");
                 double percent = GetDouble(progress, "percent", 0);
                 _progress.Value = Math.Max(0, Math.Min(1000, (int)Math.Round(percent * 10)));
-                _summary.Text = PhaseTitle(phase);
                 long received = GetLong(progress, "bytesReceived", 0);
                 long total = GetLong(progress, "bytesTotal", 0);
                 long speed = GetLong(progress, "speedBytesPerSecond", 0);
                 string transport = GetString(progress, "transport", "");
+                long reused = GetLong(progress, "reusedBytes", 0);
+                long target = GetLong(progress, "targetBytes", 0);
+                bool localScan = string.Equals(phase, "analyzing", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(transport, "local-sha256", StringComparison.OrdinalIgnoreCase);
+                _summary.Text = PhaseTitle(phase, transport);
                 var detail = new StringBuilder();
-                if (total > 0) detail.Append(percent.ToString("0.0")).Append("% · ").Append(FormatBytes(received)).Append(" / ").Append(FormatBytes(total));
-                if (speed > 0) detail.Append(" · ").Append(FormatBytes(speed)).Append("/s");
-                if (!string.IsNullOrWhiteSpace(transport)) detail.Append(" · ").Append(transport);
+                if (localScan)
+                {
+                    if (total > 0) detail.Append("本地扫描 ").Append(percent.ToString("0.0")).Append("% · ").Append(FormatBytes(received)).Append(" / ").Append(FormatBytes(total));
+                    else detail.Append(message);
+                    detail.Append(" · 不计入网络下载");
+                }
+                else
+                {
+                    if (total > 0) detail.Append(percent.ToString("0.0")).Append("% · ").Append(FormatBytes(received)).Append(" / ").Append(FormatBytes(total));
+                    if (speed > 0) detail.Append(" · ").Append(FormatBytes(speed)).Append("/s");
+                    if (reused > 0 && target > 0) detail.Append(" · 本地已复用 ").Append(FormatBytes(reused)).Append(" / ").Append(FormatBytes(target));
+                    if (!string.IsNullOrWhiteSpace(transport)) detail.Append(" · ").Append(transport);
+                }
                 if (detail.Length == 0) detail.Append(message);
                 _detail.Text = detail.ToString();
             }
             catch { }
         }
 
-        private static string PhaseTitle(string phase)
+        internal static string UpdateModeLabel(string mode, long chainLength)
+        {
+            if (string.Equals(mode, "blockmap", StringComparison.OrdinalIgnoreCase)) return "Blockmap 差分增量更新";
+            if (string.Equals(mode, "incremental-chain", StringComparison.OrdinalIgnoreCase)) return "增量链更新（" + chainLength + " 段）";
+            if (string.Equals(mode, "incremental", StringComparison.OrdinalIgnoreCase)) return "增量更新";
+            if (string.Equals(mode, "full", StringComparison.OrdinalIgnoreCase)) return "完整包更新";
+            return mode;
+        }
+
+        internal static string PhaseTitle(string phase, string transport)
         {
             switch ((phase ?? "").ToLowerInvariant())
             {
                 case "metadata": return "正在读取 GitHub Release";
-                case "downloading": return "正在下载更新包";
+                case "probing": return "正在选择 Blockmap Range 下载源";
+                case "analyzing": return "正在分析本地可复用块";
+                case "downloading": return (transport ?? "").IndexOf("range", StringComparison.OrdinalIgnoreCase) >= 0 ? "正在下载缺失文件块" : "正在下载更新包";
                 case "downloaded": return "更新包下载完成";
+                case "reconstructing": return "正在本地重组并校验目标文件";
                 case "verifying": return "正在校验 SHA-256";
                 case "extracting": return "正在安全解压并验证";
                 case "fallback": return "正在切换完整包兜底";

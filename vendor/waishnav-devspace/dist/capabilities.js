@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.43";
+export const DEVSPACE_SERVER_VERSION = "1.1.44";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -137,6 +137,7 @@ const FEATURE_CATALOG = [
     { id: "remote-agent-scoped-global-read", maturity: "stable", since: "1.1.43" },
     { id: "remote-agent-landlock-write-confinement", maturity: "stable", since: "1.1.43" },
     { id: "remote-agent-full-access", maturity: "stable", since: "1.1.43" },
+    { id: "github-updater-blockmap-ui-clarity", maturity: "stable", since: "1.1.44" },
 ];
 
 export function buildCapabilities(config, pluginManager) {
