@@ -92,6 +92,7 @@ export class StructuredRuntimeState {
       limit @limit
     `).all(params).map((row) => ({
             id: row.id,
+            conversationScopeId: row.conversation_scope_id,
             requestId: row.request_id ?? undefined,
             tool: row.tool,
             workspaceId: row.workspace_id ?? undefined,
@@ -103,6 +104,220 @@ export class StructuredRuntimeState {
             details: parseJson(row.details_json, {}),
             createdAt: row.created_at,
         }));
+    }
+    continuationTask(input = {}) {
+        const action = String(input.action ?? "status");
+        const now = new Date();
+        const nowIso = now.toISOString();
+        const terminalStates = new Set(["SUCCEEDED", "FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED"]);
+        const rowToTask = (row) => row ? ({
+            id: row.id,
+            workspaceId: row.workspace_id ?? undefined,
+            objective: row.objective,
+            state: row.state,
+            requiredMilestones: parseJson(row.required_milestones_json, []),
+            completedMilestones: parseJson(row.completed_milestones_json, []),
+            evidence: parseJson(row.evidence_json, {}),
+            progressFingerprint: row.progress_fingerprint ?? undefined,
+            failureFingerprint: row.failure_fingerprint ?? undefined,
+            continuationCount: row.continuation_count,
+            noProgressCount: row.no_progress_count,
+            sameFailureCount: row.same_failure_count,
+            maxContinuations: row.max_continuations,
+            maxNoProgress: row.max_no_progress,
+            maxSameFailure: row.max_same_failure,
+            continuationPending: Boolean(row.continuation_pending),
+            waitingReason: row.waiting_reason ?? undefined,
+            terminalReason: row.terminal_reason ?? undefined,
+            deadlineAt: row.deadline_at ?? undefined,
+            turnStartedAt: row.turn_started_at ?? undefined,
+            lastContinuationAt: row.last_continuation_at ?? undefined,
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+        }) : undefined;
+        const find = () => {
+            if (input.taskId) {
+                return this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(String(input.taskId));
+            }
+            if (input.workspaceId && input.conversationScopeId) {
+                return this.database.sqlite.prepare(`
+                  select * from continuation_tasks
+                  where workspace_id=? and conversation_scope_id=?
+                    and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED')
+                  order by updated_at desc limit 1
+                `).get(String(input.workspaceId), String(input.conversationScopeId));
+            }
+            return undefined;
+        };
+        if (action === "status") {
+            return { task: rowToTask(find()) };
+        }
+        if (action === "begin" || action === "begin-auto") {
+            let existing = find();
+            if (existing && existing.deadline_at && Date.parse(existing.deadline_at) <= now.getTime()) {
+                this.database.sqlite.prepare("update continuation_tasks set state='BUDGET_EXHAUSTED', terminal_reason='wall-clock-budget', continuation_pending=0, updated_at=? where id=?")
+                    .run(nowIso, existing.id);
+                existing = undefined;
+            }
+            if (existing && !terminalStates.has(existing.state)) {
+                if (action === "begin") {
+                    const currentRequired = new Set(parseJson(existing.required_milestones_json, []));
+                    for (const value of Array.isArray(input.requiredMilestones) ? input.requiredMilestones : []) {
+                        const item = String(value).trim();
+                        if (item) currentRequired.add(item);
+                    }
+                    const objective = String(input.objective ?? existing.objective).trim() || existing.objective;
+                    this.database.sqlite.prepare(`
+                      update continuation_tasks set objective=?, required_milestones_json=?,
+                        max_continuations=?, max_no_progress=?, max_same_failure=?, updated_at=? where id=?
+                    `).run(objective, JSON.stringify([...currentRequired].slice(0, 64)),
+                        Math.max(existing.max_continuations, Math.max(1, Math.min(Number(input.maxContinuations ?? existing.max_continuations), 100))),
+                        Math.max(1, Math.min(Number(input.maxNoProgress ?? existing.max_no_progress), 20)),
+                        Math.max(1, Math.min(Number(input.maxSameFailure ?? existing.max_same_failure), 20)), nowIso, existing.id);
+                    return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id)), created: false, upgraded: true };
+                }
+                return { task: rowToTask(existing), created: false };
+            }
+            const id = `task_${randomUUID()}`;
+            const required = Array.isArray(input.requiredMilestones)
+                ? [...new Set(input.requiredMilestones.map((value) => String(value).trim()).filter(Boolean))].slice(0, 64)
+                : [];
+            const maxContinuations = Math.max(1, Math.min(Number(input.maxContinuations ?? 5), 100));
+            const maxNoProgress = Math.max(1, Math.min(Number(input.maxNoProgress ?? 2), 20));
+            const maxSameFailure = Math.max(1, Math.min(Number(input.maxSameFailure ?? 2), 20));
+            const wallClockMinutes = Math.max(10, Math.min(Number(input.wallClockMinutes ?? 180), 24 * 60));
+            const deadlineAt = new Date(now.getTime() + wallClockMinutes * 60_000).toISOString();
+            this.database.sqlite.prepare(`
+              insert into continuation_tasks (
+                id, conversation_scope_id, workspace_id, objective, state, required_milestones_json,
+                completed_milestones_json, evidence_json, max_continuations,
+                max_no_progress, max_same_failure, deadline_at, turn_started_at, created_at, updated_at
+              ) values (?, ?, ?, ?, 'RUNNING', ?, '[]', '{}', ?, ?, ?, ?, ?, ?, ?)
+            `).run(id, String(input.conversationScopeId || "unknown"), input.workspaceId ? String(input.workspaceId) : null,
+                String(input.objective ?? "Continue the current DevSpace task until the original user goal is verified complete."),
+                JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(id)), created: true };
+        }
+        const row = find();
+        if (!row) return { task: undefined, accepted: false, reason: "task-not-found" };
+        if (terminalStates.has(row.state) && !["status"].includes(action)) {
+            return { task: rowToTask(row), accepted: false, reason: "task-terminal" };
+        }
+        const taskId = row.id;
+        if (action === "checkpoint") {
+            const completed = new Set(parseJson(row.completed_milestones_json, []));
+            for (const value of Array.isArray(input.completedMilestones) ? input.completedMilestones : []) {
+                const item = String(value).trim();
+                if (item) completed.add(item);
+            }
+            const progress = input.progressFingerprint === undefined ? row.progress_fingerprint : String(input.progressFingerprint || "");
+            const failure = input.failureFingerprint === undefined ? row.failure_fingerprint : String(input.failureFingerprint || "");
+            let noProgress = row.no_progress_count;
+            if (input.progressFingerprint !== undefined) {
+                noProgress = row.progress_fingerprint && progress === row.progress_fingerprint ? row.no_progress_count + 1 : 0;
+            }
+            let sameFailure = row.same_failure_count;
+            if (input.failureFingerprint !== undefined) {
+                sameFailure = failure && failure === row.failure_fingerprint ? row.same_failure_count + 1 : 0;
+            }
+            let state = input.waitingExternal ? "WAITING_EXTERNAL" : "RUNNING";
+            let terminalReason = null;
+            if (noProgress >= row.max_no_progress && !input.waitingExternal) {
+                state = "ABORTED_NO_PROGRESS";
+                terminalReason = "no-progress-limit";
+            }
+            if (sameFailure >= row.max_same_failure && failure) {
+                state = "ABORTED_NO_PROGRESS";
+                terminalReason = "same-failure-limit";
+            }
+            this.database.sqlite.prepare(`
+              update continuation_tasks set state=?, completed_milestones_json=?, progress_fingerprint=?, failure_fingerprint=?,
+                no_progress_count=?, same_failure_count=?, waiting_reason=?, terminal_reason=?, continuation_pending=0, updated_at=?
+              where id=?
+            `).run(state, JSON.stringify([...completed]), progress || null, failure || null, noProgress, sameFailure,
+                input.waitingExternal ? String(input.note ?? "Waiting for an external condition.") : null,
+                terminalReason, nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "wait") {
+            this.database.sqlite.prepare("update continuation_tasks set state='WAITING_EXTERNAL', waiting_reason=?, continuation_pending=0, updated_at=? where id=?")
+                .run(String(input.note ?? "Waiting for an external condition."), nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "resume") {
+            this.database.sqlite.prepare("update continuation_tasks set state='RUNNING', waiting_reason=null, continuation_pending=0, turn_started_at=?, updated_at=? where id=?")
+                .run(nowIso, nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "cancel") {
+            this.database.sqlite.prepare("update continuation_tasks set state='CANCELLED_BY_USER', terminal_reason='user-cancelled', continuation_pending=0, updated_at=? where id=?")
+                .run(nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "fail") {
+            const terminal = input.terminal !== false;
+            this.database.sqlite.prepare("update continuation_tasks set state=?, terminal_reason=?, continuation_pending=0, updated_at=? where id=?")
+                .run(terminal ? "FAILED_TERMINAL" : "FAILED_RETRYABLE", String(input.note ?? "Task failed."), nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "complete") {
+            const required = new Set(parseJson(row.required_milestones_json, []));
+            const completed = new Set(parseJson(row.completed_milestones_json, []));
+            for (const value of Array.isArray(input.completedMilestones) ? input.completedMilestones : []) {
+                const item = String(value).trim();
+                if (item) completed.add(item);
+            }
+            const missing = [...required].filter((item) => !completed.has(item));
+            if (missing.length > 0) {
+                return { task: rowToTask(row), accepted: false, reason: "required-milestones-missing", missingMilestones: missing };
+            }
+            const evidence = input.evidence && typeof input.evidence === "object" ? redactValue(input.evidence) : {};
+            if (Object.keys(evidence).length === 0) {
+                return { task: rowToTask(row), accepted: false, reason: "completion-evidence-required" };
+            }
+            this.database.sqlite.prepare(`
+              update continuation_tasks set state='SUCCEEDED', completed_milestones_json=?, evidence_json=?,
+                terminal_reason='completed', continuation_pending=0, updated_at=? where id=?
+            `).run(JSON.stringify([...completed]), JSON.stringify(evidence), nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "claim-continuation") {
+            const transaction = this.database.sqlite.transaction(() => {
+                const current = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
+                if (!current || terminalStates.has(current.state)) return { accepted: false, reason: "task-terminal", task: rowToTask(current) };
+                if (current.state === "WAITING_EXTERNAL") return { accepted: false, reason: "waiting-external", task: rowToTask(current) };
+                if (current.continuation_pending) {
+                    const pendingAge = current.last_continuation_at ? now.getTime() - Date.parse(current.last_continuation_at) : 0;
+                    if (pendingAge < 120_000) {
+                        return { accepted: false, reason: "continuation-already-pending", task: rowToTask(current) };
+                    }
+                    this.database.sqlite.prepare("update continuation_tasks set continuation_pending=0, updated_at=? where id=?").run(nowIso, taskId);
+                    current.continuation_pending = 0;
+                }
+                if (current.last_continuation_at && now.getTime() - Date.parse(current.last_continuation_at) < 60_000) {
+                    return { accepted: false, reason: "continuation-cooldown", task: rowToTask(current) };
+                }
+                if (current.deadline_at && Date.parse(current.deadline_at) <= now.getTime()) {
+                    this.database.sqlite.prepare("update continuation_tasks set state='BUDGET_EXHAUSTED', terminal_reason='wall-clock-budget', updated_at=? where id=?").run(nowIso, taskId);
+                    return { accepted: false, reason: "wall-clock-budget", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
+                }
+                if (current.continuation_count >= current.max_continuations) {
+                    this.database.sqlite.prepare("update continuation_tasks set state='BUDGET_EXHAUSTED', terminal_reason='continuation-budget', updated_at=? where id=?").run(nowIso, taskId);
+                    return { accepted: false, reason: "continuation-budget", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
+                }
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set continuation_pending=1, continuation_count=continuation_count+1,
+                    last_continuation_at=?, updated_at=? where id=?
+                `).run(nowIso, nowIso, taskId);
+                return { accepted: true, task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
+            });
+            return transaction();
+        }
+        if (action === "release-continuation") {
+            this.database.sqlite.prepare("update continuation_tasks set continuation_pending=0, updated_at=? where id=?").run(nowIso, taskId);
+            return { accepted: true, task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
+        }
+        throw new Error(`Unsupported continuation task action: ${action}`);
     }
     recordDiagnostic(report) {
         const runId = `doctor_${randomUUID()}`;

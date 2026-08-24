@@ -38,7 +38,7 @@ import urllib.request
 from pathlib import Path
 
 
-AGENT_VERSION = "1.1.43"
+AGENT_VERSION = "1.1.46"
 PROTOCOL_VERSION = 1
 DEFAULT_CONFIG = "/etc/devspace-agent/config.json"
 DEFAULT_STATE_DIR = "/var/lib/devspace-agent"
@@ -161,6 +161,90 @@ def landlock_abi() -> int:
     return int(result) if result >= 1 else 0
 
 
+def landlock_runtime_scratch_paths() -> list[str]:
+    """Ephemeral Linux runtime paths ordinary SSH shells can write safely.
+
+    Scoped mode is intended to stop persistent writes outside writableRoots,
+    not to break normal process runtime facilities.  Python/PyTorch/NCCL and
+    many CLI tools legitimately need temporary files or shared memory even
+    when all durable project output stays under the workspace.
+    """
+    candidates = ["/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue"]
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    candidates.append(runtime_dir)
+    result: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = os.path.realpath(candidate)
+        if resolved in seen or not os.path.isdir(resolved):
+            continue
+        seen.add(resolved)
+        result.append(resolved)
+    return result
+
+
+def landlock_runtime_device_paths() -> list[str]:
+    """Return narrowly-scoped character devices that need O_RDWR semantics.
+
+    Landlock WRITE_FILE also gates O_RDWR opens on character devices.  That
+    accidentally blocked NVML/CUDA in scoped Remote Agent commands even when
+    the same Linux user could use the GPU over SSH.  Restore parity only for
+    non-persistent terminal/random/sink devices and accelerator device nodes;
+    never grant block-device access or arbitrary /dev writes.
+    """
+    patterns = [
+        "/dev/null",
+        "/dev/zero",
+        "/dev/full",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/tty",
+        "/dev/ptmx",
+        "/dev/nvidiactl",
+        "/dev/nvidia-uvm",
+        "/dev/nvidia-uvm-tools",
+        "/dev/nvidia[0-9]*",
+        "/dev/dri/card[0-9]*",
+        "/dev/dri/renderD[0-9]*",
+        "/dev/kfd",
+        "/dev/infiniband/uverbs*",
+        "/dev/infiniband/rdma_cm",
+        "/dev/infiniband/umad*",
+        "/dev/infiniband/issm*",
+    ]
+    result: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        matches = glob.glob(pattern) if any(char in pattern for char in "*?[") else [pattern]
+        for candidate in matches:
+            try:
+                resolved = os.path.realpath(candidate)
+                mode = os.stat(resolved).st_mode
+            except OSError:
+                continue
+            if not statmod.S_ISCHR(mode) or resolved in seen:
+                continue
+            seen.add(resolved)
+            result.append(resolved)
+    return result
+
+
+def landlock_runtime_device_directories() -> list[str]:
+    """Directories containing dynamic character devices needed at runtime.
+
+    PTY slave nodes under /dev/pts are created after /dev/ptmx is opened, so
+    they cannot be enumerated before the Landlock ruleset is applied. Grant
+    WRITE_FILE only to the devpts directory; Unix ownership/mode checks remain
+    authoritative and no create/remove permissions are granted here.
+    """
+    result: list[str] = []
+    for candidate in ["/dev/pts"]:
+        resolved = os.path.realpath(candidate)
+        if os.path.isdir(resolved):
+            result.append(resolved)
+    return result
+
+
 def apply_write_landlock(roots: list[str], abi: int) -> None:
     handled = (
         LANDLOCK_ACCESS_FS_WRITE_FILE
@@ -191,18 +275,33 @@ def apply_write_landlock(roots: list[str], abi: int) -> None:
             path_attr = LandlockPathBeneathAttr(allowed_access=handled, parent_fd=fd)
             if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0) < 0:
                 raise OSError(ctypes.get_errno(), f"landlock_add_rule failed for {root}")
-        # /dev/null is a non-persistent sink used pervasively by ordinary shell
-        # commands (for example `command >/dev/null`).  Treating that redirection
-        # as a data write outside writableRoots makes scoped mode unnecessarily
-        # incompatible without strengthening the filesystem boundary.  Grant
-        # WRITE_FILE only to this single character device; no real directory or
-        # regular file outside writableRoots is made writable.
-        if os.path.exists("/dev/null"):
-            fd = os.open("/dev/null", getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+        # Runtime scratch is explicitly non-persistent.  Keep durable writes
+        # confined to writableRoots while preserving ordinary Linux process
+        # compatibility (tempfiles, multiprocessing shared memory, NCCL, etc.).
+        scratch_access = handled & ~(LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_BLOCK)
+        for scratch in landlock_runtime_scratch_paths():
+            fd = os.open(scratch, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
             opened.append(fd)
-            null_attr = LandlockPathBeneathAttr(allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE, parent_fd=fd)
-            if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(null_attr), 0) < 0:
-                raise OSError(ctypes.get_errno(), "landlock_add_rule failed for /dev/null")
+            scratch_attr = LandlockPathBeneathAttr(allowed_access=scratch_access, parent_fd=fd)
+            if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(scratch_attr), 0) < 0:
+                raise OSError(ctypes.get_errno(), f"landlock_add_rule failed for runtime scratch {scratch}")
+        # O_RDWR on character devices is seen by Landlock as WRITE_FILE.  GPU
+        # management/compute APIs (NVML/CUDA), PTYs and common sink/random
+        # devices require that access even though they do not represent durable
+        # filesystem writes.  Grant only WRITE_FILE to the allowlisted device
+        # inode itself; block devices and arbitrary /dev paths stay denied.
+        for device in landlock_runtime_device_paths():
+            fd = os.open(device, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+            opened.append(fd)
+            device_attr = LandlockPathBeneathAttr(allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE, parent_fd=fd)
+            if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(device_attr), 0) < 0:
+                raise OSError(ctypes.get_errno(), f"landlock_add_rule failed for runtime device {device}")
+        for directory in landlock_runtime_device_directories():
+            fd = os.open(directory, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+            opened.append(fd)
+            directory_attr = LandlockPathBeneathAttr(allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE, parent_fd=fd)
+            if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(directory_attr), 0) < 0:
+                raise OSError(ctypes.get_errno(), f"landlock_add_rule failed for runtime device directory {directory}")
         if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
             raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) failed")
         if libc.syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0) < 0:

@@ -29,12 +29,13 @@ const BASH = resolveBash();
 const agent = readFileSync(SOURCE_AGENT, "utf8");
 const installer = readFileSync(SOURCE_INSTALLER, "utf8");
 const remoteAgentStore = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "remote-agent-store.js"), "utf8");
+const remoteAgentManager = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "remote-agent-manager.js"), "utf8");
 
 assert.equal(readFileSync(PACKAGED_AGENT, "utf8"), agent, "installed Portable Agent must match maintained source");
 assert.equal(readFileSync(PACKAGED_INSTALLER, "utf8"), installer, "installed Portable installer must match maintained source");
 
 for (const contract of [
-  /AGENT_VERSION = "1\.1\.43"/,
+  /AGENT_VERSION = "1\.1\.46"/,
   /MAX_MESSAGE_BYTES = 8 \* 1024 \* 1024/,
   /TRANSFER_CHUNK_BYTES = 512 \* 1024/,
   /MAX_WATCHES = 64/,
@@ -51,11 +52,31 @@ for (const contract of [
   /def writable\(self, root: str, path: str \| None = None\)/,
   /def command_preexec_fn\(self\)/,
   /apply_write_landlock/,
-  /landlock_add_rule failed for \/dev\/null/,
+  /landlock_runtime_scratch_paths/,
+  /"\/tmp"/,
+  /"\/var\/tmp"/,
+  /"\/dev\/shm"/,
+  /"\/dev\/mqueue"/,
+  /landlock_runtime_device_paths/,
+  /landlock_runtime_device_directories/,
+  /"\/dev\/pts"/,
+  /"\/dev\/nvidiactl"/,
+  /"\/dev\/nvidia-uvm"/,
+  /"\/dev\/nvidia\[0-9\]\*"/,
+  /"\/dev\/dri\/renderD\[0-9\]\*"/,
+  /"\/dev\/kfd"/,
+  /"\/dev\/infiniband\/uverbs\*"/,
+  /"\/dev\/infiniband\/rdma_cm"/,
+  /statmod\.S_ISCHR/,
+  /scratch_access = handled & ~\(LANDLOCK_ACCESS_FS_MAKE_CHAR \| LANDLOCK_ACCESS_FS_MAKE_BLOCK\)/,
+  /allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE/,
+  /runtime device directory/,
   /access_mode.*full-access/,
 ]) {
   assert.match(agent, contract);
 }
+assert.doesNotMatch(agent, /landlock_runtime_device_paths[\s\S]*?"\/dev\/sd\*/);
+assert.doesNotMatch(agent, /landlock_runtime_device_paths[\s\S]*?"\/dev\/nvme\*/);
 
 for (const contract of [
   /INSTALL_DIR="\$STATE_DIR\/bin"/,
@@ -95,6 +116,8 @@ for (const contract of [
 }
 assert.doesNotMatch(installer, /curl is required/);
 assert.doesNotMatch(installer, /sha256sum is required/);
+assert.match(remoteAgentManager, /DEVSPACE_LINUX_AGENT_VERSION = "1\.1\.46"/);
+assert.match(remoteAgentManager, /message\.agentVersion !== DEVSPACE_LINUX_AGENT_VERSION.*?agent\.selfUpdate/s);
 
 const python = spawnSync("python", ["-c", [
   "import ast, pathlib, sys",
@@ -184,6 +207,9 @@ console.log(JSON.stringify({
   nonSystemdBackgroundFallback: true,
   scopedReadWriteSplit: true,
   fullAccessMode: true,
+  scopedRuntimeScratchCompatibility: true,
+  scopedAcceleratorDeviceCompatibility: true,
+  noBlockDeviceLandlockException: true,
   generatedInstallCommandRequiresSudo: false,
   installCommandKeepsInteractiveShellOpen: true,
   boundedRpcAndResources: true,

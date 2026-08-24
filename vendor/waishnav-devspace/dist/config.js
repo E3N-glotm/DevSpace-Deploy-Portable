@@ -104,6 +104,7 @@ function parseFeatures(env, fileFeatures = {}) {
         memories: booleanConfigValue(env.DEVSPACE_MEMORIES ?? fileFeatures.memories, true),
         hooks: booleanConfigValue(env.DEVSPACE_HOOKS ?? fileFeatures.hooks, true),
         uiSessionReview: booleanConfigValue(env.DEVSPACE_UI_SESSION_REVIEW ?? fileFeatures.uiSessionReview, true),
+        continuationGuard: booleanConfigValue(env.DEVSPACE_CONTINUATION_GUARD ?? fileFeatures.continuationGuard, true),
     };
 }
 function parseToolMode(env) {

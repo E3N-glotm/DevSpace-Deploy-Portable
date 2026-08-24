@@ -54,7 +54,9 @@ const MCP_SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1_000;
 const MCP_SESSION_CLEANUP_INTERVAL_MS = 60 * 1_000;
 const MCP_SESSION_MAX_ACTIVE = 32;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
+const CONTINUATION_GUARD_URI = "ui://devspace/continuation-guard.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+const CONTINUATION_GUARD_KINDS = new Set(["workspace", "runtime", "write", "edit"]);
 let structuredRuntimeState;
 const WRITE_TOOL_ANNOTATIONS = {
     readOnlyHint: false,
@@ -130,6 +132,19 @@ function toolWidgetDescriptorMeta(config, kind) {
         "openai/toolInvocation/invoked": status.invoked,
     };
     if (!shouldAttachWidget(config, kind)) {
+        if (config.features?.continuationGuard && CONTINUATION_GUARD_KINDS.has(kind)) {
+            return {
+                securitySchemes,
+                _meta: {
+                    ...baseMeta,
+                    ui: {
+                        resourceUri: CONTINUATION_GUARD_URI,
+                        visibility: ["model"],
+                    },
+                    "openai/outputTemplate": CONTINUATION_GUARD_URI,
+                },
+            };
+        }
         return {
             securitySchemes,
             _meta: baseMeta,
@@ -222,6 +237,9 @@ function serverInstructions(config) {
             : "",
         config.features?.uiSessionReview
             ? " show_changes also reports aggregate changes since the persisted workspace session captured its first structured-mutation baseline. Session rollback restores the tracked structured paths, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result. The same bounded sparse-journal model is used for local and remote-agent workspaces; arbitrary shell side effects outside tracked paths are not claimed as rollback-safe."
+            : "",
+        config.features?.continuationGuard
+            ? " For non-trivial multi-step work that may span a long assistant turn, use continuation_task action=begin early with the original objective and verifiable milestones. Use checkpoint only when objective progress or the failure strategy materially changes; use wait while an external condition is genuinely pending; call complete before the final response only after the original user goal is verified and provide concrete evidence. Do not mark a task complete merely because one substep finished. The MCP App may automatically request a follow-up after a host timeout only while the persisted task remains RUNNING; server-side continuation, wall-clock, no-progress, repeated-failure, cooldown, waiting-external, user-cancel, and duplicate-pending gates prevent unbounded loops."
             : "",
     ].join("");
     const compactActivityInstruction = " Keep tool calls task-driven and minimal because the client may expose every MCP invocation and its JSON arguments in a native activity panel. Do not call capabilities, doctor, session_list, session_resume, or show_changes merely to demonstrate or test the UI. Do not issue no-op diagnostics after the required result is already known. Use show_changes only once after actual file modifications.";
@@ -631,6 +649,24 @@ ${stylesheets}
   </body>
 </html>`;
 }
+function continuationGuardHtml(config) {
+    const baseUrl = assetBaseUrl(config);
+    const entry = getWorkspaceAppManifestEntry();
+    return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DevSpace Continuation Guard</title>
+    <style>
+      html, body, #app { width: 1px; height: 1px; min-height: 0; margin: 0; padding: 0; overflow: hidden; opacity: 0; pointer-events: none; }
+    </style>
+    <script type="module" crossorigin src="${assetUrl(baseUrl, "assets/continuation-guard.js")}"></script>
+    <script type="module" crossorigin src="${assetUrl(baseUrl, entry.file)}"></script>
+  </head>
+  <body><main id="app"></main></body>
+</html>`;
+}
 function appCsp(config) {
     const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
     return {
@@ -872,6 +908,7 @@ async function assertWorkspaceAppAssets() {
         entry.file,
         ...(entry.css ?? []),
         "assets/runtime-enhancements.js",
+        "assets/continuation-guard.js",
         "assets/runtime-enhancements.css",
         "assets/session-review.css",
         "assets/runtime-timeline.css",
@@ -1334,6 +1371,46 @@ function registerDoctorTool(server, config, processSessions, runtimeState) {
     });
 }
 function registerRuntimeStateTools(server, config, workspaces, runtimeState, fileWatches, permissionRules, remoteAgents) {
+    if (config.features?.continuationGuard) {
+        registerAppTool(server, "continuation_task", {
+            title: "Continuation task state",
+            description: "Persist and verify a multi-step DevSpace task across ChatGPT assistant turns. Use begin near the start of a non-trivial task, checkpoint only for meaningful progress/failure changes, wait while an external condition is pending, complete only after the original user goal is verified with evidence, and cancel/fail for real terminal states. The invisible MCP App uses claim-continuation/release-continuation internally to deduplicate automatic follow-ups and enforce loop budgets.",
+            inputSchema: {
+                action: z.enum(["begin", "begin-auto", "status", "checkpoint", "wait", "resume", "complete", "fail", "cancel", "claim-continuation", "release-continuation"]),
+                taskId: z.string().optional(),
+                workspaceId: z.string().optional(),
+                objective: z.string().max(4000).optional(),
+                requiredMilestones: z.array(z.string().max(160)).max(64).optional(),
+                completedMilestones: z.array(z.string().max(160)).max(64).optional(),
+                evidence: z.record(z.string(), z.unknown()).optional(),
+                progressFingerprint: z.string().max(512).optional(),
+                failureFingerprint: z.string().max(512).optional(),
+                waitingExternal: z.boolean().optional(),
+                note: z.string().max(2000).optional(),
+                terminal: z.boolean().optional(),
+                maxContinuations: z.number().int().min(1).max(100).optional(),
+                maxNoProgress: z.number().int().min(1).max(20).optional(),
+                maxSameFailure: z.number().int().min(1).max(20).optional(),
+                wallClockMinutes: z.number().int().min(10).max(1440).optional(),
+            },
+            outputSchema: resultOutputSchema({
+                task: z.unknown().optional(),
+                accepted: z.boolean().optional(),
+                created: z.boolean().optional(),
+                upgraded: z.boolean().optional(),
+                reason: z.string().optional(),
+                missingMilestones: z.array(z.string()).optional(),
+            }),
+            annotations: EDIT_TOOL_ANNOTATIONS,
+        }, async (input, { _meta } = {}) => {
+            if (input.workspaceId)
+                workspaces.getWorkspace(input.workspaceId);
+            const conversationScopeId = openAiConversationScopeId(_meta) ?? "host-scope-unavailable";
+            const outcome = runtimeState.continuationTask({ ...input, conversationScopeId });
+            const result = JSON.stringify(outcome, null, 2);
+            return { content: [textBlock(result)], structuredContent: { result, ...outcome } };
+        });
+    }
     registerAppTool(server, "event_poll", {
         title: "Poll events",
         description: "Read ordered DevSpace events after a sequence cursor. Events cover process lifecycle, file changes, watches, and permission audits.",
@@ -1530,6 +1607,30 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             ],
         };
     });
+    if (config.features?.continuationGuard) {
+        registerAppResource(server, "DevSpace Continuation Guard", CONTINUATION_GUARD_URI, {
+            description: "Invisible MCP App lifecycle guard for durable unfinished-task continuation.",
+            _meta: {
+                ui: {
+                    prefersBorder: false,
+                    csp: appCsp(config),
+                },
+                "openai/widgetDescription": "DevSpace continuation guard.",
+                "openai/widgetPrefersBorder": false,
+            },
+        }, async () => ({
+            contents: [{
+                    uri: CONTINUATION_GUARD_URI,
+                    mimeType: RESOURCE_MIME_TYPE,
+                    text: continuationGuardHtml(config),
+                    _meta: {
+                        ui: { prefersBorder: false, csp: appCsp(config) },
+                        "openai/widgetDescription": "DevSpace continuation guard.",
+                        "openai/widgetPrefersBorder": false,
+                    },
+                }],
+        }));
+    }
     registerDoctorTool(server, config, processSessions, runtimeServices.runtimeState);
     registerRuntimeStateTools(server, config, workspaces, runtimeServices.runtimeState, runtimeServices.fileWatches, runtimeServices.permissionRules, runtimeServices.remoteAgents);
     registerPluginManagementTools(server, config, workspaces, runtimeServices.pluginManager);

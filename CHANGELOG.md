@@ -2,6 +2,15 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.46
+
+- 新增持久化 Continuation Task Controller 与隐藏 MCP App guard：正式 `ui/message` 自动续轮、timeout/watchdog 双触发、原子 dedupe、continuation/wall-clock/no-progress/same-failure/cooldown 多重预算，以及 milestone+evidence 完成门。
+- 修复 scoped Remote Agent Landlock 对 NVIDIA GPU character devices 的误拦截，解决 SSH `nvidia-smi` 正常但 Remote Agent 子进程 NVML/CUDA 初始化失败的问题。
+- 将 `/tmp`、共享内存、user runtime dir、动态 `/dev/pts/<n>` PTY slave 以及 NVIDIA/DRM/KFD/RDMA character devices 纳入严格限定的 runtime compatibility allowlist；持久写入仍只能落在 writableRoots。
+- Remote Agent manager 的目标 Agent 版本同步提升到 1.1.46，旧 1.1.43 Agent 重新连接 1.1.46 控制端后可通过既有 `agent.selfUpdate` 链自动升级并重启。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.46.md)
+
 ## 1.1.45
 
 - Blockmap Range 线路按“镜像站 → Windows/显式代理 → 官方直连”分级选择，每一级内部按 1 MiB 实测吞吐排序；真实 Range 失败后重新探测并自动进入下一优先级。

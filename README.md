@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.45**
+当前稳定版本：**1.1.46**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.45.zip
+DevSpacePortable-Windows-x64-1.1.46.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -343,6 +343,16 @@ https://你的域名/mcp
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.46 主要变化
+
+- **新增 Continuation Guard / Task Controller。** 非平凡 DevSpace 任务可以持久化 objective、里程碑、证据、进度/失败 fingerprint 和续轮预算；ChatGPT Host 超时或接近单轮时间上限时，MCP App 优先通过正式 `ui/message` 请求续轮，并以 `sendFollowUpMessage` 作为兼容 fallback，不使用 DOM 模拟输入框。
+- **自动续轮加入完整防死循环门控。** `WAITING_EXTERNAL`、用户取消、已完成/终止状态不会续轮；SQLite 原子 claim 防重复消息，并限制 continuation 次数、wall-clock、no-progress、same-failure 和 60 秒 cooldown。`complete` 必须满足 required milestones 且提供 evidence，避免一个子步骤结束就误判整项任务完成。
+- **修复 scoped Remote Agent 把正常 GPU 错判成 NVML/CUDA 故障。** 根因是 Landlock `WRITE_FILE` 会拦截 NVML/CUDA 对 `/dev/nvidia*` 的 `O_RDWR`，导致 SSH 正常而 Agent 子进程 `nvidia-smi` 报 `Failed to initialize NVML: Unknown Error`。1.1.46 只对存在的 accelerator/terminal/random character devices 恢复必要 `WRITE_FILE`，不开放 block devices 或任意 `/dev` 写入。
+- **补齐 scoped Linux 运行时兼容边界。** `/tmp`、`/var/tmp`、`/dev/shm`、`/dev/mqueue`、`XDG_RUNTIME_DIR`/`/run/user/<uid>` 被视为非持久 runtime scratch；同时覆盖 NVIDIA、DRM/KFD、常见 InfiniBand/RDMA character devices 以及动态 `/dev/pts/<n>` PTY slave，使 `tty=true`、screen/tmux、Python multiprocessing、PyTorch/CUDA、NCCL/共享内存等行为与同一 Linux 用户的 SSH shell 一致，而持久项目写入仍受 writableRoots 约束。
+- **1.1.46 控制端会主动把旧 Remote Agent 自更新到 1.1.46。** Remote Agent manager 的目标版本同步提升到 1.1.46；已登记且支持 autoUpdate 的 1.1.43 Agent 在重新连接 1.1.46 控制端后会走现有 `agent.selfUpdate` 校验链并原位重启，不要求用户重新注册 Agent。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.46.md)
 
 ## 1.1.45 主要变化
 

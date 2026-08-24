@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.45";
+export const DEVSPACE_SERVER_VERSION = "1.1.46";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -141,6 +141,10 @@ const FEATURE_CATALOG = [
     { id: "github-updater-blockmap-priority-routing", maturity: "stable", since: "1.1.45" },
     { id: "github-updater-blockmap-segmented-header", maturity: "stable", since: "1.1.45" },
     { id: "github-updater-stage-single-flight", maturity: "stable", since: "1.1.45" },
+    { id: "mcp-continuation-task-controller", maturity: "stable", since: "1.1.46" },
+    { id: "mcp-ui-auto-continuation-guard", maturity: "stable", since: "1.1.46" },
+    { id: "remote-agent-runtime-device-compatibility", maturity: "stable", since: "1.1.46" },
+    { id: "remote-agent-ephemeral-runtime-scratch", maturity: "stable", since: "1.1.46" },
 ];
 
 export function buildCapabilities(config, pluginManager) {

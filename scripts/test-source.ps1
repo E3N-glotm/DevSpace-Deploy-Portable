@@ -81,6 +81,7 @@ $Tests = @(
     "setup/test-upstream-workspace-reuse.mjs",
     "setup/test-remote-workspace-backend.mjs",
     "setup/test-linux-agent-contract.mjs",
+    "setup/test-continuation-guard.mjs",
     "setup/test-remote-agent-ssh-rescue.mjs",
     "setup/test-session-capabilities.mjs",
     "setup/test-portable-ui-heartbeat.mjs",

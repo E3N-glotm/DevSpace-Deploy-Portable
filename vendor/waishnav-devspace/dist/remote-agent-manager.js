@@ -6,7 +6,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createRemoteAgentStore } from "./remote-agent-store.js";
 
 export const DEVSPACE_REMOTE_AGENT_PROTOCOL = 1;
-export const DEVSPACE_LINUX_AGENT_VERSION = "1.1.43";
+export const DEVSPACE_LINUX_AGENT_VERSION = "1.1.46";
 const AGENT_PATH = "/agent/v1/connect";
 const MAX_RPC_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;

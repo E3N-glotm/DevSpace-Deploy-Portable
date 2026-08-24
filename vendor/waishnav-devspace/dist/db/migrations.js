@@ -59,6 +59,11 @@ const migrations = [
         name: "remote-agent-access-model",
         up: migrateRemoteAgentAccessModel,
     },
+    {
+        version: 13,
+        name: "continuation-task-controller",
+        up: migrateContinuationTasks,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -426,6 +431,42 @@ function migrateRemoteAgentAccessModel(sqlite) {
     addColumnIfMissing(sqlite, "remote_agents", "install_root", "text");
     addColumnIfMissing(sqlite, "remote_agent_enrollments", "access_mode", "text not null default 'scoped'");
     addColumnIfMissing(sqlite, "remote_agent_enrollments", "install_root", "text");
+}
+function migrateContinuationTasks(sqlite) {
+    sqlite.exec(`
+    create table if not exists continuation_tasks (
+      id text primary key,
+      conversation_scope_id text not null,
+      workspace_id text,
+      objective text not null,
+      state text not null,
+      required_milestones_json text not null default '[]',
+      completed_milestones_json text not null default '[]',
+      evidence_json text not null default '{}',
+      progress_fingerprint text,
+      failure_fingerprint text,
+      continuation_count integer not null default 0,
+      no_progress_count integer not null default 0,
+      same_failure_count integer not null default 0,
+      max_continuations integer not null default 5,
+      max_no_progress integer not null default 2,
+      max_same_failure integer not null default 2,
+      continuation_pending integer not null default 0,
+      waiting_reason text,
+      terminal_reason text,
+      deadline_at text,
+      turn_started_at text,
+      last_continuation_at text,
+      created_at text not null,
+      updated_at text not null
+    );
+
+    create index if not exists continuation_tasks_workspace_state_idx
+      on continuation_tasks(conversation_scope_id, workspace_id, state, updated_at desc);
+
+    create index if not exists continuation_tasks_state_updated_idx
+      on continuation_tasks(state, updated_at desc);
+  `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {
     const columns = sqlite.prepare(`pragma table_info(${table})`).all();
