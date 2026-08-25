@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.47**
+当前稳定版本：**1.1.48**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -12,7 +12,7 @@ Portable Protocol：**1.5**
 
 > 上图为 DevSpace Portable Windows 原生控制中心的实际界面截图；公开文档中的截图不展示 Token、Owner Password 等敏感认证信息。
 
-控制中心左侧主要页面分别用于：**状态与部署**（服务/隧道/更新/诊断）、**配置与权限**（公网域名、Token、工作目录和权限）、**远程服务器**（Linux Agent、SSH 救援与安装）、**插件管理**、**会话与回退**、**显式 Memories**、**日志与诊断**；右上角的 Computer Use 开关只控制桌面操作能力，不会替代目录/命令权限配置。
+控制中心左侧主要页面分别用于：**状态与部署**（服务/隧道/更新/诊断）、**配置与权限**（公网域名、Token、工作目录和权限）、**远程服务器**（Linux Agent、SSH 救援与安装）、**插件管理**、**续轮任务**（Continuation 状态、Owner 锁、手动结束/恢复）、**会话与回退**、**显式 Memories**、**日志与诊断**；右上角的 Computer Use 开关只控制桌面操作能力，不会替代目录/命令权限配置。
 
 ## 这个项目是做什么的
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.47.zip
+DevSpacePortable-Windows-x64-1.1.48.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -343,6 +343,18 @@ https://你的域名/mcp
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.48 主要变化
+
+- **续轮任务现在有独立的 Owner 控制面板。** 控制中心在“插件管理”和“会话与回退”之间新增“续轮任务 / CONTINUATION”，直接显示 task 是否已开始、当前状态、目标、里程碑完成度、续轮次数、最近活动、等待原因和 Owner 锁；支持锁定/解锁、手动结束和恢复。
+- **“锁定”表示任务不能被模型或自动预算提前结束，但 Owner 仍可手动停止。** 锁定后，模型侧 `complete/cancel`、terminal failure、no-progress/same-failure 和 continuation/wall-clock budget 都不能把任务变成 terminal；本机控制中心的 Owner stop 始终保留，因此不会出现锁死后本人也无法结束的问题。
+- **修复正常 assistant turn 结束时没有自动续轮。** 1.1.47 主要依靠 watched process、Host timeout/teardown 和学习到的 turn budget；若模型正常结束一轮、忘记额外登记 `watch-process`，task 会保持 `RUNNING` 却没有 wake。1.1.48 会把仍在运行的 durable `exec_command` 自动绑定到当前 conversation/workspace 的 continuation task，并在 Workspace App 正常 teardown 时检查 required milestones；只要任务仍为 `RUNNING` 且里程碑未完成，就主动请求下一轮。
+- **自动续轮仍不依赖固定 25 分钟。** 非平凡多步工作先通过一次 `continuation_anchor` 建立持久 task；之后由 durable process completion、Host timeout/teardown、持久 wake 和真实 timeout 学习出的 host budget 自动驱动。显式 `WAITING_EXTERNAL`、Owner 手动结束以及 terminal 状态会阻止无意义续轮。
+- **修复 Web 卡片偶发只显示 `Waiting for a tool result.`。** Workspace App 现在在模块初始化前先缓存 Host 发来的 initialize/tool-input/tool-result，再在 UI 与 coordinator listener 就绪后重放，避免 ChatGPT Host 比 iframe JavaScript listener 更早发出一次性 tool-result 时造成永久空卡。
+- **卡片继续以聚合视图为默认。** 普通 `read/exec/write/edit/process` 默认不各自挂一张 Workspace App；文件修改集中到一次 `show_changes` 卡片。Continuation 使用一张可展开专属卡片持续展示 task 状态、Owner 锁、milestones、continuation count 和 wake/ACK，而不是每个 status/checkpoint 都新增一张卡片。
+- Protocol 仍为 **1.5**；本版本没有改变 Linux Remote Agent 的协议或 scoped/full-access 权限模型。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.48.md)
 
 ## 1.1.47 主要变化
 

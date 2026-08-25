@@ -79,6 +79,14 @@ function terminal(task) {
   return !task || TERMINAL_STATES.has(task.state);
 }
 
+function hasUnfinishedMilestones(task) {
+  if (!task || terminal(task)) return false;
+  const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
+  if (required.length === 0) return Boolean(task.ownerLocked);
+  const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
+  return required.some((milestone) => !completed.has(milestone));
+}
+
 function taskElapsedMs(task) {
   const raw = task?.turnStartedAt ?? task?.updatedAt;
   const started = Date.parse(raw || "");
@@ -155,6 +163,11 @@ function renderRecoveryStatus(controller, message, tone = "info", allowManual = 
   }
 }
 
+function publishTaskForCard(task) {
+  if (!task || typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("devspace:continuation-task", { detail: task }));
+}
+
 export function installContinuationCoordinator(app, options = {}) {
   if (!app || typeof app.addEventListener !== "function") throw new Error("A connected MCP Apps App instance is required.");
 
@@ -194,7 +207,10 @@ export function installContinuationCoordinator(app, options = {}) {
       },
     });
     const outcome = normalizeTaskOutcome(result);
-    if (outcome?.task) state.task = outcome.task;
+    if (outcome?.task) {
+      state.task = outcome.task;
+      publishTaskForCard(state.task);
+    }
     return outcome;
   }
 
@@ -460,7 +476,10 @@ export function installContinuationCoordinator(app, options = {}) {
     state.currentTool = params?._meta?.tool ?? state.currentTool;
     state.workspaceId = workspaceFromResult(params) || state.workspaceId;
     const resultTask = taskFromResult(params);
-    if (resultTask) state.task = resultTask;
+    if (resultTask) {
+      state.task = resultTask;
+      publishTaskForCard(state.task);
+    }
     void ensureTask();
   }
 
@@ -507,8 +526,14 @@ export function installContinuationCoordinator(app, options = {}) {
       const timedOut = /timeout|deadline|budget/i.test(reason);
       await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
       const recommended = recommendedContinueAfterMs(state.task);
-      if (timedOut || (recommended && taskElapsedMs(state.task) >= recommended)) {
-        await attemptContinuation(timedOut ? `host teardown: ${reason}` : "adaptive teardown recovery", { force: true });
+      const unfinishedActiveTask = state.task?.state === "RUNNING" && hasUnfinishedMilestones(state.task);
+      if (timedOut || unfinishedActiveTask || (recommended && taskElapsedMs(state.task) >= recommended)) {
+        const continuationReason = timedOut
+          ? `host teardown: ${reason}`
+          : unfinishedActiveTask
+            ? "unfinished task after host teardown"
+            : "adaptive teardown recovery";
+        await attemptContinuation(continuationReason, { force: true });
       }
       controller.dispose();
     },

@@ -4,7 +4,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const node = join(root, "runtime", "node", "node.exe");
@@ -77,6 +77,29 @@ writeFileSync(join(configDir, "deployment.json"), JSON.stringify({
 
 let firstUi;
 try {
+  // Portable owner UI must be able to inspect, lock and explicitly stop a
+  // continuation task through portable-manager without relying on ChatGPT.
+  const runtimeStatePath = join(root, "app", "node_modules", "@waishnav", "devspace", "dist", "runtime-state.js");
+  const { StructuredRuntimeState } = await import(`${pathToFileURL(runtimeStatePath).href}?owner-ui=${Date.now()}`);
+  const continuationRuntime = new StructuredRuntimeState(stateDir);
+  const ownerTask = continuationRuntime.continuationTask({
+    action: "begin",
+    conversationScopeId: "native-ui-owner-test",
+    workspaceId: "ws_native_owner",
+    objective: "verify owner continuation controls",
+    requiredMilestones: ["lock", "stop"],
+  });
+  const initialTasks = manager("continuation-list", { includeTerminal: true });
+  assert.ok(initialTasks.tasks.some((task) => task.id === ownerTask.task.id));
+  const lockedTask = manager("continuation-lock", { taskId: ownerTask.task.id });
+  assert.equal(lockedTask.task.ownerLocked, true);
+  assert.equal(continuationRuntime.continuationTask({ action: "cancel", taskId: ownerTask.task.id }).reason, "task-owner-locked");
+  const stoppedTask = manager("continuation-stop", { taskId: ownerTask.task.id });
+  assert.equal(stoppedTask.task.state, "CANCELLED_BY_USER");
+  assert.equal(stoppedTask.task.terminalReason, "owner-stopped");
+  assert.equal(stoppedTask.task.continuationWakePending, false);
+  continuationRuntime.close?.();
+
   // A deleted lease must be replaced automatically by the next heartbeat.
   const firstLease = manager("ui-open");
   rmSync(join(runDir, "ui-session.json"), { force: true });
@@ -126,6 +149,7 @@ try {
     disabledBroker: true,
     sharedLogRead: true,
     singleInstanceLease: true,
+    continuationOwnerControls: true,
   }));
 } finally {
   if (firstUi && firstUi.pid) {

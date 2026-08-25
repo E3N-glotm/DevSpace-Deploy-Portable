@@ -4388,12 +4388,14 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private readonly RichTextBox _tunnelLog = CreateLogBox();
         private readonly DataGridView _pluginGrid = CreateGrid();
         private readonly DataGridView _slotGrid = CreateGrid();
+        private readonly DataGridView _continuationGrid = CreateGrid();
         private readonly DataGridView _sessionGrid = CreateGrid();
         private readonly DataGridView _fileGrid = CreateGrid();
         private readonly BorderlessTabControl _sessionPages = new BorderlessTabControl();
         private readonly DataGridView _memoryGrid = CreateGrid();
         private readonly System.Windows.Forms.Timer _heartbeatTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _statusTimer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer _continuationTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _noticeTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _computerUseTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _computerUseIndicatorTimer = new System.Windows.Forms.Timer();
@@ -4411,6 +4413,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private bool _closingForUpdate;
         private bool _trayNoticeShown;
         private bool _sessionListLoading;
+        private bool _continuationListLoading;
         private bool _memoryListLoading;
         private bool _loadingConfiguration;
         private bool _dashboardStatusBusy;
@@ -4418,6 +4421,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private Dictionary<string, object> _currentConfig = new Dictionary<string, object>();
         private Dictionary<string, object> _selectedSessionDetails = new Dictionary<string, object>();
         private List<Dictionary<string, object>> _allSessions = new List<Dictionary<string, object>>();
+        private List<Dictionary<string, object>> _allContinuationTasks = new List<Dictionary<string, object>>();
         private List<Dictionary<string, object>> _allMemories = new List<Dictionary<string, object>>();
         private readonly HashSet<string> _expandedSessionGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, int> _dashboardProblemCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -4452,6 +4456,8 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private CheckBox _showArchived;
         private CheckBox _showEmptySessions;
         private Label _sessionSummary;
+        private Label _continuationSummary;
+        private CheckBox _showTerminalContinuations;
         private Label _sessionDetailTitle;
         private Label _sessionDetailMeta;
         private TextBox _memorySearch;
@@ -4489,6 +4495,8 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _heartbeatTimer.Tick += async delegate { await HeartbeatAsync(); };
             _statusTimer.Interval = 3000;
             _statusTimer.Tick += async delegate { await RefreshDashboardStatusAsync(); };
+            _continuationTimer.Interval = 5000;
+            _continuationTimer.Tick += async delegate { await LoadContinuationsAsync(false); };
             _noticeTimer.Interval = 9000;
             _noticeTimer.Tick += delegate { _noticeTimer.Stop(); _inlineNotice.Dismiss(); };
             _computerUseTimer.Interval = 15;
@@ -4626,6 +4634,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _tabs.TabPages.Add(BuildConfigurationTab());
             _tabs.TabPages.Add(BuildRemoteAgentsTab());
             _tabs.TabPages.Add(BuildPluginsTab());
+            _tabs.TabPages.Add(BuildContinuationsTab());
             _tabs.TabPages.Add(BuildSessionsTab());
             _tabs.TabPages.Add(BuildMemoriesTab());
             _tabs.TabPages.Add(BuildLogsTab());
@@ -4692,9 +4701,10 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             AddNavigation(navStack, 1, "配置与权限", "SETTINGS", 1);
             AddNavigation(navStack, 5, "远程服务器", "LINUX AGENTS", 2);
             AddNavigation(navStack, 2, "插件管理", "EXTENSIONS", 3);
-            AddNavigation(navStack, 3, "会话与回退", "REVIEW", 4);
-            AddNavigation(navStack, 4, "显式 Memories", "MEMORIES", 5);
-            AddNavigation(navStack, 6, "日志与诊断", "DIAGNOSTICS", 6);
+            AddNavigation(navStack, 7, "续轮任务", "CONTINUATION", 4);
+            AddNavigation(navStack, 3, "会话与回退", "REVIEW", 5);
+            AddNavigation(navStack, 4, "显式 Memories", "MEMORIES", 6);
+            AddNavigation(navStack, 6, "日志与诊断", "DIAGNOSTICS", 7);
             Action fitNavigationButtons = delegate
             {
                 int available = Math.Max(120, navStack.ClientSize.Width - 8);
@@ -4725,7 +4735,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.47 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.48 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5061,6 +5071,60 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             return page;
         }
 
+        private TabPage BuildContinuationsTab()
+        {
+            TabPage page = new TabPage("续轮任务");
+            TableLayoutPanel layout = NewTable(1, 3);
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            FlowLayoutPanel actions = NewButtonBar();
+            actions.Controls.Add(ActionButton("刷新任务", async delegate { await LoadContinuationsAsync(true); }, true));
+            actions.Controls.Add(ActionButton("锁定 / 解锁", async delegate { await ToggleContinuationLockAsync(); }));
+            actions.Controls.Add(ActionButton("手动结束", async delegate { await StopSelectedContinuationAsync(); }, false, true));
+            actions.Controls.Add(ActionButton("恢复任务", async delegate { await ResumeSelectedContinuationAsync(); }));
+            _showTerminalContinuations = new CheckBox
+            {
+                Text = "显示已结束任务",
+                Checked = true,
+                AutoSize = true,
+                ForeColor = UiPalette.TextMuted,
+                BackColor = Color.Transparent,
+                Margin = new Padding(12, 11, 4, 4),
+            };
+            _showTerminalContinuations.CheckedChanged += async delegate { await LoadContinuationsAsync(true); };
+            actions.Controls.Add(_showTerminalContinuations);
+            layout.Controls.Add(actions, 0, 0);
+
+            _continuationSummary = new Label
+            {
+                Dock = DockStyle.Fill,
+                AutoEllipsis = true,
+                Padding = new Padding(14, 10, 14, 10),
+                BackColor = UiPalette.Surface,
+                ForeColor = UiPalette.Text,
+                Font = UiTypography.Ui(9.25F),
+                Text = "自动续轮任务尚未读取。非简单多步骤任务由模型显式挂载一次任务锚点；挂载后由 Workspace App 根据进程事件、宿主超时信号和学习到的轮次预算自动续轮。",
+            };
+            layout.Controls.Add(_continuationSummary, 0, 1);
+
+            _continuationGrid.AutoGenerateColumns = false;
+            _continuationGrid.MultiSelect = false;
+            _continuationGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            _continuationGrid.Columns.Clear();
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationState", HeaderText = "状态", Width = 132 });
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationLocked", HeaderText = "锁定", Width = 72 });
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationProgress", HeaderText = "里程碑", Width = 112 });
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationTurns", HeaderText = "续轮", Width = 84 });
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationUpdated", HeaderText = "最近活动", Width = 158 });
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationObjective", HeaderText = "任务目标", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 320 });
+            _continuationGrid.SelectionChanged += delegate { RenderContinuationSummary(); };
+            layout.Controls.Add(WrapSurface(_continuationGrid), 0, 2);
+            page.Controls.Add(layout);
+            return page;
+        }
+
         private TabPage BuildSessionsTab()
         {
             TabPage page = new TabPage("会话与回退");
@@ -5391,11 +5455,13 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 await AcquireLeaseAsync();
                 _heartbeatTimer.Start();
                 _statusTimer.Start();
+                _continuationTimer.Start();
                 _computerUseTimer.Start();
                 _computerUseIndicatorTimer.Start();
                 _remoteAgentRecoveryTimer.Start();
                 await LoadConfigurationAsync();
                 await LoadPluginsAsync();
+                await LoadContinuationsAsync(false);
                 await LoadSessionsAsync();
                 await LoadMemoriesAsync();
                 await LoadLogsAsync();
@@ -5516,7 +5582,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.47") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.48") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -5913,6 +5979,127 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private async Task UnbindSlotAsync()
         {
             await ExecuteBusyAsync(async delegate { await _manager.RunJsonAsync("plugin-slot-unbind", new { slot = Convert.ToInt32(_slotNumber.SelectedItem) }); await LoadPluginsAsync(); });
+        }
+
+        private static bool ContinuationTerminal(string state)
+        {
+            return new[] { "SUCCEEDED", "FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED" }
+                .Contains(state ?? "", StringComparer.OrdinalIgnoreCase);
+        }
+
+        private Dictionary<string, object> SelectedContinuation()
+        {
+            if (_continuationGrid.SelectedRows.Count != 1) return new Dictionary<string, object>();
+            return _continuationGrid.SelectedRows[0].Tag as Dictionary<string, object> ?? new Dictionary<string, object>();
+        }
+
+        private async Task LoadContinuationsAsync(bool selectPage)
+        {
+            if (_continuationListLoading) return;
+            _continuationListLoading = true;
+            string selectedId = GetString(SelectedContinuation(), "id");
+            try
+            {
+                Dictionary<string, object> value = await _manager.RunJsonAsync("continuation-list", new
+                {
+                    includeTerminal = _showTerminalContinuations == null || _showTerminalContinuations.Checked,
+                    limit = 300,
+                });
+                _allContinuationTasks = GetDictionaryList(value, "tasks");
+                _continuationGrid.Rows.Clear();
+                foreach (Dictionary<string, object> task in _allContinuationTasks)
+                {
+                    int completed = GetInt(task, "progressCompleted");
+                    int required = GetInt(task, "progressRequired");
+                    string updated = GetString(task, "lastActivityAt", GetString(task, "updatedAt"));
+                    DateTime parsed;
+                    if (DateTime.TryParse(updated, out parsed)) updated = parsed.ToLocalTime().ToString("MM-dd HH:mm:ss");
+                    int row = _continuationGrid.Rows.Add(
+                        GetString(task, "state"),
+                        GetBool(task, "ownerLocked") ? "已锁定" : "—",
+                        completed + "/" + required,
+                        GetInt(task, "continuationCount") + "/" + GetInt(task, "maxContinuations"),
+                        updated,
+                        GetString(task, "objective"));
+                    _continuationGrid.Rows[row].Tag = task;
+                }
+                if (!string.IsNullOrWhiteSpace(selectedId))
+                {
+                    foreach (DataGridViewRow row in _continuationGrid.Rows)
+                    {
+                        Dictionary<string, object> task = row.Tag as Dictionary<string, object>;
+                        if (GetString(task, "id") != selectedId) continue;
+                        row.Selected = true;
+                        _continuationGrid.CurrentCell = row.Cells[0];
+                        break;
+                    }
+                }
+                if (_continuationGrid.SelectedRows.Count == 0 && _continuationGrid.Rows.Count > 0)
+                {
+                    _continuationGrid.Rows[0].Selected = true;
+                    _continuationGrid.CurrentCell = _continuationGrid.Rows[0].Cells[0];
+                }
+                RenderContinuationSummary();
+                if (selectPage) SelectPage(4);
+            }
+            catch (Exception ex)
+            {
+                if (_continuationSummary != null) _continuationSummary.Text = "续轮任务读取失败：" + FirstLine(ex.Message);
+            }
+            finally { _continuationListLoading = false; }
+        }
+
+        private void RenderContinuationSummary()
+        {
+            if (_continuationSummary == null) return;
+            Dictionary<string, object> task = SelectedContinuation();
+            if (task.Count == 0)
+            {
+                _continuationSummary.Text = "当前没有可显示的续轮任务。自动续轮不会因为接近一个固定分钟数就凭空创建任务；非简单多步骤工作会先挂载一次持久任务锚点，之后由事件、宿主信号和学习到的轮次预算自动接力。";
+                return;
+            }
+            string state = GetString(task, "state");
+            string lockText = GetBool(task, "ownerLocked") ? "已锁定（助手和自动守卫不能终止）" : "未锁定";
+            string pending = GetBool(task, "continuationDeliveryAwaitingAck") ? " · 等待新轮 ACK"
+                : GetBool(task, "continuationWakePending") ? " · 已产生续轮唤醒"
+                : GetBool(task, "continuationPending") ? " · 正在续轮" : "";
+            string wait = GetString(task, "waitingReason");
+            _continuationSummary.Text =
+                state + pending + "  ·  " + lockText + "  ·  里程碑 " + GetInt(task, "progressCompleted") + "/" + GetInt(task, "progressRequired") +
+                "  ·  续轮 " + GetInt(task, "continuationCount") + "/" + GetInt(task, "maxContinuations") + Environment.NewLine +
+                GetString(task, "objective") + (string.IsNullOrWhiteSpace(wait) ? "" : Environment.NewLine + "等待原因：" + wait);
+        }
+
+        private async Task ToggleContinuationLockAsync()
+        {
+            Dictionary<string, object> task = SelectedContinuation();
+            string id = GetString(task, "id");
+            if (string.IsNullOrWhiteSpace(id)) return;
+            string command = GetBool(task, "ownerLocked") ? "continuation-unlock" : "continuation-lock";
+            await _manager.RunJsonAsync(command, new { taskId = id });
+            await LoadContinuationsAsync(true);
+        }
+
+        private async Task StopSelectedContinuationAsync()
+        {
+            Dictionary<string, object> task = SelectedContinuation();
+            string id = GetString(task, "id");
+            if (string.IsNullOrWhiteSpace(id) || ContinuationTerminal(GetString(task, "state"))) return;
+            if (MessageBox.Show(this,
+                "确定手动结束这个续轮任务吗？这会清除待发送的 continuation wake 和进程 watch，但不会强杀该任务启动的普通系统进程。即使任务已锁定，Owner 手动结束仍然生效。",
+                "结束续轮任务", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            await _manager.RunJsonAsync("continuation-stop", new { taskId = id });
+            await LoadContinuationsAsync(true);
+        }
+
+        private async Task ResumeSelectedContinuationAsync()
+        {
+            Dictionary<string, object> task = SelectedContinuation();
+            string id = GetString(task, "id");
+            if (string.IsNullOrWhiteSpace(id)) return;
+            if (!ContinuationTerminal(GetString(task, "state")) && !string.Equals(GetString(task, "state"), "FAILED_RETRYABLE", StringComparison.OrdinalIgnoreCase)) return;
+            await _manager.RunJsonAsync("continuation-resume", new { taskId = id });
+            await LoadContinuationsAsync(true);
         }
 
         private async Task LoadSessionsAsync()

@@ -66,7 +66,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.47";
+const PORTABLE_VERSION = "1.1.48";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -1402,6 +1402,95 @@ async function runMemoryAdmin(action, payload = {}) {
       return { memory: store.delete(String(payload.id || "")) };
     }
     throw new Error(`Unsupported memory admin action: ${action}`);
+  } finally {
+    database.close();
+  }
+}
+
+async function runContinuationAdmin(action, payload = {}) {
+  if (!fs.existsSync(DATABASE_CLIENT_FILE)) {
+    throw new Error("Continuation runtime is missing from the bundled DevSpace package.");
+  }
+  const databaseModule = await import(`${pathToFileURL(DATABASE_CLIENT_FILE).href}?mtime=${fs.statSync(DATABASE_CLIENT_FILE).mtimeMs}`);
+  const database = databaseModule.openDatabase(STATE_DIR);
+  const parse = (value, fallback) => {
+    try { return JSON.parse(String(value || "")); } catch { return fallback; }
+  };
+  const taskFromRow = (row) => {
+    const required = parse(row.required_milestones_json, []);
+    const completed = parse(row.completed_milestones_json, []);
+    return {
+      id: row.id,
+      workspaceId: row.workspace_id || "",
+      objective: row.objective,
+      state: row.state,
+      requiredMilestones: required,
+      completedMilestones: completed,
+      evidence: parse(row.evidence_json, {}),
+      continuationCount: Number(row.continuation_count || 0),
+      maxContinuations: Number(row.max_continuations || 0),
+      noProgressCount: Number(row.no_progress_count || 0),
+      maxNoProgress: Number(row.max_no_progress || 0),
+      continuationPending: [1, 3, 4].includes(Number(row.continuation_pending || 0)),
+      continuationWakePending: [2, 3, 4].includes(Number(row.continuation_pending || 0)),
+      continuationDeliveryAwaitingAck: Number(row.continuation_pending || 0) === 4,
+      ownerLocked: Boolean(row.owner_locked),
+      ownerLockedAt: row.owner_locked_at || "",
+      ownerControlNote: row.owner_control_note || "",
+      waitingReason: row.waiting_reason || "",
+      terminalReason: row.terminal_reason || "",
+      deadlineAt: row.deadline_at || "",
+      lastActivityAt: row.last_activity_at || row.updated_at,
+      lastContinuationAt: row.last_continuation_at || "",
+      lastSendAttemptAt: row.last_send_attempt_at || "",
+      lastSendResult: parse(row.last_send_result, {}),
+      watchProcessHandles: parse(row.watch_process_handles_json, []),
+      progressCompleted: completed.length,
+      progressRequired: required.length,
+      progressPercent: required.length ? Math.min(100, Math.round(completed.length * 100 / required.length)) : 0,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  };
+  try {
+    if (action === "list") {
+      const limit = Math.max(1, Math.min(Number(payload.limit || 200), 1000));
+      const includeTerminal = payload.includeTerminal !== false;
+      const where = includeTerminal ? "" : "where state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED')";
+      const rows = database.sqlite.prepare(`select * from continuation_tasks ${where} order by updated_at desc limit ?`).all(limit);
+      return {
+        tasks: rows.map(taskFromRow),
+        activeCount: rows.filter((row) => !new Set(['SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED']).has(row.state)).length,
+      };
+    }
+    const taskId = String(payload.taskId || "").trim();
+    if (!taskId) throw new Error("taskId is required.");
+    const row = database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
+    if (!row) throw new Error(`Continuation task not found: ${taskId}`);
+    const now = new Date().toISOString();
+    if (action === "lock" || action === "unlock") {
+      const locked = action === "lock" ? 1 : 0;
+      database.sqlite.prepare(`
+        update continuation_tasks set owner_locked=?, owner_locked_at=?, owner_control_note=?, updated_at=? where id=?
+      `).run(locked, locked ? now : null, locked ? "Locked by Portable owner UI." : "Unlocked by Portable owner UI.", now, taskId);
+    }
+    else if (action === "stop") {
+      database.sqlite.prepare(`
+        update continuation_tasks set state='CANCELLED_BY_USER', terminal_reason='owner-stopped',
+          continuation_pending=0, watch_process_handles_json='[]', waiting_reason=null,
+          owner_control_note='Stopped explicitly by Portable owner UI.', updated_at=? where id=?
+      `).run(now, taskId);
+    }
+    else if (action === "resume") {
+      database.sqlite.prepare(`
+        update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
+          continuation_pending=0, turn_started_at=?, owner_control_note='Resumed explicitly by Portable owner UI.', updated_at=? where id=?
+      `).run(now, now, taskId);
+    }
+    else {
+      throw new Error(`Unsupported continuation admin action: ${action}`);
+    }
+    return { task: taskFromRow(database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
   } finally {
     database.close();
   }
@@ -3489,6 +3578,16 @@ async function main() {
       stdoutJson(runPluginAdmin("bind-slot", await readStdinJson()));
     } else if (command === "plugin-slot-unbind") {
       stdoutJson(runPluginAdmin("unbind-slot", await readStdinJson()));
+    } else if (command === "continuation-list") {
+      stdoutJson(await runContinuationAdmin("list", await readStdinJson()));
+    } else if (command === "continuation-lock") {
+      stdoutJson(await runContinuationAdmin("lock", await readStdinJson()));
+    } else if (command === "continuation-unlock") {
+      stdoutJson(await runContinuationAdmin("unlock", await readStdinJson()));
+    } else if (command === "continuation-stop") {
+      stdoutJson(await runContinuationAdmin("stop", await readStdinJson()));
+    } else if (command === "continuation-resume") {
+      stdoutJson(await runContinuationAdmin("resume", await readStdinJson()));
     } else if (command === "review-list") {
       stdoutJson(await runReviewAdmin("list", await readStdinJson()));
     } else if (command === "review-details") {

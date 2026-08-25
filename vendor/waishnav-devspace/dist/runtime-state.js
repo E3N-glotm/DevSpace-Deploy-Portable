@@ -129,6 +129,9 @@ export class StructuredRuntimeState {
             continuationPending: [1, 3, 4].includes(Number(row.continuation_pending)),
             continuationWakePending: [2, 3, 4].includes(Number(row.continuation_pending)),
             continuationDeliveryAwaitingAck: Number(row.continuation_pending) === 4,
+            ownerLocked: Boolean(row.owner_locked),
+            ownerLockedAt: row.owner_locked_at ?? undefined,
+            ownerControlNote: row.owner_control_note ?? undefined,
             waitingReason: row.waiting_reason ?? undefined,
             terminalReason: row.terminal_reason ?? undefined,
             deadlineAt: row.deadline_at ?? undefined,
@@ -219,9 +222,15 @@ export class StructuredRuntimeState {
         if (action === "begin" || action === "begin-auto") {
             let existing = find();
             if (existing && existing.deadline_at && Date.parse(existing.deadline_at) <= now.getTime()) {
-                this.database.sqlite.prepare("update continuation_tasks set state='BUDGET_EXHAUSTED', terminal_reason='wall-clock-budget', continuation_pending=0, updated_at=? where id=?")
-                    .run(nowIso, existing.id);
-                existing = undefined;
+                if (existing.owner_locked) {
+                    this.database.sqlite.prepare("update continuation_tasks set waiting_reason='Owner lock prevented automatic wall-clock termination.', owner_control_note='wall-clock-budget-reached-while-locked', updated_at=? where id=?")
+                        .run(nowIso, existing.id);
+                }
+                else {
+                    this.database.sqlite.prepare("update continuation_tasks set state='BUDGET_EXHAUSTED', terminal_reason='wall-clock-budget', continuation_pending=0, updated_at=? where id=?")
+                        .run(nowIso, existing.id);
+                    existing = undefined;
+                }
             }
             if (existing && !terminalStates.has(existing.state)) {
                 if (action === "begin") {
@@ -399,12 +408,24 @@ export class StructuredRuntimeState {
                 : "RUNNING";
             let terminalReason = null;
             if (noProgress >= row.max_no_progress && !input.waitingExternal) {
-                state = "ABORTED_NO_PROGRESS";
-                terminalReason = "no-progress-limit";
+                if (row.owner_locked) {
+                    state = "RUNNING";
+                    terminalReason = null;
+                }
+                else {
+                    state = "ABORTED_NO_PROGRESS";
+                    terminalReason = "no-progress-limit";
+                }
             }
             if (sameFailure >= row.max_same_failure && failure) {
-                state = "ABORTED_NO_PROGRESS";
-                terminalReason = "same-failure-limit";
+                if (row.owner_locked) {
+                    state = "RUNNING";
+                    terminalReason = null;
+                }
+                else {
+                    state = "ABORTED_NO_PROGRESS";
+                    terminalReason = "same-failure-limit";
+                }
             }
             this.database.sqlite.prepare(`
               update continuation_tasks set state=?, completed_milestones_json=?, progress_fingerprint=?, failure_fingerprint=?,
@@ -437,17 +458,26 @@ export class StructuredRuntimeState {
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
         }
         if (action === "cancel") {
+            if (row.owner_locked) {
+                return { task: rowToTask(row), accepted: false, reason: "task-owner-locked" };
+            }
             this.database.sqlite.prepare("update continuation_tasks set state='CANCELLED_BY_USER', terminal_reason='user-cancelled', continuation_pending=0, updated_at=? where id=?")
                 .run(nowIso, taskId);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
         }
         if (action === "fail") {
             const terminal = input.terminal !== false;
+            if (terminal && row.owner_locked) {
+                return { task: rowToTask(row), accepted: false, reason: "task-owner-locked" };
+            }
             this.database.sqlite.prepare("update continuation_tasks set state=?, terminal_reason=?, continuation_pending=0, updated_at=? where id=?")
                 .run(terminal ? "FAILED_TERMINAL" : "FAILED_RETRYABLE", String(input.note ?? "Task failed."), nowIso, taskId);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
         }
         if (action === "complete") {
+            if (row.owner_locked) {
+                return { task: rowToTask(row), accepted: false, reason: "task-owner-locked" };
+            }
             const required = new Set(parseJson(row.required_milestones_json, []));
             const completed = new Set(parseJson(row.completed_milestones_json, []));
             for (const value of Array.isArray(input.completedMilestones) ? input.completedMilestones : []) {
@@ -507,10 +537,18 @@ export class StructuredRuntimeState {
                     return { accepted: false, reason: "continuation-cooldown", task: rowToTask(current) };
                 }
                 if (current.deadline_at && Date.parse(current.deadline_at) <= now.getTime()) {
+                    if (current.owner_locked) {
+                        this.database.sqlite.prepare("update continuation_tasks set waiting_reason='Owner lock prevented automatic wall-clock termination.', owner_control_note='wall-clock-budget-reached-while-locked', updated_at=? where id=?").run(nowIso, taskId);
+                        return { accepted: false, reason: "task-owner-locked-budget", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
+                    }
                     this.database.sqlite.prepare("update continuation_tasks set state='BUDGET_EXHAUSTED', terminal_reason='wall-clock-budget', updated_at=? where id=?").run(nowIso, taskId);
                     return { accepted: false, reason: "wall-clock-budget", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
                 }
                 if (current.continuation_count >= current.max_continuations) {
+                    if (current.owner_locked) {
+                        this.database.sqlite.prepare("update continuation_tasks set waiting_reason='Owner lock prevented automatic continuation-budget termination.', owner_control_note='continuation-budget-reached-while-locked', updated_at=? where id=?").run(nowIso, taskId);
+                        return { accepted: false, reason: "task-owner-locked-budget", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
+                    }
                     this.database.sqlite.prepare("update continuation_tasks set state='BUDGET_EXHAUSTED', terminal_reason='continuation-budget', updated_at=? where id=?").run(nowIso, taskId);
                     return { accepted: false, reason: "continuation-budget", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
                 }

@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.48
+
+- 新增原生控制中心“续轮任务 / CONTINUATION”一级页面，位于“插件管理”和“会话与回退”之间；可直接查看任务是否运行、等待或结束，并显示目标、里程碑、续轮次数、最近活动、Owner 锁和 wake/ACK 状态。
+- 新增 Owner 级任务控制：本机 UI 可锁定/解锁、手动结束和恢复 continuation task。Owner 锁会阻止模型侧 `complete/cancel`、terminal failure、no-progress 和 continuation/wall-clock budget 自动终止；本机 Owner 的手动结束仍保留最终控制权。
+- 修复“回复写着会继续但实际没有下一轮”的正常结束时序：active continuation 下仍在运行的 durable `exec_command` 会自动登记 `processHandle` watch，不再依赖模型额外记住 `watch-process`；Workspace App 在正常 teardown 时若 required milestones 尚未完成，也会主动请求续轮，而不是只响应 timeout/学习预算。
+- 修复 Workspace App 偶发永久停在 `Waiting for a tool result.`：bootstrap 在模块监听器加载前同步缓存 Host 的 initialize/tool-input/tool-result 消息，并在所有 listener 就绪后按原顺序重放，避免初始 `toolresult` 竞态丢失。
+- Continuation 增加专属聚合卡片，持续显示同一 task 的状态、目标、Owner 锁、里程碑和 wake/ACK；普通读写/命令工具继续默认 headless，文件变更由一次 `show_changes` 聚合展示，显式 `DEVSPACE_WIDGETS=full` 仅保留兼容用途。
+- 新增 migration 16 与针对正常 teardown、自动 process watch、Owner 控制、早期 Host 消息重放和 continuation card 的回归覆盖；Protocol 保持 1.5，Linux Remote Agent 协议/权限模型不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.48.md)
+
 ## 1.1.47
 
 - 同版本热修复 `watch-process` 的真实运行时序：`continuation_anchor` 已挂载后再由 headless `continuation_task` 注册进程监控时，Coordinator 会主动刷新服务端 task 状态；`WAITING_EXTERNAL` 仅在没有 watched process 时暂停，受监控进程结束后会自动 `resume -> claim -> sendMessage`，不再需要用户手工发送“继续”。

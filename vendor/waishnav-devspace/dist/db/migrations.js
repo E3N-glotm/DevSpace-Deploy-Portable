@@ -74,6 +74,11 @@ const migrations = [
         name: "continuation-host-budget-learning",
         up: migrateContinuationHostBudgetLearning,
     },
+    {
+        version: 16,
+        name: "continuation-owner-controls",
+        up: migrateContinuationOwnerControls,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -508,6 +513,15 @@ function migrateContinuationHostBudgetLearning(sqlite) {
 
     create index if not exists continuation_host_profiles_updated_idx
       on continuation_host_profiles(updated_at desc);
+  `);
+}
+function migrateContinuationOwnerControls(sqlite) {
+    addColumnIfMissing(sqlite, "continuation_tasks", "owner_locked", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "owner_locked_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "owner_control_note", "text");
+    sqlite.exec(`
+    create index if not exists continuation_tasks_owner_locked_idx
+      on continuation_tasks(owner_locked, state, updated_at desc);
   `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

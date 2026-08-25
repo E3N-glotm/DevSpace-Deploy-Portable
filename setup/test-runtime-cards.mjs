@@ -174,7 +174,8 @@ try {
     new URL("../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js", import.meta.url),
     "utf8",
   );
-  if (!enhancementSource.includes("DevSpace Portable 1.1.8 · Protocol 1.5")
+  const portableVersion = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
+  if (!enhancementSource.includes(`DevSpace Portable ${portableVersion} · Protocol 1.5`)
       || !enhancementSource.includes("session_rollback")
       || !enhancementSource.includes("session_changes")) {
     throw new Error("session review, rollback, or version footer is missing from the Workspace App");

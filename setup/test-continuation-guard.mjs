@@ -25,6 +25,11 @@ for (const pattern of [
   /continuation-app-coordinator-observability/,
   /version: 15/,
   /continuation-host-budget-learning/,
+  /version: 16/,
+  /continuation-owner-controls/,
+  /owner_locked[\s\S]{0,80}integer not null default 0/,
+  /owner_locked_at/,
+  /owner_control_note/,
   /create table if not exists continuation_host_profiles/,
   /create table if not exists continuation_tasks/,
   /conversation_scope_id text not null/,
@@ -60,6 +65,8 @@ for (const pattern of [
   /visibility: \["model", "app"\]/,
   /"openai\/widgetAccessible": true/,
   /registerAppTool\(server, "continuation_task"/,
+  /effectivePersistent && config\.features\?\.continuationGuard && runtimeState/,
+  /action: "watch-process",[\s\S]{0,220}conversationScopeId,[\s\S]{0,220}processHandle: snapshot\.processHandle/,
   /registerAppTool\(server, "continuation_task",[\s\S]{0,3400}\.\.\.appCallableToolMeta\(config, "shell"\)/,
   /openAiConversationScopeId\(_meta\)/,
   /requiredMilestones/,
@@ -124,6 +131,11 @@ assert.doesNotMatch(renderedWorkspaceApp, /data:text\/javascript;base64,/, "Work
 assert.doesNotMatch(renderedWorkspaceApp, /src="[^"]*continuation-coordinator\.js/, "Workspace App HTML must not depend on an externally cached continuation coordinator script");
 assert.match(renderedWorkspaceApp, /window\.__DEVSPACE_MCP_APP__=/, "Workspace App HTML must inline the MCP Apps bootstrap bundle so ChatGPT does not need a second script request before connecting");
 assert.match(renderedWorkspaceApp, /RUNTIME_TOOLS/, "Workspace App HTML must inline runtime enhancements used by the render surface");
+assert.match(renderedWorkspaceApp, /__devspaceEarlyHostMessages/, "Workspace App must buffer host notifications that arrive before module listeners are ready");
+assert.match(renderedWorkspaceApp, /stopImmediatePropagation\(\)/, "early host notifications must be delivered exactly once after module bootstrap");
+assert.match(renderedWorkspaceApp, /devspace:workspace-app-ready/, "Workspace App must announce completion of early-message replay");
+assert.doesNotMatch(renderedWorkspaceApp, /<section class="empty">Waiting for a tool result\.<\/section>/, "the legacy permanently-stuck placeholder must not remain in the Workspace App shell");
+assert.match(renderedWorkspaceApp, /data-devspace-continuation/, "Workspace App must include the dedicated continuation task card renderer");
 assert.match(renderedWorkspaceApp, /<style>[\s\S]*\.shell/, "Workspace App HTML must inline its initial styles so the iframe is self-contained");
 assert.doesNotMatch(renderedWorkspaceApp, /<script[^>]+src=/, "Workspace App bootstrap must not depend on external script requests");
 assert.doesNotMatch(renderedWorkspaceApp, /<link[^>]+rel="stylesheet"/, "Workspace App bootstrap must not depend on external stylesheet requests");
@@ -372,6 +384,35 @@ await teardownController.onTeardown({ reason: "host timeout" });
 assert.equal(teardownApp.messages.length, 1, "timeout teardown should force one continuation attempt");
 teardownController.dispose();
 
+const normalTeardownApp = new FakeApp();
+const normalTeardownController = installContinuationCoordinator(normalTeardownApp, { timers: false, instanceId: "ui_normal_teardown" });
+normalTeardownApp.emit("toolinput", { arguments: { workspaceId: "ws_normal_teardown" } });
+await normalTeardownController.onConnected();
+await normalTeardownController.onTeardown({ reason: "resource teardown" });
+assert.equal(normalTeardownApp.messages.length, 1,
+  "a normally-ended host turn must continue an active task that still has required milestones outstanding");
+normalTeardownController.dispose();
+
+const finishedTeardownApp = new FakeApp();
+finishedTeardownApp.task = {
+  id: "task_finished_teardown",
+  workspaceId: "ws_finished_teardown",
+  state: "RUNNING",
+  objective: "already finished milestones",
+  requiredMilestones: ["done"],
+  completedMilestones: ["done"],
+  continuationPending: false,
+  watchProcessHandles: [],
+  turnStartedAt: new Date(Date.now() - 1000).toISOString(),
+};
+const finishedTeardownController = installContinuationCoordinator(finishedTeardownApp, { timers: false, instanceId: "ui_finished_teardown" });
+finishedTeardownApp.emit("toolinput", { arguments: { workspaceId: "ws_finished_teardown", taskId: "task_finished_teardown" } });
+await finishedTeardownController.onConnected();
+await finishedTeardownController.onTeardown({ reason: "resource teardown" });
+assert.equal(finishedTeardownApp.messages.length, 0,
+  "normal teardown must not create a follow-up when every required milestone is already complete");
+finishedTeardownController.dispose();
+
 const { StructuredRuntimeState } = await import(`${pathToFileURL(runtimeStatePath).href}?continuation=${Date.now()}`);
 const stateDir = mkdtempSync(join(tmpdir(), "devspace-continuation-test-"));
 const runtime = new StructuredRuntimeState(stateDir);
@@ -510,6 +551,38 @@ try {
   const loopStopped = runtime.continuationTask({ action: "checkpoint", taskId: loop.task.id, progressFingerprint: "same" });
   assert.equal(loopStopped.task.state, "ABORTED_NO_PROGRESS");
   assert.equal(loopStopped.task.terminalReason, "no-progress-limit");
+
+  const locked = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-owner-lock",
+    workspaceId: "ws_owner_lock",
+    requiredMilestones: ["owner releases lock"],
+    maxNoProgress: 1,
+    maxSameFailure: 1,
+  });
+  runtime.database.sqlite.prepare("update continuation_tasks set owner_locked=1, owner_locked_at=? where id=?")
+    .run(new Date().toISOString(), locked.task.id);
+  const lockedStatus = runtime.continuationTask({ action: "status", taskId: locked.task.id });
+  assert.equal(lockedStatus.task.ownerLocked, true);
+  assert.ok(lockedStatus.task.ownerLockedAt);
+  const lockedCancel = runtime.continuationTask({ action: "cancel", taskId: locked.task.id });
+  assert.equal(lockedCancel.accepted, false);
+  assert.equal(lockedCancel.reason, "task-owner-locked");
+  const lockedComplete = runtime.continuationTask({
+    action: "complete",
+    taskId: locked.task.id,
+    completedMilestones: ["owner releases lock"],
+    evidence: { test: "locked" },
+  });
+  assert.equal(lockedComplete.accepted, false);
+  assert.equal(lockedComplete.reason, "task-owner-locked");
+  runtime.continuationTask({ action: "checkpoint", taskId: locked.task.id, progressFingerprint: "locked-same" });
+  const lockedNoProgress = runtime.continuationTask({ action: "checkpoint", taskId: locked.task.id, progressFingerprint: "locked-same" });
+  assert.equal(lockedNoProgress.task.state, "RUNNING", "owner lock must prevent automatic no-progress termination");
+  runtime.database.sqlite.prepare("update continuation_tasks set owner_locked=0, owner_locked_at=null where id=?").run(locked.task.id);
+  const unlockedCancel = runtime.continuationTask({ action: "cancel", taskId: locked.task.id });
+  assert.equal(unlockedCancel.accepted, true);
+  assert.equal(unlockedCancel.task.state, "CANCELLED_BY_USER");
 
   const wait = runtime.continuationTask({
     action: "begin",

@@ -39,6 +39,7 @@ release-assets/*
 .live-upgrade-*/
 .update-staging/
 release-output/
+workspace-archives/
 
 # Language caches.
 __pycache__/

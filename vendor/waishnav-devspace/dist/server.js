@@ -249,7 +249,7 @@ function serverInstructions(config) {
             ? " show_changes also reports aggregate changes since the persisted workspace session captured its first structured-mutation baseline. Session rollback restores the tracked structured paths, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result. The same bounded sparse-journal model is used for local and remote-agent workspaces; arbitrary shell side effects outside tracked paths are not claimed as rollback-safe."
             : "",
         config.features?.continuationGuard
-            ? " For non-trivial multi-step work that may span assistant turns, call continuation_anchor exactly once after opening the working workspace, supplying the original objective and verifiable milestones. The anchor reuses the existing DevSpace Workspace App and is the only continuation tool that renders UI; ordinary read/run/write/edit/process tools remain headless. If exec_command returns a running durable process that should wake the conversation when it finishes, call continuation_task action=watch-process with that processHandle; the anchor supervisor will wake on process completion independently of any fixed minute limit. Use checkpoint only when objective progress or the failure strategy materially changes; use wait while an external condition is genuinely pending; call complete before the final response only after the original user goal is verified and provide concrete evidence. Do not mark a task complete merely because one substep finished. Automatic continuation is task-event and host-event driven first, and uses a learned host turn budget only as a proactive watchdog; it is not tied to a fixed minute value. Server-side continuation, wall-clock, no-progress, repeated-failure, cooldown, waiting-external, user-cancel, and duplicate-pending gates prevent unbounded loops."
+            ? " For non-trivial multi-step work that may span assistant turns, call continuation_anchor exactly once after opening the working workspace, supplying the original objective and verifiable milestones. The anchor reuses the existing DevSpace Workspace App and is the only continuation tool that renders UI; ordinary read/run/write/edit/process tools remain headless. While an active continuation exists, exec_command automatically registers any still-running persistent process as a durable wake source for the same conversation/workspace; explicit watch-process remains available for externally created or otherwise non-automatic process handles. The Workspace App also requests a follow-up when an active task with unfinished required milestones is torn down normally, so a normal host turn ending does not silently strand work. Use wait only while a real external/user condition should intentionally suppress automatic continuation. Use checkpoint only when objective progress or the failure strategy materially changes; call complete before the final response only after the original user goal is verified and provide concrete evidence. Do not mark a task complete merely because one substep finished. Automatic continuation is task-event and host-event driven first, and uses a learned host turn budget only as a proactive watchdog; it is not tied to a fixed minute value. Server-side continuation, wall-clock, no-progress, repeated-failure, cooldown, waiting-external, user-cancel, Owner lock, and duplicate-pending gates prevent unbounded loops."
             : "",
     ].join("");
     const compactActivityInstruction = " Keep tool calls task-driven and minimal because the client may expose every MCP invocation and its JSON arguments in a native activity panel. Do not call capabilities, doctor, session_list, session_resume, or show_changes merely to demonstrate or test the UI. Do not issue no-op diagnostics after the required result is already known. Use show_changes only once after actual file modifications.";
@@ -695,6 +695,25 @@ function workspaceAppHtml(config) {
     <style>
 ${inlineStyles}
     </style>
+    <script>
+      // ChatGPT can deliver the initial tool-input/tool-result notification as
+      // soon as the iframe exists, while module scripts are still being parsed.
+      // Buffer those early host messages synchronously and replay them only
+      // after all Workspace App modules have installed their listeners. Without
+      // this bridge the card intermittently remains on "Waiting for a tool
+      // result." even though the MCP call itself completed successfully.
+      window.__devspaceEarlyHostMessages = [];
+      window.__devspaceEarlyHostListener = function (event) {
+        if (event.source !== window.parent) return;
+        var message = event.data;
+        if (!message || message.jsonrpc !== "2.0") return;
+        if (message.method === "ui/initialize" || String(message.method || "").indexOf("ui/notifications/") === 0) {
+          event.stopImmediatePropagation();
+          window.__devspaceEarlyHostMessages.push(message);
+        }
+      };
+      window.addEventListener("message", window.__devspaceEarlyHostListener);
+    </script>
     <script type="module">
 ${runtimeEnhancementSource}
     </script>
@@ -704,10 +723,19 @@ ${continuationCoordinatorSource}
     <script type="module">
 ${workspaceEntrySource}
     </script>
+    <script type="module">
+      const early = Array.isArray(window.__devspaceEarlyHostMessages) ? window.__devspaceEarlyHostMessages.splice(0) : [];
+      if (window.__devspaceEarlyHostListener) window.removeEventListener("message", window.__devspaceEarlyHostListener);
+      window.__devspaceEarlyHostListener = undefined;
+      for (const message of early) {
+        window.dispatchEvent(new MessageEvent("message", { data: message, source: window.parent }));
+      }
+      window.dispatchEvent(new CustomEvent("devspace:workspace-app-ready", { detail: { replayed: early.length } }));
+    </script>
   </head>
   <body>
     <main id="app" class="shell">
-      <section class="empty">Waiting for a tool result.</section>
+      <section class="empty">Connecting DevSpace card…</section>
     </main>
   </body>
 </html>`;
@@ -1068,7 +1096,7 @@ function processToolResponse(tool, workspaceId, snapshot, summary, runtime = {})
         },
     };
 }
-function registerCodexProcessTools(server, config, workspaces, processSessions, permissionRules, reviewCheckpoints, hookManager, remoteAgents) {
+function registerCodexProcessTools(server, config, workspaces, processSessions, permissionRules, reviewCheckpoints, hookManager, remoteAgents, runtimeState) {
     registerAppTool(server, "exec_command", {
         title: "Execute command",
         description: `${commandToolDescription(config, "exec_command")} Returns its result when it exits during the yield window; otherwise returns a sessionId for write_stdin.`,
@@ -1122,7 +1150,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
         outputSchema: processOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "runtime"),
         annotations: SHELL_TOOL_ANNOTATIONS,
-    }, async ({ workspaceId, cmd, argv, processHandle, env, persistent, tty, columns, rows, workingDirectory, yieldTimeMs, maxOutputTokens }) => {
+    }, async ({ workspaceId, cmd, argv, processHandle, env, persistent, tty, columns, rows, workingDirectory, yieldTimeMs, maxOutputTokens }, { _meta } = {}) => {
         const startedAt = performance.now();
         if (Boolean(cmd) === Boolean(argv)) {
             throw new Error("Provide exactly one of cmd or argv.");
@@ -1153,13 +1181,14 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
         if (permissionDecision.decision === "deny") {
             throw new Error(`Command denied by permission rule ${permissionDecision.ruleId}.`);
         }
+        const effectivePersistent = persistent ?? Boolean(processHandle);
         let snapshot = isRemoteWorkspace(workspace)
             ? await remoteAgents.rpcWorkspace(workspace, "process.start", {
                 command: cmd,
                 argv,
                 processHandle,
                 env,
-                persistent: persistent ?? Boolean(processHandle),
+                persistent: effectivePersistent,
                 cwd,
                 tty,
                 columns,
@@ -1173,7 +1202,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
                 argv,
                 processHandle,
                 env,
-                persistent: persistent ?? Boolean(processHandle),
+                persistent: effectivePersistent,
                 cwd,
                 workspaceRoot: workspace.root,
                 tty,
@@ -1198,6 +1227,21 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
                     maxOutputTokens,
                 });
             }
+        }
+        // An active durable continuation should not depend on the model remembering
+        // a second watch-process call after every long-running command. If a
+        // persistent process is still running when exec_command returns, bind it
+        // to the active task for this exact ChatGPT conversation/workspace. This
+        // makes process completion a durable wake source even when the assistant
+        // turn ends normally immediately after starting the process.
+        if (snapshot.running && effectivePersistent && config.features?.continuationGuard && runtimeState) {
+            const conversationScopeId = openAiConversationScopeId(_meta) ?? "host-scope-unavailable";
+            runtimeState.continuationTask({
+                action: "watch-process",
+                workspaceId,
+                conversationScopeId,
+                processHandle: snapshot.processHandle,
+            });
         }
         await hookManager.runEvent("after_command", {
             workspaceId,
@@ -1236,7 +1280,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
             requestedWorkingDirectory: workingDirectory ?? ".",
             environment: env,
             tty: Boolean(tty),
-            persistent: persistent ?? Boolean(processHandle),
+            persistent: effectivePersistent,
             permissionRule: permissionDecision.ruleId,
             permissionDecision: permissionDecision.decision,
         });
@@ -2977,7 +3021,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         });
     }
     if (config.toolMode === "codex") {
-        registerCodexProcessTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, reviewCheckpoints, runtimeServices.hookManager, runtimeServices.remoteAgents);
+        registerCodexProcessTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, reviewCheckpoints, runtimeServices.hookManager, runtimeServices.remoteAgents, runtimeServices.runtimeState);
     }
     if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
         registerArtifactTools(server, {

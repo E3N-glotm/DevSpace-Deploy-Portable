@@ -8,6 +8,7 @@ const RUNTIME_TOOLS = new Set([
   "bash",
 ]);
 const REVIEW_TOOLS = new Set(["apply_patch", "show_changes", "session_changes", "write", "edit"]);
+const CONTINUATION_TOOLS = new Set(["continuation_anchor"]);
 const ZH = String(navigator.language || "").toLowerCase().startsWith("zh");
 
 const state = {
@@ -16,6 +17,7 @@ const state = {
   result: undefined,
   mode: undefined,
   cancelled: undefined,
+  continuationTask: undefined,
 };
 
 const pendingServerCalls = new Map();
@@ -232,6 +234,73 @@ function buildRuntimeCard() {
     outputSection.append(element("div", { className: "runtime-output-empty", text: runtime.running ? "Waiting for process output…" : "No output." }));
   }
   body.append(outputSection);
+  panel.append(body);
+  shell.append(panel);
+  return shell;
+}
+
+function continuationStateTone(task = {}) {
+  const value = String(task.state || "RUNNING");
+  if (["SUCCEEDED"].includes(value)) return "success";
+  if (["FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED"].includes(value)) return "failed";
+  if (["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(value)) return "waiting";
+  return "running";
+}
+
+function buildContinuationCard() {
+  const structuredTask = state.result?.structuredContent?.task;
+  const task = state.continuationTask ?? structuredTask ?? {};
+  const tone = continuationStateTone(task);
+  const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
+  const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
+  const shell = element("main", { className: "shell" });
+  const panel = element("details", { className: `tool-card shell codex-runtime-card compact-log continuation-card ${tone}` });
+  panel.dataset.devspaceContinuation = "true";
+  panel.open = true;
+  const header = element("summary", { className: "compact-log-summary" });
+  const lockLabel = task.ownerLocked ? (ZH ? " · 已锁定" : " · Locked") : "";
+  header.append(
+    element("span", { className: `compact-log-icon ${tone}`, text: tone === "success" ? "✓" : tone === "failed" ? "×" : "↻" }),
+    element("span", { className: "compact-log-verb", text: ZH ? "自动续轮任务" : "Continuation task" }),
+    element("code", { className: "compact-log-command", text: task.objective || state.input?.objective || (ZH ? "等待任务状态" : "Waiting for task state") }),
+    element("span", { className: `runtime-status ${tone}`, text: `${task.state || "STARTING"}${lockLabel}` }),
+  );
+  panel.append(header);
+
+  const body = element("div", { className: "codex-runtime-body" });
+  const summary = element("div", { className: "runtime-meta-grid" });
+  [
+    metadataRow(ZH ? "任务 ID" : "Task ID", task.id),
+    metadataRow(ZH ? "状态" : "State", task.state),
+    metadataRow(ZH ? "里程碑" : "Milestones", `${completed.size}/${required.length}`),
+    metadataRow(ZH ? "续轮" : "Continuations", `${task.continuationCount ?? 0}/${task.maxContinuations ?? "—"}`),
+    metadataRow(ZH ? "Owner 锁" : "Owner lock", task.ownerLocked ? (ZH ? "已锁定" : "Locked") : (ZH ? "未锁定" : "Unlocked")),
+    metadataRow(ZH ? "等待原因" : "Waiting", task.waitingReason),
+  ].filter(Boolean).forEach((row) => summary.append(row));
+  body.append(summary);
+
+  if (required.length) {
+    const milestoneSection = element("section", { className: "runtime-section" });
+    milestoneSection.append(element("div", { className: "runtime-section-title", text: ZH ? "任务里程碑" : "Milestones" }));
+    const list = element("div", { className: "operation-list continuation-milestones" });
+    for (const milestone of required) {
+      const done = completed.has(milestone);
+      const row = element("div", { className: "operation-summary" });
+      row.append(
+        element("span", { className: `compact-log-icon ${done ? "success" : "running"}`, text: done ? "✓" : "·" }),
+        element("span", { className: "operation-verb", text: milestone }),
+      );
+      list.append(row);
+    }
+    milestoneSection.append(list);
+    body.append(milestoneSection);
+  }
+  const note = task.continuationDeliveryAwaitingAck
+    ? (ZH ? "续轮消息已被宿主接受，正在等待新 assistant 轮重新连接 DevSpace 并 ACK。" : "Follow-up accepted; waiting for the resumed assistant turn to ACK DevSpace connectivity.")
+    : task.continuationWakePending
+      ? (ZH ? "已产生持久续轮唤醒，Workspace App 将自动 claim 并发送续轮消息。" : "A durable continuation wake is pending and will be claimed automatically.")
+      : (ZH ? "任务挂载后由 Workspace App 自动监控进程完成、宿主超时/teardown 信号和学习到的轮次预算；不是依赖固定分钟数。" : "After anchoring, Workspace App monitors task/process and host signals automatically; no fixed minute cutoff is used.");
+  body.append(element("div", { className: "runtime-output-empty", text: note }));
   panel.append(body);
   shell.append(panel);
   return shell;
@@ -507,7 +576,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-    text: "DevSpace Portable 1.1.8 · Protocol 1.5",
+    text: "DevSpace Portable 1.1.48 · Protocol 1.5",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);
@@ -529,6 +598,17 @@ function renderPatchPending() {
   rendering = true;
   try {
     root.replaceChildren(buildPatchPendingCard());
+    ensureVersionFooter();
+  } finally {
+    rendering = false;
+  }
+}
+
+function renderContinuation() {
+  if (!root || rendering || !CONTINUATION_TOOLS.has(state.tool)) return;
+  rendering = true;
+  try {
+    root.replaceChildren(buildContinuationCard());
     ensureVersionFooter();
   } finally {
     rendering = false;
@@ -565,6 +645,7 @@ function scheduleRender() {
     renderScheduled = false;
     if (state.mode === "runtime") renderRuntime();
     else if (state.mode === "patch-pending") renderPatchPending();
+    else if (state.mode === "continuation") renderContinuation();
     else if (state.mode === "review") injectReviewEnhancements();
     else ensureVersionFooter();
   });
@@ -596,15 +677,18 @@ function handleMessage(message) {
     state.cancelled = undefined;
     if (RUNTIME_TOOLS.has(state.tool)) state.mode = "runtime";
     else if (state.tool === "apply_patch") state.mode = "patch-pending";
+    else if (CONTINUATION_TOOLS.has(state.tool)) state.mode = "continuation";
     scheduleRender();
     return;
   }
   if (message.method === "ui/notifications/tool-result") {
     state.result = message.params;
     state.tool = message.params?._meta?.tool ?? state.tool;
+    if (message.params?.structuredContent?.task) state.continuationTask = message.params.structuredContent.task;
     state.cancelled = undefined;
     if (RUNTIME_TOOLS.has(state.tool)) state.mode = "runtime";
     else if (REVIEW_TOOLS.has(state.tool)) state.mode = "review";
+    else if (CONTINUATION_TOOLS.has(state.tool)) state.mode = "continuation";
     scheduleRender();
     setTimeout(scheduleRender, 25);
     setTimeout(scheduleRender, 150);
@@ -622,12 +706,22 @@ window.addEventListener("message", (event) => {
   handleMessage(event.data);
 });
 
+window.addEventListener("devspace:continuation-task", (event) => {
+  if (!event?.detail || typeof event.detail !== "object") return;
+  state.continuationTask = event.detail;
+  if (CONTINUATION_TOOLS.has(state.tool)) {
+    state.mode = "continuation";
+    scheduleRender();
+  }
+});
+
 if (root) {
   ensureVersionFooter();
   new MutationObserver(() => {
     if (rendering) return;
     if (state.mode === "runtime" && !root.querySelector("[data-devspace-runtime='true']")) scheduleRender();
     if (state.mode === "patch-pending" && !root.querySelector("[data-devspace-runtime='true']")) scheduleRender();
+    if (state.mode === "continuation" && !root.querySelector("[data-devspace-continuation='true']")) scheduleRender();
     if (state.mode === "review") scheduleRender();
     ensureVersionFooter();
   }).observe(root, { childList: true, subtree: true });
