@@ -41,6 +41,9 @@ for (const pattern of [
   /toolWidgetDescriptorMeta\(config, "continuation-anchor"\)/,
   /resourceUri: WORKSPACE_APP_URI/,
   /assets\/continuation-coordinator\.js/,
+  /continuationCoordinatorRevision/,
+  /createHash\("sha256"\)/,
+  /continuation-coordinator\.js"\)\}\?v=\$\{continuationCoordinatorRevision\(\)\}/,
   /registerAppTool\(server, "continuation_task"/,
   /registerAppTool\(server, "continuation_task",[\s\S]{0,3200}\.\.\.toolWidgetDescriptorMeta\(config, "shell"\)/,
   /openAiConversationScopeId\(_meta\)/,
@@ -240,6 +243,32 @@ await processWatchController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
 assert.equal(processWatchApp.messages.length, 1, "watched process completion should wake without any learned minute budget");
 processWatchController.dispose();
+
+// Reproduce the real host ordering: the anchor renders first with no process
+// watches, then a headless continuation_task call registers a watch and the
+// assistant marks the task WAITING_EXTERNAL. The existing Workspace App must
+// refresh authoritative server state, continue supervising the wait, resume it
+// when the process completes, and deliver one follow-up.
+const lateProcessWatchApp = new FakeApp();
+const lateProcessWatchController = installContinuationCoordinator(lateProcessWatchApp, {
+  supervisorTickMs: 5,
+  heartbeatIntervalMs: 25,
+  instanceId: "ui_late_process_watch",
+});
+lateProcessWatchApp.emit("toolinput", { arguments: { workspaceId: "ws_late_process_watch" } });
+await lateProcessWatchController.onConnected();
+lateProcessWatchApp.task = {
+  ...lateProcessWatchApp.task,
+  state: "WAITING_EXTERNAL",
+  watchProcessHandles: ["late-build-process"],
+};
+lateProcessWatchApp.watchWakeReady = true;
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 650));
+assert.ok(lateProcessWatchApp.calls.includes("status"), "supervisor must refresh task state after anchor render");
+assert.ok(lateProcessWatchApp.calls.includes("watch-status"), "WAITING_EXTERNAL with a process watch must still poll watch-status");
+assert.ok(lateProcessWatchApp.calls.includes("resume"), "completed watched process must resume a waiting task before continuation claim");
+assert.equal(lateProcessWatchApp.messages.length, 1, "late registered watched process should wake exactly once");
+lateProcessWatchController.dispose();
 
 const teardownApp = new FakeApp();
 const teardownController = installContinuationCoordinator(teardownApp, { timers: false, instanceId: "ui_teardown" });

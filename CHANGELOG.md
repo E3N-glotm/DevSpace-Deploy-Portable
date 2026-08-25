@@ -4,6 +4,11 @@
 
 ## 1.1.47
 
+- 同版本热修复 `watch-process` 的真实运行时序：`continuation_anchor` 已挂载后再由 headless `continuation_task` 注册进程监控时，Coordinator 会主动刷新服务端 task 状态；`WAITING_EXTERNAL` 仅在没有 watched process 时暂停，受监控进程结束后会自动 `resume -> claim -> sendMessage`，不再需要用户手工发送“继续”。
+- `watch-status` 在发现受监控进程结束时会清理 watch，并将对应的 `WAITING_EXTERNAL` task 恢复为 `RUNNING`，避免后续 `claim-continuation` 被 waiting gate 正确但意外地拒绝；新增“anchor 先创建、watch 后注册、随后 wait”的真实时序回归。
+- `continuation-coordinator.js` 的 Workspace App URL 增加基于文件 SHA-256 的 revision query。`/mcp-app-assets` 仍可保持一年 immutable 缓存，但同版本 1.1.47 热修复不会再被浏览器旧缓存遮蔽。
+- 修复 `portableProcessSnapshot()` 将自己的枚举 PowerShell 误判为 Portable-owned 的问题；snapshot 现在显式排除 `$PID`，避免 strict stop 每轮杀掉枚举器后又创建一个新的枚举器而无法收敛。
+
 - 自动续轮从独立 hidden Continuation Guard resource 迁入现有 DevSpace Workspace App；继续使用同一个 MCP endpoint、OAuth 和公网域名，不需要注册第二个 App 或第二个域名。
 - 新增单一 `continuation_anchor`，并把 Portable 默认 widget 模式从逐工具 `full` 收敛为 `changes`：普通 workspace/runtime/write/edit/process 工具恢复 headless，`show_changes` 只在汇总变更时渲染 Workspace App；显式 `DEVSPACE_WIDGETS=full` 仍作为兼容选项保留，修复默认状态下每次 MCP 调用都渲染一张 DevSpace/CSP 卡片的 UI 回归。
 - 续轮 coordinator 直接复用已经完成 `App.connect()` 的 Apps SDK 实例，使用 `app.callServerTool()`、`app.updateModelContext()` 与 `app.sendMessage()`，并保留 `sendFollowUpMessage` compatibility fallback；不使用 DOM 自动化。

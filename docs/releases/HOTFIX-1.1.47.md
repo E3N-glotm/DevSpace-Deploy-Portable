@@ -1,5 +1,35 @@
 # DevSpace Portable 1.1.47
 
+## 同版本运行时热修复：watch-process 自动唤醒
+
+正式 1.1.47 上线后的真实 75 秒 durable process 测试暴露了一个单元测试没有覆盖的时序缺陷：`continuation_anchor` 首先挂载时本地 App task 还没有任何 `watchProcessHandles`，随后模型通过 headless `continuation_task(action="watch-process")` 注册进程，再调用 `wait` 进入 `WAITING_EXTERNAL`。原 Coordinator 既不会主动刷新这个后注册的服务端 watch，又会在 `WAITING_EXTERNAL` 时停止 supervisor，因此事件日志虽然已经记录 `process.exited`，却不会触发任何 continuation claim 或 follow-up message。
+
+热修复后的路径为：
+
+```text
+continuation_anchor 已挂载
+        ↓
+headless watch-process 后注册
+        ↓
+Supervisor 每 tick 先刷新 authoritative task state
+        ↓
+WAITING_EXTERNAL + watched process 仍继续 watch-status
+        ↓
+running=false / process.exited
+        ↓
+unwatch + resume RUNNING
+        ↓
+claim-continuation
+        ↓
+app.sendMessage 自动续轮
+```
+
+普通 `WAITING_EXTERNAL` 且没有受监控进程时仍保持抑制，不会因为等待人工审批、外部文件或其他未知条件而自行续轮。Server 侧 `watch-status` 和 App Coordinator 都提供 resume 保护，因此即使 App/Server 在升级边界上有短暂状态差异，也不会让已完成的 watched process 卡在 waiting gate。
+
+此外，Workspace App 静态资源继续使用一年 immutable cache，但 `continuation-coordinator.js` 的引用 URL 现在加入基于文件 SHA-256 的 revision query；同版本重新发布时浏览器会请求新的 URL，而不是继续使用初始 1.1.47 的旧 Coordinator。回归测试也改为覆盖真实顺序“anchor 无 watch → 后注册 watch → WAITING_EXTERNAL → process complete → 自动 follow-up”，不再只测试连接前就预置 watch 的理想化场景。
+
+本轮排查还发现 `portableProcessSnapshot()` 的枚举 PowerShell 自身命令行必然包含 Portable root，而旧 wrapper heuristic 会把这个枚举器本身也识别为 Portable-owned。snapshot 现在显式排除当前 PowerShell `$PID`，避免 strict stop 反复看到一个仅为下一次 snapshot 新建的 PowerShell 而无法在超时前收敛。
+
 ## 目标
 
 1.1.47 专门收口 1.1.46 Continuation Guard 在真实 ChatGPT Host 中没有自动续轮的问题。该问题不是持久任务控制器或后台进程恢复失败：1.1.46 的 `continuation_task` SQLite 状态机、`processHandle` reattach、WAITING_EXTERNAL、原子 claim 和预算治理均已实测工作；真实 27 分钟测试中失败的是 UI guard 自身没有执行任何新的 `claim-continuation`。

@@ -318,16 +318,44 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   async function supervisorTick() {
-    if (state.disposed || !state.task || terminal(state.task) || state.task.state === "WAITING_EXTERNAL") return;
+    if (state.disposed || !state.task || terminal(state.task)) return;
+
+    // The assistant registers watch-process through a headless continuation_task
+    // call after the continuation_anchor has already rendered. That later tool
+    // result is not guaranteed to be delivered to the existing Workspace App,
+    // so refresh authoritative task state before deciding whether anything is
+    // being watched. Without this refresh the App can cache an empty watch list
+    // forever even though the server has a durable process handle registered.
+    const current = await callTask("status").catch(() => undefined);
+    if (current?.task) state.task = current.task;
+    if (!state.task || terminal(state.task)) return;
+
+    const hasWatchedProcesses = Array.isArray(state.task.watchProcessHandles)
+      && state.task.watchProcessHandles.length > 0;
+
+    // WAITING_EXTERNAL must suppress time-budget continuations, but it must not
+    // suppress a process watch whose explicit purpose is to wake the task when
+    // that external process completes.
+    if (state.task.state === "WAITING_EXTERNAL" && !hasWatchedProcesses) return;
+
     if (Date.now() - state.lastHeartbeatAt >= heartbeatIntervalMs) await heartbeat("adaptive supervisor");
-    if (Array.isArray(state.task.watchProcessHandles) && state.task.watchProcessHandles.length > 0) {
+    if (hasWatchedProcesses) {
       const watched = await callTask("watch-status").catch(() => undefined);
       if (watched?.task) state.task = watched.task;
       if (watched?.wakeReady) {
+        // watch-status normally resumes WAITING_EXTERNAL server-side when a
+        // watched process completes. Keep this defensive resume so older or
+        // partially upgraded servers cannot leave claim-continuation blocked.
+        if (state.task?.state === "WAITING_EXTERNAL") {
+          const resumed = await callTask("resume", { note: "watched process completed" }).catch(() => undefined);
+          if (resumed?.task) state.task = resumed.task;
+        }
         await attemptContinuation("watched process completed", { force: true });
         return;
       }
     }
+
+    if (state.task?.state === "WAITING_EXTERNAL") return;
     const recommended = recommendedContinueAfterMs(state.task);
     if (recommended && taskElapsedMs(state.task) >= recommended) {
       await attemptContinuation("adaptive host-budget watchdog", { force: true });
@@ -335,7 +363,10 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   function startSupervisor() {
-    if (!timersEnabled || state.supervisorTimer || !state.task || terminal(state.task) || state.task.state === "WAITING_EXTERNAL") return;
+    // Keep a lightweight supervisor alive for non-terminal waiting tasks too. A
+    // watch-process registration may arrive after the anchor is mounted, and a
+    // stopped timer would otherwise never discover that new server-side watch.
+    if (!timersEnabled || state.supervisorTimer || !state.task || terminal(state.task)) return;
     state.supervisorTimer = setInterval(() => void supervisorTick(), supervisorTickMs);
     void supervisorTick();
   }

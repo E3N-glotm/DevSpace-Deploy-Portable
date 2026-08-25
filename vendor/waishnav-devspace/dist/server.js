@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
 import { extname } from "node:path";
@@ -611,11 +611,18 @@ function getWorkspaceAppManifestEntry() {
 function assetUrl(baseUrl, assetPath) {
     return `${baseUrl}/${assetPath.replace(/^\/+/, "")}`;
 }
+function continuationCoordinatorRevision() {
+    const source = readFileSync(new URL("../dist/ui/assets/continuation-coordinator.js", import.meta.url));
+    return createHash("sha256").update(source).digest("hex").slice(0, 16);
+}
 function workspaceAppHtml(config) {
     const baseUrl = assetBaseUrl(config);
     const entry = getWorkspaceAppManifestEntry();
     const runtimeEnhancementUrl = assetUrl(baseUrl, "assets/runtime-enhancements.js");
-    const continuationCoordinatorUrl = assetUrl(baseUrl, "assets/continuation-coordinator.js");
+    // The coordinator is a maintained non-hashed asset while /mcp-app-assets is
+    // intentionally served immutable for one year. Add a content revision so a
+    // same-version hotfix cannot be shadowed by the browser's old immutable URL.
+    const continuationCoordinatorUrl = `${assetUrl(baseUrl, "assets/continuation-coordinator.js")}?v=${continuationCoordinatorRevision()}`;
     const runtimeEnhancementStylesheet = assetUrl(baseUrl, "assets/runtime-enhancements.css");
     const sessionReviewStylesheet = assetUrl(baseUrl, "assets/session-review.css");
     const runtimeTimelineStylesheet = assetUrl(baseUrl, "assets/runtime-timeline.css");
@@ -1466,6 +1473,19 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                     }
                     for (const processHandle of completedHandles) {
                         runtimeState.continuationTask({ action: "unwatch-process", taskId: task.id, processHandle, conversationScopeId });
+                    }
+                    if (completedHandles.length > 0 && task.state === "WAITING_EXTERNAL") {
+                        // A watched process is itself the external condition the
+                        // task asked DevSpace to observe. Once it completes, move
+                        // the task back to RUNNING before the App attempts to
+                        // claim/send a continuation; claim-continuation correctly
+                        // rejects generic WAITING_EXTERNAL tasks.
+                        runtimeState.continuationTask({
+                            action: "resume",
+                            taskId: task.id,
+                            conversationScopeId,
+                            note: "watched process completed",
+                        });
                     }
                 }
                 const refreshed = task
