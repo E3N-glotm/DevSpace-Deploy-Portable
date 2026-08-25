@@ -18,6 +18,8 @@ writeFileSync(join(configDir, "deployment.json"), JSON.stringify({
   formatVersion: 5,
   tunnelProvider: "ngrok",
   tunnelNetworkCompatibility: true,
+  publicBaseUrl: "https://example.invalid",
+  port: 7676,
 }, null, 2));
 writeFileSync(join(configDir, "ngrok.yml"), 'version: "3"\nagent:\n  authtoken: "test-token-value"\n');
 
@@ -49,6 +51,24 @@ function resolveNetwork(overrides = {}) {
   const result = spawnSync(NODE, [LAUNCHER, "--network-self-test"], {
     cwd: ROOT,
     env,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 10_000,
+  });
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout || `launcher exited ${result.status}`);
+  return JSON.parse(result.stdout.trim());
+}
+
+function resolvePublicHealth(mode) {
+  const result = spawnSync(NODE, [LAUNCHER, "--public-health-self-test"], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      DEVSPACE_PORTABLE_CONFIG_DIR: configDir,
+      DEVSPACE_PORTABLE_RUN_DIR: runDir,
+      DEVSPACE_TEST_ROUTE_SIGNATURE: "route-a",
+      DEVSPACE_TEST_PUBLIC_HEALTH: mode,
+    },
     encoding: "utf8",
     windowsHide: true,
     timeout: 10_000,
@@ -96,6 +116,20 @@ try {
   assert.equal(cloudflare.mode, "provider-managed");
   assert.equal(cloudflare.reason, "network-path-stable");
 
+  const publicHealthy = resolvePublicHealth("healthy");
+  assert.equal(publicHealthy.actionable, true);
+  assert.equal(publicHealthy.healthy, true);
+  assert.equal(publicHealthy.localStatus, 401);
+  assert.equal(publicHealthy.publicStatus, 401);
+  const publicBroken = resolvePublicHealth("failing");
+  assert.equal(publicBroken.actionable, true);
+  assert.equal(publicBroken.healthy, false);
+  assert.equal(publicBroken.localStatus, 401);
+  assert.equal(publicBroken.publicStatus, 0);
+  const localBroken = resolvePublicHealth("local-failing");
+  assert.equal(localBroken.actionable, false,
+    "a local MCP outage must not be misdiagnosed as a tunnel fault");
+
   writeFileSync(join(configDir, "deployment.json"), JSON.stringify({
     formatVersion: 5,
     tunnelProvider: "ngrok",
@@ -130,6 +164,14 @@ try {
     "third-party route or adapter changes must be recorded without restarting the owned tunnel");
   assert.doesNotMatch(launcherSource, /terminateChild\("network-path-quiescing"\)|network-path-settled-reconnect/,
     "third-party topology changes must not trigger proactive tunnel churn");
+  assert.match(launcherSource, /PUBLIC_HEALTH_FAILURE_THRESHOLD = 3/,
+    "a single public probe failure must not churn the tunnel");
+  assert.match(launcherSource, /PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 60_000/,
+    "public-health recovery must be rate limited during wider internet outages");
+  assert.match(launcherSource, /terminateChild\("public-endpoint-unhealthy"\)/,
+    "a persistently broken public endpoint must restart only the owned tunnel child");
+  assert.match(launcherSource, /localStatus !== 401[\s\S]*?actionable: false/,
+    "tunnel recovery must not fire when the local MCP itself is unhealthy");
   assert.match(launcherSource, /ownedChild\.kill\(\)/,
     "network transitions may stop only the ChildProcess owned by this supervisor");
   assert.doesNotMatch(launcherSource, /EasyConnect|Sangfor|SangforVnic|WireGuard|OpenVPN|AnyConnect|GlobalProtect/i,
@@ -157,6 +199,7 @@ try {
   console.log(JSON.stringify({
     vendorNeutralNetworkPathAdaptation: true,
     publicTunnelRemainsStableAcrossRouteChanges: true,
+    publicEndpointHealthRecovery: true,
     publicReadinessFailurePreservesLocalService: true,
     topologyChangeDoesNotRestartOwnedTunnel: true,
     splitRouteAndAddressChangesAreObserved: true,

@@ -100,7 +100,8 @@ function isChinese() {
 
 function continuationText(task, reason) {
   const id = task?.id ? ` ${task.id}` : "";
-  return `继续 DevSpace 任务${id}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、持久任务状态和已完成里程碑，不要重新开始。先读取 continuation_task status，再继续原始用户目标；只有原始目标经验证完成后才调用 complete 并结束。`;
+  const workspace = task?.workspaceId ? `，workspaceId=${task.workspaceId}` : "";
+  return `继续 DevSpace 任务${id}${workspace}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、持久任务状态和已完成里程碑，不要重新开始。第一步必须调用 continuation_task action=status，并显式传入这个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}，用该成功调用确认新一轮已经重新连上 DevSpace；若 MCP 暂时 UNAVAILABLE/Connection failed，等待连接恢复后重试这个 status，不要新建任务。ACK 成功后再继续原始用户目标；只有原始目标经验证完成后才调用 complete 并结束。`;
 }
 
 function continuationContext(task, workspaceId, reason) {
@@ -224,10 +225,10 @@ export function installContinuationCoordinator(app, options = {}) {
     if (state.disposed) return false;
     try {
       await ensureTask();
-      if (!state.task || terminal(state.task) || state.task.state === "WAITING_EXTERNAL") return false;
+      if (!state.task || terminal(state.task) || ["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(state.task.state)) return false;
       const status = await callTask("status");
       if (status?.task) state.task = status.task;
-      if (!state.task || terminal(state.task) || state.task.state === "WAITING_EXTERNAL") return false;
+      if (!state.task || terminal(state.task) || ["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(state.task.state)) return false;
       await heartbeat(reason);
       if (typeof app.updateModelContext === "function") {
         await app.updateModelContext({
@@ -273,11 +274,12 @@ export function installContinuationCoordinator(app, options = {}) {
     if (state.disposed && !force) return false;
     const recommended = recommendedContinueAfterMs(state.task);
     if (!force && (!recommended || taskElapsedMs(state.task) < recommended)) return false;
+    const wakeRetry = Boolean(state.task?.continuationWakePending) || reason === "watched process completed";
     state.deliveryInFlight = true;
     try {
       const prepared = await prepareContinuation(reason);
       if (!prepared || !state.task || terminal(state.task) || state.task.state === "WAITING_EXTERNAL") {
-        stopSupervisor();
+        if (!wakeRetry || !state.task || terminal(state.task)) stopSupervisor();
         return false;
       }
       const claim = await callTask("claim-continuation", { note: reason });
@@ -285,11 +287,25 @@ export function installContinuationCoordinator(app, options = {}) {
       if (claim.task) state.task = claim.task;
       try {
         const delivery = await sendFollowUp(continuationText(state.task, reason));
-        await callTask("delivery-result", {
+        const recorded = await callTask("delivery-result", {
           deliveryResult: delivery.result,
           deliveryMethod: delivery.method,
           note: reason,
         }).catch(() => undefined);
+        if (recorded?.task) state.task = recorded.task;
+        if (state.task?.continuationDeliveryAwaitingAck) {
+          renderRecoveryStatus(
+            controller,
+            isChinese() ? "DevSpace 已请求自动续轮，正在等待新一轮确认连接；若公网连接失败会自动重试。" : "DevSpace requested an automatic continuation and is waiting for the resumed turn to acknowledge connectivity; transport failures will be retried.",
+            "success",
+            false,
+          );
+          // Do not stop the supervisor yet. State 4 keeps the durable wake alive
+          // until the resumed model performs its first continuation_task status
+          // ACK. If that new turn dies on an MCP UNAVAILABLE error, the claim
+          // lease expires and this surviving App can resend automatically.
+          return true;
+        }
         renderRecoveryStatus(controller, isChinese() ? "DevSpace 已请求自动续轮。" : "DevSpace requested an automatic continuation.", "success", false);
         stopSupervisor();
         return true;
@@ -330,6 +346,14 @@ export function installContinuationCoordinator(app, options = {}) {
     if (current?.task) state.task = current.task;
     if (!state.task || terminal(state.task)) return;
 
+    // Persisted process wakes are claimable by any surviving/recreated iframe.
+    // This prevents a single watch-status winner from consuming the wake and
+    // disappearing before claim/sendMessage while sibling App cards see nothing.
+    if (state.task.continuationWakePending) {
+      await attemptContinuation("watched process completed", { force: true });
+      return;
+    }
+
     const hasWatchedProcesses = Array.isArray(state.task.watchProcessHandles)
       && state.task.watchProcessHandles.length > 0;
 
@@ -343,9 +367,8 @@ export function installContinuationCoordinator(app, options = {}) {
       const watched = await callTask("watch-status").catch(() => undefined);
       if (watched?.task) state.task = watched.task;
       if (watched?.wakeReady) {
-        // watch-status normally resumes WAITING_EXTERNAL server-side when a
-        // watched process completes. Keep this defensive resume so older or
-        // partially upgraded servers cannot leave claim-continuation blocked.
+        // Current servers arm a durable wake and move the task to RUNNING.
+        // Keep the defensive resume for older/partially upgraded servers.
         if (state.task?.state === "WAITING_EXTERNAL") {
           const resumed = await callTask("resume", { note: "watched process completed" }).catch(() => undefined);
           if (resumed?.task) state.task = resumed.task;
@@ -355,7 +378,7 @@ export function installContinuationCoordinator(app, options = {}) {
       }
     }
 
-    if (state.task?.state === "WAITING_EXTERNAL") return;
+    if (["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(state.task?.state)) return;
     const recommended = recommendedContinueAfterMs(state.task);
     if (recommended && taskElapsedMs(state.task) >= recommended) {
       await attemptContinuation("adaptive host-budget watchdog", { force: true });
@@ -377,13 +400,29 @@ export function installContinuationCoordinator(app, options = {}) {
     if (state.ensuringTask) return state.ensuringTask;
     state.ensuringTask = (async () => {
       try {
+        const explicitTaskId = state.currentInput?.taskId ? String(state.currentInput.taskId) : undefined;
+        if (explicitTaskId && state.task?.id !== explicitTaskId) {
+          // The anchor input is authoritative. ChatGPT can instantiate the App
+          // without delivering the one-shot initial toolresult notification, so
+          // bind the already-persisted task from toolinput before considering the
+          // legacy begin-auto fallback. This also prevents an orphan shadow task
+          // from being created under a different host request scope.
+          state.task = undefined;
+          const bound = await callTask("status", { taskId: explicitTaskId });
+          if (bound?.task?.id === explicitTaskId) state.task = bound.task;
+          if (!state.task?.id) return state.task;
+        }
         if (!state.task?.id) {
+          // Older callers may not supply taskId. Keep begin-auto as a compatibility
+          // fallback, but never race it against an explicit continuation_anchor
+          // task binding.
+          if (explicitTaskId) return state.task;
           const outcome = await callTask("begin-auto", {
             objective: "Continue the current DevSpace work until the original user request is verified complete; preserve the existing workspace, process handles, milestones, and evidence across assistant turns.",
           });
           if (outcome?.task) state.task = outcome.task;
         }
-        if (state.task?.continuationPending || state.task?.state === "FAILED_RETRYABLE") {
+        if ((state.task?.continuationPending && !state.task?.continuationWakePending) || state.task?.state === "FAILED_RETRYABLE") {
           const resumed = await callTask("resume");
           if (resumed?.task) state.task = resumed.task;
         }
@@ -405,8 +444,15 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   function onToolInput(params) {
+    const previousTaskId = state.currentInput?.taskId ? String(state.currentInput.taskId) : undefined;
     state.currentInput = { ...state.currentInput, ...(params?.arguments ?? {}) };
     if (state.currentInput.workspaceId) state.workspaceId = String(state.currentInput.workspaceId);
+    const nextTaskId = state.currentInput?.taskId ? String(state.currentInput.taskId) : undefined;
+    if (nextTaskId && previousTaskId && nextTaskId !== previousTaskId) {
+      stopSupervisor();
+      state.task = undefined;
+      state.lastHeartbeatAt = 0;
+    }
     void ensureTask();
   }
 

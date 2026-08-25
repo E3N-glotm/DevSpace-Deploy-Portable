@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
 import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
@@ -53,7 +53,8 @@ import { linuxAgentAsset, RemoteAgentManager } from "./remote-agent-manager.js";
 const MCP_SESSION_IDLE_TIMEOUT_MS = 60 * 60 * 1_000;
 const MCP_SESSION_CLEANUP_INTERVAL_MS = 60 * 1_000;
 const MCP_SESSION_MAX_ACTIVE = 32;
-const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
+const WORKSPACE_APP_URI_PREFIX = "ui://devspace/workspace-app";
+const LEGACY_CONTINUATION_GUARD_URI = "ui://devspace/continuation-guard.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 let structuredRuntimeState;
 const WRITE_TOOL_ANNOTATIONS = {
@@ -142,17 +143,34 @@ function toolWidgetDescriptorMeta(config, kind) {
             _meta: baseMeta,
         };
     }
+    const appUri = workspaceAppUri(config);
     return {
         securitySchemes,
         _meta: {
             ...baseMeta,
             ui: {
-                resourceUri: WORKSPACE_APP_URI,
+                resourceUri: appUri,
                 visibility: ["model"],
             },
             // ChatGPT compatibility alias. The standards-first ui.resourceUri field
             // remains authoritative, but this improves rendering on older snapshots.
-            "openai/outputTemplate": WORKSPACE_APP_URI,
+            "openai/outputTemplate": appUri,
+        },
+    };
+}
+function appCallableToolMeta(config, kind) {
+    const base = toolWidgetDescriptorMeta(config, kind);
+    return {
+        ...base,
+        _meta: {
+            ...(base._meta ?? {}),
+            ui: {
+                ...(base._meta?.ui ?? {}),
+                visibility: ["model", "app"],
+            },
+            // ChatGPT Apps SDK compatibility alias for allowing calls from the
+            // rendered widget. Keep the tool headless by omitting resourceUri.
+            "openai/widgetAccessible": true,
         },
     };
 }
@@ -611,37 +629,81 @@ function getWorkspaceAppManifestEntry() {
 function assetUrl(baseUrl, assetPath) {
     return `${baseUrl}/${assetPath.replace(/^\/+/, "")}`;
 }
-function continuationCoordinatorRevision() {
-    const source = readFileSync(new URL("../dist/ui/assets/continuation-coordinator.js", import.meta.url));
-    return createHash("sha256").update(source).digest("hex").slice(0, 16);
+const workspaceAppUriCache = new Map();
+function workspaceAppRevision(config) {
+    const publicBaseUrl = String(config.publicBaseUrl ?? "").replace(/\/+$/, "");
+    const entry = getWorkspaceAppManifestEntry();
+    const coordinator = readFileSync(new URL("../dist/ui/assets/continuation-coordinator.js", import.meta.url));
+    const runtimeEnhancements = readFileSync(new URL("../dist/ui/assets/runtime-enhancements.js", import.meta.url));
+    const inlineStyles = [
+        ...(entry.css ?? []),
+        "assets/runtime-enhancements.css",
+        "assets/session-review.css",
+        "assets/runtime-timeline.css",
+    ].map((stylesheet) => readFileSync(new URL(`../dist/ui/${stylesheet}`, import.meta.url)));
+    return createHash("sha256")
+        .update(entry.file)
+        .update("\0")
+        .update(coordinator)
+        .update("\0")
+        .update(runtimeEnhancements)
+        .update("\0")
+        .update(inlineStyles.map((bytes) => createHash("sha256").update(bytes).digest("hex")).join("\0"))
+        .update("\0")
+        .update(publicBaseUrl)
+        .update("\0")
+        .update("workspace-app-self-contained-bootstrap-v4")
+        .digest("hex")
+        .slice(0, 16);
+}
+function workspaceAppUri(config) {
+    const publicBaseUrl = String(config.publicBaseUrl ?? "").replace(/\/+$/, "");
+    let uri = workspaceAppUriCache.get(publicBaseUrl);
+    if (!uri) {
+        uri = `${WORKSPACE_APP_URI_PREFIX}-${workspaceAppRevision(config)}.html`;
+        workspaceAppUriCache.set(publicBaseUrl, uri);
+    }
+    return uri;
 }
 function workspaceAppHtml(config) {
     const baseUrl = assetBaseUrl(config);
     const entry = getWorkspaceAppManifestEntry();
-    const runtimeEnhancementUrl = assetUrl(baseUrl, "assets/runtime-enhancements.js");
-    // The coordinator is a maintained non-hashed asset while /mcp-app-assets is
-    // intentionally served immutable for one year. Add a content revision so a
-    // same-version hotfix cannot be shadowed by the browser's old immutable URL.
-    const continuationCoordinatorUrl = `${assetUrl(baseUrl, "assets/continuation-coordinator.js")}?v=${continuationCoordinatorRevision()}`;
-    const runtimeEnhancementStylesheet = assetUrl(baseUrl, "assets/runtime-enhancements.css");
-    const sessionReviewStylesheet = assetUrl(baseUrl, "assets/session-review.css");
-    const runtimeTimelineStylesheet = assetUrl(baseUrl, "assets/runtime-timeline.css");
-    const stylesheets = (entry.css ?? [])
-        .map((stylesheet) => `    <link rel="stylesheet" crossorigin href="${assetUrl(baseUrl, stylesheet)}" />`)
-        .join("\n");
+    const escapeInlineScript = (source) => String(source).replace(/<\/script/gi, "<\\/script");
+    const continuationCoordinatorSource = readFileSync(new URL("../dist/ui/assets/continuation-coordinator.js", import.meta.url), "utf8")
+        .replace(/<\/script/gi, "<\\/script");
+    const runtimeEnhancementSource = escapeInlineScript(readFileSync(new URL("../dist/ui/assets/runtime-enhancements.js", import.meta.url), "utf8"));
+    const workspaceEntrySource = escapeInlineScript(
+        readFileSync(new URL(`../dist/ui/${entry.file}`, import.meta.url), "utf8")
+            .replace(/(["'])\.\/([^"']+\.js)\1/g, (_match, quote, relativePath) => `${quote}${assetUrl(baseUrl, `assets/${relativePath}`)}${quote}`),
+    );
+    const stylesheetFiles = [
+        ...(entry.css ?? []),
+        "assets/runtime-enhancements.css",
+        "assets/session-review.css",
+        "assets/runtime-timeline.css",
+    ];
+    const inlineStyles = stylesheetFiles
+        .map((stylesheet) => readFileSync(new URL(`../dist/ui/${stylesheet}`, import.meta.url), "utf8"))
+        .join("\n")
+        .replace(/<\/style/gi, "<\\/style");
     return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DevSpace Workspace</title>
-    <link rel="stylesheet" crossorigin href="${runtimeEnhancementStylesheet}" />
-    <link rel="stylesheet" crossorigin href="${sessionReviewStylesheet}" />
-    <link rel="stylesheet" crossorigin href="${runtimeTimelineStylesheet}" />
-    <script type="module" crossorigin src="${runtimeEnhancementUrl}"></script>
-    <script type="module" crossorigin src="${continuationCoordinatorUrl}"></script>
-    <script type="module" crossorigin src="${assetUrl(baseUrl, entry.file)}"></script>
-${stylesheets}
+    <style>
+${inlineStyles}
+    </style>
+    <script type="module">
+${runtimeEnhancementSource}
+    </script>
+    <script type="module">
+${continuationCoordinatorSource}
+    </script>
+    <script type="module">
+${workspaceEntrySource}
+    </script>
   </head>
   <body>
     <main id="app" class="shell">
@@ -653,8 +715,41 @@ ${stylesheets}
 function appCsp(config) {
     const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
     return {
-        resourceDomains: [publicBaseUrl, "data:"],
+        resourceDomains: [publicBaseUrl],
         connectDomains: [publicBaseUrl],
+    };
+}
+function appOpenAiWidgetCsp(config) {
+    const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
+    return {
+        resource_domains: [publicBaseUrl],
+        connect_domains: [publicBaseUrl],
+    };
+}
+function appResourceMeta(config) {
+    const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
+    return {
+        ui: {
+            prefersBorder: true,
+            domain: publicBaseUrl,
+            csp: appCsp(config),
+        },
+        "openai/widgetDescription": "DevSpace workspace UI, operation timeline, file diffs, generated artifact previews, and durable task continuation.",
+        "openai/widgetPrefersBorder": true,
+        "openai/widgetCSP": appOpenAiWidgetCsp(config),
+        "openai/widgetDomain": publicBaseUrl,
+    };
+}
+function workspaceAppResourceResult(config, resourceUri = workspaceAppUri(config)) {
+    return {
+        contents: [
+            {
+                uri: String(resourceUri),
+                mimeType: RESOURCE_MIME_TYPE,
+                text: workspaceAppHtml(config),
+                _meta: appResourceMeta(config),
+            },
+        ],
     };
 }
 
@@ -1431,7 +1526,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 wakeReady: z.boolean().optional(),
                 watchedProcesses: z.array(z.unknown()).optional(),
             }),
-            ...toolWidgetDescriptorMeta(config, "shell"),
+            ...appCallableToolMeta(config, "shell"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async (input, { _meta } = {}) => {
             if (input.workspaceId)
@@ -1443,6 +1538,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                     taskId: input.taskId,
                     workspaceId: input.workspaceId,
                     conversationScopeId,
+                    coordinatorInstanceId: input.coordinatorInstanceId,
                 });
                 const task = status.task;
                 const workspaceId = task?.workspaceId ?? input.workspaceId;
@@ -1475,13 +1571,12 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                         runtimeState.continuationTask({ action: "unwatch-process", taskId: task.id, processHandle, conversationScopeId });
                     }
                     if (completedHandles.length > 0 && task.state === "WAITING_EXTERNAL") {
-                        // A watched process is itself the external condition the
-                        // task asked DevSpace to observe. Once it completes, move
-                        // the task back to RUNNING before the App attempts to
-                        // claim/send a continuation; claim-continuation correctly
-                        // rejects generic WAITING_EXTERNAL tasks.
+                        // Persist the wake separately from any one iframe. Multiple
+                        // Workspace App instances can race watch-status; a one-shot
+                        // wakeReady response is not sufficient because the winning
+                        // iframe may disappear before claim/sendMessage.
                         runtimeState.continuationTask({
-                            action: "resume",
+                            action: "arm-wake",
                             taskId: task.id,
                             conversationScopeId,
                             note: "watched process completed",
@@ -1491,7 +1586,12 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 const refreshed = task
                     ? runtimeState.continuationTask({ action: "status", taskId: task.id, conversationScopeId }).task
                     : undefined;
-                const payload = { task: refreshed, accepted: Boolean(task), wakeReady: completedHandles.length > 0, watchedProcesses };
+                const payload = {
+                    task: refreshed,
+                    accepted: Boolean(task),
+                    wakeReady: completedHandles.length > 0 || Boolean(refreshed?.continuationWakePending),
+                    watchedProcesses,
+                };
                 const result = JSON.stringify(payload, null, 2);
                 return { content: [textBlock(result)], structuredContent: { result, ...payload } };
             }
@@ -1666,36 +1766,44 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     }, {
         instructions: serverInstructions(config),
     });
-    registerAppResource(server, "DevSpace Diff Card", WORKSPACE_APP_URI, {
+    const workspaceResourceUri = workspaceAppUri(config);
+    const workspaceResourceMetadata = {
         description: "DevSpace workspace UI for operation cards, file diffs, and durable continuation coordination.",
-        _meta: {
-            ui: {
-                prefersBorder: true,
-                csp: appCsp(config),
-            },
-            "openai/widgetDescription": "DevSpace workspace UI, operation timeline, file diffs, generated artifact previews, and durable task continuation.",
-            "openai/widgetPrefersBorder": true,
-        },
-    }, async () => {
+        _meta: appResourceMeta(config),
+    };
+    registerAppResource(server, "DevSpace Diff Card", workspaceResourceUri, workspaceResourceMetadata, async () => {
         await assertWorkspaceAppAssets();
-        return {
-            contents: [
-                {
-                    uri: WORKSPACE_APP_URI,
-                    mimeType: RESOURCE_MIME_TYPE,
-                    text: workspaceAppHtml(config),
-                    _meta: {
-                        ui: {
-                            prefersBorder: true,
-                            csp: appCsp(config),
-                        },
-                        "openai/widgetDescription": "DevSpace workspace UI, operation timeline, file diffs, generated artifact previews, and durable task continuation.",
-                        "openai/widgetPrefersBorder": true,
-                    },
-                },
-            ],
-        };
+        return workspaceAppResourceResult(config, workspaceResourceUri);
     });
+    server.registerResource(
+        "DevSpace Diff Card Compatibility",
+        new ResourceTemplate(`${WORKSPACE_APP_URI_PREFIX}-{revision}.html`, { list: undefined }),
+        workspaceResourceMetadata,
+        async (uri) => {
+            await assertWorkspaceAppAssets();
+            return workspaceAppResourceResult(config, uri.toString());
+        },
+    );
+    registerAppResource(
+        server,
+        "DevSpace Diff Card Legacy Compatibility",
+        `${WORKSPACE_APP_URI_PREFIX}.html`,
+        workspaceResourceMetadata,
+        async () => {
+            await assertWorkspaceAppAssets();
+            return workspaceAppResourceResult(config, `${WORKSPACE_APP_URI_PREFIX}.html`);
+        },
+    );
+    registerAppResource(
+        server,
+        "DevSpace Continuation Guard Legacy Compatibility",
+        LEGACY_CONTINUATION_GUARD_URI,
+        workspaceResourceMetadata,
+        async () => {
+            await assertWorkspaceAppAssets();
+            return workspaceAppResourceResult(config, LEGACY_CONTINUATION_GUARD_URI);
+        },
+    );
     registerDoctorTool(server, config, processSessions, runtimeServices.runtimeState);
     registerRuntimeStateTools(server, config, workspaces, runtimeServices.runtimeState, runtimeServices.fileWatches, runtimeServices.permissionRules, processSessions, runtimeServices.remoteAgents);
     registerPluginManagementTools(server, config, workspaces, runtimeServices.pluginManager);
@@ -3061,6 +3169,7 @@ export function createServer(config = loadConfig(), options = {}) {
         });
         try {
             let transport;
+            let initializedServer;
             if (sessionId) {
                 transport = transports.get(sessionId);
                 if (!transport) {
@@ -3100,6 +3209,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     hookManager,
                     remoteAgents,
                 });
+                initializedServer = server;
                 await server.connect(transport);
             }
             else {
@@ -3107,6 +3217,25 @@ export function createServer(config = loadConfig(), options = {}) {
                 return;
             }
             await transport.handleRequest(req, res, req.body);
+            if (initializeRequest && initializedServer) {
+                const refreshTimer = setTimeout(() => {
+                    try {
+                        // Tool/resource registration happens before MCP initialization, so
+                        // the SDK's registration-time list_changed notifications are not
+                        // deliverable yet. Emit one revision signal after initialization so
+                        // hosts refresh content-addressed Workspace App metadata following a
+                        // Portable restart or same-version UI hotfix without manual reconnects.
+                        initializedServer.sendToolListChanged();
+                        initializedServer.sendResourceListChanged();
+                    }
+                    catch (error) {
+                        logEvent(config.logging, "warn", "mcp_metadata_refresh_notification_failed", {
+                            error: error instanceof Error ? error.message : String(error),
+                        });
+                    }
+                }, 250);
+                refreshTimer.unref?.();
+            }
         }
         catch (error) {
             logEvent(config.logging, "error", "mcp_request_error", {
@@ -3205,4 +3334,4 @@ if (await isMainModule()) {
 
 // Export pure response/preview helpers for packaged smoke tests. They do not
 // bypass workspace path validation or expose server state.
-export { collectWorkspacePreviews, nativeAttachmentContent, processToolResponse, redactDisplayArgv, reviewOperation, shouldAttachWidget, toolInvocationStatus, toolWidgetDescriptorMeta, workspaceAppHtml };
+export { collectWorkspacePreviews, nativeAttachmentContent, processToolResponse, redactDisplayArgv, reviewOperation, shouldAttachWidget, toolInvocationStatus, toolWidgetDescriptorMeta, workspaceAppHtml, workspaceAppResourceResult, workspaceAppUri };

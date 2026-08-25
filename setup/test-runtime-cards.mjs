@@ -116,12 +116,14 @@ try {
 
   const html = workspaceAppHtml({ publicBaseUrl: "https://example.test" });
   if (
-    !html.includes("runtime-enhancements.js")
-    || !html.includes("runtime-enhancements.css")
-    || !html.includes("session-review.css")
-    || !html.includes("runtime-timeline.css")
+    !html.includes("const RUNTIME_TOOLS = new Set([")
+    || !html.includes(".codex-runtime-card{")
+    || !html.includes(".devspace-session-review{")
+    || !html.includes(".devspace-operation-timeline {")
+    || /<script[^>]+src=/.test(html)
+    || /<link[^>]+rel="stylesheet"/.test(html)
   ) {
-    throw new Error("runtime enhancement assets are missing from the workspace app");
+    throw new Error("runtime enhancement assets are not self-contained in the workspace app");
   }
 
   for (const relativePath of [
@@ -139,6 +141,7 @@ try {
     widgets: "changes",
     toolMode: "codex",
     oauth: { scopes: ["devspace"] },
+    publicBaseUrl: "https://devspace.example.test",
   };
   if (shouldAttachWidget(changesConfig, "runtime")) {
     throw new Error("runtime tools must stay headless in changes mode");
@@ -150,9 +153,10 @@ try {
     throw new Error("show_changes must remain the dedicated render tool");
   }
   const renderMeta = toolWidgetDescriptorMeta(changesConfig, "show_changes");
+  const renderUri = renderMeta._meta?.ui?.resourceUri;
   if (
-    renderMeta._meta?.ui?.resourceUri !== "ui://devspace/workspace-app.html"
-    || renderMeta._meta?.["openai/outputTemplate"] !== "ui://devspace/workspace-app.html"
+    !/^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/.test(renderUri ?? "")
+    || renderMeta._meta?.["openai/outputTemplate"] !== renderUri
   ) {
     throw new Error("show_changes render metadata is incomplete");
   }

@@ -2018,19 +2018,25 @@ async function startPublicTunnel(provider, publicBaseUrl, port) {
     const network = readJson(TUNNEL_NETWORK_STATE_FILE, null);
     if (provider === "ngrok") {
       const agent = await ngrokAgentState(publicBaseUrl);
+      const publicReady = agent.matchingTunnel ? await publicServiceReady(publicBaseUrl) : false;
       return {
-        ready: Boolean(agent.matchingTunnel),
+        ready: Boolean(agent.matchingTunnel && publicReady),
         agentReachable: agent.reachable,
         matchingTunnel: agent.matchingTunnel,
+        publicReady,
         networkMode: network?.mode || "unknown",
         networkReason: network?.reason || "unknown",
         proxySource: network?.proxySource || "none",
       };
     }
     const childStatus = recordedProcessStatus(TUNNEL_PID_FILE, spec.image);
+    const publicReady = childStatus.running && network?.paused !== true
+      ? await publicServiceReady(publicBaseUrl)
+      : false;
     return {
-      ready: Boolean(childStatus.running && network?.paused !== true),
+      ready: Boolean(childStatus.running && network?.paused !== true && publicReady),
       childRunning: childStatus.running,
+      publicReady,
       networkMode: network?.mode || "unknown",
       networkReason: network?.reason || "unknown",
     };
@@ -2092,12 +2098,14 @@ async function startTunnelOnly() {
   }
   if (provider === "ngrok") {
     const currentAgent = await ngrokAgentState(expected.publicBaseUrl);
-    if (currentAgent.matchingTunnel) {
+    if (currentAgent.matchingTunnel && await publicServiceReady(expected.publicBaseUrl)) {
       return `Public ngrok tunnel is already active. Local MCP was not restarted.`;
     }
   } else {
     const current = recordedProcessStatus(TUNNEL_PID_FILE, tunnelProcessSpec(provider).image);
-    if (current.running) return `Public ${provider} tunnel is already running. Local MCP was not restarted.`;
+    if (current.running && await publicServiceReady(expected.publicBaseUrl)) {
+      return `Public ${provider} tunnel is already running. Local MCP was not restarted.`;
+    }
   }
   const started = await startPublicTunnel(provider, expected.publicBaseUrl, expected.port);
   if (started?.deferred) {
@@ -2131,9 +2139,10 @@ async function startServices() {
   }
   ensureRuntime(provider);
   const expected = validateTunnelStartConfiguration(provider, deployment, config);
-  const existingTunnel = provider === "ngrok"
+  const existingTunnelProcess = provider === "ngrok"
     ? (await ngrokAgentState(expected.publicBaseUrl)).matchingTunnel
     : recordedProcessStatus(TUNNEL_PID_FILE, tunnelProcessSpec(provider).image).running;
+  const existingTunnel = Boolean(existingTunnelProcess && await publicServiceReady(expected.publicBaseUrl));
   if (existingLocal && existingTunnel) {
     return `Portable DevSpace and ${provider} are already healthy; no restart was required.\nOwner Password file (auth.json): ${AUTH_FILE}`;
   }

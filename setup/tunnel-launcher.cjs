@@ -14,6 +14,7 @@ const runDir = process.env.DEVSPACE_PORTABLE_RUN_DIR
   : path.join(root, "data", "run");
 const deploymentFile = path.join(configDir, "deployment.json");
 const ngrokConfigFile = path.join(configDir, "ngrok.yml");
+const curlExe = path.join(root, "runtime", "git", "mingw64", "bin", "curl.exe");
 const pidFile = process.env.TUNNEL_PID_FILE || path.join(runDir, "tunnel.pid");
 const supervisorPidFile = path.join(runDir, "tunnel-supervisor.pid");
 const networkStateFile = path.join(runDir, "tunnel-network.json");
@@ -31,10 +32,14 @@ const allowedExecutables = new Set([
   path.join(root, "runtime", "cloudflared", "cloudflared.exe").toLowerCase(),
 ]);
 const isNetworkSelfTest = process.argv.includes("--network-self-test");
+const isPublicHealthSelfTest = process.argv.includes("--public-health-self-test");
 const requestedProvider = isNetworkSelfTest
   ? (String(process.env.DEVSPACE_TEST_TUNNEL_PROVIDER || "ngrok").toLowerCase() === "cloudflare" ? "cloudflare" : "ngrok")
   : requestedExecutable.toLowerCase().endsWith("cloudflared.exe") ? "cloudflare" : "ngrok";
 const NETWORK_POLL_MS = 5_000;
+const PUBLIC_HEALTH_POLL_MS = 15_000;
+const PUBLIC_HEALTH_FAILURE_THRESHOLD = 3;
+const PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 60_000;
 let child = null;
 let stopping = false;
 let restartTimer = null;
@@ -43,6 +48,17 @@ let lastConfigurationSignature = "";
 let lastObservedPathSignature = "";
 let reconnectCount = 0;
 let lastReconnectAt = "";
+let lastPublicHealthProbeAt = 0;
+let publicHealthFailureCount = 0;
+let lastPublicHealthRestartAt = 0;
+let lastPublicHealth = {
+  checkedAt: null,
+  healthy: null,
+  actionable: false,
+  localStatus: 0,
+  publicStatus: 0,
+  error: "not-checked",
+};
 
 function readJson(file, fallback = {}) {
   try { return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "")); } catch { return fallback; }
@@ -75,6 +91,127 @@ function commandOutput(executable, args, timeout = 3_000) {
     maxBuffer: 2 * 1024 * 1024,
   });
   return result.status === 0 ? String(result.stdout || "") : "";
+}
+
+function deploymentRuntime() {
+  const deployment = readJson(deploymentFile, {});
+  return {
+    publicBaseUrl: String(deployment.publicBaseUrl || "").replace(/\/$/, ""),
+    port: Number(deployment.port || 7676),
+  };
+}
+
+function curlHttpStatus(url, network, timeoutMs = 4_000) {
+  const forced = String(process.env.DEVSPACE_TEST_PUBLIC_HEALTH || "").trim().toLowerCase();
+  const local = /^http:\/\/(?:127\.0\.0\.1|localhost|\[?::1\]?)(?::|\/)/i.test(String(url));
+  if (forced === "healthy") return 401;
+  if (forced === "failing") return local ? 401 : 0;
+  if (forced === "local-failing") return 0;
+  if (!fs.existsSync(curlExe)) return 0;
+  const timeoutSeconds = Math.max(2, Math.ceil(timeoutMs / 1000));
+  const args = [
+    "--silent",
+    "--show-error",
+    "--location",
+    "--connect-timeout", String(Math.min(3, timeoutSeconds)),
+    "--max-time", String(timeoutSeconds),
+    "--output", "NUL",
+    "--write-out", "%{http_code}",
+  ];
+  if (!local && network?.proxyUrl) args.push("--proxy", network.proxyUrl);
+  else args.push("--proxy", "", "--noproxy", "*");
+  args.push(String(url));
+  const result = childProcess.spawnSync(curlExe, args, {
+    cwd: root,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: timeoutMs + 1_500,
+    maxBuffer: 256 * 1024,
+    env: {
+      ...process.env,
+      HTTP_PROXY: "",
+      HTTPS_PROXY: "",
+      ALL_PROXY: "",
+      http_proxy: "",
+      https_proxy: "",
+      all_proxy: "",
+    },
+  });
+  if (result.status !== 0) return 0;
+  const status = Number(String(result.stdout || "").trim());
+  return Number.isInteger(status) ? status : 0;
+}
+
+function probePublicEndpointHealth(network) {
+  const runtime = deploymentRuntime();
+  if (!runtime.publicBaseUrl || !Number.isInteger(runtime.port) || runtime.port <= 0) {
+    return {
+      checkedAt: new Date().toISOString(),
+      healthy: null,
+      actionable: false,
+      localStatus: 0,
+      publicStatus: 0,
+      error: "public-runtime-not-configured",
+    };
+  }
+  const localStatus = curlHttpStatus(`http://127.0.0.1:${runtime.port}/mcp`, { proxyUrl: "" });
+  if (localStatus !== 401) {
+    return {
+      checkedAt: new Date().toISOString(),
+      healthy: null,
+      actionable: false,
+      localStatus,
+      publicStatus: 0,
+      error: `local-mcp-status-${localStatus || "unreachable"}`,
+    };
+  }
+  const publicStatus = curlHttpStatus(`${runtime.publicBaseUrl}/mcp`, network);
+  return {
+    checkedAt: new Date().toISOString(),
+    healthy: publicStatus === 401,
+    actionable: true,
+    localStatus,
+    publicStatus,
+    error: publicStatus === 401 ? "" : `public-mcp-status-${publicStatus || "unreachable"}`,
+  };
+}
+
+function maybeRecoverPublicEndpoint(network) {
+  if (!child || network.paused) return false;
+  const now = Date.now();
+  if (now - lastPublicHealthProbeAt < PUBLIC_HEALTH_POLL_MS) return false;
+  lastPublicHealthProbeAt = now;
+  lastPublicHealth = probePublicEndpointHealth(network);
+  if (!lastPublicHealth.actionable) {
+    publicHealthFailureCount = 0;
+    return false;
+  }
+  if (lastPublicHealth.healthy) {
+    publicHealthFailureCount = 0;
+    return false;
+  }
+  publicHealthFailureCount += 1;
+  if (publicHealthFailureCount < PUBLIC_HEALTH_FAILURE_THRESHOLD) return false;
+  if (now - lastPublicHealthRestartAt < PUBLIC_HEALTH_RESTART_COOLDOWN_MS) return false;
+
+  lastPublicHealthRestartAt = now;
+  publicHealthFailureCount = 0;
+  reconnectCount += 1;
+  lastReconnectAt = new Date(now).toISOString();
+  terminateChild("public-endpoint-unhealthy");
+  writeNetworkState(network, {
+    status: "recovering",
+    transition: "public-health-reconnect",
+    appliedPathSignature: lastObservedPathSignature || network.pathSignature || null,
+    publicEndpointHealthy: false,
+    publicHealthFailureCount,
+    publicHealthLastProbeAt: lastPublicHealth.checkedAt,
+    publicHealthLocalStatus: lastPublicHealth.localStatus,
+    publicHealthPublicStatus: lastPublicHealth.publicStatus,
+    publicHealthError: lastPublicHealth.error,
+  });
+  scheduleReconcile(1_500);
+  return true;
 }
 
 function normalizeProxyUrl(value) {
@@ -409,6 +546,7 @@ function reconcile() {
     });
     return;
   }
+  if (maybeRecoverPublicEndpoint(network)) return;
   writeNetworkState(network, {
     childPid: child.pid,
     status: "running",
@@ -416,6 +554,12 @@ function reconcile() {
     previousPathSignature: pathChanged ? previousPathSignature : undefined,
     appliedPathSignature: lastObservedPathSignature || network.pathSignature || null,
     publicProbesSuppressed: false,
+    publicEndpointHealthy: lastPublicHealth.healthy,
+    publicHealthFailureCount,
+    publicHealthLastProbeAt: lastPublicHealth.checkedAt,
+    publicHealthLocalStatus: lastPublicHealth.localStatus,
+    publicHealthPublicStatus: lastPublicHealth.publicStatus,
+    publicHealthError: lastPublicHealth.error,
   });
 }
 
@@ -431,6 +575,11 @@ function shutdown() {
 
 if (isNetworkSelfTest) {
   process.stdout.write(`${JSON.stringify(resolveNetworkState())}\n`);
+  process.exit(0);
+}
+
+if (isPublicHealthSelfTest) {
+  process.stdout.write(`${JSON.stringify(probePublicEndpointHealth(resolveNetworkState()))}\n`);
   process.exit(0);
 }
 

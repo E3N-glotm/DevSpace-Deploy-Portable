@@ -39,18 +39,34 @@ for (const pattern of [
 for (const pattern of [
   /registerAppTool\(server, "continuation_anchor"/,
   /toolWidgetDescriptorMeta\(config, "continuation-anchor"\)/,
-  /resourceUri: WORKSPACE_APP_URI/,
+  /resourceUri: appUri/,
   /assets\/continuation-coordinator\.js/,
-  /continuationCoordinatorRevision/,
+  /workspaceAppRevision/,
+  /workspaceAppUri/,
+  /WORKSPACE_APP_URI_PREFIX/,
+  /sendToolListChanged\(\)/,
+  /sendResourceListChanged\(\)/,
+  /mcp_metadata_refresh_notification_failed/,
   /createHash\("sha256"\)/,
-  /continuation-coordinator\.js"\)\}\?v=\$\{continuationCoordinatorRevision\(\)\}/,
+  /continuationCoordinatorSource/,
+  /appOpenAiWidgetCsp/,
+  /"openai\/widgetCSP": appOpenAiWidgetCsp\(config\)/,
+  /"openai\/widgetDomain": publicBaseUrl/,
+  /ResourceTemplate/,
+  /WORKSPACE_APP_URI_PREFIX[^\n]*\{revision\}\.html/,
+  /DevSpace Diff Card Compatibility/,
+  /DevSpace Diff Card Legacy Compatibility/,
+  /function appCallableToolMeta/,
+  /visibility: \["model", "app"\]/,
+  /"openai\/widgetAccessible": true/,
   /registerAppTool\(server, "continuation_task"/,
-  /registerAppTool\(server, "continuation_task",[\s\S]{0,3200}\.\.\.toolWidgetDescriptorMeta\(config, "shell"\)/,
+  /registerAppTool\(server, "continuation_task",[\s\S]{0,3400}\.\.\.appCallableToolMeta\(config, "shell"\)/,
   /openAiConversationScopeId\(_meta\)/,
   /requiredMilestones/,
   /completion.*evidence|provide concrete evidence/is,
 ]) assert.match(server, pattern);
-assert.doesNotMatch(server, /CONTINUATION_GUARD_URI|ui:\/\/devspace\/continuation-guard\.html|DevSpace Continuation Guard/);
+assert.doesNotMatch(server, /<script[^>]+src="\$\{continuationCoordinatorUrl\}"/, "continuation coordinator must be delivered inline with the MCP App resource so same-version host asset caches cannot pin stale logic");
+assert.doesNotMatch(server, /"openai\/outputTemplate"\s*:\s*LEGACY_CONTINUATION_GUARD_URI/, "historical continuation-guard URI may exist only as a resource alias, never as the current output template");
 assert.doesNotMatch(server, /CONTINUATION_APP_KINDS/, "ordinary DevSpace tools must not gain UI metadata merely because continuation is enabled");
 assert.match(server, /const attachWorkspaceApp = shouldAttachWidget\(config, kind\);/, "only explicitly UI-bearing tools may mount the Workspace App");
 assert.match(featureTools, /registerAppTool\(server, "session_changes",[\s\S]{0,1200}\.\.\.toolMeta\("review"\)/, "session_changes must stay headless in default changes mode");
@@ -84,11 +100,12 @@ assert.match(workspaceBundle, /window\.__DEVSPACE_ATTACH_CONTINUATION__\?\.\(Y_\
 assert.match(workspaceBundle, /window\.__DEVSPACE_CONTINUATION_CONNECTED__\?\.\(Y_\)/);
 assert.match(workspaceBundle, /window\.__DEVSPACE_CONTINUATION_TEARDOWN__\?\.\(Y_,e,t\)/);
 
-const { toolWidgetDescriptorMeta } = await import(`${pathToFileURL(packagedServerPath).href}?descriptor=${Date.now()}`);
+const { toolWidgetDescriptorMeta, workspaceAppHtml, workspaceAppResourceResult, workspaceAppUri } = await import(`${pathToFileURL(packagedServerPath).href}?descriptor=${Date.now()}`);
 const descriptorConfig = {
   widgets: "changes",
   features: { continuationGuard: true },
   oauth: { scopes: ["devspace"] },
+  publicBaseUrl: "https://devspace.example.test",
 };
 for (const kind of ["workspace", "runtime", "shell", "write", "edit", "read", "search", "directory"]) {
   const meta = toolWidgetDescriptorMeta(descriptorConfig, kind);
@@ -96,8 +113,33 @@ for (const kind of ["workspace", "runtime", "shell", "write", "edit", "read", "s
   assert.equal(meta?._meta?.["openai/outputTemplate"], undefined, `${kind} must not render a continuation card`);
 }
 const anchorMeta = toolWidgetDescriptorMeta(descriptorConfig, "continuation-anchor");
-assert.equal(anchorMeta?._meta?.ui?.resourceUri, "ui://devspace/workspace-app.html");
-assert.equal(anchorMeta?._meta?.["openai/outputTemplate"], "ui://devspace/workspace-app.html");
+const anchorUri = workspaceAppUri(descriptorConfig);
+assert.match(anchorUri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/);
+assert.equal(anchorMeta?._meta?.ui?.resourceUri, anchorUri);
+assert.equal(anchorMeta?._meta?.["openai/outputTemplate"], anchorUri);
+assert.notEqual(workspaceAppUri({ ...descriptorConfig, publicBaseUrl: "https://other.example.test" }), anchorUri, "changing the public asset origin must produce a fresh Workspace App URI");
+const renderedWorkspaceApp = workspaceAppHtml(descriptorConfig);
+assert.match(renderedWorkspaceApp, /<script type="module">[\s\S]*installContinuationCoordinator/, "Workspace App HTML must embed the continuation coordinator directly in the versioned MCP App resource");
+assert.doesNotMatch(renderedWorkspaceApp, /data:text\/javascript;base64,/, "Workspace App HTML must not depend on a data: module that ChatGPT may block before widget CSP compatibility metadata is applied");
+assert.doesNotMatch(renderedWorkspaceApp, /src="[^"]*continuation-coordinator\.js/, "Workspace App HTML must not depend on an externally cached continuation coordinator script");
+assert.match(renderedWorkspaceApp, /window\.__DEVSPACE_MCP_APP__=/, "Workspace App HTML must inline the MCP Apps bootstrap bundle so ChatGPT does not need a second script request before connecting");
+assert.match(renderedWorkspaceApp, /RUNTIME_TOOLS/, "Workspace App HTML must inline runtime enhancements used by the render surface");
+assert.match(renderedWorkspaceApp, /<style>[\s\S]*\.shell/, "Workspace App HTML must inline its initial styles so the iframe is self-contained");
+assert.doesNotMatch(renderedWorkspaceApp, /<script[^>]+src=/, "Workspace App bootstrap must not depend on external script requests");
+assert.doesNotMatch(renderedWorkspaceApp, /<link[^>]+rel="stylesheet"/, "Workspace App bootstrap must not depend on external stylesheet requests");
+assert.match(renderedWorkspaceApp, /https:\/\/devspace\.example\.test\/mcp-app-assets\/assets\/heavy-payload-[^"']+\.js/, "inline Vite entry must rewrite lazy chunk URLs to the public asset origin");
+const staleResourceUri = "ui://devspace/workspace-app-deadbeefdeadbeef.html";
+const staleResource = workspaceAppResourceResult(descriptorConfig, staleResourceUri);
+assert.equal(staleResource.contents?.[0]?.uri, staleResourceUri, "compatibility reads must preserve the stale URI requested by the host");
+assert.equal(staleResource.contents?.[0]?.mimeType, "text/html;profile=mcp-app");
+assert.match(staleResource.contents?.[0]?.text ?? "", /window\.__DEVSPACE_MCP_APP__=/, "compatibility reads must return the current self-contained Workspace App");
+assert.equal(staleResource.contents?.[0]?._meta?.ui?.domain, descriptorConfig.publicBaseUrl);
+const historicalContinuationGuardUri = "ui://devspace/continuation-guard.html";
+const historicalContinuationGuardResource = workspaceAppResourceResult(descriptorConfig, historicalContinuationGuardUri);
+assert.equal(historicalContinuationGuardResource.contents?.[0]?.uri, historicalContinuationGuardUri);
+assert.match(historicalContinuationGuardResource.contents?.[0]?.text ?? "", /installContinuationCoordinator/, "historical continuation-guard URI must resolve to the current coordinator");
+assert.match(server, /DevSpace Continuation Guard Legacy Compatibility/);
+assert.match(server, /ui:\/\/devspace\/continuation-guard\.html/);
 
 const { loadConfig } = await import(`${pathToFileURL(packagedConfigPath).href}?config=${Date.now()}`);
 const configRoot = mkdtempSync(join(tmpdir(), "devspace-1147-config-"));
@@ -127,6 +169,7 @@ class FakeApp {
   constructor() {
     this.handlers = new Map();
     this.calls = [];
+    this.callInputs = [];
     this.messages = [];
     this.contextUpdates = [];
     this.task = undefined;
@@ -151,6 +194,7 @@ class FakeApp {
   async callServerTool({ name, arguments: input }) {
     assert.equal(name, "continuation_task");
     this.calls.push(input.action);
+    this.callInputs.push({ ...input });
     if (input.action === "begin-auto") {
       this.task ??= {
         id: "task_fake",
@@ -217,6 +261,31 @@ assert.ok(fakeApp.calls.includes("claim-continuation"));
 assert.ok(fakeApp.calls.includes("delivery-result"));
 fakeController.dispose();
 
+// ChatGPT may create the iframe and deliver toolinput but omit the one-shot
+// initial toolresult. An explicit anchor taskId must bind that persisted task
+// directly and must never create a begin-auto shadow task.
+const explicitBindingApp = new FakeApp();
+explicitBindingApp.task = {
+  id: "task_explicit",
+  workspaceId: "ws_explicit",
+  state: "RUNNING",
+  objective: "bind exact anchor task",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  watchProcessHandles: [],
+  turnStartedAt: new Date(Date.now() - 1000).toISOString(),
+};
+const explicitBindingController = installContinuationCoordinator(explicitBindingApp, { timers: false, instanceId: "ui_explicit" });
+explicitBindingApp.emit("toolinput", { arguments: { workspaceId: "ws_explicit", taskId: "task_explicit" } });
+await explicitBindingController.onConnected();
+assert.equal(explicitBindingController.state.task?.id, "task_explicit");
+assert.ok(explicitBindingApp.calls.includes("status"), "explicit anchor taskId must be resolved through status when toolresult is absent");
+assert.equal(explicitBindingApp.calls.includes("begin-auto"), false, "explicit anchor taskId must suppress begin-auto shadow task creation");
+assert.equal(explicitBindingApp.callInputs.find((entry) => entry.action === "status")?.taskId, "task_explicit");
+assert.ok(explicitBindingApp.calls.includes("heartbeat"));
+explicitBindingController.dispose();
+
 const timerApp = new FakeApp();
 timerApp.profileRecommendedMs = 10;
 const timerController = installContinuationCoordinator(timerApp, {
@@ -270,6 +339,31 @@ assert.ok(lateProcessWatchApp.calls.includes("resume"), "completed watched proce
 assert.equal(lateProcessWatchApp.messages.length, 1, "late registered watched process should wake exactly once");
 lateProcessWatchController.dispose();
 
+const persistentWakeApp = new FakeApp();
+persistentWakeApp.task = {
+  id: "task_fake",
+  workspaceId: "ws_persistent_wake",
+  state: "RUNNING",
+  objective: "finish persistent wake task",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  continuationWakePending: true,
+  watchProcessHandles: [],
+  turnStartedAt: new Date(Date.now() - 1000).toISOString(),
+};
+const persistentWakeController = installContinuationCoordinator(persistentWakeApp, {
+  supervisorTickMs: 5,
+  heartbeatIntervalMs: 25,
+  instanceId: "ui_persistent_wake",
+});
+persistentWakeApp.emit("toolinput", { arguments: { workspaceId: "ws_persistent_wake" } });
+await persistentWakeController.onConnected();
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
+assert.ok(persistentWakeApp.calls.includes("claim-continuation"), "a sibling iframe must claim a persisted wake without a process handle");
+assert.equal(persistentWakeApp.messages.length, 1, "a persisted wake must be deliverable by any surviving iframe");
+persistentWakeController.dispose();
+
 const teardownApp = new FakeApp();
 const teardownController = installContinuationCoordinator(teardownApp, { timers: false, instanceId: "ui_teardown" });
 teardownApp.emit("toolinput", { arguments: { workspaceId: "ws_teardown" } });
@@ -302,6 +396,20 @@ try {
     workspaceId: "ws_shared",
   });
   assert.notEqual(a.task.id, b.task.id, "two conversations sharing a workspace must not share continuation state");
+  const wrongScopeLookup = runtime.continuationTask({
+    action: "status",
+    taskId: a.task.id,
+    workspaceId: "ws_shared",
+    conversationScopeId: "conversation-b",
+  });
+  assert.equal(wrongScopeLookup.task, undefined, "an exact taskId must not cross the ChatGPT conversation scope boundary");
+  const exactScopeLookup = runtime.continuationTask({
+    action: "status",
+    taskId: a.task.id,
+    workspaceId: "ws_shared",
+    conversationScopeId: "conversation-a",
+  });
+  assert.equal(exactScopeLookup.task?.id, a.task.id);
 
   const upgraded = runtime.continuationTask({
     action: "begin",
@@ -427,6 +535,118 @@ try {
   assert.equal(exhausted.reason, "continuation-budget");
   assert.equal(exhausted.task.state, "BUDGET_EXHAUSTED");
 
+  const supervisorGuard = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-supervisor-guard",
+    workspaceId: "ws_supervisor_guard",
+  });
+  runtime.continuationTask({ action: "watch-process", taskId: supervisorGuard.task.id, processHandle: "guard-process" });
+  const staleWait = runtime.continuationTask({ action: "wait", taskId: supervisorGuard.task.id, note: "must not wait without a live supervisor" });
+  assert.equal(staleWait.accepted, true);
+  assert.equal(staleWait.reason, "supervisor-ack-pending");
+  assert.equal(staleWait.task.state, "WAITING_SUPERVISOR", "a watched wait must persist intent without pretending the supervisor already acknowledged it");
+  const acknowledgedWait = runtime.continuationTask({
+    action: "status",
+    taskId: supervisorGuard.task.id,
+    conversationScopeId: "conversation-supervisor-guard",
+    coordinatorInstanceId: "ui_guard",
+  });
+  assert.equal(acknowledgedWait.task.state, "WAITING_EXTERNAL", "the next coordinator status poll must atomically acknowledge the pending wait");
+  assert.equal(acknowledgedWait.task.coordinatorInstanceId, "ui_guard");
+  runtime.continuationTask({ action: "resume", taskId: supervisorGuard.task.id });
+  const staleCheckpointWait = runtime.continuationTask({
+    action: "checkpoint",
+    taskId: supervisorGuard.task.id,
+    waitingExternal: true,
+    note: "checkpoint wait also requires a live supervisor",
+  });
+  assert.equal(staleCheckpointWait.accepted, true);
+  assert.equal(staleCheckpointWait.reason, "supervisor-ack-pending");
+  assert.equal(staleCheckpointWait.task.state, "WAITING_SUPERVISOR");
+  const coordinatorTouch = runtime.continuationTask({
+    action: "status",
+    taskId: supervisorGuard.task.id,
+    conversationScopeId: "conversation-supervisor-guard",
+    coordinatorInstanceId: "ui_guard",
+  });
+  assert.equal(coordinatorTouch.task.coordinatorInstanceId, "ui_guard");
+  assert.ok(coordinatorTouch.task.lastUiHeartbeatAt, "coordinator status polling must count as supervisor liveness");
+  assert.equal(coordinatorTouch.task.state, "WAITING_EXTERNAL");
+  runtime.continuationTask({ action: "resume", taskId: supervisorGuard.task.id });
+
+  const wake = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-persistent-wake",
+    workspaceId: "ws_persistent_wake_state",
+    maxContinuations: 3,
+  });
+  runtime.continuationTask({ action: "wait", taskId: wake.task.id, note: "external process running" });
+  const armedWake = runtime.continuationTask({ action: "arm-wake", taskId: wake.task.id });
+  assert.equal(armedWake.task.state, "RUNNING");
+  assert.equal(armedWake.task.continuationPending, false);
+  assert.equal(armedWake.task.continuationWakePending, true);
+  const wakeClaimOne = runtime.continuationTask({ action: "claim-continuation", taskId: wake.task.id });
+  assert.equal(wakeClaimOne.accepted, true);
+  assert.equal(wakeClaimOne.task.continuationPending, true);
+  assert.equal(wakeClaimOne.task.continuationWakePending, true, "a claimed process wake must remain identifiable until delivery succeeds");
+  const wakeClaimBlocked = runtime.continuationTask({ action: "claim-continuation", taskId: wake.task.id });
+  assert.equal(wakeClaimBlocked.accepted, false);
+  assert.equal(wakeClaimBlocked.reason, "continuation-already-pending");
+  runtime.database.sqlite.prepare("update continuation_tasks set last_continuation_at=? where id=?")
+    .run(new Date(Date.now() - 31_000).toISOString(), wake.task.id);
+  const wakeLeaseTakeover = runtime.continuationTask({ action: "claim-continuation", taskId: wake.task.id });
+  assert.equal(wakeLeaseTakeover.accepted, true, "a sibling coordinator must be able to take over an expired wake claim lease");
+  assert.equal(wakeLeaseTakeover.task.continuationPending, true);
+  assert.equal(wakeLeaseTakeover.task.continuationWakePending, true);
+  assert.equal(wakeLeaseTakeover.task.continuationCount, 2);
+  const wakeRetry = runtime.continuationTask({ action: "release-continuation", taskId: wake.task.id });
+  assert.equal(wakeRetry.task.continuationPending, false);
+  assert.equal(wakeRetry.task.continuationWakePending, true);
+  const wakeClaimTwo = runtime.continuationTask({ action: "claim-continuation", taskId: wake.task.id });
+  assert.equal(wakeClaimTwo.accepted, true, "persisted wake retries must bypass the ordinary cooldown");
+  assert.equal(wakeClaimTwo.task.continuationCount, 3);
+  const wakeDelivered = runtime.continuationTask({
+    action: "delivery-result",
+    taskId: wake.task.id,
+    deliveryResult: "accepted",
+    deliveryMethod: "app.sendMessage",
+  });
+  assert.equal(wakeDelivered.task.continuationPending, true);
+  assert.equal(wakeDelivered.task.continuationWakePending, true);
+  assert.equal(wakeDelivered.task.continuationDeliveryAwaitingAck, true,
+    "host acceptance must keep a wake durable until the resumed model proves DevSpace connectivity");
+  const deliveryStillLeased = runtime.continuationTask({ action: "claim-continuation", taskId: wake.task.id });
+  assert.equal(deliveryStillLeased.accepted, false);
+  assert.equal(deliveryStillLeased.reason, "continuation-delivery-awaiting-ack");
+  runtime.database.sqlite.prepare("update continuation_tasks set last_send_attempt_at=? where id=?")
+    .run(new Date(Date.now() - 61_000).toISOString(), wake.task.id);
+  const deliveryRetry = runtime.continuationTask({ action: "claim-continuation", taskId: wake.task.id });
+  assert.equal(deliveryRetry.accepted, false, "the configured continuation budget is already exhausted in this fixture after the retry becomes eligible");
+  assert.equal(deliveryRetry.reason, "continuation-budget");
+
+  const ackWake = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-delivery-ack",
+    workspaceId: "ws_delivery_ack",
+    maxContinuations: 4,
+  });
+  runtime.continuationTask({ action: "arm-wake", taskId: ackWake.task.id });
+  const ackClaim = runtime.continuationTask({ action: "claim-continuation", taskId: ackWake.task.id });
+  assert.equal(ackClaim.accepted, true);
+  const ackDelivered = runtime.continuationTask({
+    action: "delivery-result",
+    taskId: ackWake.task.id,
+    deliveryResult: "accepted",
+    deliveryMethod: "app.sendMessage",
+  });
+  assert.equal(ackDelivered.task.continuationDeliveryAwaitingAck, true);
+  const modelAck = runtime.continuationTask({ action: "status", taskId: ackWake.task.id });
+  assert.equal(modelAck.accepted, true);
+  assert.equal(modelAck.reason, "continuation-resume-acknowledged");
+  assert.equal(modelAck.task.continuationPending, false);
+  assert.equal(modelAck.task.continuationWakePending, false);
+  assert.equal(modelAck.task.continuationDeliveryAwaitingAck, false);
+
   console.log(JSON.stringify({
     persistentTaskState: true,
     conversationIsolation: true,
@@ -448,6 +668,14 @@ try {
     continuationDeliveryDiagnostics: true,
     explicitWallClockExtension: true,
     followUpCompatibilityFallback: true,
+    persistentProcessWakeTakeover: true,
+    staleSupervisorWaitGuard: true,
+    coordinatorStatusLivenessTouch: true,
+    supervisorAckWaitHandshake: true,
+    continuationResumeAckRetry: true,
+    explicitAnchorTaskBinding: true,
+    exactTaskConversationIsolation: true,
+    historicalContinuationGuardAlias: true,
     domAutomationAbsent: true,
   }));
 } finally {

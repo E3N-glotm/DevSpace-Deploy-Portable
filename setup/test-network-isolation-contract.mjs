@@ -75,6 +75,14 @@ assert.match(reconcile, /topology-changed-no-restart/,
   "route and adapter changes must be observed without proactive tunnel restart");
 assert.doesNotMatch(reconcile, /network-path-quiescing|network-path-settled-reconnect/,
   "third-party topology transitions must not churn the DevSpace tunnel");
+assert.match(reconcile, /maybeRecoverPublicEndpoint\(network\)/,
+  "the tunnel supervisor must recover a persistently unhealthy public endpoint even when the child process is still alive");
+assert.match(launcherSource, /PUBLIC_HEALTH_FAILURE_THRESHOLD = 3/,
+  "end-to-end tunnel recovery must require consecutive failures");
+assert.match(launcherSource, /PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 60_000/,
+  "end-to-end tunnel recovery must use a restart cooldown");
+assert.match(launcherSource, /terminateChild\("public-endpoint-unhealthy"\)/,
+  "public recovery may terminate only the child owned by the tunnel supervisor");
 
 for (const variable of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NGROK_PROXY"]) {
   assert.match(childEnvironment, new RegExp(`\\"${variable}\\"`),

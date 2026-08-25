@@ -1,17 +1,27 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const setupDir = dirname(fileURLToPath(import.meta.url));
-const root = resolve(setupDir, "..");
-const manager = join(setupDir, "portable-manager.cjs");
+const sourceRoot = resolve(setupDir, "..");
+const sourceManager = join(setupDir, "portable-manager.cjs");
 const temporary = await mkdtemp(join(tmpdir(), "devspace-strict-stop-"));
-const configDir = join(temporary, "config");
-const stateDir = join(temporary, "state");
+// Run the destructive stop test from a disposable Portable root. Running the
+// real worktree manager would make ROOT point at the active source checkout and
+// can terminate unrelated DevSpace test/tool processes that happen to belong to
+// that checkout. The sandbox keeps process ownership strictly local to this test.
+const root = join(temporary, "portable");
+const sandboxSetupDir = join(root, "setup");
+const sandboxNodeDir = join(root, "runtime", "node");
+const manager = join(sandboxSetupDir, "portable-manager.cjs");
+const sandboxNode = join(sandboxNodeDir, "node.exe");
+const configDir = join(root, "data", "config");
+const stateDir = join(root, "data", "state");
+const runDir = join(root, "data", "run");
 const pidFile = join(temporary, "orphan.pid");
 const externalPidFile = join(temporary, "external.pid");
 const pingExe = join(process.env.SystemRoot || "C:\\Windows", "System32", "PING.EXE");
@@ -38,10 +48,15 @@ function processExists(pid) {
 }
 
 try {
+  await mkdir(sandboxSetupDir, { recursive: true });
+  await mkdir(sandboxNodeDir, { recursive: true });
   await mkdir(configDir, { recursive: true });
   await mkdir(stateDir, { recursive: true });
+  await mkdir(runDir, { recursive: true });
+  await copyFile(sourceManager, manager);
+  await copyFile(process.execPath, sandboxNode);
   await writeFile(join(configDir, "deployment.json"), JSON.stringify({ port: 17689, tunnelProvider: "ngrok" }), "utf8");
-  const launched = spawnSync(process.execPath, ["-e", launcherCode], {
+  const launched = spawnSync(sandboxNode, ["-e", launcherCode], {
     cwd: root,
     encoding: "utf8",
     windowsHide: true,
@@ -58,12 +73,13 @@ try {
   assert.equal(processExists(pid), true, `orphan test process ${pid} did not start`);
   assert.equal(processExists(externalPid), true, `external descendant ${externalPid} did not start`);
 
-  const stopped = spawnSync(process.execPath, [manager, "stop"], {
+  const stopped = spawnSync(sandboxNode, [manager, "stop"], {
     cwd: root,
     env: {
       ...process.env,
       DEVSPACE_PORTABLE_CONFIG_DIR: configDir,
       DEVSPACE_PORTABLE_STATE_DIR: stateDir,
+      DEVSPACE_PORTABLE_RUN_DIR: runDir,
       DEVSPACE_STOP_EXCLUDE_PID: String(process.pid),
     },
     encoding: "utf8",

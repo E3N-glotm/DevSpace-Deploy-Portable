@@ -126,7 +126,9 @@ export class StructuredRuntimeState {
             maxContinuations: row.max_continuations,
             maxNoProgress: row.max_no_progress,
             maxSameFailure: row.max_same_failure,
-            continuationPending: Boolean(row.continuation_pending),
+            continuationPending: [1, 3, 4].includes(Number(row.continuation_pending)),
+            continuationWakePending: [2, 3, 4].includes(Number(row.continuation_pending)),
+            continuationDeliveryAwaitingAck: Number(row.continuation_pending) === 4,
             waitingReason: row.waiting_reason ?? undefined,
             terminalReason: row.terminal_reason ?? undefined,
             deadlineAt: row.deadline_at ?? undefined,
@@ -149,7 +151,22 @@ export class StructuredRuntimeState {
         }) : undefined;
         const find = () => {
             if (input.taskId) {
-                return this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(String(input.taskId));
+                const taskId = String(input.taskId);
+                const conversationScopeId = input.conversationScopeId ? String(input.conversationScopeId) : undefined;
+                const workspaceId = input.workspaceId ? String(input.workspaceId) : undefined;
+                if (conversationScopeId && workspaceId) {
+                    return this.database.sqlite.prepare("select * from continuation_tasks where id=? and conversation_scope_id=? and workspace_id=?")
+                        .get(taskId, conversationScopeId, workspaceId);
+                }
+                if (conversationScopeId) {
+                    return this.database.sqlite.prepare("select * from continuation_tasks where id=? and conversation_scope_id=?")
+                        .get(taskId, conversationScopeId);
+                }
+                if (workspaceId) {
+                    return this.database.sqlite.prepare("select * from continuation_tasks where id=? and workspace_id=?")
+                        .get(taskId, workspaceId);
+                }
+                return this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
             }
             if (input.workspaceId && input.conversationScopeId) {
                 return this.database.sqlite.prepare(`
@@ -162,7 +179,42 @@ export class StructuredRuntimeState {
             return undefined;
         };
         if (action === "status") {
-            return { task: rowToTask(find()) };
+            const row = find();
+            // The Workspace App supervisor already polls status on every
+            // supervisor tick. Treat a status request carrying a coordinator id
+            // as authoritative UI liveness instead of requiring the separate
+            // one-minute heartbeat timer to beat a shorter freshness gate.
+            // Model-originated status calls do not carry coordinatorInstanceId
+            // and therefore remain read-only.
+            if (row && input.coordinatorInstanceId) {
+                const watchedHandles = parseJson(row.watch_process_handles_json, []);
+                const acknowledgedState = row.state === "WAITING_SUPERVISOR" && watchedHandles.length > 0
+                    ? "WAITING_EXTERNAL"
+                    : row.state;
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set state=?, last_activity_at=?, last_ui_heartbeat_at=?,
+                    coordinator_instance_id=?, updated_at=? where id=?
+                `).run(acknowledgedState, nowIso, nowIso, String(input.coordinatorInstanceId), nowIso, row.id);
+                return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id)) };
+            }
+            // A wake-driven app.sendMessage is only transport-level acceptance.
+            // The resumed model must prove that the new turn can actually reach
+            // DevSpace before the durable wake is retired. continuationText asks
+            // the resumed turn to make this exact status call first. If the host
+            // creates the turn but its first MCP connection fails, state 4 stays
+            // retryable and a surviving Workspace App can resend after the lease.
+            if (row && Number(row.continuation_pending) === 4) {
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set continuation_pending=0,
+                    last_activity_at=?, updated_at=? where id=?
+                `).run(nowIso, nowIso, row.id);
+                return {
+                    task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id)),
+                    accepted: true,
+                    reason: "continuation-resume-acknowledged",
+                };
+            }
+            return { task: rowToTask(row) };
         }
         if (action === "begin" || action === "begin-auto") {
             let existing = find();
@@ -300,10 +352,28 @@ export class StructuredRuntimeState {
                 method: input.deliveryMethod ? String(input.deliveryMethod) : undefined,
                 note: input.note ? String(input.note).slice(0, 1000) : undefined,
             };
+            const delivered = delivery.result === "accepted" || delivery.result === "fallback-accepted";
+            const pendingState = Number(row.continuation_pending || 0);
+            // State 4 means the host accepted a wake-driven follow-up message,
+            // but the resumed model has not yet acknowledged that it can reach
+            // DevSpace. Keep the wake durable until that model-side status ACK.
+            const nextPending = delivered
+                ? (pendingState === 3 ? 4 : 0)
+                : pendingState;
             this.database.sqlite.prepare(`
-              update continuation_tasks set last_send_attempt_at=?, last_send_result=?, coordinator_instance_id=?, updated_at=?
+              update continuation_tasks set last_send_attempt_at=?, last_send_result=?, coordinator_instance_id=?,
+                continuation_pending=?, updated_at=?
               where id=?
-            `).run(nowIso, JSON.stringify(delivery), input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : row.coordinator_instance_id, nowIso, taskId);
+            `).run(nowIso, JSON.stringify(delivery), input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : row.coordinator_instance_id,
+                nextPending, nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "arm-wake") {
+            this.database.sqlite.prepare(`
+              update continuation_tasks set state='RUNNING', waiting_reason=null,
+                continuation_pending=case when continuation_pending in (1,4) then continuation_pending else 2 end,
+                turn_started_at=?, last_activity_at=?, updated_at=? where id=?
+            `).run(nowIso, nowIso, nowIso, taskId);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
         }
         if (action === "checkpoint") {
@@ -322,7 +392,11 @@ export class StructuredRuntimeState {
             if (input.failureFingerprint !== undefined) {
                 sameFailure = failure && failure === row.failure_fingerprint ? row.same_failure_count + 1 : 0;
             }
-            let state = input.waitingExternal ? "WAITING_EXTERNAL" : "RUNNING";
+            const watchedHandles = parseJson(row.watch_process_handles_json, []);
+            const waitingForSupervisorAck = Boolean(input.waitingExternal && watchedHandles.length > 0);
+            let state = input.waitingExternal
+                ? (waitingForSupervisorAck ? "WAITING_SUPERVISOR" : "WAITING_EXTERNAL")
+                : "RUNNING";
             let terminalReason = null;
             if (noProgress >= row.max_no_progress && !input.waitingExternal) {
                 state = "ABORTED_NO_PROGRESS";
@@ -339,12 +413,23 @@ export class StructuredRuntimeState {
             `).run(state, JSON.stringify([...completed]), progress || null, failure || null, noProgress, sameFailure,
                 input.waitingExternal ? String(input.note ?? "Waiting for an external condition.") : null,
                 terminalReason, nowIso, taskId);
-            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+            return {
+                task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)),
+                accepted: true,
+                ...(waitingForSupervisorAck ? { reason: "supervisor-ack-pending" } : {}),
+            };
         }
         if (action === "wait") {
-            this.database.sqlite.prepare("update continuation_tasks set state='WAITING_EXTERNAL', waiting_reason=?, continuation_pending=0, updated_at=? where id=?")
-                .run(String(input.note ?? "Waiting for an external condition."), nowIso, taskId);
-            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+            const watchedHandles = parseJson(row.watch_process_handles_json, []);
+            const waitingForSupervisorAck = watchedHandles.length > 0;
+            this.database.sqlite.prepare("update continuation_tasks set state=?, waiting_reason=?, continuation_pending=0, updated_at=? where id=?")
+                .run(waitingForSupervisorAck ? "WAITING_SUPERVISOR" : "WAITING_EXTERNAL",
+                String(input.note ?? "Waiting for an external condition."), nowIso, taskId);
+            return {
+                task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)),
+                accepted: true,
+                ...(waitingForSupervisorAck ? { reason: "supervisor-ack-pending" } : {}),
+            };
         }
         if (action === "resume") {
             this.database.sqlite.prepare("update continuation_tasks set state='RUNNING', waiting_reason=null, continuation_pending=0, turn_started_at=?, updated_at=? where id=?")
@@ -388,15 +473,37 @@ export class StructuredRuntimeState {
                 const current = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
                 if (!current || terminalStates.has(current.state)) return { accepted: false, reason: "task-terminal", task: rowToTask(current) };
                 if (current.state === "WAITING_EXTERNAL") return { accepted: false, reason: "waiting-external", task: rowToTask(current) };
-                if (current.continuation_pending) {
+                let pendingState = Number(current.continuation_pending || 0);
+                const wakePending = pendingState === 2 || pendingState === 3 || pendingState === 4;
+                if (pendingState === 4) {
+                    const sendAt = current.last_send_attempt_at ? Date.parse(current.last_send_attempt_at) : NaN;
+                    const deliveryAckAge = Number.isFinite(sendAt) ? Math.max(0, now.getTime() - sendAt) : Number.POSITIVE_INFINITY;
+                    const deliveryAckLeaseMs = 60_000;
+                    if (deliveryAckAge < deliveryAckLeaseMs) {
+                        return {
+                            accepted: false,
+                            reason: "continuation-delivery-awaiting-ack",
+                            deliveryAckAgeMs: deliveryAckAge,
+                            deliveryAckLeaseMs,
+                            task: rowToTask(current),
+                        };
+                    }
+                    pendingState = 2;
+                    this.database.sqlite.prepare("update continuation_tasks set continuation_pending=2, updated_at=? where id=?")
+                        .run(nowIso, taskId);
+                    current.continuation_pending = 2;
+                }
+                if (pendingState === 1 || pendingState === 3) {
                     const pendingAge = current.last_continuation_at ? now.getTime() - Date.parse(current.last_continuation_at) : 0;
-                    if (pendingAge < 120_000) {
+                    const leaseMs = pendingState === 3 ? 30_000 : 120_000;
+                    if (pendingAge < leaseMs) {
                         return { accepted: false, reason: "continuation-already-pending", task: rowToTask(current) };
                     }
-                    this.database.sqlite.prepare("update continuation_tasks set continuation_pending=0, updated_at=? where id=?").run(nowIso, taskId);
-                    current.continuation_pending = 0;
+                    pendingState = pendingState === 3 ? 2 : 0;
+                    this.database.sqlite.prepare("update continuation_tasks set continuation_pending=?, updated_at=? where id=?").run(pendingState, nowIso, taskId);
+                    current.continuation_pending = pendingState;
                 }
-                if (current.last_continuation_at && now.getTime() - Date.parse(current.last_continuation_at) < 60_000) {
+                if (!wakePending && current.last_continuation_at && now.getTime() - Date.parse(current.last_continuation_at) < 60_000) {
                     return { accepted: false, reason: "continuation-cooldown", task: rowToTask(current) };
                 }
                 if (current.deadline_at && Date.parse(current.deadline_at) <= now.getTime()) {
@@ -408,15 +515,16 @@ export class StructuredRuntimeState {
                     return { accepted: false, reason: "continuation-budget", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
                 }
                 this.database.sqlite.prepare(`
-                  update continuation_tasks set continuation_pending=1, continuation_count=continuation_count+1,
+                  update continuation_tasks set continuation_pending=?, continuation_count=continuation_count+1,
                     last_continuation_at=?, updated_at=? where id=?
-                `).run(nowIso, nowIso, taskId);
+                `).run(wakePending ? 3 : 1, nowIso, nowIso, taskId);
                 return { accepted: true, task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
             });
             return transaction();
         }
         if (action === "release-continuation") {
-            this.database.sqlite.prepare("update continuation_tasks set continuation_pending=0, updated_at=? where id=?").run(nowIso, taskId);
+            const pending = [3, 4].includes(Number(row.continuation_pending)) ? 2 : 0;
+            this.database.sqlite.prepare("update continuation_tasks set continuation_pending=?, updated_at=? where id=?").run(pending, nowIso, taskId);
             return { accepted: true, task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
         }
         throw new Error(`Unsupported continuation task action: ${action}`);
