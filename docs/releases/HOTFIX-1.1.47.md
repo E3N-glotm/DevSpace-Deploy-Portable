@@ -1,5 +1,32 @@
 # DevSpace Portable 1.1.47
 
+## 最终同版本热修复：两阶段等待、resume ACK 与公网自愈
+
+1.1.47 最终 repack 又完成了一轮真实 ChatGPT Host 端到端验收，覆盖此前仅靠单元测试无法证明的三条时序链路。
+
+第一，durable process 等待改为两阶段握手。模型调用 `wait` 且已经注册 `watch-process` 时，任务先进入 `WAITING_SUPERVISOR`；只有仍然存活的 Workspace App Coordinator 用带 `coordinatorInstanceId` 的 `status` 明确 ACK 后，服务端才切换到 `WAITING_EXTERNAL`。这样不会再出现模型轮已经结束、但唯一负责继续轮询的 App 实际没有接管任务的假等待状态。
+
+第二，`app.sendMessage()` 的 accepted 只被视为传输层接受，不再立即清除 durable wake。发送成功后任务进入 delivery-awaiting-ACK 状态；新 assistant 轮的第一条 `continuation_task status` 必须成功连回 DevSpace，服务端才返回 `continuation-resume-acknowledged` 并退役 wake。如果新轮刚创建就遇到 `UNAVAILABLE` / `Connection failed`，60 秒 ACK lease 到期后 surviving Workspace App 可以重新 claim/send，而不会把一次“Host 接受了消息但新轮没有连回 MCP”的失败误判为成功。
+
+第三，tunnel supervisor 增加独立于本地 MCP 的公网 `/mcp` 健康探测：每 15 秒检查本地和公网端点；只有本地 `/mcp` 正常而公网连续 3 次失败时才重建 tunnel，并带 60 秒 cooldown/debounce，避免网络路径抖动导致重启风暴。该恢复逻辑不会把本地 MCP 故障误归因到 ngrok/cloudflared。
+
+最终 live acceptance 使用一个干净 90 秒 durable process 验证：
+
+```text
+WAITING_SUPERVISOR
+  -> Coordinator status ACK
+  -> WAITING_EXTERNAL
+  -> process exited 0
+  -> durable wake
+  -> claim-continuation
+  -> app.sendMessage accepted
+  -> 新 assistant 轮第一步 continuation_task status
+  -> continuation-resume-acknowledged
+  -> wake / delivery lease / watch handle 全部清零
+```
+
+同一轮验收中还真实遇到过一次公网 MCP `Connection failed`，无需人工重启 DevSpace 即恢复。最终 source/Portable regression 全部通过，production dependency audit 为 0 vulnerabilities。
+
 ## 同版本运行时热修复：watch-process 自动唤醒
 
 正式 1.1.47 上线后的真实 75 秒 durable process 测试暴露了一个单元测试没有覆盖的时序缺陷：`continuation_anchor` 首先挂载时本地 App task 还没有任何 `watchProcessHandles`，随后模型通过 headless `continuation_task(action="watch-process")` 注册进程，再调用 `wait` 进入 `WAITING_EXTERNAL`。原 Coordinator 既不会主动刷新这个后注册的服务端 watch，又会在 `WAITING_EXTERNAL` 时停止 supervisor，因此事件日志虽然已经记录 `process.exited`，却不会触发任何 continuation claim 或 follow-up message。
