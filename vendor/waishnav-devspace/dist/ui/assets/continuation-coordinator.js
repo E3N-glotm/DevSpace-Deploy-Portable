@@ -1,6 +1,7 @@
 const TASK_TOOL = "continuation_task";
 const DEFAULT_SUPERVISOR_TICK_MS = 15_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
+const DEFAULT_MODEL_IDLE_CONTINUE_MS = 60_000;
 
 const TERMINAL_STATES = new Set([
   "SUCCEEDED",
@@ -91,6 +92,12 @@ function taskElapsedMs(task) {
   const raw = task?.turnStartedAt ?? task?.updatedAt;
   const started = Date.parse(raw || "");
   return Number.isFinite(started) ? Math.max(0, Date.now() - started) : 0;
+}
+
+function modelActivityAgeMs(task) {
+  const raw = task?.lastModelActivityAt ?? task?.turnStartedAt ?? task?.createdAt;
+  const lastActivity = Date.parse(raw || "");
+  return Number.isFinite(lastActivity) ? Math.max(0, Date.now() - lastActivity) : 0;
 }
 
 function recommendedContinueAfterMs(task) {
@@ -187,6 +194,7 @@ export function installContinuationCoordinator(app, options = {}) {
   };
   const supervisorTickMs = Math.max(250, Number(options.supervisorTickMs ?? DEFAULT_SUPERVISOR_TICK_MS));
   const heartbeatIntervalMs = Math.max(supervisorTickMs, Number(options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS));
+  const modelIdleContinueMs = Math.max(supervisorTickMs, Number(options.modelIdleContinueMs ?? DEFAULT_MODEL_IDLE_CONTINUE_MS));
   const timersEnabled = options.timers !== false;
 
   function buildHostProfileId() {
@@ -362,6 +370,14 @@ export function installContinuationCoordinator(app, options = {}) {
     if (current?.task) state.task = current.task;
     if (!state.task || terminal(state.task)) return;
 
+    // app.sendMessage acceptance is not proof that a resumed assistant turn
+    // reached DevSpace. Keep retrying the same persisted continuation after its
+    // ACK lease expires, for both process-wake and proactive continuations.
+    if (state.task.continuationDeliveryAwaitingAck) {
+      await attemptContinuation("delivery ACK retry", { force: true });
+      return;
+    }
+
     // Persisted process wakes are claimable by any surviving/recreated iframe.
     // This prevents a single watch-status winner from consuming the wake and
     // disappearing before claim/sendMessage while sibling App cards see nothing.
@@ -395,6 +411,23 @@ export function installContinuationCoordinator(app, options = {}) {
     }
 
     if (["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(state.task?.state)) return;
+
+    // Some ChatGPT host truncations emit neither resource teardown nor a
+    // tool-cancel timeout notification. The server therefore records a separate
+    // model-only activity timestamp on ordinary DevSpace tool calls; iframe
+    // status/heartbeat traffic never refreshes it. If a RUNNING task still has
+    // unfinished milestones, no durable process is active, and the model has
+    // stopped advancing it for a short grace period, request the next turn
+    // directly through the official Apps SDK. This is intentionally based on
+    // activity rather than a guessed 10/15/25-minute host limit.
+    if (state.task?.state === "RUNNING"
+      && hasUnfinishedMilestones(state.task)
+      && !hasWatchedProcesses
+      && modelActivityAgeMs(state.task) >= modelIdleContinueMs) {
+      await attemptContinuation("model activity idle watchdog", { force: true });
+      return;
+    }
+
     const recommended = recommendedContinueAfterMs(state.task);
     if (recommended && taskElapsedMs(state.task) >= recommended) {
       await attemptContinuation("adaptive host-budget watchdog", { force: true });

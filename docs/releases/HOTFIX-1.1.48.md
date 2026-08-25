@@ -10,6 +10,10 @@
 
 同时，Workspace App 的 `onTeardown` 不再只在 timeout/deadline/budget 或学习预算达到阈值时恢复。若 task 仍为 `RUNNING` 且 required milestones 尚有未完成项，正常 resource teardown 也会通过正式 Apps SDK `app.sendMessage()` 请求续轮。`WAITING_EXTERNAL`、`WAITING_SUPERVISOR`、terminal task 和已完成全部 required milestones 的任务不会因此被无条件续轮。
 
+真实 ChatGPT Web 验收进一步发现，Host 强制截断并不保证发送 `resource teardown` 或 `toolcancelled(timeout)`。因此 1.1.48 最终版又增加独立于 Host 生命周期回调的 **model-activity idle watchdog**：服务端对同一 conversation/workspace 的模型发起 DevSpace 工具调用维护 `lastModelActivityAt`，而 Workspace App 自己的 status/heartbeat 不会刷新该时钟。任务仍为 `RUNNING`、required milestones 未完成、没有仍在运行的 watched process 且模型侧约 60 秒没有继续推进时，Coordinator 会主动走 `claim -> app.sendMessage -> resume ACK`。这不是猜测 ChatGPT 的固定分钟上限；Host 即使以后改变截断时间或完全不发 teardown，静默任务仍可恢复。长时间 durable process 继续由 process watch 独立接管，因此 idle watchdog 不会抢占正在执行的测试/构建。
+
+主动 watchdog 产生的 follow-up 与 process-wake follow-up 现在都必须等待新 assistant turn 首次 `continuation_task status` ACK 后才退役 delivery lease；如果 Host 接受了消息但新轮没有真正连回 DevSpace，60 秒 ACK lease 到期后 surviving Workspace App 会再次尝试送达。ACK 成功时会重置 turn clock，避免达到阈值后重复续轮。
+
 这仍然不是一个写死的 25 分钟定时器。`continuation_anchor` 只需在非平凡多步任务开始时挂载一次；之后 process completion、Host lifecycle、durable wake 和学习到的 turn budget 共同提供触发源。
 
 ## Owner Continuation 控制中心
@@ -43,6 +47,9 @@ Portable 默认仍为 `DEVSPACE_WIDGETS=changes`。普通 read/run/write/edit/pr
 
 - 正常 teardown + 未完成 required milestone 必须产生一次 follow-up；
 - 正常 teardown + required milestones 全部完成不得产生 follow-up；
+- 无 teardown/timeout 的模型静默仍必须由 model-activity idle watchdog 续轮；
+- 正在运行的 watched process 必须抑制 model-idle 抢跑；
+- proactive follow-up 与 process-wake follow-up 都必须完成 resume ACK 才能清除 delivery lease；
 - durable `exec_command` 自动绑定当前 conversation/workspace continuation watch；
 - Owner lock 阻止模型终止，Owner stop 仍可结束；
 - early Host tool-result buffer/replay；

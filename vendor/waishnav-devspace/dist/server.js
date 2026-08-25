@@ -10,7 +10,7 @@ import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middlew
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
-import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE, } from "@modelcontextprotocol/ext-apps/server";
+import { registerAppResource, registerAppTool as registerExtAppTool, RESOURCE_MIME_TYPE, } from "@modelcontextprotocol/ext-apps/server";
 import express from "express";
 import * as z from "zod/v4";
 import { applyHunks, applyPatch, countPatchStats, parsePatch, unifiedFilePatch } from "./apply-patch.js";
@@ -57,6 +57,28 @@ const WORKSPACE_APP_URI_PREFIX = "ui://devspace/workspace-app";
 const LEGACY_CONTINUATION_GUARD_URI = "ui://devspace/continuation-guard.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 let structuredRuntimeState;
+function registerAppTool(server, name, definition, handler) {
+    return registerExtAppTool(server, name, definition, async (input, context = {}) => {
+        // Keep a model-only activity clock for durable continuation recovery.
+        // Workspace App status/heartbeat calls are intentionally excluded so a
+        // surviving iframe cannot make a truncated assistant turn look active.
+        // Ordinary model-originated DevSpace calls refresh this timestamp via
+        // their request conversation scope, regardless of whether the tool is
+        // headless in the default aggregated-card mode.
+        try {
+            const coordinatorCall = name === "continuation_task" && Boolean(input?.coordinatorInstanceId);
+            const workspaceId = input?.workspaceId ? String(input.workspaceId) : undefined;
+            const conversationScopeId = openAiConversationScopeId(context?._meta);
+            if (!coordinatorCall && workspaceId && conversationScopeId && structuredRuntimeState) {
+                structuredRuntimeState.touchContinuationModelActivity({ workspaceId, conversationScopeId });
+            }
+        }
+        catch {
+            // Continuation activity telemetry must never block the requested tool.
+        }
+        return handler(input, context);
+    });
+}
 const WRITE_TOOL_ANNOTATIONS = {
     readOnlyHint: false,
     destructiveHint: true,

@@ -79,6 +79,11 @@ const migrations = [
         name: "continuation-owner-controls",
         up: migrateContinuationOwnerControls,
     },
+    {
+        version: 17,
+        name: "continuation-model-activity-watchdog",
+        up: migrateContinuationModelActivityWatchdog,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -522,6 +527,17 @@ function migrateContinuationOwnerControls(sqlite) {
     sqlite.exec(`
     create index if not exists continuation_tasks_owner_locked_idx
       on continuation_tasks(owner_locked, state, updated_at desc);
+  `);
+}
+function migrateContinuationModelActivityWatchdog(sqlite) {
+    addColumnIfMissing(sqlite, "continuation_tasks", "last_model_activity_at", "text");
+    sqlite.exec(`
+    update continuation_tasks
+      set last_model_activity_at=coalesce(last_model_activity_at, turn_started_at, last_activity_at, created_at)
+      where last_model_activity_at is null;
+
+    create index if not exists continuation_tasks_model_activity_idx
+      on continuation_tasks(state, last_model_activity_at desc);
   `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

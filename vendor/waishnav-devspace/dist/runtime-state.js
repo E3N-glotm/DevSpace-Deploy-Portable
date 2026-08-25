@@ -105,6 +105,27 @@ export class StructuredRuntimeState {
             createdAt: row.created_at,
         }));
     }
+    touchContinuationModelActivity(input = {}) {
+        const workspaceId = String(input.workspaceId ?? "").trim();
+        const conversationScopeId = String(input.conversationScopeId ?? "").trim();
+        if (!workspaceId || !conversationScopeId)
+            return undefined;
+        const nowIso = new Date().toISOString();
+        const row = this.database.sqlite.prepare(`
+          select * from continuation_tasks
+          where workspace_id=? and conversation_scope_id=?
+            and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED')
+          order by updated_at desc limit 1
+        `).get(workspaceId, conversationScopeId);
+        if (!row)
+            return undefined;
+        this.database.sqlite.prepare(`
+          update continuation_tasks
+          set last_model_activity_at=?, last_activity_at=?, updated_at=?
+          where id=?
+        `).run(nowIso, nowIso, nowIso, row.id);
+        return row.id;
+    }
     continuationTask(input = {}) {
         const action = String(input.action ?? "status");
         const now = new Date();
@@ -126,9 +147,9 @@ export class StructuredRuntimeState {
             maxContinuations: row.max_continuations,
             maxNoProgress: row.max_no_progress,
             maxSameFailure: row.max_same_failure,
-            continuationPending: [1, 3, 4].includes(Number(row.continuation_pending)),
+            continuationPending: [1, 3, 4, 5].includes(Number(row.continuation_pending)),
             continuationWakePending: [2, 3, 4].includes(Number(row.continuation_pending)),
-            continuationDeliveryAwaitingAck: Number(row.continuation_pending) === 4,
+            continuationDeliveryAwaitingAck: [4, 5].includes(Number(row.continuation_pending)),
             ownerLocked: Boolean(row.owner_locked),
             ownerLockedAt: row.owner_locked_at ?? undefined,
             ownerControlNote: row.owner_control_note ?? undefined,
@@ -138,6 +159,7 @@ export class StructuredRuntimeState {
             turnStartedAt: row.turn_started_at ?? undefined,
             lastContinuationAt: row.last_continuation_at ?? undefined,
             lastActivityAt: row.last_activity_at ?? undefined,
+            lastModelActivityAt: row.last_model_activity_at ?? undefined,
             lastUiHeartbeatAt: row.last_ui_heartbeat_at ?? undefined,
             lastSendAttemptAt: row.last_send_attempt_at ?? undefined,
             lastSendResult: row.last_send_result ? parseJson(row.last_send_result, row.last_send_result) : undefined,
@@ -204,13 +226,15 @@ export class StructuredRuntimeState {
             // The resumed model must prove that the new turn can actually reach
             // DevSpace before the durable wake is retired. continuationText asks
             // the resumed turn to make this exact status call first. If the host
-            // creates the turn but its first MCP connection fails, state 4 stays
-            // retryable and a surviving Workspace App can resend after the lease.
-            if (row && Number(row.continuation_pending) === 4) {
+            // creates the turn but its first MCP connection fails, states 4/5
+            // stay retryable and a surviving Workspace App can resend after the
+            // delivery ACK lease. State 4 is backed by a durable process wake;
+            // state 5 is a proactive/host-lifecycle continuation.
+            if (row && [4, 5].includes(Number(row.continuation_pending))) {
                 this.database.sqlite.prepare(`
                   update continuation_tasks set continuation_pending=0,
-                    last_activity_at=?, updated_at=? where id=?
-                `).run(nowIso, nowIso, row.id);
+                    turn_started_at=?, last_model_activity_at=?, last_activity_at=?, updated_at=? where id=?
+                `).run(nowIso, nowIso, nowIso, nowIso, row.id);
                 return {
                     task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id)),
                     accepted: true,
@@ -273,11 +297,12 @@ export class StructuredRuntimeState {
               insert into continuation_tasks (
                 id, conversation_scope_id, workspace_id, objective, state, required_milestones_json,
                 completed_milestones_json, evidence_json, max_continuations,
-                max_no_progress, max_same_failure, deadline_at, turn_started_at, last_activity_at, created_at, updated_at
-              ) values (?, ?, ?, ?, 'RUNNING', ?, '[]', '{}', ?, ?, ?, ?, ?, ?, ?, ?)
+                max_no_progress, max_same_failure, deadline_at, turn_started_at, last_activity_at,
+                last_model_activity_at, created_at, updated_at
+              ) values (?, ?, ?, ?, 'RUNNING', ?, '[]', '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(id, String(input.conversationScopeId || "unknown"), input.workspaceId ? String(input.workspaceId) : null,
                 String(input.objective ?? "Continue the current DevSpace task until the original user goal is verified complete."),
-                JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso, nowIso);
+                JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso, nowIso, nowIso);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(id)), created: true };
         }
         const row = find();
@@ -367,7 +392,7 @@ export class StructuredRuntimeState {
             // but the resumed model has not yet acknowledged that it can reach
             // DevSpace. Keep the wake durable until that model-side status ACK.
             const nextPending = delivered
-                ? (pendingState === 3 ? 4 : 0)
+                ? (pendingState === 3 ? 4 : pendingState === 1 ? 5 : 0)
                 : pendingState;
             this.database.sqlite.prepare(`
               update continuation_tasks set last_send_attempt_at=?, last_send_result=?, coordinator_instance_id=?,
@@ -505,7 +530,7 @@ export class StructuredRuntimeState {
                 if (current.state === "WAITING_EXTERNAL") return { accepted: false, reason: "waiting-external", task: rowToTask(current) };
                 let pendingState = Number(current.continuation_pending || 0);
                 const wakePending = pendingState === 2 || pendingState === 3 || pendingState === 4;
-                if (pendingState === 4) {
+                if (pendingState === 4 || pendingState === 5) {
                     const sendAt = current.last_send_attempt_at ? Date.parse(current.last_send_attempt_at) : NaN;
                     const deliveryAckAge = Number.isFinite(sendAt) ? Math.max(0, now.getTime() - sendAt) : Number.POSITIVE_INFINITY;
                     const deliveryAckLeaseMs = 60_000;
@@ -518,10 +543,10 @@ export class StructuredRuntimeState {
                             task: rowToTask(current),
                         };
                     }
-                    pendingState = 2;
-                    this.database.sqlite.prepare("update continuation_tasks set continuation_pending=2, updated_at=? where id=?")
-                        .run(nowIso, taskId);
-                    current.continuation_pending = 2;
+                    pendingState = pendingState === 4 ? 2 : 0;
+                    this.database.sqlite.prepare("update continuation_tasks set continuation_pending=?, updated_at=? where id=?")
+                        .run(pendingState, nowIso, taskId);
+                    current.continuation_pending = pendingState;
                 }
                 if (pendingState === 1 || pendingState === 3) {
                     const pendingAge = current.last_continuation_at ? now.getTime() - Date.parse(current.last_continuation_at) : 0;
@@ -561,7 +586,8 @@ export class StructuredRuntimeState {
             return transaction();
         }
         if (action === "release-continuation") {
-            const pending = [3, 4].includes(Number(row.continuation_pending)) ? 2 : 0;
+            const pendingState = Number(row.continuation_pending);
+            const pending = [3, 4].includes(pendingState) ? 2 : 0;
             this.database.sqlite.prepare("update continuation_tasks set continuation_pending=?, updated_at=? where id=?").run(pending, nowIso, taskId);
             return { accepted: true, task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
         }

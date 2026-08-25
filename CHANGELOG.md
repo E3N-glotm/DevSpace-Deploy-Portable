@@ -6,10 +6,10 @@
 
 - 新增原生控制中心“续轮任务 / CONTINUATION”一级页面，位于“插件管理”和“会话与回退”之间；可直接查看任务是否运行、等待或结束，并显示目标、里程碑、续轮次数、最近活动、Owner 锁和 wake/ACK 状态。
 - 新增 Owner 级任务控制：本机 UI 可锁定/解锁、手动结束和恢复 continuation task。Owner 锁会阻止模型侧 `complete/cancel`、terminal failure、no-progress 和 continuation/wall-clock budget 自动终止；本机 Owner 的手动结束仍保留最终控制权。
-- 修复“回复写着会继续但实际没有下一轮”的正常结束时序：active continuation 下仍在运行的 durable `exec_command` 会自动登记 `processHandle` watch，不再依赖模型额外记住 `watch-process`；Workspace App 在正常 teardown 时若 required milestones 尚未完成，也会主动请求续轮，而不是只响应 timeout/学习预算。
+- 修复“回复写着会继续但实际没有下一轮”的正常结束与强制截断时序：active continuation 下仍在运行的 durable `exec_command` 会自动登记 `processHandle` watch；正常 teardown 会检查未完成 milestones；即使 ChatGPT 强制截断既不发 teardown 也不发 timeout，服务端独立维护的 `lastModelActivityAt` 在模型停止推进约 60 秒后也会触发正式 `app.sendMessage()` 续轮。Workspace App 自己的 status/heartbeat 不刷新模型活动时钟，仍在运行的 watched process 会抑制 idle watchdog 抢跑。
 - 修复 Workspace App 偶发永久停在 `Waiting for a tool result.`：bootstrap 在模块监听器加载前同步缓存 Host 的 initialize/tool-input/tool-result 消息，并在所有 listener 就绪后按原顺序重放，避免初始 `toolresult` 竞态丢失。
 - Continuation 增加专属聚合卡片，持续显示同一 task 的状态、目标、Owner 锁、里程碑和 wake/ACK；普通读写/命令工具继续默认 headless，文件变更由一次 `show_changes` 聚合展示，显式 `DEVSPACE_WIDGETS=full` 仅保留兼容用途。
-- 新增 migration 16 与针对正常 teardown、自动 process watch、Owner 控制、早期 Host 消息重放和 continuation card 的回归覆盖；Protocol 保持 1.5，Linux Remote Agent 协议/权限模型不变。
+- 新增 migration 16/17 与针对正常 teardown、无 teardown 的 model-idle watchdog、自动 process watch、proactive resume ACK、Owner 控制、早期 Host 消息重放和 continuation card 的回归覆盖；Protocol 保持 1.5，Linux Remote Agent 协议/权限模型不变。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.48.md)
 

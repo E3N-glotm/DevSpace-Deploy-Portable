@@ -27,7 +27,10 @@ for (const pattern of [
   /continuation-host-budget-learning/,
   /version: 16/,
   /continuation-owner-controls/,
+  /version: 17/,
+  /continuation-model-activity-watchdog/,
   /owner_locked[\s\S]{0,80}integer not null default 0/,
+  /last_model_activity_at/,
   /owner_locked_at/,
   /owner_control_note/,
   /create table if not exists continuation_host_profiles/,
@@ -82,6 +85,7 @@ assert.doesNotMatch(featureTools, /registerAppTool\(server, "session_changes",[\
 for (const pattern of [
   /DEFAULT_SUPERVISOR_TICK_MS/,
   /DEFAULT_HEARTBEAT_INTERVAL_MS/,
+  /DEFAULT_MODEL_IDLE_CONTINUE_MS/,
   /app\.callServerTool/,
   /app\.sendMessage/,
   /app\.updateModelContext/,
@@ -92,6 +96,8 @@ for (const pattern of [
   /watch-status/,
   /watched process completed/,
   /adaptive host-budget watchdog/,
+  /model activity idle watchdog/,
+  /delivery ACK retry/,
   /claim-continuation/,
   /delivery-result/,
   /release-continuation/,
@@ -311,6 +317,63 @@ await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
 assert.equal(timerApp.messages.length, 1, "watchdog timer should automatically request a follow-up");
 timerController.dispose();
 
+// ChatGPT can hard-truncate an assistant turn without emitting teardown or a
+// toolcancelled timeout. A model-only idle clock must therefore be able to
+// request the next turn independently of learned host-minute budgets.
+const idleWatchdogApp = new FakeApp();
+idleWatchdogApp.task = {
+  id: "task_idle_watchdog",
+  workspaceId: "ws_idle_watchdog",
+  state: "RUNNING",
+  objective: "resume after silent host truncation",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  watchProcessHandles: [],
+  lastModelActivityAt: new Date(Date.now() - 1000).toISOString(),
+  turnStartedAt: new Date(Date.now() - 1000).toISOString(),
+};
+const idleWatchdogController = installContinuationCoordinator(idleWatchdogApp, {
+  supervisorTickMs: 5,
+  heartbeatIntervalMs: 25,
+  modelIdleContinueMs: 20,
+  instanceId: "ui_idle_watchdog",
+});
+idleWatchdogApp.emit("toolinput", { arguments: { workspaceId: "ws_idle_watchdog", taskId: "task_idle_watchdog" } });
+await idleWatchdogController.onConnected();
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
+assert.equal(idleWatchdogApp.messages.length, 1,
+  "model-idle watchdog should recover an unfinished RUNNING task without any host teardown signal");
+idleWatchdogController.dispose();
+
+const idleSuppressedByProcessApp = new FakeApp();
+idleSuppressedByProcessApp.task = {
+  id: "task_idle_process",
+  workspaceId: "ws_idle_process",
+  state: "RUNNING",
+  objective: "do not preempt running durable process",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  watchProcessHandles: ["still-running"],
+  lastModelActivityAt: new Date(Date.now() - 1000).toISOString(),
+  turnStartedAt: new Date(Date.now() - 1000).toISOString(),
+};
+idleSuppressedByProcessApp.watchWakeReady = false;
+const idleSuppressedByProcessController = installContinuationCoordinator(idleSuppressedByProcessApp, {
+  supervisorTickMs: 5,
+  heartbeatIntervalMs: 25,
+  modelIdleContinueMs: 20,
+  instanceId: "ui_idle_process",
+});
+idleSuppressedByProcessApp.emit("toolinput", { arguments: { workspaceId: "ws_idle_process", taskId: "task_idle_process" } });
+await idleSuppressedByProcessController.onConnected();
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
+assert.equal(idleSuppressedByProcessApp.messages.length, 0,
+  "model-idle watchdog must not preempt a still-running watched process");
+assert.ok(idleSuppressedByProcessApp.calls.includes("watch-status"));
+idleSuppressedByProcessController.dispose();
+
 const processWatchApp = new FakeApp();
 processWatchApp.initialWatchHandles = ["build-process"];
 processWatchApp.watchWakeReady = true;
@@ -430,6 +493,17 @@ try {
   assert.equal(a.created, true);
   assert.equal(a.task.state, "RUNNING");
   assert.ok(a.task.turnStartedAt);
+  assert.ok(a.task.lastModelActivityAt);
+
+  const modelActivityBefore = a.task.lastModelActivityAt;
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 2));
+  const touchedTaskId = runtime.touchContinuationModelActivity({
+    conversationScopeId: "conversation-a",
+    workspaceId: "ws_shared",
+  });
+  assert.equal(touchedTaskId, a.task.id);
+  const touchedActivity = runtime.continuationTask({ action: "status", taskId: a.task.id });
+  assert.ok(Date.parse(touchedActivity.task.lastModelActivityAt) >= Date.parse(modelActivityBefore));
 
   const b = runtime.continuationTask({
     action: "begin-auto",
@@ -720,6 +794,30 @@ try {
   assert.equal(modelAck.task.continuationWakePending, false);
   assert.equal(modelAck.task.continuationDeliveryAwaitingAck, false);
 
+  const proactiveAck = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-proactive-ack",
+    workspaceId: "ws_proactive_ack",
+    maxContinuations: 4,
+  });
+  const proactiveClaim = runtime.continuationTask({ action: "claim-continuation", taskId: proactiveAck.task.id });
+  assert.equal(proactiveClaim.accepted, true);
+  const proactiveDelivered = runtime.continuationTask({
+    action: "delivery-result",
+    taskId: proactiveAck.task.id,
+    deliveryResult: "accepted",
+    deliveryMethod: "app.sendMessage",
+  });
+  assert.equal(proactiveDelivered.task.continuationDeliveryAwaitingAck, true,
+    "proactive continuations must also retain a delivery lease until the resumed model reconnects");
+  assert.equal(proactiveDelivered.task.continuationWakePending, false,
+    "proactive delivery ACK state must not masquerade as a process wake");
+  const proactiveModelAck = runtime.continuationTask({ action: "status", taskId: proactiveAck.task.id });
+  assert.equal(proactiveModelAck.reason, "continuation-resume-acknowledged");
+  assert.equal(proactiveModelAck.task.continuationDeliveryAwaitingAck, false);
+  assert.ok(proactiveModelAck.task.turnStartedAt);
+  assert.ok(proactiveModelAck.task.lastModelActivityAt);
+
   console.log(JSON.stringify({
     persistentTaskState: true,
     conversationIsolation: true,
@@ -735,6 +833,8 @@ try {
     officialAppToolCallPath: true,
     automaticWatchdogTimer: true,
     adaptiveHostBudgetLearning: true,
+    modelActivityIdleWatchdog: true,
+    proactiveDeliveryResumeAck: true,
     processCompletionWake: true,
     singleContinuationAnchor: true,
     teardownRecoveryPath: true,

@@ -72,8 +72,22 @@ if ($BypassProxy) {
 $Gh = Get-GitHubCli
 
 $ExistingRelease = $null
-$ExistingReleaseJson = & $Gh release view $Tag --repo $Repository --json tagName,assets 2>$null
-if ($LASTEXITCODE -ne 0) {
+$PreviousErrorActionPreference = $ErrorActionPreference
+$ExistingReleaseJson = $null
+$ExistingReleaseExitCode = 0
+try {
+    # A missing release is an expected branch, not a PowerShell exception.
+    # Windows PowerShell 5.1 can convert gh's harmless "release not found"
+    # stderr into NativeCommandError while ErrorActionPreference=Stop, before
+    # LASTEXITCODE can be inspected. Keep native stderr non-terminating for this
+    # probe and let the exit code decide whether the release must be created.
+    $ErrorActionPreference = "Continue"
+    $ExistingReleaseJson = & $Gh release view $Tag --repo $Repository --json tagName,assets 2>$null
+    $ExistingReleaseExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $PreviousErrorActionPreference
+}
+if ($ExistingReleaseExitCode -ne 0) {
     & $Gh release create $Tag `
         --repo $Repository `
         --title "DevSpace Portable $Version" `
