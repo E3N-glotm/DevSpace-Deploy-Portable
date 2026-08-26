@@ -4396,6 +4396,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private readonly System.Windows.Forms.Timer _heartbeatTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _statusTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _continuationTimer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer _continuationCountdownTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _noticeTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _computerUseTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _computerUseIndicatorTimer = new System.Windows.Forms.Timer();
@@ -4497,6 +4498,8 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _statusTimer.Tick += async delegate { await RefreshDashboardStatusAsync(); };
             _continuationTimer.Interval = 5000;
             _continuationTimer.Tick += async delegate { await LoadContinuationsAsync(false); };
+            _continuationCountdownTimer.Interval = 1000;
+            _continuationCountdownTimer.Tick += delegate { UpdateContinuationCountdownDisplay(); };
             _noticeTimer.Interval = 9000;
             _noticeTimer.Tick += delegate { _noticeTimer.Stop(); _inlineNotice.Dismiss(); };
             _computerUseTimer.Interval = 15;
@@ -5081,9 +5084,12 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
 
             FlowLayoutPanel actions = NewButtonBar();
             actions.Controls.Add(ActionButton("刷新任务", async delegate { await LoadContinuationsAsync(true); }, true));
-            actions.Controls.Add(ActionButton("锁定 / 解锁", async delegate { await ToggleContinuationLockAsync(); }));
-            actions.Controls.Add(ActionButton("手动结束", async delegate { await StopSelectedContinuationAsync(); }, false, true));
-            actions.Controls.Add(ActionButton("恢复任务", async delegate { await ResumeSelectedContinuationAsync(); }));
+            actions.Controls.Add(ActionButton("暂停所选", async delegate { await PauseSelectedContinuationsAsync(); }));
+            actions.Controls.Add(ActionButton("恢复所选", async delegate { await ResumeSelectedContinuationsAsync(); }));
+            actions.Controls.Add(ActionButton("锁定所选", async delegate { await SetSelectedContinuationLockAsync(true); }));
+            actions.Controls.Add(ActionButton("解锁所选", async delegate { await SetSelectedContinuationLockAsync(false); }));
+            actions.Controls.Add(ActionButton("手动结束", async delegate { await StopSelectedContinuationsAsync(); }, false, true));
+            actions.Controls.Add(ActionButton("删除所选", async delegate { await DeleteSelectedContinuationsAsync(); }, false, true));
             _showTerminalContinuations = new CheckBox
             {
                 Text = "显示已结束任务",
@@ -5105,18 +5111,19 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "自动续轮任务尚未读取。非简单多步骤任务由模型显式挂载一次任务锚点；挂载后由 Workspace App 根据进程事件、宿主超时信号和学习到的轮次预算自动续轮。",
+                Text = "自动续轮任务尚未读取。显式长任务使用持久 task；每个续轮 assistant turn 会复用同一 task 重新挂载 supervisor。进程完成、宿主超时/预算和受控的静默截断保护可触发下一轮；已完成、暂停和等待状态不会续轮。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
             _continuationGrid.AutoGenerateColumns = false;
-            _continuationGrid.MultiSelect = false;
+            _continuationGrid.MultiSelect = true;
             _continuationGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
             _continuationGrid.Columns.Clear();
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationState", HeaderText = "状态", Width = 132 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationLocked", HeaderText = "锁定", Width = 72 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationProgress", HeaderText = "里程碑", Width = 112 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationTurns", HeaderText = "续轮", Width = 84 });
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationCountdown", HeaderText = "下一轮", Width = 104 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationUpdated", HeaderText = "最近活动", Width = 158 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationObjective", HeaderText = "任务目标", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 320 });
             _continuationGrid.SelectionChanged += delegate { RenderContinuationSummary(); };
@@ -5456,6 +5463,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 _heartbeatTimer.Start();
                 _statusTimer.Start();
                 _continuationTimer.Start();
+                _continuationCountdownTimer.Start();
                 _computerUseTimer.Start();
                 _computerUseIndicatorTimer.Start();
                 _remoteAgentRecoveryTimer.Start();
@@ -5987,17 +5995,87 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 .Contains(state ?? "", StringComparer.OrdinalIgnoreCase);
         }
 
+        private List<Dictionary<string, object>> SelectedContinuations()
+        {
+            List<Dictionary<string, object>> result = new List<Dictionary<string, object>>();
+            foreach (DataGridViewRow row in _continuationGrid.SelectedRows)
+            {
+                Dictionary<string, object> task = row.Tag as Dictionary<string, object>;
+                if (task != null && task.Count > 0) result.Add(task);
+            }
+            return result;
+        }
+
         private Dictionary<string, object> SelectedContinuation()
         {
-            if (_continuationGrid.SelectedRows.Count != 1) return new Dictionary<string, object>();
-            return _continuationGrid.SelectedRows[0].Tag as Dictionary<string, object> ?? new Dictionary<string, object>();
+            DataGridViewRow current = _continuationGrid.CurrentRow;
+            Dictionary<string, object> currentTask = current == null ? null : current.Tag as Dictionary<string, object>;
+            if (currentTask != null && currentTask.Count > 0) return currentTask;
+            List<Dictionary<string, object>> selected = SelectedContinuations();
+            return selected.Count > 0 ? selected[0] : new Dictionary<string, object>();
+        }
+
+        private string[] SelectedContinuationIds()
+        {
+            return SelectedContinuations()
+                .Select(task => GetString(task, "id"))
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private string ContinuationCountdownText(Dictionary<string, object> task)
+        {
+            string state = GetString(task, "state");
+            if (string.Equals(state, "PAUSED_BY_USER", StringComparison.OrdinalIgnoreCase)) return "已暂停";
+            if (ContinuationTerminal(state) || !string.Equals(state, "RUNNING", StringComparison.OrdinalIgnoreCase)) return "—";
+            if (GetBool(task, "continuationDeliveryAwaitingAck") || GetBool(task, "continuationWakePending") || GetBool(task, "continuationPending")) return "触发中";
+            if (GetStringList(task, "watchProcessHandles").Count > 0) return "等待进程";
+            int required = GetInt(task, "progressRequired");
+            int completed = GetInt(task, "progressCompleted");
+            bool unfinished = required > 0 && completed < required;
+            if (!unfinished) return "—";
+            DateTimeOffset baseTime;
+            long delayMs;
+            string prefix;
+            long recommendedMs = GetLong(task, "recommendedContinueAfterMs");
+            if (GetInt(task, "hostTimeoutSamples") > 0 && recommendedMs > 0)
+            {
+                if (!DateTimeOffset.TryParse(GetString(task, "turnStartedAt"), out baseTime)) return "—";
+                delayMs = recommendedMs;
+                prefix = "预算 ";
+            }
+            else if (string.Equals(GetString(task, "continuationMode"), "explicit-long", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!DateTimeOffset.TryParse(GetString(task, "lastModelActivityAt"), out baseTime)) return "—";
+                delayMs = Math.Max(1L, GetLong(task, "explicitSilentContinueAfterMs", 3L * 60L * 1000L));
+                prefix = "静默 ";
+            }
+            else return "—";
+            TimeSpan remaining = baseTime.AddMilliseconds(delayMs) - DateTimeOffset.UtcNow;
+            if (remaining.TotalMilliseconds <= 0) return "待触发";
+            if (remaining.TotalHours >= 1) return prefix + ((int)remaining.TotalHours) + ":" + remaining.Minutes.ToString("00") + ":" + remaining.Seconds.ToString("00");
+            return prefix + ((int)remaining.TotalMinutes) + ":" + remaining.Seconds.ToString("00");
+        }
+
+        private void UpdateContinuationCountdownDisplay()
+        {
+            if (_continuationGrid == null || _continuationGrid.IsDisposed) return;
+            foreach (DataGridViewRow row in _continuationGrid.Rows)
+            {
+                Dictionary<string, object> task = row.Tag as Dictionary<string, object>;
+                if (task == null) continue;
+                DataGridViewCell cell = row.Cells["continuationCountdown"];
+                if (cell != null) cell.Value = ContinuationCountdownText(task);
+            }
+            RenderContinuationSummary();
         }
 
         private async Task LoadContinuationsAsync(bool selectPage)
         {
             if (_continuationListLoading) return;
             _continuationListLoading = true;
-            string selectedId = GetString(SelectedContinuation(), "id");
+            HashSet<string> selectedIds = new HashSet<string>(SelectedContinuationIds(), StringComparer.OrdinalIgnoreCase);
             try
             {
                 Dictionary<string, object> value = await _manager.RunJsonAsync("continuation-list", new
@@ -6019,21 +6097,24 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                         GetBool(task, "ownerLocked") ? "已锁定" : "—",
                         completed + "/" + required,
                         GetInt(task, "continuationCount") + "/" + GetInt(task, "maxContinuations"),
+                        ContinuationCountdownText(task),
                         updated,
                         GetString(task, "objective"));
                     _continuationGrid.Rows[row].Tag = task;
                 }
-                if (!string.IsNullOrWhiteSpace(selectedId))
+                _continuationGrid.ClearSelection();
+                DataGridViewRow firstSelectedRow = null;
+                if (selectedIds.Count > 0)
                 {
                     foreach (DataGridViewRow row in _continuationGrid.Rows)
                     {
                         Dictionary<string, object> task = row.Tag as Dictionary<string, object>;
-                        if (GetString(task, "id") != selectedId) continue;
+                        if (!selectedIds.Contains(GetString(task, "id"))) continue;
                         row.Selected = true;
-                        _continuationGrid.CurrentCell = row.Cells[0];
-                        break;
+                        if (firstSelectedRow == null) firstSelectedRow = row;
                     }
                 }
+                if (firstSelectedRow != null) _continuationGrid.CurrentCell = firstSelectedRow.Cells[0];
                 if (_continuationGrid.SelectedRows.Count == 0 && _continuationGrid.Rows.Count > 0)
                 {
                     _continuationGrid.Rows[0].Selected = true;
@@ -6052,53 +6133,78 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private void RenderContinuationSummary()
         {
             if (_continuationSummary == null) return;
+            List<Dictionary<string, object>> selected = SelectedContinuations();
+            if (selected.Count > 1)
+            {
+                int paused = selected.Count(task => string.Equals(GetString(task, "state"), "PAUSED_BY_USER", StringComparison.OrdinalIgnoreCase));
+                int locked = selected.Count(task => GetBool(task, "ownerLocked"));
+                _continuationSummary.Text = "已选择 " + selected.Count + " 个续轮任务  ·  已暂停 " + paused + "  ·  已锁定 " + locked + Environment.NewLine +
+                    "可直接批量暂停、恢复、锁定、解锁、结束或删除；Ctrl / Shift 可增减选择。";
+                return;
+            }
             Dictionary<string, object> task = SelectedContinuation();
             if (task.Count == 0)
             {
-                _continuationSummary.Text = "当前没有可显示的续轮任务。自动续轮不会因为接近一个固定分钟数就凭空创建任务；非简单多步骤工作会先挂载一次持久任务锚点，之后由事件、宿主信号和学习到的轮次预算自动接力。";
+                _continuationSummary.Text = "当前没有可显示的续轮任务。自动续轮不会因为普通 MCP 调用结束就凭空创建下一轮；显式长任务会复用同一持久 task，并在每个自动续轮后的 assistant turn 重新挂载 supervisor。";
                 return;
             }
             string state = GetString(task, "state");
+            string modeText = string.Equals(GetString(task, "continuationMode"), "explicit-long", StringComparison.OrdinalIgnoreCase) ? "显式长任务" : "兼容任务";
             string lockText = GetBool(task, "ownerLocked") ? "已锁定（助手和自动守卫不能终止）" : "未锁定";
             string pending = GetBool(task, "continuationDeliveryAwaitingAck") ? " · 等待新轮 ACK"
                 : GetBool(task, "continuationWakePending") ? " · 已产生续轮唤醒"
                 : GetBool(task, "continuationPending") ? " · 正在续轮" : "";
             string wait = GetString(task, "waitingReason");
             _continuationSummary.Text =
-                state + pending + "  ·  " + lockText + "  ·  里程碑 " + GetInt(task, "progressCompleted") + "/" + GetInt(task, "progressRequired") +
-                "  ·  续轮 " + GetInt(task, "continuationCount") + "/" + GetInt(task, "maxContinuations") + Environment.NewLine +
+                state + pending + "  ·  " + modeText + "  ·  " + lockText + "  ·  里程碑 " + GetInt(task, "progressCompleted") + "/" + GetInt(task, "progressRequired") +
+                "  ·  续轮 " + GetInt(task, "continuationCount") + "/" + GetInt(task, "maxContinuations") +
+                "  ·  下一轮 " + ContinuationCountdownText(task) + Environment.NewLine +
                 GetString(task, "objective") + (string.IsNullOrWhiteSpace(wait) ? "" : Environment.NewLine + "等待原因：" + wait);
         }
 
-        private async Task ToggleContinuationLockAsync()
+        private async Task SetSelectedContinuationLockAsync(bool locked)
         {
-            Dictionary<string, object> task = SelectedContinuation();
-            string id = GetString(task, "id");
-            if (string.IsNullOrWhiteSpace(id)) return;
-            string command = GetBool(task, "ownerLocked") ? "continuation-unlock" : "continuation-lock";
-            await _manager.RunJsonAsync(command, new { taskId = id });
+            string[] ids = SelectedContinuationIds();
+            if (ids.Length == 0) return;
+            await _manager.RunJsonAsync(locked ? "continuation-lock" : "continuation-unlock", new { taskIds = ids });
             await LoadContinuationsAsync(true);
         }
 
-        private async Task StopSelectedContinuationAsync()
+        private async Task PauseSelectedContinuationsAsync()
         {
-            Dictionary<string, object> task = SelectedContinuation();
-            string id = GetString(task, "id");
-            if (string.IsNullOrWhiteSpace(id) || ContinuationTerminal(GetString(task, "state"))) return;
+            string[] ids = SelectedContinuationIds();
+            if (ids.Length == 0) return;
+            await _manager.RunJsonAsync("continuation-pause", new { taskIds = ids });
+            await LoadContinuationsAsync(true);
+        }
+
+        private async Task ResumeSelectedContinuationsAsync()
+        {
+            string[] ids = SelectedContinuationIds();
+            if (ids.Length == 0) return;
+            await _manager.RunJsonAsync("continuation-resume", new { taskIds = ids });
+            await LoadContinuationsAsync(true);
+        }
+
+        private async Task StopSelectedContinuationsAsync()
+        {
+            string[] ids = SelectedContinuationIds();
+            if (ids.Length == 0) return;
             if (MessageBox.Show(this,
-                "确定手动结束这个续轮任务吗？这会清除待发送的 continuation wake 和进程 watch，但不会强杀该任务启动的普通系统进程。即使任务已锁定，Owner 手动结束仍然生效。",
+                "确定手动结束所选的 " + ids.Length + " 个续轮任务吗？这会清除待发送的 continuation wake 和进程 watch，但不会强杀这些任务启动的普通系统进程。即使任务已锁定，Owner 手动结束仍然生效。",
                 "结束续轮任务", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-            await _manager.RunJsonAsync("continuation-stop", new { taskId = id });
+            await _manager.RunJsonAsync("continuation-stop", new { taskIds = ids });
             await LoadContinuationsAsync(true);
         }
 
-        private async Task ResumeSelectedContinuationAsync()
+        private async Task DeleteSelectedContinuationsAsync()
         {
-            Dictionary<string, object> task = SelectedContinuation();
-            string id = GetString(task, "id");
-            if (string.IsNullOrWhiteSpace(id)) return;
-            if (!ContinuationTerminal(GetString(task, "state")) && !string.Equals(GetString(task, "state"), "FAILED_RETRYABLE", StringComparison.OrdinalIgnoreCase)) return;
-            await _manager.RunJsonAsync("continuation-resume", new { taskId = id });
+            string[] ids = SelectedContinuationIds();
+            if (ids.Length == 0) return;
+            if (MessageBox.Show(this,
+                "确定永久删除所选的 " + ids.Length + " 个续轮任务记录吗？删除只影响 DevSpace continuation 状态，不会强杀普通系统进程；删除后该任务的里程碑、wake 和历史状态不可从列表恢复。",
+                "删除续轮任务", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+            await _manager.RunJsonAsync("continuation-delete", new { taskIds = ids });
             await LoadContinuationsAsync(true);
         }
 
@@ -7043,7 +7149,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 _allowUiExit = true;
             }
             _closing = true;
-            _heartbeatTimer.Stop(); _statusTimer.Stop(); _noticeTimer.Stop(); _computerUseTimer.Stop(); _computerUseIndicatorTimer.Stop(); _remoteAgentRecoveryTimer.Stop();
+            _heartbeatTimer.Stop(); _statusTimer.Stop(); _continuationTimer.Stop(); _continuationCountdownTimer.Stop(); _noticeTimer.Stop(); _computerUseTimer.Stop(); _computerUseIndicatorTimer.Stop(); _remoteAgentRecoveryTimer.Stop();
             _computerUseIndicator.Dispose();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();

@@ -1424,6 +1424,8 @@ async function runContinuationAdmin(action, payload = {}) {
       workspaceId: row.workspace_id || "",
       objective: row.objective,
       state: row.state,
+      continuationMode: row.continuation_mode || "compat",
+      explicitSilentContinueAfterMs: row.continuation_mode === "explicit-long" ? 3 * 60_000 : 0,
       requiredMilestones: required,
       completedMilestones: completed,
       evidence: parse(row.evidence_json, {}),
@@ -1431,15 +1433,21 @@ async function runContinuationAdmin(action, payload = {}) {
       maxContinuations: Number(row.max_continuations || 0),
       noProgressCount: Number(row.no_progress_count || 0),
       maxNoProgress: Number(row.max_no_progress || 0),
-      continuationPending: [1, 3, 4].includes(Number(row.continuation_pending || 0)),
+      continuationPending: [1, 3, 4, 5].includes(Number(row.continuation_pending || 0)),
       continuationWakePending: [2, 3, 4].includes(Number(row.continuation_pending || 0)),
-      continuationDeliveryAwaitingAck: Number(row.continuation_pending || 0) === 4,
+      continuationDeliveryAwaitingAck: [4, 5].includes(Number(row.continuation_pending || 0)),
       ownerLocked: Boolean(row.owner_locked),
       ownerLockedAt: row.owner_locked_at || "",
       ownerControlNote: row.owner_control_note || "",
       waitingReason: row.waiting_reason || "",
       terminalReason: row.terminal_reason || "",
       deadlineAt: row.deadline_at || "",
+      turnStartedAt: row.turn_started_at || "",
+      lastModelActivityAt: row.last_model_activity_at || "",
+      observedTurnBudgetMs: Number(row.observed_turn_budget_ms || 0),
+      recommendedContinueAfterMs: Number(row.recommended_continue_after_ms || 0),
+      hostTimeoutSamples: Number(row.host_timeout_samples || 0),
+      lastHostSignal: row.last_host_signal || "",
       lastActivityAt: row.last_activity_at || row.updated_at,
       lastContinuationAt: row.last_continuation_at || "",
       lastSendAttemptAt: row.last_send_attempt_at || "",
@@ -1463,34 +1471,81 @@ async function runContinuationAdmin(action, payload = {}) {
         activeCount: rows.filter((row) => !new Set(['SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED']).has(row.state)).length,
       };
     }
-    const taskId = String(payload.taskId || "").trim();
-    if (!taskId) throw new Error("taskId is required.");
-    const row = database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
-    if (!row) throw new Error(`Continuation task not found: ${taskId}`);
+    const requestedIds = Array.isArray(payload.taskIds) ? payload.taskIds : [payload.taskId];
+    const taskIds = [...new Set(requestedIds.map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 300);
+    if (!taskIds.length) throw new Error("taskId or taskIds is required.");
+    const rows = taskIds.map((taskId) => database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId));
+    const missing = taskIds.filter((taskId, index) => !rows[index]);
+    if (missing.length) throw new Error(`Continuation task not found: ${missing.join(", ")}`);
     const now = new Date().toISOString();
-    if (action === "lock" || action === "unlock") {
-      const locked = action === "lock" ? 1 : 0;
-      database.sqlite.prepare(`
-        update continuation_tasks set owner_locked=?, owner_locked_at=?, owner_control_note=?, updated_at=? where id=?
-      `).run(locked, locked ? now : null, locked ? "Locked by Portable owner UI." : "Unlocked by Portable owner UI.", now, taskId);
-    }
-    else if (action === "stop") {
-      database.sqlite.prepare(`
-        update continuation_tasks set state='CANCELLED_BY_USER', terminal_reason='owner-stopped',
-          continuation_pending=0, watch_process_handles_json='[]', waiting_reason=null,
-          owner_control_note='Stopped explicitly by Portable owner UI.', updated_at=? where id=?
-      `).run(now, taskId);
-    }
-    else if (action === "resume") {
-      database.sqlite.prepare(`
-        update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
-          continuation_pending=0, turn_started_at=?, owner_control_note='Resumed explicitly by Portable owner UI.', updated_at=? where id=?
-      `).run(now, now, taskId);
-    }
-    else {
-      throw new Error(`Unsupported continuation admin action: ${action}`);
-    }
-    return { task: taskFromRow(database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+    const terminalStates = new Set(["SUCCEEDED", "FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED"]);
+    const resumableStates = new Set(["PAUSED_BY_USER", "WAITING_EXTERNAL", "WAITING_SUPERVISOR", "FAILED_RETRYABLE"]);
+    const skipped = [];
+    const deletedIds = [];
+    const transaction = database.sqlite.transaction(() => {
+      for (let index = 0; index < taskIds.length; index += 1) {
+        const taskId = taskIds[index];
+        const row = rows[index];
+        if (action === "lock" || action === "unlock") {
+          const locked = action === "lock" ? 1 : 0;
+          database.sqlite.prepare(`
+            update continuation_tasks set owner_locked=?, owner_locked_at=?, owner_control_note=?, updated_at=? where id=?
+          `).run(locked, locked ? now : null, locked ? "Locked by Portable owner UI." : "Unlocked by Portable owner UI.", now, taskId);
+        }
+        else if (action === "pause") {
+          if (terminalStates.has(row.state) || row.state === "PAUSED_BY_USER") {
+            skipped.push({ taskId, reason: terminalStates.has(row.state) ? "task-terminal" : "already-paused" });
+            continue;
+          }
+          database.sqlite.prepare(`
+            update continuation_tasks set state='PAUSED_BY_USER', waiting_reason='Paused by Portable owner UI.',
+              continuation_pending=0, owner_control_note='Paused explicitly by Portable owner UI.', updated_at=? where id=?
+          `).run(now, taskId);
+        }
+        else if (action === "stop") {
+          if (terminalStates.has(row.state)) {
+            skipped.push({ taskId, reason: "task-terminal" });
+            continue;
+          }
+          database.sqlite.prepare(`
+            update continuation_tasks set state='CANCELLED_BY_USER', terminal_reason='owner-stopped',
+              continuation_pending=0, watch_process_handles_json='[]', waiting_reason=null,
+              owner_control_note='Stopped explicitly by Portable owner UI.', updated_at=? where id=?
+          `).run(now, taskId);
+        }
+        else if (action === "resume") {
+          if (!resumableStates.has(row.state)) {
+            skipped.push({ taskId, reason: terminalStates.has(row.state) ? "task-terminal" : "task-not-resumable" });
+            continue;
+          }
+          database.sqlite.prepare(`
+            update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
+              continuation_pending=0, turn_started_at=?, owner_control_note='Resumed explicitly by Portable owner UI.', updated_at=? where id=?
+          `).run(now, now, taskId);
+        }
+        else if (action === "delete") {
+          database.sqlite.prepare("delete from continuation_tasks where id=?").run(taskId);
+          deletedIds.push(taskId);
+        }
+        else {
+          throw new Error(`Unsupported continuation admin action: ${action}`);
+        }
+      }
+    });
+    transaction();
+    const tasks = taskIds
+      .filter((taskId) => !deletedIds.includes(taskId))
+      .map((taskId) => database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId))
+      .filter(Boolean)
+      .map(taskFromRow);
+    return {
+      task: tasks.length === 1 ? tasks[0] : undefined,
+      tasks,
+      deletedIds,
+      skipped,
+      affected: taskIds.length - skipped.length,
+      accepted: true,
+    };
   } finally {
     database.close();
   }
@@ -3584,10 +3639,14 @@ async function main() {
       stdoutJson(await runContinuationAdmin("lock", await readStdinJson()));
     } else if (command === "continuation-unlock") {
       stdoutJson(await runContinuationAdmin("unlock", await readStdinJson()));
+    } else if (command === "continuation-pause") {
+      stdoutJson(await runContinuationAdmin("pause", await readStdinJson()));
     } else if (command === "continuation-stop") {
       stdoutJson(await runContinuationAdmin("stop", await readStdinJson()));
     } else if (command === "continuation-resume") {
       stdoutJson(await runContinuationAdmin("resume", await readStdinJson()));
+    } else if (command === "continuation-delete") {
+      stdoutJson(await runContinuationAdmin("delete", await readStdinJson()));
     } else if (command === "review-list") {
       stdoutJson(await runReviewAdmin("list", await readStdinJson()));
     } else if (command === "review-details") {

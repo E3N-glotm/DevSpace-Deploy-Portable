@@ -39,7 +39,8 @@ const requestedProvider = isNetworkSelfTest
 const NETWORK_POLL_MS = 5_000;
 const PUBLIC_HEALTH_POLL_MS = 15_000;
 const PUBLIC_HEALTH_FAILURE_THRESHOLD = 3;
-const PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 60_000;
+const PUBLIC_HEALTH_AGENT_MISMATCH_THRESHOLD = 3;
+const PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 5 * 60_000;
 let child = null;
 let stopping = false;
 let restartTimer = null;
@@ -50,6 +51,7 @@ let reconnectCount = 0;
 let lastReconnectAt = "";
 let lastPublicHealthProbeAt = 0;
 let publicHealthFailureCount = 0;
+let publicHealthAgentMismatchCount = 0;
 let lastPublicHealthRestartAt = 0;
 let lastPublicHealth = {
   checkedAt: null,
@@ -57,6 +59,12 @@ let lastPublicHealth = {
   actionable: false,
   localStatus: 0,
   publicStatus: 0,
+  publicCurlExitCode: null,
+  publicErrorKind: "not-checked",
+  publicErrorDetail: "",
+  agentReachable: null,
+  agentMatchingTunnel: null,
+  recoveryEligible: false,
   error: "not-checked",
 };
 
@@ -101,13 +109,32 @@ function deploymentRuntime() {
   };
 }
 
-function curlHttpStatus(url, network, timeoutMs = 4_000) {
+function curlErrorKind(exitCode, stderr) {
+  const detail = String(stderr || "");
+  if (exitCode === 6 || /could not resolve host|no such host/i.test(detail)) return "dns";
+  if (exitCode === 7 || /failed to connect|connection refused/i.test(detail)) return "connect";
+  if (exitCode === 28 || /timed out|timeout/i.test(detail)) return "timeout";
+  if ([35, 51, 53, 58, 59, 60, 77, 80, 82, 83, 90, 91].includes(Number(exitCode)) || /ssl|tls|certificate/i.test(detail)) return "tls";
+  return exitCode === 0 ? "" : "curl";
+}
+
+function curlHttpObservation(url, network, timeoutMs = 4_000) {
   const forced = String(process.env.DEVSPACE_TEST_PUBLIC_HEALTH || "").trim().toLowerCase();
   const local = /^http:\/\/(?:127\.0\.0\.1|localhost|\[?::1\]?)(?::|\/)/i.test(String(url));
-  if (forced === "healthy") return 401;
-  if (forced === "failing") return local ? 401 : 0;
-  if (forced === "local-failing") return 0;
-  if (!fs.existsSync(curlExe)) return 0;
+  if (forced === "healthy") return { status: 401, exitCode: 0, errorKind: "", errorDetail: "" };
+  if (forced === "local-failing") return { status: 0, exitCode: 7, errorKind: "connect", errorDetail: "test local failure" };
+  if (!local && ["failing", "dns-failing", "connect-failing", "timeout-failing", "tls-failing"].includes(forced)) {
+    const map = {
+      failing: [28, "timeout"],
+      "dns-failing": [6, "dns"],
+      "connect-failing": [7, "connect"],
+      "timeout-failing": [28, "timeout"],
+      "tls-failing": [60, "tls"],
+    };
+    const [exitCode, errorKind] = map[forced];
+    return { status: 0, exitCode, errorKind, errorDetail: `test ${errorKind} failure` };
+  }
+  if (!fs.existsSync(curlExe)) return { status: 0, exitCode: null, errorKind: "curl-missing", errorDetail: "bundled curl.exe missing" };
   const timeoutSeconds = Math.max(2, Math.ceil(timeoutMs / 1000));
   const args = [
     "--silent",
@@ -137,9 +164,48 @@ function curlHttpStatus(url, network, timeoutMs = 4_000) {
       all_proxy: "",
     },
   });
-  if (result.status !== 0) return 0;
+  const exitCode = Number.isInteger(result.status) ? Number(result.status) : null;
+  const errorDetail = String(result.stderr || "").trim().replace(/\s+/g, " ").slice(0, 500);
+  if (exitCode !== 0) return { status: 0, exitCode, errorKind: curlErrorKind(exitCode, errorDetail), errorDetail };
   const status = Number(String(result.stdout || "").trim());
-  return Number.isInteger(status) ? status : 0;
+  return { status: Number.isInteger(status) ? status : 0, exitCode: 0, errorKind: "", errorDetail: "" };
+}
+
+function ownedChildLoopbackPorts() {
+  const pid = Number(child?.pid || 0);
+  if (!Number.isInteger(pid) || pid <= 0) return [];
+  const output = commandOutput("netstat.exe", ["-ano", "-p", "TCP"]);
+  const ports = new Set();
+  for (const line of String(output || "").split(/\r?\n/)) {
+    const match = line.match(/^\s*TCP\s+(\S+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i);
+    if (!match || Number(match[2]) !== pid) continue;
+    const endpoint = match[1];
+    const port = Number(endpoint.slice(endpoint.lastIndexOf(":") + 1));
+    if (Number.isInteger(port) && port > 0 && port <= 65535) ports.add(port);
+  }
+  return [...ports];
+}
+
+function probeOwnedNgrokAgent(expectedPublicUrl) {
+  const forced = String(process.env.DEVSPACE_TEST_NGROK_AGENT_HEALTH || "").trim().toLowerCase();
+  if (forced === "matching") return { reachable: true, matchingTunnel: true };
+  if (forced === "missing") return { reachable: true, matchingTunnel: false };
+  if (forced === "unreachable") return { reachable: false, matchingTunnel: null };
+  if (requestedProvider !== "ngrok" || !child?.pid) return { reachable: null, matchingTunnel: null };
+  for (const port of ownedChildLoopbackPorts()) {
+    const result = childProcess.spawnSync(curlExe, [
+      "--silent", "--show-error", "--connect-timeout", "1", "--max-time", "1",
+      "--proxy", "", "--noproxy", "*", `http://127.0.0.1:${port}/api/tunnels`,
+    ], { cwd: root, encoding: "utf8", windowsHide: true, timeout: 2_000, maxBuffer: 512 * 1024 });
+    if (result.status !== 0) continue;
+    let body;
+    try { body = JSON.parse(String(result.stdout || "{}")); } catch { continue; }
+    if (!Array.isArray(body?.tunnels)) continue;
+    const expected = String(expectedPublicUrl || "").replace(/\/$/, "").toLowerCase();
+    const matchingTunnel = body.tunnels.some((item) => String(item?.public_url || "").replace(/\/$/, "").toLowerCase() === expected);
+    return { reachable: true, matchingTunnel };
+  }
+  return { reachable: false, matchingTunnel: null };
 }
 
 function probePublicEndpointHealth(network) {
@@ -154,25 +220,40 @@ function probePublicEndpointHealth(network) {
       error: "public-runtime-not-configured",
     };
   }
-  const localStatus = curlHttpStatus(`http://127.0.0.1:${runtime.port}/mcp`, { proxyUrl: "" });
-  if (localStatus !== 401) {
+  const local = curlHttpObservation(`http://127.0.0.1:${runtime.port}/mcp`, { proxyUrl: "" });
+  if (local.status !== 401) {
     return {
       checkedAt: new Date().toISOString(),
       healthy: null,
       actionable: false,
-      localStatus,
+      localStatus: local.status,
       publicStatus: 0,
-      error: `local-mcp-status-${localStatus || "unreachable"}`,
+      publicCurlExitCode: null,
+      publicErrorKind: "not-checked",
+      publicErrorDetail: "",
+      agentReachable: null,
+      agentMatchingTunnel: null,
+      recoveryEligible: false,
+      error: `local-mcp-status-${local.status || "unreachable"}`,
     };
   }
-  const publicStatus = curlHttpStatus(`${runtime.publicBaseUrl}/mcp`, network);
+  const publicObservation = curlHttpObservation(`${runtime.publicBaseUrl}/mcp`, network);
+  const healthy = publicObservation.status === 401;
+  const agent = healthy ? { reachable: null, matchingTunnel: null } : probeOwnedNgrokAgent(runtime.publicBaseUrl);
+  const recoveryEligible = requestedProvider === "ngrok" && agent.reachable === true && agent.matchingTunnel === false;
   return {
     checkedAt: new Date().toISOString(),
-    healthy: publicStatus === 401,
+    healthy,
     actionable: true,
-    localStatus,
-    publicStatus,
-    error: publicStatus === 401 ? "" : `public-mcp-status-${publicStatus || "unreachable"}`,
+    localStatus: local.status,
+    publicStatus: publicObservation.status,
+    publicCurlExitCode: publicObservation.exitCode,
+    publicErrorKind: publicObservation.errorKind,
+    publicErrorDetail: publicObservation.errorDetail,
+    agentReachable: agent.reachable,
+    agentMatchingTunnel: agent.matchingTunnel,
+    recoveryEligible,
+    error: healthy ? "" : `public-mcp-${publicObservation.errorKind || `status-${publicObservation.status || "unreachable"}`}`,
   };
 }
 
@@ -184,30 +265,41 @@ function maybeRecoverPublicEndpoint(network) {
   lastPublicHealth = probePublicEndpointHealth(network);
   if (!lastPublicHealth.actionable) {
     publicHealthFailureCount = 0;
+    publicHealthAgentMismatchCount = 0;
     return false;
   }
   if (lastPublicHealth.healthy) {
     publicHealthFailureCount = 0;
+    publicHealthAgentMismatchCount = 0;
     return false;
   }
   publicHealthFailureCount += 1;
+  publicHealthAgentMismatchCount = lastPublicHealth.recoveryEligible ? publicHealthAgentMismatchCount + 1 : 0;
   if (publicHealthFailureCount < PUBLIC_HEALTH_FAILURE_THRESHOLD) return false;
+  if (publicHealthAgentMismatchCount < PUBLIC_HEALTH_AGENT_MISMATCH_THRESHOLD) return false;
   if (now - lastPublicHealthRestartAt < PUBLIC_HEALTH_RESTART_COOLDOWN_MS) return false;
 
   lastPublicHealthRestartAt = now;
   publicHealthFailureCount = 0;
+  publicHealthAgentMismatchCount = 0;
   reconnectCount += 1;
   lastReconnectAt = new Date(now).toISOString();
-  terminateChild("public-endpoint-unhealthy");
+  terminateChild("owned-ngrok-agent-missing-expected-tunnel");
   writeNetworkState(network, {
     status: "recovering",
-    transition: "public-health-reconnect",
+    transition: "owned-agent-mismatch-reconnect",
     appliedPathSignature: lastObservedPathSignature || network.pathSignature || null,
     publicEndpointHealthy: false,
     publicHealthFailureCount,
     publicHealthLastProbeAt: lastPublicHealth.checkedAt,
     publicHealthLocalStatus: lastPublicHealth.localStatus,
     publicHealthPublicStatus: lastPublicHealth.publicStatus,
+    publicHealthCurlExitCode: lastPublicHealth.publicCurlExitCode,
+    publicHealthErrorKind: lastPublicHealth.publicErrorKind,
+    publicHealthErrorDetail: lastPublicHealth.publicErrorDetail,
+    publicHealthAgentReachable: lastPublicHealth.agentReachable,
+    publicHealthAgentMatchingTunnel: lastPublicHealth.agentMatchingTunnel,
+    publicHealthRecoveryEligible: lastPublicHealth.recoveryEligible,
     publicHealthError: lastPublicHealth.error,
   });
   scheduleReconcile(1_500);
@@ -556,9 +648,16 @@ function reconcile() {
     publicProbesSuppressed: false,
     publicEndpointHealthy: lastPublicHealth.healthy,
     publicHealthFailureCount,
+    publicHealthAgentMismatchCount,
     publicHealthLastProbeAt: lastPublicHealth.checkedAt,
     publicHealthLocalStatus: lastPublicHealth.localStatus,
     publicHealthPublicStatus: lastPublicHealth.publicStatus,
+    publicHealthCurlExitCode: lastPublicHealth.publicCurlExitCode,
+    publicHealthErrorKind: lastPublicHealth.publicErrorKind,
+    publicHealthErrorDetail: lastPublicHealth.publicErrorDetail,
+    publicHealthAgentReachable: lastPublicHealth.agentReachable,
+    publicHealthAgentMatchingTunnel: lastPublicHealth.agentMatchingTunnel,
+    publicHealthRecoveryEligible: lastPublicHealth.recoveryEligible,
     publicHealthError: lastPublicHealth.error,
   });
 }

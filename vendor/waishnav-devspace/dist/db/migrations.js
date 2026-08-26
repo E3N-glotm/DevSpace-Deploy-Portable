@@ -84,6 +84,11 @@ const migrations = [
         name: "continuation-model-activity-watchdog",
         up: migrateContinuationModelActivityWatchdog,
     },
+    {
+        version: 18,
+        name: "continuation-explicit-long-task-mode",
+        up: migrateContinuationExplicitLongTaskMode,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -538,6 +543,16 @@ function migrateContinuationModelActivityWatchdog(sqlite) {
 
     create index if not exists continuation_tasks_model_activity_idx
       on continuation_tasks(state, last_model_activity_at desc);
+  `);
+}
+function migrateContinuationExplicitLongTaskMode(sqlite) {
+    // Compatibility-created tasks must stay conservative: only an explicit
+    // continuation_anchor/begin upgrades a task into the mode that is allowed
+    // to recover a silent host truncation without a timeout event.
+    addColumnIfMissing(sqlite, "continuation_tasks", "continuation_mode", "text not null default 'compat'");
+    sqlite.exec(`
+    create index if not exists continuation_tasks_mode_state_idx
+      on continuation_tasks(continuation_mode, state, updated_at desc);
   `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

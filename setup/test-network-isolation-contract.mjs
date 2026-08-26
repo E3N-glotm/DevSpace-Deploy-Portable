@@ -79,10 +79,16 @@ assert.match(reconcile, /maybeRecoverPublicEndpoint\(network\)/,
   "the tunnel supervisor must recover a persistently unhealthy public endpoint even when the child process is still alive");
 assert.match(launcherSource, /PUBLIC_HEALTH_FAILURE_THRESHOLD = 3/,
   "end-to-end tunnel recovery must require consecutive failures");
-assert.match(launcherSource, /PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 60_000/,
-  "end-to-end tunnel recovery must use a restart cooldown");
-assert.match(launcherSource, /terminateChild\("public-endpoint-unhealthy"\)/,
-  "public recovery may terminate only the child owned by the tunnel supervisor");
+assert.match(launcherSource, /PUBLIC_HEALTH_AGENT_MISMATCH_THRESHOLD = 3/,
+  "public recovery must also require repeated owned-agent evidence that the expected tunnel is missing");
+assert.match(launcherSource, /PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 5 \* 60_000/,
+  "end-to-end tunnel recovery must use a multi-minute restart cooldown");
+assert.match(launcherSource, /agent\.reachable === true && agent\.matchingTunnel === false/,
+  "public curl failure alone must never be sufficient to restart ngrok");
+assert.match(launcherSource, /terminateChild\("owned-ngrok-agent-missing-expected-tunnel"\)/,
+  "public recovery may terminate only the child owned by the tunnel supervisor after agent confirmation");
+assert.match(launcherSource, /curlErrorKind[\s\S]*?"dns"[\s\S]*?"connect"[\s\S]*?"timeout"[\s\S]*?"tls"/,
+  "public probe diagnostics must preserve DNS/connect/timeout/TLS failure classes");
 
 for (const variable of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NGROK_PROXY"]) {
   assert.match(childEnvironment, new RegExp(`\\"${variable}\\"`),

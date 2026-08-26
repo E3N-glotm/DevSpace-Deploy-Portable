@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const node = join(root, "runtime", "node", "node.exe");
 const managerFile = join(root, "setup", "portable-manager.cjs");
+const nativeSource = readFileSync(join(root, "setup", "native", "DevSpacePortableApp.cs"), "utf8");
 const nativeExe = join(root, "DevSpace-Portable.exe");
 const temporary = await mkdtemp(join(tmpdir(), "devspace-ui-resilience-"));
 const configDir = join(temporary, "config");
@@ -77,8 +78,8 @@ writeFileSync(join(configDir, "deployment.json"), JSON.stringify({
 
 let firstUi;
 try {
-  // Portable owner UI must be able to inspect, lock and explicitly stop a
-  // continuation task through portable-manager without relying on ChatGPT.
+  // Portable owner UI must support real multi-selection and batch continuation
+  // controls without relying on ChatGPT or reviving already-completed tasks.
   const runtimeStatePath = join(root, "app", "node_modules", "@waishnav", "devspace", "dist", "runtime-state.js");
   const { StructuredRuntimeState } = await import(`${pathToFileURL(runtimeStatePath).href}?owner-ui=${Date.now()}`);
   const continuationRuntime = new StructuredRuntimeState(stateDir);
@@ -89,15 +90,58 @@ try {
     objective: "verify owner continuation controls",
     requiredMilestones: ["lock", "stop"],
   });
+  const secondOwnerTask = continuationRuntime.continuationTask({
+    action: "begin",
+    conversationScopeId: "native-ui-owner-test-2",
+    workspaceId: "ws_native_owner_2",
+    objective: "verify batch owner continuation controls",
+    requiredMilestones: ["pause", "delete"],
+  });
+  continuationRuntime.continuationTask({
+    action: "host-signal",
+    taskId: ownerTask.task.id,
+    hostProfileId: "native-ui-test-host",
+    hostSignal: "timeout",
+    elapsedMs: 10_000,
+  });
   const initialTasks = manager("continuation-list", { includeTerminal: true });
   assert.ok(initialTasks.tasks.some((task) => task.id === ownerTask.task.id));
-  const lockedTask = manager("continuation-lock", { taskId: ownerTask.task.id });
-  assert.equal(lockedTask.task.ownerLocked, true);
+  const listedOwnerTask = initialTasks.tasks.find((task) => task.id === ownerTask.task.id);
+  assert.ok(listedOwnerTask.turnStartedAt);
+  assert.equal(listedOwnerTask.continuationMode, "explicit-long");
+  assert.equal(listedOwnerTask.explicitSilentContinueAfterMs, 180000);
+  assert.ok(listedOwnerTask.lastModelActivityAt);
+  assert.equal(listedOwnerTask.hostTimeoutSamples, 1);
+  assert.equal(listedOwnerTask.recommendedContinueAfterMs, 8800);
+  const batchIds = [ownerTask.task.id, secondOwnerTask.task.id];
+  const lockedTasks = manager("continuation-lock", { taskIds: batchIds });
+  assert.equal(lockedTasks.affected, 2);
+  assert.equal(lockedTasks.tasks.length, 2);
+  assert.ok(lockedTasks.tasks.every((task) => task.ownerLocked));
   assert.equal(continuationRuntime.continuationTask({ action: "cancel", taskId: ownerTask.task.id }).reason, "task-owner-locked");
+  const pausedTasks = manager("continuation-pause", { taskIds: batchIds });
+  assert.equal(pausedTasks.affected, 2);
+  assert.ok(pausedTasks.tasks.every((task) => task.state === "PAUSED_BY_USER"));
+  assert.equal(continuationRuntime.continuationTask({ action: "claim-continuation", taskId: ownerTask.task.id }).reason, "task-paused-by-user");
+  const resumedTasks = manager("continuation-resume", { taskIds: batchIds });
+  assert.equal(resumedTasks.affected, 2);
+  assert.ok(resumedTasks.tasks.every((task) => task.state === "RUNNING"));
+  const unlockedTasks = manager("continuation-unlock", { taskIds: batchIds });
+  assert.ok(unlockedTasks.tasks.every((task) => !task.ownerLocked));
   const stoppedTask = manager("continuation-stop", { taskId: ownerTask.task.id });
   assert.equal(stoppedTask.task.state, "CANCELLED_BY_USER");
   assert.equal(stoppedTask.task.terminalReason, "owner-stopped");
   assert.equal(stoppedTask.task.continuationWakePending, false);
+  const deletedTask = manager("continuation-delete", { taskIds: [secondOwnerTask.task.id] });
+  assert.deepEqual(deletedTask.deletedIds, [secondOwnerTask.task.id]);
+  assert.equal(manager("continuation-list", { includeTerminal: true }).tasks.some((task) => task.id === secondOwnerTask.task.id), false);
+  assert.match(nativeSource, /_continuationGrid\.MultiSelect = true/);
+  assert.match(nativeSource, /Name = "continuationCountdown"[\s\S]*?HeaderText = "下一轮"/);
+  assert.match(nativeSource, /_continuationCountdownTimer\.Interval = 1000/);
+  assert.match(nativeSource, /prefix = "静默 "/);
+  assert.match(nativeSource, /continuationMode[\s\S]*?explicit-long/);
+  assert.match(nativeSource, /continuation-pause[\s\S]*?taskIds = ids/);
+  assert.match(nativeSource, /continuation-delete[\s\S]*?taskIds = ids/);
   continuationRuntime.close?.();
 
   // A deleted lease must be replaced automatically by the next heartbeat.
@@ -150,6 +194,8 @@ try {
     sharedLogRead: true,
     singleInstanceLease: true,
     continuationOwnerControls: true,
+    continuationBatchControls: true,
+    continuationCountdownUi: true,
   }));
 } finally {
   if (firstUi && firstUi.pid) {

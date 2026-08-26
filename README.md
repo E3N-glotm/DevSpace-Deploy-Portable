@@ -346,12 +346,15 @@ https://你的域名/mcp
 
 ## 1.1.48 主要变化
 
-- **续轮任务现在有独立的 Owner 控制面板。** 控制中心在“插件管理”和“会话与回退”之间新增“续轮任务 / CONTINUATION”，直接显示 task 是否已开始、当前状态、目标、里程碑完成度、续轮次数、最近活动、等待原因和 Owner 锁；支持锁定/解锁、手动结束和恢复。
+- **续轮任务现在有完整的 Owner 控制面板。** 控制中心在“插件管理”和“会话与回退”之间提供“续轮任务 / CONTINUATION”，列表支持多选，以及批量暂停、恢复、锁定、解锁、手动结束和删除；同时显示目标、里程碑、续轮次数、最近活动、等待原因、Owner 锁和“下一轮”倒计时。已学习真实 Host timeout 时显示“预算”倒计时；尚未学习 timeout 的显式长任务显示“静默”兜底倒计时；等待进程、暂停、等待、终态或 milestones 已完成时不显示虚假触发时间。
 - **“锁定”表示任务不能被模型或自动预算提前结束，但 Owner 仍可手动停止。** 锁定后，模型侧 `complete/cancel`、terminal failure、no-progress/same-failure 和 continuation/wall-clock budget 都不能把任务变成 terminal；本机控制中心的 Owner stop 始终保留，因此不会出现锁死后本人也无法结束的问题。
-- **修复正常 assistant turn 结束或 Host 强制截断时没有自动续轮。** 1.1.47 主要依靠 watched process、Host timeout/teardown 和学习到的 turn budget；但真实 ChatGPT Web 有时强制截断既不发 teardown，也不发 `toolcancelled(timeout)`。1.1.48 会把仍在运行的 durable `exec_command` 自动绑定到当前 conversation/workspace continuation task，并由服务端单独记录模型发起 DevSpace 调用的 `lastModelActivityAt`。任务仍为 `RUNNING`、里程碑未完成、没有仍在运行的 watched process且模型约 60 秒没有继续推进时，Workspace App 会主动请求下一轮；自己的 status/heartbeat 不会伪造模型活动。
-- **自动续轮仍不依赖固定 25 分钟。** 非平凡多步工作先通过一次 `continuation_anchor` 建立持久 task；之后由 durable process completion、Host lifecycle、model-activity idle watchdog、持久 wake 和真实 timeout 学习出的 host budget共同驱动。主动 follow-up 与 process-wake follow-up 都必须等新 assistant turn 首次 `continuation_task status` resume ACK 后才退役 delivery lease；显式 `WAITING_EXTERNAL`、Owner 手动结束以及 terminal 状态会阻止无意义续轮。
+- **暂停是真正的持久状态。** `PAUSED_BY_USER` 会阻止 Workspace App、process wake、claim、模型侧 resume 和 learned-budget watchdog 自动恢复任务；暂停不删除里程碑或 watch，只有 Owner 在本机控制中心点击恢复才重新运行。
+- **自动续轮现在明确区分兼容任务和显式长任务。** 普通/`begin-auto` task 的 model/MCP inactivity、正常 resource teardown，以及普通 persistent `exec_command` 都不会凭自身创建下一轮；长进程必须显式登记 `continuation_task watch-process`。通过 `continuation_anchor` 建立或升级的 task 标记为 `explicit-long`：真实 Host timeout/deadline/budget、learned budget 和显式 process wake 是主触发源；如果 Host 静默硬截断且完全没有 timeout/teardown，只有显式长任务仍有未完成 required milestones、没有活动 process watch 并持续静默约 3 分钟时，才使用最后兜底的 silent-truncation guard。显式长任务在 Host 普通 teardown 时若仍未完成也可恢复。
+- **每个自动续轮后的 assistant turn 都重新挂载同一个 supervisor。** 新一轮第一步仍必须用相同 `taskId/workspaceId` 执行 `continuation_task status` ACK；若返回 `reanchorRequired=true`，第二步用同一个 taskId/workspaceId 再调用 `continuation_anchor`。这不会创建新任务，而是避免上一轮 Workspace App iframe 被 Host 卸载后，本轮失去 timeout/静默监督器。
+- **手工恢复同样会检查 supervisor 是否还活着。** 对仍在 `RUNNING` 且 required milestones 未完成的 `explicit-long` task，model-side `status` 会检查最近 Workspace App coordinator heartbeat；如果约 45 秒没有 supervisor 心跳，也返回 `reanchorRequired=true`。因此即使自动 follow-up 没有成功、用户后来手工说“继续”，恢复同一 task 后仍会重新挂载当前 assistant turn 的 supervisor。
+- **公网 tunnel 自愈不再仅靠本机公网自检决定 kill ngrok。** 公网探测持久化 curl exit code 和 DNS/connect/timeout/TLS 分类；只有 owned ngrok Agent API 可达、并连续确认预期 tunnel 已缺失时才允许重启 owned child。普通 DNS/公网路径抖动会留给 ngrok 自身重连，并使用更长 cooldown 防止恢复风暴。
 - **修复 Web 卡片偶发只显示 `Waiting for a tool result.`。** Workspace App 现在在模块初始化前先缓存 Host 发来的 initialize/tool-input/tool-result，再在 UI 与 coordinator listener 就绪后重放，避免 ChatGPT Host 比 iframe JavaScript listener 更早发出一次性 tool-result 时造成永久空卡。
-- **卡片继续以聚合视图为默认。** 普通 `read/exec/write/edit/process` 默认不各自挂一张 Workspace App；文件修改集中到一次 `show_changes` 卡片。Continuation 使用一张可展开专属卡片持续展示 task 状态、Owner 锁、milestones、continuation count 和 wake/ACK，而不是每个 status/checkpoint 都新增一张卡片。
+- **卡片继续以聚合视图为默认，并可主动折叠长操作记录。** 普通 `read/exec/write/edit/process` 默认不各自挂一张 Workspace App；文件修改集中到一次 `show_changes` 卡片，其中 operation history 使用可折叠 `<details>`，成功日志默认收起、失败日志默认展开。Continuation 仍使用单张可展开专属卡片。
 - Protocol 仍为 **1.5**；本版本没有改变 Linux Remote Agent 的协议或 scoped/full-access 权限模型。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.48.md)

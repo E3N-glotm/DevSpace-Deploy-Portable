@@ -4,12 +4,14 @@
 
 ## 1.1.48
 
-- 新增原生控制中心“续轮任务 / CONTINUATION”一级页面，位于“插件管理”和“会话与回退”之间；可直接查看任务是否运行、等待或结束，并显示目标、里程碑、续轮次数、最近活动、Owner 锁和 wake/ACK 状态。
-- 新增 Owner 级任务控制：本机 UI 可锁定/解锁、手动结束和恢复 continuation task。Owner 锁会阻止模型侧 `complete/cancel`、terminal failure、no-progress 和 continuation/wall-clock budget 自动终止；本机 Owner 的手动结束仍保留最终控制权。
-- 修复“回复写着会继续但实际没有下一轮”的正常结束与强制截断时序：active continuation 下仍在运行的 durable `exec_command` 会自动登记 `processHandle` watch；正常 teardown 会检查未完成 milestones；即使 ChatGPT 强制截断既不发 teardown 也不发 timeout，服务端独立维护的 `lastModelActivityAt` 在模型停止推进约 60 秒后也会触发正式 `app.sendMessage()` 续轮。Workspace App 自己的 status/heartbeat 不刷新模型活动时钟，仍在运行的 watched process 会抑制 idle watchdog 抢跑。
+- 原生“续轮任务 / CONTINUATION”控制中心升级为真正的 Owner 任务管理页：列表支持 Ctrl/Shift 多选与批量暂停、恢复、锁定、解锁、手动结束、删除；新增“下一轮”倒计时。已学习真实 Host timeout 时显示“预算”倒计时，尚未学习 timeout 的显式长任务显示“静默”兜底倒计时；process watch、暂停、等待、终态或已完成 milestones 时不显示虚假触发时间。
+- 新增持久 `PAUSED_BY_USER` 状态。Owner 暂停会清除 pending continuation，但保留任务和 process watch；Workspace App、`claim-continuation`、`arm-wake` 和模型侧 `resume` 都不能绕过暂停，只有本机 Owner 恢复操作可以重新进入 `RUNNING`。
+- 收紧自动续轮触发边界并区分“兼容任务”和“显式长任务”（migration 18）：普通/`begin-auto` 任务不会因模型/MCP 空闲或正常 resource teardown 创建下一轮；`exec_command` 也不再把每个仍在运行的 persistent process 自动登记为 wake。跨轮长进程必须显式 `watch-process`。显式 `continuation_anchor` 会把 task 标记为 `explicit-long`：真实 timeout/deadline/budget、learned Host budget 和显式 process wake 是主触发源；若 Host 既不发 timeout 也不发 teardown，只有该显式长任务仍有未完成 required milestones、没有活动 process watch 且持续静默约 3 分钟时，才启用最后兜底的 silent-truncation guard。显式长任务遇到普通 Host teardown 但仍未完成时也允许续轮。
+- 修复续轮后 supervisor 失活：自动 follow-up 的新 assistant turn 首次 `continuation_task status` ACK 会返回 `reanchorRequired`；任务仍未完成时，续轮提示要求用相同 `taskId/workspaceId` 再调用 `continuation_anchor`，复用原 task 重新挂载本轮 Workspace App supervisor，而不是依赖上一轮可能已被 Host 卸载的 iframe。
+- 公网健康监督改为非破坏性优先：公网 curl 自检失败会保留 exit code，并区分 DNS/connect/timeout/TLS；单纯公网自检连续失败不再足以 kill ngrok。只有当前 supervisor 自己拥有的 ngrok Agent API 可达且连续确认“预期 tunnel 不存在”时才允许重启 owned child，并增加独立三次 agent-mismatch hysteresis 与 5 分钟 restart cooldown。
 - 修复 Workspace App 偶发永久停在 `Waiting for a tool result.`：bootstrap 在模块监听器加载前同步缓存 Host 的 initialize/tool-input/tool-result 消息，并在所有 listener 就绪后按原顺序重放，避免初始 `toolresult` 竞态丢失。
-- Continuation 增加专属聚合卡片，持续显示同一 task 的状态、目标、Owner 锁、里程碑和 wake/ACK；普通读写/命令工具继续默认 headless，文件变更由一次 `show_changes` 聚合展示，显式 `DEVSPACE_WIDGETS=full` 仅保留兼容用途。
-- 新增 migration 16/17 与针对正常 teardown、无 teardown 的 model-idle watchdog、自动 process watch、proactive resume ACK、Owner 控制、早期 Host 消息重放和 continuation card 的回归覆盖；Protocol 保持 1.5，Linux Remote Agent 协议/权限模型不变。
+- Continuation 继续使用单张专属聚合卡片；`show_changes` 中的 operation history 改为真正的 `<details>` 折叠区，成功记录默认收起、失败记录默认展开，避免长操作记录占满对话。
+- 回归覆盖同步改为“兼容任务 teardown/idle 不续轮、显式长任务 silent truncation/teardown 可恢复、续轮 ACK 后必须 re-anchor、显式 process watch 才唤醒、Owner pause 不可被自动恢复、批量任务控制/双模式倒计时、curl 错误分类与 owned-agent recovery gate”；Protocol 保持 1.5，Linux Remote Agent 协议/权限模型不变。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.48.md)
 

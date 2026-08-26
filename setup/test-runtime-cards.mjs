@@ -180,6 +180,10 @@ try {
       || !enhancementSource.includes("session_changes")) {
     throw new Error("session review, rollback, or version footer is missing from the Workspace App");
   }
+  if (!/element\("details", \{ className: "devspace-operation-timeline" \}\)/.test(enhancementSource)
+      || !enhancementSource.includes("operation-timeline-summary")) {
+    throw new Error("operation history must be wrapped in a user-collapsible details card");
+  }
 
   console.log(
     JSON.stringify({
@@ -195,6 +199,7 @@ try {
       decoupledRenderTool: true,
       invocationStatusMetadata: true,
       sessionReviewUi: true,
+      collapsibleOperationHistory: true,
       versionFooter: true,
     }),
   );

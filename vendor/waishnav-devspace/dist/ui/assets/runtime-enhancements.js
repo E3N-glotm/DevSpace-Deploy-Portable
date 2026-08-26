@@ -243,7 +243,7 @@ function continuationStateTone(task = {}) {
   const value = String(task.state || "RUNNING");
   if (["SUCCEEDED"].includes(value)) return "success";
   if (["FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED"].includes(value)) return "failed";
-  if (["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(value)) return "waiting";
+  if (["WAITING_EXTERNAL", "WAITING_SUPERVISOR", "PAUSED_BY_USER"].includes(value)) return "waiting";
   return "running";
 }
 
@@ -272,6 +272,7 @@ function buildContinuationCard() {
   [
     metadataRow(ZH ? "任务 ID" : "Task ID", task.id),
     metadataRow(ZH ? "状态" : "State", task.state),
+    metadataRow(ZH ? "模式" : "Mode", task.continuationMode === "explicit-long" ? (ZH ? "显式长任务" : "Explicit long task") : (ZH ? "兼容任务" : "Compatibility task")),
     metadataRow(ZH ? "里程碑" : "Milestones", `${completed.size}/${required.length}`),
     metadataRow(ZH ? "续轮" : "Continuations", `${task.continuationCount ?? 0}/${task.maxContinuations ?? "—"}`),
     metadataRow(ZH ? "Owner 锁" : "Owner lock", task.ownerLocked ? (ZH ? "已锁定" : "Locked") : (ZH ? "未锁定" : "Unlocked")),
@@ -299,7 +300,9 @@ function buildContinuationCard() {
     ? (ZH ? "续轮消息已被宿主接受，正在等待新 assistant 轮重新连接 DevSpace 并 ACK。" : "Follow-up accepted; waiting for the resumed assistant turn to ACK DevSpace connectivity.")
     : task.continuationWakePending
       ? (ZH ? "已产生持久续轮唤醒，Workspace App 将自动 claim 并发送续轮消息。" : "A durable continuation wake is pending and will be claimed automatically.")
-      : (ZH ? "任务挂载后由 Workspace App 自动监控进程完成、宿主超时/teardown 信号和学习到的轮次预算；不是依赖固定分钟数。" : "After anchoring, Workspace App monitors task/process and host signals automatically; no fixed minute cutoff is used.");
+      : task.continuationMode === "explicit-long"
+        ? (ZH ? "显式长任务会在真实超时、显式进程 wake 或学习预算时续轮；若 Host 静默截断且不发 timeout/teardown，持续静默保护会作为最后兜底。每次自动续轮 ACK 后应复用同一 task 重新挂载本轮 supervisor。" : "Explicit long tasks continue on real host timeouts, explicit process wakes, learned budgets, and a guarded silent-truncation fallback. Re-mount the same task supervisor after each automatic continuation ACK.")
+        : (ZH ? "兼容任务不会因为普通模型/MCP 静默自动创建下一轮；需要跨轮一直运行的工作应显式挂载长任务。" : "Compatibility tasks do not create a new turn from ordinary model/MCP silence; cross-turn work should use an explicit long-task anchor.");
   body.append(element("div", { className: "runtime-output-empty", text: note }));
   panel.append(body);
   shell.append(panel);
@@ -408,9 +411,13 @@ function buildOperationTimeline(card) {
   const operations = Array.isArray(card?.operations) ? card.operations : [];
   const files = Array.isArray(card?.files) ? card.files : [];
   if (!operations.length && !files.length) return undefined;
-  const section = element("section", { className: "devspace-operation-timeline" });
+  const section = element("details", { className: "devspace-operation-timeline" });
   section.dataset.devspaceOperations = "true";
-  section.append(element("div", { className: "preview-title", text: ZH ? "操作日志" : "Operations" }));
+  section.open = operations.some((operation) => operation.success === false);
+  section.append(element("summary", {
+    className: "preview-title operation-timeline-summary",
+    text: ZH ? `操作日志（${operations.length + files.length} 项）` : `Operations (${operations.length + files.length})`,
+  }));
   const list = element("div", { className: "operation-list" });
   for (const operation of operations) {
     const row = element("details", { className: "operation-row compact-operation" });

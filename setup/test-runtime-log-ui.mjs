@@ -42,14 +42,18 @@ setTimeout(() => {
   }});
 }, 220);
 setTimeout(() => {
-  const text = document.body.innerText;
+  const timeline = document.querySelector("[data-devspace-operations='true']");
+  const text = timeline?.textContent ?? "";
   document.body.dataset.timelineCount = String(document.querySelectorAll("details.compact-operation").length);
-  document.body.dataset.hasOperations = String(Boolean(document.querySelector("[data-devspace-operations='true']")));
+  document.body.dataset.hasOperations = String(Boolean(timeline));
+  document.body.dataset.timelineCollapsed = String(Boolean(timeline?.tagName === "DETAILS" && !timeline.open));
   document.body.dataset.hasRan = String(text.includes("已在 1.2 s 内运行") || text.includes("Ran in 1.2 s"));
   document.body.dataset.hasModified = String(text.includes("已修改") || text.includes("Modified"));
   document.body.dataset.hasFile = String(text.includes("src/train.py"));
   document.body.dataset.timelineOk = String(
-    document.querySelector("[data-devspace-operations='true']")
+    timeline
+    && timeline.tagName === "DETAILS"
+    && !timeline.open
     && (text.includes("已在 1.2 s 内运行") || text.includes("Ran in 1.2 s"))
     && (text.includes("已修改") || text.includes("Modified"))
     && text.includes("src/train.py")
@@ -77,7 +81,7 @@ setTimeout(() => {
     throw new Error(`operation/file timeline did not render (${bodyTag}): ${result.stdout.slice(-900)}`);
   }
   if (result.stdout.includes("secret</code>") || result.stdout.includes("--token secret")) throw new Error("sensitive command value leaked");
-  console.log(JSON.stringify({ compactRuntimeLog: true, operationTimeline: true, fileTimeline: true, redaction: true }));
+  console.log(JSON.stringify({ compactRuntimeLog: true, operationTimeline: true, collapsibleOperationTimeline: true, fileTimeline: true, redaction: true }));
 } finally {
   await rm(root, { recursive: true, force: true });
 }

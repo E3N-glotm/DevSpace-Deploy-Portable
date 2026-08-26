@@ -271,7 +271,7 @@ function serverInstructions(config) {
             ? " show_changes also reports aggregate changes since the persisted workspace session captured its first structured-mutation baseline. Session rollback restores the tracked structured paths, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result. The same bounded sparse-journal model is used for local and remote-agent workspaces; arbitrary shell side effects outside tracked paths are not claimed as rollback-safe."
             : "",
         config.features?.continuationGuard
-            ? " For non-trivial multi-step work that may span assistant turns, call continuation_anchor exactly once after opening the working workspace, supplying the original objective and verifiable milestones. The anchor reuses the existing DevSpace Workspace App and is the only continuation tool that renders UI; ordinary read/run/write/edit/process tools remain headless. While an active continuation exists, exec_command automatically registers any still-running persistent process as a durable wake source for the same conversation/workspace; explicit watch-process remains available for externally created or otherwise non-automatic process handles. The Workspace App also requests a follow-up when an active task with unfinished required milestones is torn down normally, so a normal host turn ending does not silently strand work. Use wait only while a real external/user condition should intentionally suppress automatic continuation. Use checkpoint only when objective progress or the failure strategy materially changes; call complete before the final response only after the original user goal is verified and provide concrete evidence. Do not mark a task complete merely because one substep finished. Automatic continuation is task-event and host-event driven first, and uses a learned host turn budget only as a proactive watchdog; it is not tied to a fixed minute value. Server-side continuation, wall-clock, no-progress, repeated-failure, cooldown, waiting-external, user-cancel, Owner lock, and duplicate-pending gates prevent unbounded loops."
+            ? " For non-trivial multi-step work that may span assistant turns, call continuation_anchor after opening the working workspace, supplying the original objective and verifiable milestones. That explicit anchor marks the task as an explicit-long continuation. After an automatic continuation message, the first model action must be continuation_task status with the same taskId/workspaceId. More generally, whenever model-side continuation_task status returns reanchorRequired=true for an unfinished explicit-long task, call continuation_anchor with that same taskId/workspaceId to re-mount the current turn's Workspace App supervisor. Re-anchoring reuses the persisted task and must never create a shadow task. The anchor is the only continuation tool that renders UI; ordinary read/run/write/edit/process tools remain headless. Do not turn every command into a continuation wake: if a deliberately long-running process must outlive the current assistant turn, explicitly call continuation_task action=watch-process for its returned processHandle and then use wait/checkpoint as appropriate. Ordinary validation/build commands are not watched merely because exec_command returned a persistent handle. Compatibility/begin-auto tasks and ordinary model inactivity do not create a follow-up. An explicit-long task with unfinished milestones may recover a normal Host teardown or, as a last-resort fallback, a sustained silent period when the Host emits neither timeout nor teardown; paused/waiting/terminal/completed tasks and active explicit process watches suppress that fallback. Real host timeout/deadline/budget interruption, learned host-budget watchdogs, and explicitly registered durable process wakes remain the primary continuation signals. Use checkpoint only when objective progress or the failure strategy materially changes; call complete before the final response only after the original user goal is verified and provide concrete evidence. Do not mark a task complete merely because one substep finished. Server-side continuation, wall-clock, no-progress, repeated-failure, cooldown, waiting-external, user-cancel, Owner lock, owner pause, and duplicate-pending gates prevent unbounded loops."
             : "",
     ].join("");
     const compactActivityInstruction = " Keep tool calls task-driven and minimal because the client may expose every MCP invocation and its JSON arguments in a native activity panel. Do not call capabilities, doctor, session_list, session_resume, or show_changes merely to demonstrate or test the UI. Do not issue no-op diagnostics after the required result is already known. Use show_changes only once after actual file modifications.";
@@ -1250,21 +1250,6 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
                 });
             }
         }
-        // An active durable continuation should not depend on the model remembering
-        // a second watch-process call after every long-running command. If a
-        // persistent process is still running when exec_command returns, bind it
-        // to the active task for this exact ChatGPT conversation/workspace. This
-        // makes process completion a durable wake source even when the assistant
-        // turn ends normally immediately after starting the process.
-        if (snapshot.running && effectivePersistent && config.features?.continuationGuard && runtimeState) {
-            const conversationScopeId = openAiConversationScopeId(_meta) ?? "host-scope-unavailable";
-            runtimeState.continuationTask({
-                action: "watch-process",
-                workspaceId,
-                conversationScopeId,
-                processHandle: snapshot.processHandle,
-            });
-        }
         await hookManager.runEvent("after_command", {
             workspaceId,
             workspaceRoot: workspace.root,
@@ -1518,7 +1503,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
     if (config.features?.continuationGuard) {
         registerAppTool(server, "continuation_anchor", {
             title: "Continuation anchor",
-            description: "Mount exactly one existing DevSpace Workspace App continuation coordinator for a long-running workspace task. Call this once after open_workspace for non-trivial multi-step work. It creates or upgrades the persisted continuation task and supplies the single UI anchor used for host timeout/teardown recovery; ordinary DevSpace tools remain headless.",
+            description: "Mount or re-mount the DevSpace Workspace App continuation coordinator for an explicit long-running workspace task. Call it after open_workspace for non-trivial multi-step work; after an automatic continuation, first ACK with continuation_task status and then call this again with the same taskId/workspaceId if unfinished. Re-mounting reuses the persisted task and restores the current turn's supervisor; ordinary DevSpace tools remain headless.",
             inputSchema: {
                 workspaceId: z.string(),
                 taskId: z.string().optional(),
@@ -1556,7 +1541,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
         });
         registerAppTool(server, "continuation_task", {
             title: "Continuation task state",
-            description: "Persist and verify a multi-step DevSpace task across ChatGPT assistant turns. continuation_anchor is the single UI-bearing entry point; this tool stays headless for status/checkpoint/wait/resume/completion and internal heartbeat/host-signal/delivery coordination. Use watch-process for a durable processHandle whose completion should wake the conversation; watch-status is used internally by the Workspace App supervisor. Use checkpoint only for meaningful progress/failure changes, wait while an external condition is pending, complete only after the original user goal is verified with evidence, and cancel/fail for real terminal states.",
+            description: "Persist and verify a multi-step DevSpace task across ChatGPT assistant turns. continuation_anchor is the single UI-bearing entry point; this tool stays headless for status/checkpoint/wait/resume/completion and internal heartbeat/host-signal/delivery coordination. A model-side status may return continueRequired=true with nextRequiredMilestones for an unfinished explicit-long task; ACK/re-anchor is only recovery protocol, so do not stop with a status summary—continue actual work in the same assistant turn unless genuinely blocked. status may also return reanchorRequired=true when the task no longer has a fresh Workspace App supervisor; in that case re-call continuation_anchor with the same taskId/workspaceId before continuing. Use watch-process only for a durable processHandle whose completion should intentionally wake the conversation; watch-status is used internally by the Workspace App supervisor. Use checkpoint only for meaningful progress/failure changes, wait while an external condition is pending, complete only after the original user goal is verified with evidence, and cancel/fail for real terminal states.",
             inputSchema: {
                 action: z.enum(["begin", "begin-auto", "status", "heartbeat", "host-signal", "watch-process", "unwatch-process", "watch-status", "checkpoint", "wait", "resume", "complete", "fail", "cancel", "claim-continuation", "delivery-result", "release-continuation"]),
                 taskId: z.string().optional(),
@@ -1588,6 +1573,9 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 created: z.boolean().optional(),
                 upgraded: z.boolean().optional(),
                 reason: z.string().optional(),
+                reanchorRequired: z.boolean().optional(),
+                continueRequired: z.boolean().optional(),
+                nextRequiredMilestones: z.array(z.string()).optional(),
                 missingMilestones: z.array(z.string()).optional(),
                 wakeReady: z.boolean().optional(),
                 watchedProcesses: z.array(z.unknown()).optional(),

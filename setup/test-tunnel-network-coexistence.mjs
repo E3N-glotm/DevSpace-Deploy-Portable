@@ -59,7 +59,7 @@ function resolveNetwork(overrides = {}) {
   return JSON.parse(result.stdout.trim());
 }
 
-function resolvePublicHealth(mode) {
+function resolvePublicHealth(mode, agentMode = "") {
   const result = spawnSync(NODE, [LAUNCHER, "--public-health-self-test"], {
     cwd: ROOT,
     env: {
@@ -68,6 +68,7 @@ function resolvePublicHealth(mode) {
       DEVSPACE_PORTABLE_RUN_DIR: runDir,
       DEVSPACE_TEST_ROUTE_SIGNATURE: "route-a",
       DEVSPACE_TEST_PUBLIC_HEALTH: mode,
+      DEVSPACE_TEST_NGROK_AGENT_HEALTH: agentMode,
     },
     encoding: "utf8",
     windowsHide: true,
@@ -126,6 +127,25 @@ try {
   assert.equal(publicBroken.healthy, false);
   assert.equal(publicBroken.localStatus, 401);
   assert.equal(publicBroken.publicStatus, 0);
+  assert.equal(publicBroken.publicCurlExitCode, 28);
+  assert.equal(publicBroken.publicErrorKind, "timeout");
+  assert.equal(publicBroken.recoveryEligible, false,
+    "a public probe failure without owned-agent mismatch evidence must stay non-destructive");
+  const dnsBrokenButAgentHealthy = resolvePublicHealth("dns-failing", "matching");
+  assert.equal(dnsBrokenButAgentHealthy.publicErrorKind, "dns");
+  assert.equal(dnsBrokenButAgentHealthy.agentReachable, true);
+  assert.equal(dnsBrokenButAgentHealthy.agentMatchingTunnel, true);
+  assert.equal(dnsBrokenButAgentHealthy.recoveryEligible, false,
+    "transient DNS failure must not make a healthy owned ngrok tunnel restartable");
+  const missingOwnedTunnel = resolvePublicHealth("connect-failing", "missing");
+  assert.equal(missingOwnedTunnel.publicErrorKind, "connect");
+  assert.equal(missingOwnedTunnel.agentReachable, true);
+  assert.equal(missingOwnedTunnel.agentMatchingTunnel, false);
+  assert.equal(missingOwnedTunnel.recoveryEligible, true,
+    "only a reachable owned agent that repeatedly reports the expected tunnel missing may authorize recovery");
+  const tlsBroken = resolvePublicHealth("tls-failing", "matching");
+  assert.equal(tlsBroken.publicCurlExitCode, 60);
+  assert.equal(tlsBroken.publicErrorKind, "tls");
   const localBroken = resolvePublicHealth("local-failing");
   assert.equal(localBroken.actionable, false,
     "a local MCP outage must not be misdiagnosed as a tunnel fault");
@@ -166,12 +186,18 @@ try {
     "third-party topology changes must not trigger proactive tunnel churn");
   assert.match(launcherSource, /PUBLIC_HEALTH_FAILURE_THRESHOLD = 3/,
     "a single public probe failure must not churn the tunnel");
-  assert.match(launcherSource, /PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 60_000/,
-    "public-health recovery must be rate limited during wider internet outages");
-  assert.match(launcherSource, /terminateChild\("public-endpoint-unhealthy"\)/,
-    "a persistently broken public endpoint must restart only the owned tunnel child");
-  assert.match(launcherSource, /localStatus !== 401[\s\S]*?actionable: false/,
+  assert.match(launcherSource, /PUBLIC_HEALTH_AGENT_MISMATCH_THRESHOLD = 3/,
+    "recovery must require repeated owned-agent mismatch evidence in addition to public failures");
+  assert.match(launcherSource, /PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 5 \* 60_000/,
+    "public-health recovery must use hysteresis/backoff during wider internet outages");
+  assert.match(launcherSource, /agent\.reachable === true && agent\.matchingTunnel === false/,
+    "public self-probe failure alone must not authorize a destructive restart");
+  assert.match(launcherSource, /terminateChild\("owned-ngrok-agent-missing-expected-tunnel"\)/,
+    "only confirmed owned-agent mismatch may restart the owned tunnel child");
+  assert.match(launcherSource, /local\.status !== 401[\s\S]*?actionable: false/,
     "tunnel recovery must not fire when the local MCP itself is unhealthy");
+  assert.match(launcherSource, /publicHealthCurlExitCode[\s\S]*?publicHealthErrorKind[\s\S]*?publicHealthErrorDetail/,
+    "network state must persist detailed curl failure diagnostics instead of collapsing everything to status 0");
   assert.match(launcherSource, /ownedChild\.kill\(\)/,
     "network transitions may stop only the ChildProcess owned by this supervisor");
   assert.doesNotMatch(launcherSource, /EasyConnect|Sangfor|SangforVnic|WireGuard|OpenVPN|AnyConnect|GlobalProtect/i,
@@ -200,6 +226,8 @@ try {
     vendorNeutralNetworkPathAdaptation: true,
     publicTunnelRemainsStableAcrossRouteChanges: true,
     publicEndpointHealthRecovery: true,
+    publicProbeFailureClassification: true,
+    ownedAgentRecoveryGate: true,
     publicReadinessFailurePreservesLocalService: true,
     topologyChangeDoesNotRestartOwnedTunnel: true,
     splitRouteAndAddressChangesAreObserved: true,

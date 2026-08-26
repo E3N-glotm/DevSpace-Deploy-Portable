@@ -136,6 +136,8 @@ export class StructuredRuntimeState {
             workspaceId: row.workspace_id ?? undefined,
             objective: row.objective,
             state: row.state,
+            continuationMode: row.continuation_mode ?? "compat",
+            explicitSilentContinueAfterMs: row.continuation_mode === "explicit-long" ? 3 * 60_000 : undefined,
             requiredMilestones: parseJson(row.required_milestones_json, []),
             completedMilestones: parseJson(row.completed_milestones_json, []),
             evidence: parseJson(row.evidence_json, {}),
@@ -174,6 +176,30 @@ export class StructuredRuntimeState {
             createdAt: row.created_at,
             updatedAt: row.updated_at,
         }) : undefined;
+        const taskNeedsCurrentTurnSupervisor = (row, task = rowToTask(row)) => {
+            if (!row || !task || task.state !== "RUNNING" || task.continuationMode !== "explicit-long") return false;
+            const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
+            if (required.length === 0) return false;
+            const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
+            if (!required.some((milestone) => !completed.has(milestone))) return false;
+            const heartbeatAt = row.last_ui_heartbeat_at ? Date.parse(row.last_ui_heartbeat_at) : NaN;
+            // Coordinator status polling normally refreshes this about every
+            // 15 seconds. A 45-second gap is therefore strong evidence that the
+            // previous Workspace App iframe is no longer supervising this turn.
+            return !Number.isFinite(heartbeatAt) || now.getTime() - heartbeatAt > 45_000;
+        };
+        const continuationDirective = (task) => {
+            if (!task || task.state !== "RUNNING" || task.continuationMode !== "explicit-long") {
+                return { continueRequired: false, nextRequiredMilestones: [] };
+            }
+            const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
+            const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
+            const nextRequiredMilestones = required.filter((milestone) => !completed.has(milestone));
+            return {
+                continueRequired: nextRequiredMilestones.length > 0,
+                nextRequiredMilestones,
+            };
+        };
         const find = () => {
             if (input.taskId) {
                 const taskId = String(input.taskId);
@@ -235,13 +261,27 @@ export class StructuredRuntimeState {
                   update continuation_tasks set continuation_pending=0,
                     turn_started_at=?, last_model_activity_at=?, last_activity_at=?, updated_at=? where id=?
                 `).run(nowIso, nowIso, nowIso, nowIso, row.id);
+                const refreshedTask = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id));
+                const required = Array.isArray(refreshedTask?.requiredMilestones) ? refreshedTask.requiredMilestones : [];
+                const completed = new Set(Array.isArray(refreshedTask?.completedMilestones) ? refreshedTask.completedMilestones : []);
+                const reanchorRequired = refreshedTask?.state === "RUNNING"
+                    && refreshedTask?.continuationMode === "explicit-long"
+                    && required.length > 0
+                    && required.some((milestone) => !completed.has(milestone));
                 return {
-                    task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id)),
+                    task: refreshedTask,
                     accepted: true,
                     reason: "continuation-resume-acknowledged",
+                    reanchorRequired,
+                    ...continuationDirective(refreshedTask),
                 };
             }
-            return { task: rowToTask(row) };
+            const task = rowToTask(row);
+            return {
+                task,
+                ...continuationDirective(task),
+                ...(taskNeedsCurrentTurnSupervisor(row, task) ? { reanchorRequired: true } : {}),
+            };
         }
         if (action === "begin" || action === "begin-auto") {
             let existing = find();
@@ -275,7 +315,7 @@ export class StructuredRuntimeState {
                         : requestedDeadlineAt ?? existing.deadline_at;
                     this.database.sqlite.prepare(`
                       update continuation_tasks set objective=?, required_milestones_json=?,
-                        max_continuations=?, max_no_progress=?, max_same_failure=?, deadline_at=?, last_activity_at=?, updated_at=? where id=?
+                        continuation_mode='explicit-long', max_continuations=?, max_no_progress=?, max_same_failure=?, deadline_at=?, last_activity_at=?, updated_at=? where id=?
                     `).run(objective, JSON.stringify([...currentRequired].slice(0, 64)),
                         Math.max(existing.max_continuations, Math.max(1, Math.min(Number(input.maxContinuations ?? existing.max_continuations), 100))),
                         Math.max(1, Math.min(Number(input.maxNoProgress ?? existing.max_no_progress), 20)),
@@ -295,14 +335,14 @@ export class StructuredRuntimeState {
             const deadlineAt = new Date(now.getTime() + wallClockMinutes * 60_000).toISOString();
             this.database.sqlite.prepare(`
               insert into continuation_tasks (
-                id, conversation_scope_id, workspace_id, objective, state, required_milestones_json,
+                id, conversation_scope_id, workspace_id, objective, state, continuation_mode, required_milestones_json,
                 completed_milestones_json, evidence_json, max_continuations,
                 max_no_progress, max_same_failure, deadline_at, turn_started_at, last_activity_at,
                 last_model_activity_at, created_at, updated_at
-              ) values (?, ?, ?, ?, 'RUNNING', ?, '[]', '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ) values (?, ?, ?, ?, 'RUNNING', ?, ?, '[]', '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(id, String(input.conversationScopeId || "unknown"), input.workspaceId ? String(input.workspaceId) : null,
                 String(input.objective ?? "Continue the current DevSpace task until the original user goal is verified complete."),
-                JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso, nowIso, nowIso);
+                action === "begin" ? "explicit-long" : "compat", JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso, nowIso, nowIso);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(id)), created: true };
         }
         const row = find();
@@ -403,6 +443,9 @@ export class StructuredRuntimeState {
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
         }
         if (action === "arm-wake") {
+            if (row.state === "PAUSED_BY_USER") {
+                return { task: rowToTask(row), accepted: false, reason: "task-paused-by-user" };
+            }
             this.database.sqlite.prepare(`
               update continuation_tasks set state='RUNNING', waiting_reason=null,
                 continuation_pending=case when continuation_pending in (1,4) then continuation_pending else 2 end,
@@ -428,11 +471,14 @@ export class StructuredRuntimeState {
             }
             const watchedHandles = parseJson(row.watch_process_handles_json, []);
             const waitingForSupervisorAck = Boolean(input.waitingExternal && watchedHandles.length > 0);
-            let state = input.waitingExternal
-                ? (waitingForSupervisorAck ? "WAITING_SUPERVISOR" : "WAITING_EXTERNAL")
-                : "RUNNING";
+            const pausedByUser = row.state === "PAUSED_BY_USER";
+            let state = pausedByUser
+                ? "PAUSED_BY_USER"
+                : input.waitingExternal
+                    ? (waitingForSupervisorAck ? "WAITING_SUPERVISOR" : "WAITING_EXTERNAL")
+                    : "RUNNING";
             let terminalReason = null;
-            if (noProgress >= row.max_no_progress && !input.waitingExternal) {
+            if (!pausedByUser && noProgress >= row.max_no_progress && !input.waitingExternal) {
                 if (row.owner_locked) {
                     state = "RUNNING";
                     terminalReason = null;
@@ -442,7 +488,7 @@ export class StructuredRuntimeState {
                     terminalReason = "no-progress-limit";
                 }
             }
-            if (sameFailure >= row.max_same_failure && failure) {
+            if (!pausedByUser && sameFailure >= row.max_same_failure && failure) {
                 if (row.owner_locked) {
                     state = "RUNNING";
                     terminalReason = null;
@@ -457,7 +503,8 @@ export class StructuredRuntimeState {
                 no_progress_count=?, same_failure_count=?, waiting_reason=?, terminal_reason=?, continuation_pending=0, updated_at=?
               where id=?
             `).run(state, JSON.stringify([...completed]), progress || null, failure || null, noProgress, sameFailure,
-                input.waitingExternal ? String(input.note ?? "Waiting for an external condition.") : null,
+                pausedByUser ? (row.waiting_reason || "Paused by Portable owner UI.")
+                    : input.waitingExternal ? String(input.note ?? "Waiting for an external condition.") : null,
                 terminalReason, nowIso, taskId);
             return {
                 task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)),
@@ -466,6 +513,9 @@ export class StructuredRuntimeState {
             };
         }
         if (action === "wait") {
+            if (row.state === "PAUSED_BY_USER") {
+                return { task: rowToTask(row), accepted: false, reason: "task-paused-by-user" };
+            }
             const watchedHandles = parseJson(row.watch_process_handles_json, []);
             const waitingForSupervisorAck = watchedHandles.length > 0;
             this.database.sqlite.prepare("update continuation_tasks set state=?, waiting_reason=?, continuation_pending=0, updated_at=? where id=?")
@@ -478,6 +528,9 @@ export class StructuredRuntimeState {
             };
         }
         if (action === "resume") {
+            if (row.state === "PAUSED_BY_USER") {
+                return { task: rowToTask(row), accepted: false, reason: "task-paused-by-user" };
+            }
             this.database.sqlite.prepare("update continuation_tasks set state='RUNNING', waiting_reason=null, continuation_pending=0, turn_started_at=?, updated_at=? where id=?")
                 .run(nowIso, nowIso, taskId);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
@@ -527,6 +580,7 @@ export class StructuredRuntimeState {
             const transaction = this.database.sqlite.transaction(() => {
                 const current = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
                 if (!current || terminalStates.has(current.state)) return { accepted: false, reason: "task-terminal", task: rowToTask(current) };
+                if (current.state === "PAUSED_BY_USER") return { accepted: false, reason: "task-paused-by-user", task: rowToTask(current) };
                 if (current.state === "WAITING_EXTERNAL") return { accepted: false, reason: "waiting-external", task: rowToTask(current) };
                 let pendingState = Number(current.continuation_pending || 0);
                 const wakePending = pendingState === 2 || pendingState === 3 || pendingState === 4;
