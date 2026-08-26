@@ -2,19 +2,21 @@
 
 1.1.48 当前源码同时收口三类真实运行问题：公网 DNS/路径短暂波动被健康监督误判成 tunnel failure 后主动杀 ngrok；continuation 把普通空闲、正常 teardown 或普通进程结束当成必须续轮；以及 Workspace App 长操作记录/偶发 `Waiting for a tool result.` 的可用性问题。
 
-## Continuation 改为“截断或显式长任务”触发
+## Continuation 收敛为严格双模式
 
-原始目标不是“只要调用了 MCP 就一直续”，而是两种明确场景：Host 单轮时间上限真正截断了未完成工作；或者任务本身明确要求一个长进程跨 assistant turn 持续运行。因此当前实现不再把普通工具活动当作隐式 long-task intent。
+原始目标不是“只要调用了 MCP 就一直续”，而是只有两种自动开启下一轮的场景：第一，Host 单轮时间上限**已经实际截断**未完成工作；第二，用户明确要求常驻/监控任务，并授权当前阶段结束后进入下一轮。当前实现因此改为 fail-closed：无法证明已经截断时，宁可等待用户手工继续，也不提前打断仍在运行的 assistant turn。
 
-`exec_command` 即使返回仍在运行的 persistent process，也**不会自动**写入 continuation watch。只有确认该进程确实需要跨轮等待时，才显式调用 `continuation_task(action="watch-process")`；这使普通测试、诊断和构建进程结束不会平白制造新一轮。显式 process watch 的既有 durable wake / takeover / delivery-ACK 机制保持不变。
+`exec_command` 即使返回仍在运行的 persistent process，也**不会自动**写入 continuation watch。普通测试、诊断和构建进程结束不会平白制造新一轮。只有用户明确要求常驻/监控行为并把 task 建为 `continuationMode="resident"` 后，才允许显式调用 `continuation_task(action="watch-process")`；resident 还可以在模型完成当前监控阶段后调用 `stage-complete`，明确请求下一轮继续监控。
 
-Migration 18 为 continuation task 增加 `continuation_mode`。兼容/`begin-auto` task 保持 `compat`，显式 `continuation_anchor`/`begin` 会创建或升级为 `explicit-long`。普通兼容任务的 `resource teardown` 和 model/MCP inactivity 都不触发 follow-up；proactive learned-budget watchdog 仍要求未完成 milestone 且至少存在一个真实 Host timeout sample。
+Migration 18 为 continuation task 增加 `continuation_mode`；Migration 19 将模式进一步规范为 `compat`、`timeout-recovery`、`resident`。兼容/`begin-auto` task 保持 `compat`；显式 `continuation_anchor` 默认创建或升级为 `timeout-recovery`。历史 `explicit-long` 会保守迁移为 `timeout-recovery`，并清理旧 process watch / wake pending，避免升级后延续过宽的自动触发语义。
 
-显式长任务增加两层只对它生效的截断保护。第一层：即使 Host 只发普通 `resource teardown` 而没有标注 timeout，只要 required milestones 仍未完成，就允许一次续轮。第二层：真实 ChatGPT Host 有时既不发 timeout 也不发 teardown；这种情况下，只有 `explicit-long + RUNNING + required milestones 未完成 + 没有活动显式 process watch` 同时成立，并且模型侧连续约 3 分钟没有新的 DevSpace activity，才触发 `explicit long-task silent truncation guard`。这比旧的通用 60 秒 idle watchdog 更保守，也不会作用于普通任务。
+`timeout-recovery` 只接受 Host 明确发出的 `timeout/deadline/budget` 作为自动续轮证据，同时要求 required milestones 尚未完成。普通 `resource teardown`、model/MCP 静默、MCP/tunnel 网络断开、learned Host budget 到点和普通 process completion 都**不会**触发 follow-up。Host budget 仍保留为诊断/UI 参考值，但不再用于 proactive continuation；原先的 silent-truncation heuristic 也已删除。
 
-主动 follow-up 与 process-wake follow-up 仍必须等待新 assistant turn 首次 `continuation_task status` ACK 后才退役 delivery lease；如果 Host 接受消息但新轮没有真正连回 DevSpace，ACK lease 到期后 surviving Workspace App 可以重试。ACK 现在还返回 `reanchorRequired`：显式长任务仍未完成时，续轮文本要求第二步用相同 `taskId/workspaceId` 再调用 `continuation_anchor`，重新挂载**当前 assistant turn** 的 supervisor。这样不会依赖上一轮可能已被 Host 回收/虚拟化的 iframe。
+`resident` 是唯一允许“模型正常完成当前阶段后主动开下一轮”的模式。它同样接受真实 Host timeout，并额外允许两个显式 wake：受监控 durable process 完成，或模型调用 `stage-complete` 表示本阶段监控/检查已结束、应进入下一阶段。非 resident task 调用 `watch-process`、`arm-wake` 或 `stage-complete` 会被 runtime 以 `resident-mode-required` 拒绝。
 
-同一个 `reanchorRequired` 也用于手工恢复路径。model-side `status` 发现 `explicit-long + RUNNING + required milestones 未完成`，但最近约 45 秒没有 Workspace App coordinator heartbeat 时，会直接要求当前 turn re-anchor。这样即使自动 follow-up 本身没有发生、用户稍后手工发送“继续”，也能恢复同一 task 的 supervisor，而不是继续依赖已经失活的旧 iframe。
+合法 follow-up 仍必须等待新 assistant turn 首次 `continuation_task status` ACK 后才退役 delivery lease；如果 Host 接受消息但新轮没有真正连回 DevSpace，ACK lease 到期后 surviving Workspace App 可以重试。ACK 还可返回 `reanchorRequired`：未完成的 `timeout-recovery`/`resident` task 会要求用相同 `taskId/workspaceId` 再调用 `continuation_anchor`，重新挂载**当前 assistant turn** 的 supervisor。
+
+真实运行还暴露了一个独立故障：ChatGPT UI 仍显示“续轮锚点已就绪”，但该卡片对应的 iframe/supervisor 可能早已停止 heartbeat。此时即使最终真的到达 Host 时长上限，也没有活着的 `app.sendMessage()` 发送器。因此当前源码增加**同轮 stale-supervisor maintenance**：model-side `status` 仍会在约 45 秒无 coordinator heartbeat 时返回 `reanchorRequired=true`；此外，当前 assistant turn 后续普通 DevSpace 工具调用也会检测 stale supervisor，并在工具结果中要求本轮用同一 task 调用 `continuation_anchor`。这个维护动作本身绝不调用 `app.sendMessage()`、绝不创建下一轮，只是在当前轮重新挂载发送器。
 
 ## 公网健康监督：自检失败不等于 tunnel failure
 
@@ -35,7 +37,7 @@ Windows 原生控制中心新增“续轮任务 / CONTINUATION”一级页面，
 
 本机 Owner 可以对列表执行 Ctrl/Shift 多选，并批量暂停、恢复、锁定、解锁、手动结束和删除。Migration 16 持久保存 Owner lock；新的 `PAUSED_BY_USER` 直接复用 task state 字段，不需要新 schema。暂停会清除 pending continuation 但保留 task/process watch，Coordinator、claim、arm-wake 和模型侧 resume 都不能绕过 Owner pause。
 
-列表新增“下一轮”倒计时。已存在真实 timeout sample 时显示“预算”倒计时；尚未学习 Host budget、但 task 是 `explicit-long` 时显示“静默”兜底倒计时（基于 `lastModelActivityAt + 3 min`）。显式 process watch 活跃时显示“等待进程”；暂停、等待、终态或已完成 milestones 不显示虚假倒计时。
+列表新增“下一轮”状态。`timeout-recovery` 已存在真实 timeout sample 时，只按已观测 Host turn 长度显示“参考 mm:ss”；参考时间到点后显示“等待截断”，强调它不是自动触发器。`resident` 显示“等待阶段”，存在显式 process watch 时显示“等待进程”；暂停、等待、终态或已完成 milestones 不显示虚假倒计时。
 
 ## 修复 `Waiting for a tool result.` 空卡竞态
 
@@ -54,18 +56,21 @@ Portable 默认仍为 `DEVSPACE_WIDGETS=changes`。普通 read/run/write/edit/pr
 新增/扩展回归覆盖：
 
 - compat task 的正常 teardown / model inactivity 不得产生 follow-up；
-- explicit-long task 的普通 teardown 在 milestones 未完成时允许恢复；
-- explicit-long task 在无 timeout/teardown 的持续静默后必须能恢复，而 compat task 同样静默不得续轮；
-- resumed model `status` ACK 必须在显式长任务未完成时返回 `reanchorRequired=true`；
+- timeout-recovery task 的普通 teardown、持续静默和 learned budget 到点都不得产生 follow-up；
+- timeout-recovery task 只有收到明确 Host timeout/deadline/budget 且 milestones 未完成时才允许 claim/sendMessage；
+- resident task 才允许显式 process completion wake 与 `stage-complete` wake；
+- 非 resident 的 `watch-process` / `arm-wake` / `stage-complete` 必须被拒绝；
+- resumed model `status` ACK 必须在未完成的 timeout-recovery/resident task 上返回必要的 `reanchorRequired=true`；
+- 当前 assistant turn 中普通 DevSpace 工具活动必须能发现 stale supervisor，并只要求同轮 re-anchor，不得因此调用 `sendMessage`；
 - `exec_command` 不得自动把每个 persistent process 变成 continuation wake；
-- 显式 `watch-process` 的 process completion wake 继续可靠工作；
+- resident 显式 `watch-process` 的 process completion wake 继续可靠工作；
 - `PAUSED_BY_USER` 必须阻止 claim、arm-wake、模型 resume 和 coordinator 自动续轮；
-- native 任务列表多选、批量 pause/resume/lock/unlock/stop/delete 与 learned-budget / silent-fallback 双模式倒计时；
+- native 任务列表多选、批量 pause/resume/lock/unlock/stop/delete 与 timeout-recovery / resident 双模式状态；
 - curl DNS/connect/timeout/TLS 分类、owned ngrok Agent mismatch recovery gate 和 5 分钟 cooldown；
-- proactive follow-up 与 process-wake follow-up 都必须完成 resume ACK 才能清除 delivery lease；
+- timeout-triggered follow-up 与 resident process/stage wake follow-up 都必须完成 resume ACK 才能清除 delivery lease；
 - Owner lock 阻止模型终止，Owner stop 仍可结束；
 - early Host tool-result buffer/replay；
 - continuation task card 与可折叠 aggregated operation history；
-- 既有 resume-ACK durable wake、process completion wake、WAITING_SUPERVISOR handshake、delivery ACK lease 和 tunnel recovery 回归继续保留。
+- 既有 resume-ACK durable wake、resident process/stage wake、WAITING_SUPERVISOR handshake、delivery ACK lease 和 tunnel recovery 回归继续保留。
 
 Protocol 仍为 1.5。1.1.48 没有改变 Linux Remote Agent wire protocol、Landlock runtime compatibility 或 scoped/full-access 权限语义，因此远端 Agent 不需要因为本次 Portable UI/Continuation 更新重新注册。

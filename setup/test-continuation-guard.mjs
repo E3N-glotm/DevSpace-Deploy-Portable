@@ -31,6 +31,10 @@ for (const pattern of [
   /continuation-model-activity-watchdog/,
   /version: 18/,
   /continuation-explicit-long-task-mode/,
+  /version: 19/,
+  /continuation-strict-trigger-modes/,
+  /version: 20/,
+  /continuation-confirmed-turn-limit/,
   /continuation_mode[\s\S]{0,80}default 'compat'/,
   /owner_locked[\s\S]{0,80}integer not null default 0/,
   /last_model_activity_at/,
@@ -45,6 +49,8 @@ for (const pattern of [
   /last_send_result/,
   /observed_turn_budget_ms/,
   /recommended_continue_after_ms/,
+  /confirmed_turn_limit_ms/,
+  /confirmed_turn_limit_source/,
 ]) assert.match(migrations, pattern);
 
 for (const pattern of [
@@ -76,8 +82,8 @@ for (const pattern of [
   /requiredMilestones/,
   /completion.*evidence|provide concrete evidence/is,
 ]) assert.match(server, pattern);
-assert.match(server, /Do not turn every command into a continuation wake/,
-  "server guidance must reserve process wakes for explicitly long-running cross-turn work");
+assert.match(server, /continuationMode=resident[\s\S]{0,700}watch-process or stage-complete/,
+  "server guidance must reserve process/stage wakes for explicit resident or monitoring work");
 assert.doesNotMatch(server, /snapshot\.running && effectivePersistent && config\.features\?\.continuationGuard && runtimeState/,
   "exec_command must not auto-register every still-running persistent process as a continuation wake");
 assert.doesNotMatch(server, /action: "watch-process",[\s\S]{0,220}processHandle: snapshot\.processHandle/,
@@ -98,29 +104,37 @@ for (const pattern of [
   /addEventListener\("toolcancelled"/,
   /sendFollowUpMessage/,
   /host-signal/,
-  /recommendedContinueAfterMs/,
   /watch-status/,
-  /watched process completed/,
-  /adaptive host-budget watchdog/,
-  /explicit long-task silent truncation guard/,
-  /DEFAULT_EXPLICIT_SILENT_CONTINUE_MS/,
+  /resident watched process completed/,
+  /resident stage completed/,
   /delivery ACK retry/,
   /claim-continuation/,
   /delivery-result/,
   /release-continuation/,
   /WAITING_EXTERNAL/,
   /PAUSED_BY_USER/,
-  /hostTimeoutSamples/,
   /continuationPending/,
   /manual recovery/,
   /onTeardown/,
 ]) assert.match(coordinator, pattern);
-assert.doesNotMatch(coordinator, /model activity idle watchdog|DEFAULT_MODEL_IDLE_CONTINUE_MS|modelIdleContinueMs/,
-  "ordinary MCP/model inactivity must not create a continuation by itself");
+assert.doesNotMatch(coordinator, /model activity idle watchdog|DEFAULT_MODEL_IDLE_CONTINUE_MS|modelIdleContinueMs|adaptive host-budget watchdog|explicit long-task silent truncation guard|DEFAULT_EXPLICIT_SILENT_CONTINUE_MS/,
+  "ordinary inactivity, learned budgets, and silent heuristics must never create a continuation");
+assert.match(coordinator, /Intentionally no learned-budget, inactivity, or normal-teardown trigger/,
+  "coordinator must fail closed when there is no explicit timeout or resident-stage signal");
+assert.match(server, /timeout-recovery[\s\S]{0,500}timeout\/deadline\/budget[\s\S]{0,700}resident/,
+  "tool contract must expose exactly timeout-recovery and explicit resident modes");
+assert.match(server, /confirm-turn-limit[\s\S]{0,900}never (?:starts|a proactive timer)|confirm-turn-limit[\s\S]{0,900}never a proactive timer/,
+  "tool contract must support only an explicitly observed turn limit as a post-teardown classifier");
+assert.match(coordinator, /CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS/);
+assert.match(coordinator, /confirmed turn-limit teardown/);
 assert.match(server, /reanchorRequired=true[\s\S]{0,900}continuation_anchor[\s\S]{0,500}same taskId\/workspaceId/,
   "a resumed or manually recovered assistant turn must re-mount the same continuation task supervisor instead of relying on an old iframe");
 assert.match(server, /continueRequired=true[\s\S]{0,900}nextRequiredMilestones[\s\S]{0,900}same assistant turn/,
-  "a resumed explicit-long task must make same-turn work continuation machine-readable instead of relying on a prose ACK convention");
+  "a resumed continuation task must make same-turn work continuation machine-readable instead of relying on a prose ACK convention");
+assert.match(server, /continuationSupervisorDirective[\s\S]{0,1200}same assistant turn; this is NOT a continuation trigger/,
+  "ordinary DevSpace tool results must surface a stale-supervisor re-anchor advisory without creating a new turn");
+assert.match(server, /Before the next substantive DevSpace step, call continuation_anchor[\s\S]{0,500}Do not send or infer a new conversation turn/,
+  "stale-supervisor maintenance must explicitly re-anchor inside the current assistant turn");
 assert.doesNotMatch(coordinator, /window\.parent\.postMessage|querySelector\([^)]*(?:textarea|composer|send)/i, "continuation must use the connected App rather than raw host/DOM automation");
 assert.doesNotMatch(coordinator, /23\s*\*\s*60\s*\*\s*1000|24\.5\s*\*\s*60\s*\*\s*1000|25(?:\.\d+)?\s*\*\s*60\s*\*\s*1000/, "continuation must not depend on a fixed ChatGPT minute limit");
 assert.match(workspaceBundle, /window\.__DEVSPACE_MCP_APP__=Y_/);
@@ -334,7 +348,8 @@ const timerController = installContinuationCoordinator(timerApp, {
 timerApp.emit("toolinput", { arguments: { workspaceId: "ws_timer" } });
 await timerController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
-assert.equal(timerApp.messages.length, 1, "watchdog timer should automatically request a follow-up");
+assert.equal(timerApp.messages.length, 0,
+  "a learned host budget must never pre-empt a still-running assistant turn");
 timerController.dispose();
 
 // Compatibility/implicit tasks must never turn ordinary model inactivity into
@@ -367,16 +382,15 @@ assert.equal(compatSilentApp.messages.length, 0,
   "compatibility/implicit task silence must never auto-continue");
 compatSilentController.dispose();
 
-// An explicitly anchored long task is different: if it still has unfinished
-// milestones and ChatGPT silently hard-truncates the assistant without timeout
-// or teardown, a sustained quiet period is the last-resort recovery signal.
+// Even an explicitly anchored timeout-recovery task must fail closed when the
+// Host emits no timeout/deadline/budget signal. Silence is not proof of truncation.
 const explicitSilentApp = new FakeApp();
 explicitSilentApp.task = {
   id: "task_explicit_silent",
   workspaceId: "ws_explicit_silent",
   state: "RUNNING",
-  continuationMode: "explicit-long",
-  objective: "resume after silent host truncation",
+  continuationMode: "timeout-recovery",
+  objective: "do not resume until an explicit host timeout arrives",
   requiredMilestones: ["done"],
   completedMilestones: [],
   continuationPending: false,
@@ -387,14 +401,13 @@ explicitSilentApp.task = {
 const explicitSilentController = installContinuationCoordinator(explicitSilentApp, {
   supervisorTickMs: 5,
   heartbeatIntervalMs: 25,
-  explicitSilentContinueMs: 20,
   instanceId: "ui_explicit_silent",
 });
 explicitSilentApp.emit("toolinput", { arguments: { workspaceId: "ws_explicit_silent", taskId: "task_explicit_silent" } });
 await explicitSilentController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
-assert.equal(explicitSilentApp.messages.length, 1,
-  "an unfinished explicit-long task must recover when the host silently truncates without timeout/teardown");
+assert.equal(explicitSilentApp.messages.length, 0,
+  "timeout-recovery mode must not infer truncation from silence");
 explicitSilentController.dispose();
 
 const idleSuppressedByProcessApp = new FakeApp();
@@ -402,7 +415,7 @@ idleSuppressedByProcessApp.task = {
   id: "task_idle_process",
   workspaceId: "ws_idle_process",
   state: "RUNNING",
-  continuationMode: "explicit-long",
+  continuationMode: "resident",
   objective: "do not preempt running durable process",
   requiredMilestones: ["done"],
   completedMilestones: [],
@@ -415,7 +428,6 @@ idleSuppressedByProcessApp.watchWakeReady = false;
 const idleSuppressedByProcessController = installContinuationCoordinator(idleSuppressedByProcessApp, {
   supervisorTickMs: 5,
   heartbeatIntervalMs: 25,
-  explicitSilentContinueMs: 20,
   instanceId: "ui_idle_process",
 });
 idleSuppressedByProcessApp.emit("toolinput", { arguments: { workspaceId: "ws_idle_process", taskId: "task_idle_process" } });
@@ -455,17 +467,28 @@ assert.equal(pausedApp.calls.includes("watch-status"), false, "paused tasks must
 pausedController.dispose();
 
 const processWatchApp = new FakeApp();
-processWatchApp.initialWatchHandles = ["build-process"];
+processWatchApp.task = {
+  id: "task_process_watch",
+  workspaceId: "ws_process_watch",
+  state: "WAITING_EXTERNAL",
+  continuationMode: "resident",
+  objective: "monitor a resident process",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  watchProcessHandles: ["build-process"],
+  turnStartedAt: new Date(Date.now() - 1000).toISOString(),
+};
 processWatchApp.watchWakeReady = true;
 const processWatchController = installContinuationCoordinator(processWatchApp, {
   supervisorTickMs: 5,
   heartbeatIntervalMs: 25,
   instanceId: "ui_process_watch",
 });
-processWatchApp.emit("toolinput", { arguments: { workspaceId: "ws_process_watch" } });
+processWatchApp.emit("toolinput", { arguments: { workspaceId: "ws_process_watch", taskId: "task_process_watch" } });
 await processWatchController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
-assert.equal(processWatchApp.messages.length, 1, "watched process completion should wake without any learned minute budget");
+assert.equal(processWatchApp.messages.length, 1, "resident watched process completion should wake without any learned minute budget");
 processWatchController.dispose();
 
 // Reproduce the real host ordering: the anchor renders first with no process
@@ -484,6 +507,7 @@ await lateProcessWatchController.onConnected();
 lateProcessWatchApp.task = {
   ...lateProcessWatchApp.task,
   state: "WAITING_EXTERNAL",
+  continuationMode: "resident",
   watchProcessHandles: ["late-build-process"],
 };
 lateProcessWatchApp.watchWakeReady = true;
@@ -499,6 +523,7 @@ persistentWakeApp.task = {
   id: "task_fake",
   workspaceId: "ws_persistent_wake",
   state: "RUNNING",
+  continuationMode: "resident",
   objective: "finish persistent wake task",
   requiredMilestones: ["done"],
   completedMilestones: [],
@@ -520,8 +545,20 @@ assert.equal(persistentWakeApp.messages.length, 1, "a persisted wake must be del
 persistentWakeController.dispose();
 
 const teardownApp = new FakeApp();
+teardownApp.task = {
+  id: "task_teardown",
+  workspaceId: "ws_teardown",
+  state: "RUNNING",
+  continuationMode: "timeout-recovery",
+  objective: "recover only after explicit host timeout",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  watchProcessHandles: [],
+  turnStartedAt: new Date(Date.now() - 1000).toISOString(),
+};
 const teardownController = installContinuationCoordinator(teardownApp, { timers: false, instanceId: "ui_teardown" });
-teardownApp.emit("toolinput", { arguments: { workspaceId: "ws_teardown" } });
+teardownApp.emit("toolinput", { arguments: { workspaceId: "ws_teardown", taskId: "task_teardown" } });
 await teardownController.onConnected();
 await teardownController.onTeardown({ reason: "host timeout" });
 assert.equal(teardownApp.messages.length, 1, "timeout teardown should force one continuation attempt");
@@ -541,8 +578,8 @@ explicitTeardownApp.task = {
   id: "task_explicit_teardown",
   workspaceId: "ws_explicit_teardown",
   state: "RUNNING",
-  continuationMode: "explicit-long",
-  objective: "keep explicit long work alive across host resource teardown",
+  continuationMode: "timeout-recovery",
+  objective: "ordinary teardown must not pre-empt current work",
   requiredMilestones: ["done"],
   completedMilestones: [],
   continuationPending: false,
@@ -554,16 +591,58 @@ const explicitTeardownController = installContinuationCoordinator(explicitTeardo
 explicitTeardownApp.emit("toolinput", { arguments: { workspaceId: "ws_explicit_teardown", taskId: "task_explicit_teardown" } });
 await explicitTeardownController.onConnected();
 await explicitTeardownController.onTeardown({ reason: "resource teardown" });
-assert.equal(explicitTeardownApp.messages.length, 1,
-  "an unfinished explicit-long task may recover a host resource teardown even when the host fails to label it timeout");
+assert.equal(explicitTeardownApp.messages.length, 0,
+  "timeout-recovery mode must ignore ordinary resource teardown without explicit timeout evidence");
 explicitTeardownController.dispose();
+
+const confirmedLimitEarlyTeardownApp = new FakeApp();
+confirmedLimitEarlyTeardownApp.task = {
+  id: "task_confirmed_limit_early",
+  workspaceId: "ws_confirmed_limit_early",
+  state: "RUNNING",
+  continuationMode: "timeout-recovery",
+  objective: "do not continue before confirmed host limit",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  confirmedTurnLimitMs: 30_000,
+  turnStartedAt: new Date(Date.now() - 10_000).toISOString(),
+};
+const confirmedLimitEarlyController = installContinuationCoordinator(confirmedLimitEarlyTeardownApp, { timers: false, instanceId: "ui_confirmed_limit_early" });
+confirmedLimitEarlyTeardownApp.emit("toolinput", { arguments: { workspaceId: "ws_confirmed_limit_early", taskId: "task_confirmed_limit_early" } });
+await confirmedLimitEarlyController.onConnected();
+await confirmedLimitEarlyController.onTeardown({});
+assert.equal(confirmedLimitEarlyTeardownApp.messages.length, 0,
+  "resource teardown before an explicitly confirmed Host limit must never start a new turn");
+confirmedLimitEarlyController.dispose();
+
+const confirmedLimitElapsedApp = new FakeApp();
+confirmedLimitElapsedApp.task = {
+  id: "task_confirmed_limit_elapsed",
+  workspaceId: "ws_confirmed_limit_elapsed",
+  state: "RUNNING",
+  continuationMode: "timeout-recovery",
+  objective: "continue only after confirmed host limit and teardown",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  confirmedTurnLimitMs: 30_000,
+  turnStartedAt: new Date(Date.now() - 40_000).toISOString(),
+};
+const confirmedLimitElapsedController = installContinuationCoordinator(confirmedLimitElapsedApp, { timers: false, instanceId: "ui_confirmed_limit_elapsed" });
+confirmedLimitElapsedApp.emit("toolinput", { arguments: { workspaceId: "ws_confirmed_limit_elapsed", taskId: "task_confirmed_limit_elapsed" } });
+await confirmedLimitElapsedController.onConnected();
+await confirmedLimitElapsedController.onTeardown({});
+assert.equal(confirmedLimitElapsedApp.messages.length, 1,
+  "resource teardown may recover only after a user/Owner-confirmed Host turn limit has already elapsed");
+confirmedLimitElapsedController.dispose();
 
 const finishedTeardownApp = new FakeApp();
 finishedTeardownApp.task = {
   id: "task_finished_teardown",
   workspaceId: "ws_finished_teardown",
   state: "RUNNING",
-  continuationMode: "explicit-long",
+  continuationMode: "timeout-recovery",
   objective: "already finished milestones",
   requiredMilestones: ["done"],
   completedMilestones: ["done"],
@@ -608,6 +687,10 @@ try {
   assert.equal(touchedTaskId, a.task.id);
   const touchedActivity = runtime.continuationTask({ action: "status", taskId: a.task.id });
   assert.ok(Date.parse(touchedActivity.task.lastModelActivityAt) >= Date.parse(modelActivityBefore));
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "conversation-a",
+    workspaceId: "ws_shared",
+  }), undefined, "compat tasks must never request a continuation supervisor");
 
   const b = runtime.continuationTask({
     action: "begin-auto",
@@ -640,15 +723,23 @@ try {
     wallClockMinutes: 120,
   });
   assert.equal(upgraded.upgraded, true);
-  assert.equal(upgraded.task.continuationMode, "explicit-long", "explicit begin must upgrade a compatibility task into explicit-long mode");
+  assert.equal(upgraded.task.continuationMode, "timeout-recovery", "explicit begin must default to timeout-recovery mode");
   assert.deepEqual(upgraded.task.requiredMilestones, ["tests", "git", "release"]);
   assert.ok(Date.parse(upgraded.task.deadlineAt) > Date.parse(a.task.deadlineAt), "explicit begin should be able to extend the wall-clock budget");
   const staleSupervisorStatus = runtime.continuationTask({ action: "status", taskId: a.task.id });
   assert.equal(staleSupervisorStatus.reanchorRequired, true,
-    "an unfinished explicit-long task with no live coordinator heartbeat must request a current-turn re-anchor");
+    "an unfinished timeout-recovery task with no live coordinator heartbeat must request a current-turn re-anchor");
   assert.equal(staleSupervisorStatus.continueRequired, true,
-    "an unfinished explicit-long task must explicitly require real work after the model-side status ACK");
+    "an unfinished timeout-recovery task must explicitly require real work after the model-side status ACK");
   assert.deepEqual(staleSupervisorStatus.nextRequiredMilestones, ["tests", "git", "release"]);
+  const staleDirective = runtime.continuationSupervisorDirective({
+    conversationScopeId: "conversation-a",
+    workspaceId: "ws_shared",
+  });
+  assert.equal(staleDirective?.reanchorRequired, true,
+    "an active timeout-recovery task must surface stale-supervisor maintenance on ordinary model tool activity");
+  assert.equal(staleDirective?.taskId, a.task.id);
+  assert.equal(staleDirective?.continuationMode, "timeout-recovery");
   const heartbeat = runtime.continuationTask({ action: "heartbeat", taskId: a.task.id, coordinatorInstanceId: "ui_test" });
   assert.equal(heartbeat.accepted, true);
   assert.ok(heartbeat.task.lastUiHeartbeatAt);
@@ -657,13 +748,126 @@ try {
   assert.equal(Boolean(liveSupervisorStatus.reanchorRequired), false,
     "a fresh coordinator heartbeat must suppress redundant re-anchor requests");
   assert.equal(liveSupervisorStatus.continueRequired, true,
-    "a live supervisor does not make an unfinished explicit-long task safe to end after a status-only response");
-  const watched = runtime.continuationTask({ action: "watch-process", taskId: a.task.id, processHandle: "build-1" });
+    "a live supervisor does not make an unfinished timeout-recovery task safe to end after a status-only response");
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "conversation-a",
+    workspaceId: "ws_shared",
+  }), undefined, "a fresh supervisor heartbeat must suppress same-turn re-anchor maintenance");
+  runtime.continuationTask({
+    action: "host-signal",
+    taskId: a.task.id,
+    coordinatorInstanceId: "ui_test",
+    hostProfileId: "chatgpt@test",
+    hostSignal: "connected",
+    elapsedMs: 0,
+  });
+  const confirmedLimit = runtime.continuationTask({
+    action: "confirm-turn-limit",
+    taskId: a.task.id,
+    elapsedMs: 1_549_000,
+    note: "user-observed-25m49s",
+  });
+  assert.equal(confirmedLimit.accepted, true);
+  assert.equal(confirmedLimit.reason, "confirmed-turn-limit-recorded");
+  assert.equal(confirmedLimit.task.confirmedTurnLimitMs, 1_549_000);
+  assert.equal(confirmedLimit.task.confirmedTurnLimitSource, "user-observed-25m49s");
+  const confirmedGateEarly = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-confirmed-gate-early",
+    workspaceId: "ws_confirmed_gate_early",
+    requiredMilestones: ["done"],
+    maxContinuations: 2,
+  });
+  runtime.continuationTask({
+    action: "host-signal",
+    taskId: confirmedGateEarly.task.id,
+    hostProfileId: "chatgpt@confirmed-early",
+    hostSignal: "connected",
+    elapsedMs: 0,
+  });
+  runtime.continuationTask({ action: "confirm-turn-limit", taskId: confirmedGateEarly.task.id, elapsedMs: 30_000, note: "owner-confirmed" });
+  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
+    .run(new Date(Date.now() - 10_000).toISOString(), confirmedGateEarly.task.id);
+  runtime.continuationTask({
+    action: "host-signal",
+    taskId: confirmedGateEarly.task.id,
+    hostProfileId: "chatgpt@confirmed-early",
+    hostSignal: "teardown",
+    elapsedMs: 10_000,
+  });
+  const confirmedEarlyClaim = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: confirmedGateEarly.task.id,
+    note: "confirmed turn-limit teardown",
+  });
+  assert.equal(confirmedEarlyClaim.accepted, false,
+    "a teardown before the confirmed limit plus safety grace must fail closed even if its reason text is forged");
+  assert.equal(confirmedEarlyClaim.reason, "continuation-trigger-not-authorized");
+
+  const confirmedGateElapsed = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-confirmed-gate-elapsed",
+    workspaceId: "ws_confirmed_gate_elapsed",
+    requiredMilestones: ["done"],
+    maxContinuations: 2,
+  });
+  runtime.continuationTask({
+    action: "host-signal",
+    taskId: confirmedGateElapsed.task.id,
+    hostProfileId: "chatgpt@confirmed-elapsed",
+    hostSignal: "connected",
+    elapsedMs: 0,
+  });
+  runtime.continuationTask({ action: "confirm-turn-limit", taskId: confirmedGateElapsed.task.id, elapsedMs: 30_000, note: "owner-confirmed" });
+  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
+    .run(new Date(Date.now() - 40_000).toISOString(), confirmedGateElapsed.task.id);
+  runtime.continuationTask({
+    action: "host-signal",
+    taskId: confirmedGateElapsed.task.id,
+    hostProfileId: "chatgpt@confirmed-elapsed",
+    hostSignal: "teardown",
+    elapsedMs: 40_000,
+  });
+  const confirmedElapsedClaim = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: confirmedGateElapsed.task.id,
+    note: "confirmed turn-limit teardown",
+  });
+  assert.equal(confirmedElapsedClaim.accepted, true,
+    "a teardown may be claimed only after an explicitly confirmed limit plus safety grace has elapsed");
+  const rejectedWatch = runtime.continuationTask({ action: "watch-process", taskId: a.task.id, processHandle: "build-1" });
+  assert.equal(rejectedWatch.accepted, false);
+  assert.equal(rejectedWatch.reason, "resident-mode-required",
+    "ordinary timeout-recovery work must not gain a process-completion wake source");
+  const resident = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-resident",
+    workspaceId: "ws_resident",
+    continuationMode: "resident",
+    objective: "monitor training across stages",
+    requiredMilestones: ["monitor until done"],
+  });
+  assert.equal(resident.task.continuationMode, "resident");
+  const watched = runtime.continuationTask({ action: "watch-process", taskId: resident.task.id, processHandle: "training-1" });
   assert.equal(watched.accepted, true);
-  assert.deepEqual(watched.task.watchProcessHandles, ["build-1"]);
-  const unwatched = runtime.continuationTask({ action: "unwatch-process", taskId: a.task.id, processHandle: "build-1" });
-  assert.equal(unwatched.accepted, true);
-  assert.deepEqual(unwatched.task.watchProcessHandles, []);
+  assert.deepEqual(watched.task.watchProcessHandles, ["training-1"]);
+  runtime.database.sqlite.prepare("update continuation_tasks set state='WAITING_EXTERNAL', last_ui_heartbeat_at=? where id=?")
+    .run(new Date(Date.now() - 60_000).toISOString(), resident.task.id);
+  const residentWaitDirective = runtime.continuationSupervisorDirective({
+    conversationScopeId: "conversation-resident",
+    workspaceId: "ws_resident",
+  });
+  assert.equal(residentWaitDirective?.reason, "resident-supervisor-stale",
+    "a resident process wait must re-anchor in the current turn if its supervisor dies before the process completes");
+  runtime.database.sqlite.prepare("update continuation_tasks set state='RUNNING', last_ui_heartbeat_at=null where id=?")
+    .run(resident.task.id);
+  const residentStage = runtime.continuationTask({ action: "stage-complete", taskId: resident.task.id, note: "epoch review complete" });
+  assert.equal(residentStage.accepted, true);
+  assert.equal(residentStage.reason, "resident-stage-complete");
+  assert.equal(residentStage.task.continuationWakePending, true);
+  const rejectedStage = runtime.continuationTask({ action: "stage-complete", taskId: a.task.id });
+  assert.equal(rejectedStage.accepted, false);
+  assert.equal(rejectedStage.reason, "resident-mode-required");
   const learnedBudget = runtime.continuationTask({
     action: "host-signal",
     taskId: a.task.id,
@@ -676,6 +880,8 @@ try {
   assert.equal(learnedBudget.task.observedTurnBudgetMs, 600000);
   assert.equal(learnedBudget.task.recommendedContinueAfterMs, 528000);
   assert.equal(learnedBudget.task.hostTimeoutSamples, 1);
+  assert.equal(learnedBudget.task.confirmedTurnLimitMs, 1_549_000,
+    "a shorter timeout sample must not lower an explicitly confirmed no-preemption bound");
   const learnedReuseTask = runtime.continuationTask({
     action: "begin-auto",
     conversationScopeId: "conversation-budget-reuse",
@@ -691,6 +897,8 @@ try {
   });
   assert.equal(learnedReuse.task.observedTurnBudgetMs, 600000, "new tasks should reuse the learned host budget");
   assert.equal(learnedReuse.task.recommendedContinueAfterMs, 528000);
+  assert.equal(learnedReuse.task.confirmedTurnLimitMs, 1_549_000,
+    "new tasks on the same Host profile should inherit the explicitly confirmed turn limit");
   const shorterBudget = runtime.continuationTask({
     action: "host-signal",
     taskId: learnedReuseTask.task.id,
@@ -809,17 +1017,17 @@ try {
   runtime.continuationTask({ action: "wait", taskId: wait.task.id, note: "CI running" });
   assert.equal(runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id }).reason, "waiting-external");
   runtime.continuationTask({ action: "resume", taskId: wait.task.id });
-  const firstClaim = runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id });
+  const firstClaim = runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id, note: "manual recovery" });
   assert.equal(firstClaim.accepted, true);
-  assert.equal(runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id }).reason, "continuation-already-pending");
+  assert.equal(runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id, note: "manual recovery" }).reason, "continuation-already-pending");
   runtime.continuationTask({ action: "release-continuation", taskId: wait.task.id });
-  assert.equal(runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id }).reason, "continuation-cooldown");
+  assert.equal(runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id, note: "manual recovery" }).reason, "continuation-cooldown");
   runtime.database.sqlite.prepare("update continuation_tasks set last_continuation_at=? where id=?").run(new Date(Date.now() - 180_000).toISOString(), wait.task.id);
-  const secondClaim = runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id });
+  const secondClaim = runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id, note: "manual recovery" });
   assert.equal(secondClaim.accepted, true);
   runtime.continuationTask({ action: "release-continuation", taskId: wait.task.id });
   runtime.database.sqlite.prepare("update continuation_tasks set last_continuation_at=? where id=?").run(new Date(Date.now() - 180_000).toISOString(), wait.task.id);
-  const exhausted = runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id });
+  const exhausted = runtime.continuationTask({ action: "claim-continuation", taskId: wait.task.id, note: "manual recovery" });
   assert.equal(exhausted.accepted, false);
   assert.equal(exhausted.reason, "continuation-budget");
   assert.equal(exhausted.task.state, "BUDGET_EXHAUSTED");
@@ -828,6 +1036,7 @@ try {
     action: "begin",
     conversationScopeId: "conversation-supervisor-guard",
     workspaceId: "ws_supervisor_guard",
+    continuationMode: "resident",
   });
   runtime.continuationTask({ action: "watch-process", taskId: supervisorGuard.task.id, processHandle: "guard-process" });
   const staleWait = runtime.continuationTask({ action: "wait", taskId: supervisorGuard.task.id, note: "must not wait without a live supervisor" });
@@ -867,6 +1076,7 @@ try {
     action: "begin",
     conversationScopeId: "conversation-persistent-wake",
     workspaceId: "ws_persistent_wake_state",
+    continuationMode: "resident",
     maxContinuations: 3,
   });
   runtime.continuationTask({ action: "wait", taskId: wake.task.id, note: "external process running" });
@@ -917,6 +1127,7 @@ try {
     action: "begin",
     conversationScopeId: "conversation-delivery-ack",
     workspaceId: "ws_delivery_ack",
+    continuationMode: "resident",
     requiredMilestones: ["finish after resumed turn"],
     maxContinuations: 4,
   });
@@ -934,7 +1145,7 @@ try {
   assert.equal(modelAck.accepted, true);
   assert.equal(modelAck.reason, "continuation-resume-acknowledged");
   assert.equal(modelAck.reanchorRequired, true,
-    "an unfinished explicit-long task must tell the resumed model to re-mount the same supervisor");
+    "an unfinished resident task must tell the resumed model to re-mount the same supervisor");
   assert.equal(modelAck.continueRequired, true,
     "resume ACK must explicitly tell the model to continue tool work in the same assistant turn");
   assert.deepEqual(modelAck.nextRequiredMilestones, ["finish after resumed turn"]);
@@ -948,6 +1159,13 @@ try {
     workspaceId: "ws_proactive_ack",
     maxContinuations: 4,
   });
+  runtime.continuationTask({
+    action: "host-signal",
+    taskId: proactiveAck.task.id,
+    hostProfileId: "proactive-timeout@test",
+    hostSignal: "timeout",
+    elapsedMs: 10_000,
+  });
   const proactiveClaim = runtime.continuationTask({ action: "claim-continuation", taskId: proactiveAck.task.id });
   assert.equal(proactiveClaim.accepted, true);
   const proactiveDelivered = runtime.continuationTask({
@@ -957,13 +1175,13 @@ try {
     deliveryMethod: "app.sendMessage",
   });
   assert.equal(proactiveDelivered.task.continuationDeliveryAwaitingAck, true,
-    "proactive continuations must also retain a delivery lease until the resumed model reconnects");
+    "timeout-triggered continuations must retain a delivery lease until the resumed model reconnects");
   assert.equal(proactiveDelivered.task.continuationWakePending, false,
-    "proactive delivery ACK state must not masquerade as a process wake");
+    "timeout-triggered delivery ACK state must not masquerade as a resident process/stage wake");
   const proactiveModelAck = runtime.continuationTask({ action: "status", taskId: proactiveAck.task.id });
   assert.equal(proactiveModelAck.reason, "continuation-resume-acknowledged");
   assert.equal(proactiveModelAck.reanchorRequired, false,
-    "a task with no required milestone gate must not request silent-truncation supervision");
+    "a task with no required milestone gate must not request a continuation supervisor");
   assert.equal(proactiveModelAck.continueRequired, false,
     "a task without an explicit incomplete milestone gate must not force another assistant work loop");
   assert.equal(proactiveModelAck.task.continuationDeliveryAwaitingAck, false);
@@ -983,16 +1201,20 @@ try {
     integratedWorkspaceApp: true,
     officialAppSendMessagePath: true,
     officialAppToolCallPath: true,
-    automaticWatchdogTimer: true,
-    adaptiveHostBudgetLearning: true,
+    backgroundSupervisorTimer: true,
+    hostBudgetTelemetryOnly: true,
     modelIdleAutoContinuationRemoved: true,
     compatNormalTeardownDoesNotContinue: true,
-    explicitLongSilentTruncationRecovery: true,
-    explicitLongTeardownRecovery: true,
+    timeoutRecoverySilenceFailsClosed: true,
+    timeoutRecoveryNormalTeardownFailsClosed: true,
+    explicitHostTimeoutRecovery: true,
     resumedTurnReanchorRequired: true,
+    staleSupervisorSameTurnReanchor: true,
     ownerPauseSuppressesAutomation: true,
-    proactiveDeliveryResumeAck: true,
-    processCompletionWake: true,
+    timeoutDeliveryResumeAck: true,
+    residentProcessCompletionWake: true,
+    residentStageWake: true,
+    nonResidentProcessWakeRejected: true,
     singleContinuationAnchor: true,
     teardownRecoveryPath: true,
     continuationDeliveryDiagnostics: true,

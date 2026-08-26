@@ -1,10 +1,7 @@
 const TASK_TOOL = "continuation_task";
 const DEFAULT_SUPERVISOR_TICK_MS = 15_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
-// This is deliberately much longer than ordinary tool-call gaps. It is a
-// fallback only for an explicitly anchored long task when the host fails to
-// emit timeout/teardown. Compatibility/implicit tasks never use this timer.
-const DEFAULT_EXPLICIT_SILENT_CONTINUE_MS = 3 * 60_000;
+const CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS = 5_000;
 
 const TERMINAL_STATES = new Set([
   "SUCCEEDED",
@@ -87,8 +84,8 @@ function automationSuppressed(task) {
   return ["WAITING_EXTERNAL", "WAITING_SUPERVISOR", "PAUSED_BY_USER"].includes(task?.state);
 }
 
-function explicitLongTask(task) {
-  return task?.continuationMode === "explicit-long";
+function residentTask(task) {
+  return task?.continuationMode === "resident";
 }
 
 function hasUnfinishedMilestones(task) {
@@ -96,8 +93,8 @@ function hasUnfinishedMilestones(task) {
   const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
   // Automatic continuation needs an objective completion gate. An Owner lock
   // protects a task from termination but is not evidence that work remains.
-  // Explicit long tasks should therefore provide at least one required
-  // milestone; tasks without milestones can still be resumed manually.
+  // Automatic modes should therefore provide at least one required milestone;
+  // tasks without milestones can still be resumed manually.
   if (required.length === 0) return false;
   const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
   return required.some((milestone) => !completed.has(milestone));
@@ -107,17 +104,6 @@ function taskElapsedMs(task) {
   const raw = task?.turnStartedAt ?? task?.updatedAt;
   const started = Date.parse(raw || "");
   return Number.isFinite(started) ? Math.max(0, Date.now() - started) : 0;
-}
-
-function modelActivityAgeMs(task) {
-  const raw = task?.lastModelActivityAt ?? task?.turnStartedAt ?? task?.createdAt;
-  const value = Date.parse(raw || "");
-  return Number.isFinite(value) ? Math.max(0, Date.now() - value) : 0;
-}
-
-function recommendedContinueAfterMs(task) {
-  const value = Number(task?.recommendedContinueAfterMs);
-  return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function cancellationIsUserAction(reason) {
@@ -131,7 +117,7 @@ function isChinese() {
 function continuationText(task, reason) {
   const id = task?.id ? ` ${task.id}` : "";
   const workspace = task?.workspaceId ? `，workspaceId=${task.workspaceId}` : "";
-  return `继续 DevSpace 任务${id}${workspace}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、持久任务状态和已完成里程碑，不要重新开始。第一步必须调用 continuation_task action=status，并显式传入这个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}，用该成功调用确认新一轮已经重新连上 DevSpace；若 MCP 暂时 UNAVAILABLE/Connection failed，等待连接恢复后重试这个 status，不要新建任务。若 status 返回 continueRequired=true，则本轮禁止只做 ACK、状态汇报或进度总结后结束；必须继续执行 nextRequiredMilestones 中至少一个尚未完成的实际工作步骤。若同时返回 reanchorRequired=true，第二步先调用 continuation_anchor，显式传入同一个 taskId 和 workspaceId，重新挂载本轮 supervisor；这是复用原任务，不得创建 shadow task。ACK/re-anchor 只是恢复协议，不是任务进展本身。只有原始目标经验证完成后才调用 complete 并结束。`;
+  return `继续 DevSpace 任务${id}${workspace}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、持久任务状态和已完成里程碑，不要重新开始。这次自动续轮只能来自两类已授权事件：Host 明确 timeout/deadline/budget 截断且任务未完成，或用户明确授权的 resident/monitor 任务完成了一个阶段/显式 watch。第一步必须调用 continuation_task action=status，并显式传入这个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}；若 MCP 暂时 UNAVAILABLE/Connection failed，等待连接恢复后重试，不要新建任务。若 status 返回 continueRequired=true，则本轮禁止只做 ACK、状态汇报或进度总结后结束；必须继续执行 nextRequiredMilestones 中至少一个尚未完成的实际工作步骤。若同时返回 reanchorRequired=true，第二步先调用 continuation_anchor，显式传入同一个 taskId 和 workspaceId，重新挂载本轮 supervisor。ACK/re-anchor 只是恢复协议，不是任务进展本身。只有原始目标经验证完成后才调用 complete 并结束。`;
 }
 
 function continuationContext(task, workspaceId, reason) {
@@ -144,7 +130,7 @@ function continuationContext(task, workspaceId, reason) {
     `completedMilestones: ${(task?.completedMilestones ?? []).join(" | ") || "none recorded"}`,
     `requiredMilestones: ${(task?.requiredMilestones ?? []).join(" | ") || "none recorded"}`,
     `continuationReason: ${reason}`,
-    "If model-side continuation_task status returns continueRequired=true, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and advance at least one nextRequiredMilestone unless blocked by an actual external condition. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first so the current assistant turn has a live supervisor. Resume existing process handles and workspace state. Do not restart completed work.",
+    "Automatic continuation is fail-closed: timeout-recovery mode only follows an explicit Host timeout/deadline/budget interruption; resident mode additionally permits an explicitly requested resident stage/process wake. Ordinary resource teardown, model/MCP silence, learned host budgets, and ordinary process completion are never sufficient. If model-side continuation_task status returns continueRequired=true, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and advance at least one nextRequiredMilestone unless blocked by an actual external condition. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first. Resume existing process handles and workspace state. Do not restart completed work.",
   ].join("\n");
 }
 
@@ -209,10 +195,6 @@ export function installContinuationCoordinator(app, options = {}) {
   };
   const supervisorTickMs = Math.max(250, Number(options.supervisorTickMs ?? DEFAULT_SUPERVISOR_TICK_MS));
   const heartbeatIntervalMs = Math.max(supervisorTickMs, Number(options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS));
-  const explicitSilentContinueMs = Math.max(
-    supervisorTickMs * 2,
-    Number(options.explicitSilentContinueMs ?? DEFAULT_EXPLICIT_SILENT_CONTINUE_MS),
-  );
   const timersEnabled = options.timers !== false;
 
   function buildHostProfileId() {
@@ -314,8 +296,7 @@ export function installContinuationCoordinator(app, options = {}) {
   async function attemptContinuation(reason, { force = false } = {}) {
     if (state.deliveryInFlight) return false;
     if (state.disposed && !force) return false;
-    const recommended = recommendedContinueAfterMs(state.task);
-    if (!force && (!recommended || taskElapsedMs(state.task) < recommended)) return false;
+    if (!force) return false;
     const wakeRetry = Boolean(state.task?.continuationWakePending) || reason === "watched process completed";
     state.deliveryInFlight = true;
     try {
@@ -401,7 +382,11 @@ export function installContinuationCoordinator(app, options = {}) {
     // This prevents a single watch-status winner from consuming the wake and
     // disappearing before claim/sendMessage while sibling App cards see nothing.
     if (state.task.continuationWakePending) {
-      await attemptContinuation("watched process completed", { force: true });
+      if (!residentTask(state.task)) return;
+      const reason = /stage completed/i.test(String(state.task.waitingReason || ""))
+        ? "resident stage completed"
+        : "resident watched process completed";
+      await attemptContinuation(reason, { force: true });
       return;
     }
 
@@ -415,6 +400,7 @@ export function installContinuationCoordinator(app, options = {}) {
 
     if (Date.now() - state.lastHeartbeatAt >= heartbeatIntervalMs) await heartbeat("adaptive supervisor");
     if (hasWatchedProcesses) {
+      if (!residentTask(state.task)) return;
       const watched = await callTask("watch-status").catch(() => undefined);
       if (watched?.task) state.task = watched.task;
       if (watched?.wakeReady) {
@@ -424,38 +410,17 @@ export function installContinuationCoordinator(app, options = {}) {
           const resumed = await callTask("resume", { note: "watched process completed" }).catch(() => undefined);
           if (resumed?.task) state.task = resumed.task;
         }
-        await attemptContinuation("watched process completed", { force: true });
+        await attemptContinuation("resident watched process completed", { force: true });
         return;
       }
-      // A process watch is an explicit contract to wait for that process. Do
-      // not let either learned host-budget or silent-truncation timers preempt
-      // it while the process is still reported running/unknown.
       return;
     }
 
     if (automationSuppressed(state.task)) return;
-
-    const recommended = recommendedContinueAfterMs(state.task);
-    if (recommended
-      && Number(state.task?.hostTimeoutSamples || 0) > 0
-      && hasUnfinishedMilestones(state.task)
-      && taskElapsedMs(state.task) >= recommended) {
-      await attemptContinuation("adaptive host-budget watchdog", { force: true });
-      return;
-    }
-
-    // Some ChatGPT turns are hard-truncated without toolcancelled(timeout) or a
-    // teardown callback. A short generic model-idle watchdog caused false
-    // follow-ups, so the fallback is now restricted to an explicitly anchored
-    // long task with unfinished milestones. Explicit process watches take
-    // precedence and suppress this fallback while the process is still active.
-    // begin-auto/compat tasks can never enter this path.
-    if (!hasWatchedProcesses
-      && explicitLongTask(state.task)
-      && hasUnfinishedMilestones(state.task)
-      && modelActivityAgeMs(state.task) >= explicitSilentContinueMs) {
-      await attemptContinuation("explicit long-task silent truncation guard", { force: true });
-    }
+    // Intentionally no learned-budget, inactivity, or normal-teardown trigger.
+    // Without an explicit Host timeout signal DevSpace cannot prove that a turn
+    // has actually been truncated, so it fails closed instead of pre-empting an
+    // assistant turn that is still legitimately running.
   }
 
   function startSupervisor() {
@@ -545,7 +510,9 @@ export function installContinuationCoordinator(app, options = {}) {
     if (/timeout|deadline|budget/i.test(reason)) {
       void (async () => {
         await recordHostSignal("timeout", reason);
-        await attemptContinuation(`host timeout: ${reason}`, { force: true });
+        if (state.task?.continuationMode !== "compat" && hasUnfinishedMilestones(state.task)) {
+          await attemptContinuation(`host timeout: ${reason}`, { force: true });
+        }
       })();
       return;
     }
@@ -582,13 +549,18 @@ export function installContinuationCoordinator(app, options = {}) {
       const reason = String(params?.reason ?? "resource teardown");
       const timedOut = /timeout|deadline|budget/i.test(reason);
       await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
-      const unfinishedExplicitLongTask = state.task?.state === "RUNNING"
-        && explicitLongTask(state.task)
-        && hasUnfinishedMilestones(state.task);
-      if ((timedOut || unfinishedExplicitLongTask)
+      const confirmedLimitMs = Number(state.task?.confirmedTurnLimitMs || 0);
+      const confirmedLimitElapsed = !timedOut
+        && confirmedLimitMs >= 30_000
+        && taskElapsedMs(state.task) >= confirmedLimitMs + CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS;
+      if ((timedOut || confirmedLimitElapsed)
+        && state.task?.continuationMode !== "compat"
         && state.task?.state === "RUNNING"
         && hasUnfinishedMilestones(state.task)) {
-        await attemptContinuation(`host teardown: ${reason}`, { force: true });
+        await attemptContinuation(
+          timedOut ? `host teardown: ${reason}` : "confirmed turn-limit teardown",
+          { force: true },
+        );
       }
       controller.dispose();
     },

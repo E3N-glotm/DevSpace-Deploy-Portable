@@ -1419,13 +1419,16 @@ async function runContinuationAdmin(action, payload = {}) {
   const taskFromRow = (row) => {
     const required = parse(row.required_milestones_json, []);
     const completed = parse(row.completed_milestones_json, []);
+    const rawMode = String(row.continuation_mode || "compat").toLowerCase();
+    const continuationMode = rawMode === "resident" ? "resident"
+      : (rawMode === "timeout-recovery" || rawMode === "explicit-long") ? "timeout-recovery"
+        : "compat";
     return {
       id: row.id,
       workspaceId: row.workspace_id || "",
       objective: row.objective,
       state: row.state,
-      continuationMode: row.continuation_mode || "compat",
-      explicitSilentContinueAfterMs: row.continuation_mode === "explicit-long" ? 3 * 60_000 : 0,
+      continuationMode,
       requiredMilestones: required,
       completedMilestones: completed,
       evidence: parse(row.evidence_json, {}),
@@ -1447,6 +1450,9 @@ async function runContinuationAdmin(action, payload = {}) {
       observedTurnBudgetMs: Number(row.observed_turn_budget_ms || 0),
       recommendedContinueAfterMs: Number(row.recommended_continue_after_ms || 0),
       hostTimeoutSamples: Number(row.host_timeout_samples || 0),
+      confirmedTurnLimitMs: Number(row.confirmed_turn_limit_ms || 0),
+      confirmedTurnLimitAt: row.confirmed_turn_limit_at || "",
+      confirmedTurnLimitSource: row.confirmed_turn_limit_source || "",
       lastHostSignal: row.last_host_signal || "",
       lastActivityAt: row.last_activity_at || row.updated_at,
       lastContinuationAt: row.last_continuation_at || "",

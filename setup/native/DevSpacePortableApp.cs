@@ -5111,7 +5111,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "自动续轮任务尚未读取。显式长任务使用持久 task；每个续轮 assistant turn 会复用同一 task 重新挂载 supervisor。进程完成、宿主超时/预算和受控的静默截断保护可触发下一轮；已完成、暂停和等待状态不会续轮。",
+                Text = "自动续轮任务尚未读取。默认 timeout-recovery 只在 Host 明确 timeout/deadline/budget 截断后续轮；普通 teardown、静默、学习预算和普通进程结束不会提前开新一轮。只有用户明确授权的 resident/监控任务才允许阶段完成或显式进程 watch 唤醒。stale supervisor 只会在当前 assistant turn 内要求重新挂载，不会自己创建下一轮。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
@@ -6027,6 +6027,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private string ContinuationCountdownText(Dictionary<string, object> task)
         {
             string state = GetString(task, "state");
+            string mode = GetString(task, "continuationMode");
             if (string.Equals(state, "PAUSED_BY_USER", StringComparison.OrdinalIgnoreCase)) return "已暂停";
             if (ContinuationTerminal(state) || !string.Equals(state, "RUNNING", StringComparison.OrdinalIgnoreCase)) return "—";
             if (GetBool(task, "continuationDeliveryAwaitingAck") || GetBool(task, "continuationWakePending") || GetBool(task, "continuationPending")) return "触发中";
@@ -6035,27 +6036,28 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             int completed = GetInt(task, "progressCompleted");
             bool unfinished = required > 0 && completed < required;
             if (!unfinished) return "—";
+            if (string.Equals(mode, "resident", StringComparison.OrdinalIgnoreCase)) return "等待阶段";
+            if (!string.Equals(mode, "timeout-recovery", StringComparison.OrdinalIgnoreCase)) return "—";
+            long confirmedLimitMs = GetLong(task, "confirmedTurnLimitMs");
+            long observedMs = GetLong(task, "observedTurnBudgetMs");
             DateTimeOffset baseTime;
-            long delayMs;
-            string prefix;
-            long recommendedMs = GetLong(task, "recommendedContinueAfterMs");
-            if (GetInt(task, "hostTimeoutSamples") > 0 && recommendedMs > 0)
+            if (confirmedLimitMs > 0
+                && DateTimeOffset.TryParse(GetString(task, "turnStartedAt"), out baseTime))
             {
-                if (!DateTimeOffset.TryParse(GetString(task, "turnStartedAt"), out baseTime)) return "—";
-                delayMs = recommendedMs;
-                prefix = "预算 ";
+                TimeSpan remaining = baseTime.AddMilliseconds(confirmedLimitMs) - DateTimeOffset.UtcNow;
+                if (remaining.TotalMilliseconds <= 0) return "等待截断";
+                if (remaining.TotalHours >= 1) return "确认 " + ((int)remaining.TotalHours) + ":" + remaining.Minutes.ToString("00") + ":" + remaining.Seconds.ToString("00");
+                return "确认 " + ((int)remaining.TotalMinutes) + ":" + remaining.Seconds.ToString("00");
             }
-            else if (string.Equals(GetString(task, "continuationMode"), "explicit-long", StringComparison.OrdinalIgnoreCase))
+            if (GetInt(task, "hostTimeoutSamples") > 0 && observedMs > 0
+                && DateTimeOffset.TryParse(GetString(task, "turnStartedAt"), out baseTime))
             {
-                if (!DateTimeOffset.TryParse(GetString(task, "lastModelActivityAt"), out baseTime)) return "—";
-                delayMs = Math.Max(1L, GetLong(task, "explicitSilentContinueAfterMs", 3L * 60L * 1000L));
-                prefix = "静默 ";
+                TimeSpan remaining = baseTime.AddMilliseconds(observedMs) - DateTimeOffset.UtcNow;
+                if (remaining.TotalMilliseconds <= 0) return "等待截断";
+                if (remaining.TotalHours >= 1) return "参考 " + ((int)remaining.TotalHours) + ":" + remaining.Minutes.ToString("00") + ":" + remaining.Seconds.ToString("00");
+                return "参考 " + ((int)remaining.TotalMinutes) + ":" + remaining.Seconds.ToString("00");
             }
-            else return "—";
-            TimeSpan remaining = baseTime.AddMilliseconds(delayMs) - DateTimeOffset.UtcNow;
-            if (remaining.TotalMilliseconds <= 0) return "待触发";
-            if (remaining.TotalHours >= 1) return prefix + ((int)remaining.TotalHours) + ":" + remaining.Minutes.ToString("00") + ":" + remaining.Seconds.ToString("00");
-            return prefix + ((int)remaining.TotalMinutes) + ":" + remaining.Seconds.ToString("00");
+            return "等待截断";
         }
 
         private void UpdateContinuationCountdownDisplay()
@@ -6149,7 +6151,9 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 return;
             }
             string state = GetString(task, "state");
-            string modeText = string.Equals(GetString(task, "continuationMode"), "explicit-long", StringComparison.OrdinalIgnoreCase) ? "显式长任务" : "兼容任务";
+            string mode = GetString(task, "continuationMode");
+            string modeText = string.Equals(mode, "resident", StringComparison.OrdinalIgnoreCase) ? "常驻 / 监控"
+                : string.Equals(mode, "timeout-recovery", StringComparison.OrdinalIgnoreCase) ? "仅截断恢复" : "兼容任务";
             string lockText = GetBool(task, "ownerLocked") ? "已锁定（助手和自动守卫不能终止）" : "未锁定";
             string pending = GetBool(task, "continuationDeliveryAwaitingAck") ? " · 等待新轮 ACK"
                 : GetBool(task, "continuationWakePending") ? " · 已产生续轮唤醒"

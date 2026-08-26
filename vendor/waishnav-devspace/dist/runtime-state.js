@@ -126,18 +126,71 @@ export class StructuredRuntimeState {
         `).run(nowIso, nowIso, nowIso, row.id);
         return row.id;
     }
+    continuationSupervisorDirective(input = {}) {
+        const workspaceId = String(input.workspaceId ?? "").trim();
+        const conversationScopeId = String(input.conversationScopeId ?? "").trim();
+        if (!workspaceId || !conversationScopeId)
+            return undefined;
+        const row = this.database.sqlite.prepare(`
+          select * from continuation_tasks
+          where workspace_id=? and conversation_scope_id=?
+            and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED')
+          order by updated_at desc limit 1
+        `).get(workspaceId, conversationScopeId);
+        if (!row)
+            return undefined;
+        const rawMode = String(row.continuation_mode ?? "compat").trim().toLowerCase();
+        const continuationMode = rawMode === "resident"
+            ? "resident"
+            : rawMode === "timeout-recovery" || rawMode === "explicit-long"
+                ? "timeout-recovery"
+                : "compat";
+        if (continuationMode === "compat" || row.state === "PAUSED_BY_USER")
+            return undefined;
+        const required = parseJson(row.required_milestones_json, []);
+        const completed = new Set(parseJson(row.completed_milestones_json, []));
+        const unfinished = required.length > 0 && required.some((milestone) => !completed.has(milestone));
+        const watchedHandles = parseJson(row.watch_process_handles_json, []);
+        const activeTurnNeedsSupervisor = row.state === "RUNNING" && unfinished;
+        const residentWaitNeedsSupervisor = continuationMode === "resident"
+            && ["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(row.state)
+            && watchedHandles.length > 0;
+        if (!activeTurnNeedsSupervisor && !residentWaitNeedsSupervisor)
+            return undefined;
+        const heartbeatAt = row.last_ui_heartbeat_at ? Date.parse(row.last_ui_heartbeat_at) : NaN;
+        const supervisorHeartbeatAgeMs = Number.isFinite(heartbeatAt)
+            ? Math.max(0, Date.now() - heartbeatAt)
+            : Number.POSITIVE_INFINITY;
+        const staleAfterMs = 45_000;
+        if (supervisorHeartbeatAgeMs <= staleAfterMs)
+            return undefined;
+        return {
+            taskId: row.id,
+            workspaceId: row.workspace_id ?? workspaceId,
+            continuationMode,
+            reanchorRequired: true,
+            supervisorHeartbeatAgeMs: Number.isFinite(supervisorHeartbeatAgeMs) ? supervisorHeartbeatAgeMs : undefined,
+            staleAfterMs,
+            reason: residentWaitNeedsSupervisor ? "resident-supervisor-stale" : "active-turn-supervisor-stale",
+        };
+    }
     continuationTask(input = {}) {
         const action = String(input.action ?? "status");
         const now = new Date();
         const nowIso = now.toISOString();
         const terminalStates = new Set(["SUCCEEDED", "FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED"]);
+        const normalizedMode = (value, fallback = "compat") => {
+            const mode = String(value ?? "").trim().toLowerCase();
+            if (mode === "resident") return "resident";
+            if (mode === "timeout-recovery" || mode === "explicit-long") return "timeout-recovery";
+            return fallback;
+        };
         const rowToTask = (row) => row ? ({
             id: row.id,
             workspaceId: row.workspace_id ?? undefined,
             objective: row.objective,
             state: row.state,
-            continuationMode: row.continuation_mode ?? "compat",
-            explicitSilentContinueAfterMs: row.continuation_mode === "explicit-long" ? 3 * 60_000 : undefined,
+            continuationMode: normalizedMode(row.continuation_mode, "compat"),
             requiredMilestones: parseJson(row.required_milestones_json, []),
             completedMilestones: parseJson(row.completed_milestones_json, []),
             evidence: parseJson(row.evidence_json, {}),
@@ -170,6 +223,9 @@ export class StructuredRuntimeState {
             observedTurnBudgetMs: row.observed_turn_budget_ms ?? undefined,
             recommendedContinueAfterMs: row.recommended_continue_after_ms ?? undefined,
             hostTimeoutSamples: row.host_timeout_samples ?? 0,
+            confirmedTurnLimitMs: row.confirmed_turn_limit_ms ?? undefined,
+            confirmedTurnLimitAt: row.confirmed_turn_limit_at ?? undefined,
+            confirmedTurnLimitSource: row.confirmed_turn_limit_source ?? undefined,
             lastHostSignal: row.last_host_signal ?? undefined,
             lastHostSignalAt: row.last_host_signal_at ?? undefined,
             watchProcessHandles: parseJson(row.watch_process_handles_json, []),
@@ -177,7 +233,7 @@ export class StructuredRuntimeState {
             updatedAt: row.updated_at,
         }) : undefined;
         const taskNeedsCurrentTurnSupervisor = (row, task = rowToTask(row)) => {
-            if (!row || !task || task.state !== "RUNNING" || task.continuationMode !== "explicit-long") return false;
+            if (!row || !task || task.state !== "RUNNING" || task.continuationMode === "compat") return false;
             const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
             if (required.length === 0) return false;
             const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
@@ -189,7 +245,7 @@ export class StructuredRuntimeState {
             return !Number.isFinite(heartbeatAt) || now.getTime() - heartbeatAt > 45_000;
         };
         const continuationDirective = (task) => {
-            if (!task || task.state !== "RUNNING" || task.continuationMode !== "explicit-long") {
+            if (!task || task.state !== "RUNNING" || task.continuationMode === "compat") {
                 return { continueRequired: false, nextRequiredMilestones: [] };
             }
             const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
@@ -259,13 +315,14 @@ export class StructuredRuntimeState {
             if (row && [4, 5].includes(Number(row.continuation_pending))) {
                 this.database.sqlite.prepare(`
                   update continuation_tasks set continuation_pending=0,
-                    turn_started_at=?, last_model_activity_at=?, last_activity_at=?, updated_at=? where id=?
-                `).run(nowIso, nowIso, nowIso, nowIso, row.id);
+                    turn_started_at=?, last_model_activity_at=?, last_activity_at=?,
+                    last_host_signal='connected', last_host_signal_at=?, updated_at=? where id=?
+                `).run(nowIso, nowIso, nowIso, nowIso, nowIso, row.id);
                 const refreshedTask = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id));
                 const required = Array.isArray(refreshedTask?.requiredMilestones) ? refreshedTask.requiredMilestones : [];
                 const completed = new Set(Array.isArray(refreshedTask?.completedMilestones) ? refreshedTask.completedMilestones : []);
                 const reanchorRequired = refreshedTask?.state === "RUNNING"
-                    && refreshedTask?.continuationMode === "explicit-long"
+                    && refreshedTask?.continuationMode !== "compat"
                     && required.length > 0
                     && required.some((milestone) => !completed.has(milestone));
                 return {
@@ -313,10 +370,14 @@ export class StructuredRuntimeState {
                     const deadlineAt = existing.deadline_at && requestedDeadlineAt
                         ? new Date(Math.max(Date.parse(existing.deadline_at), Date.parse(requestedDeadlineAt))).toISOString()
                         : requestedDeadlineAt ?? existing.deadline_at;
+                    const currentMode = normalizedMode(existing.continuation_mode, "compat");
+                    const requestedMode = input.continuationMode === undefined
+                        ? (currentMode === "compat" ? "timeout-recovery" : currentMode)
+                        : normalizedMode(input.continuationMode, "timeout-recovery");
                     this.database.sqlite.prepare(`
                       update continuation_tasks set objective=?, required_milestones_json=?,
-                        continuation_mode='explicit-long', max_continuations=?, max_no_progress=?, max_same_failure=?, deadline_at=?, last_activity_at=?, updated_at=? where id=?
-                    `).run(objective, JSON.stringify([...currentRequired].slice(0, 64)),
+                        continuation_mode=?, max_continuations=?, max_no_progress=?, max_same_failure=?, deadline_at=?, last_activity_at=?, updated_at=? where id=?
+                    `).run(objective, JSON.stringify([...currentRequired].slice(0, 64)), requestedMode,
                         Math.max(existing.max_continuations, Math.max(1, Math.min(Number(input.maxContinuations ?? existing.max_continuations), 100))),
                         Math.max(1, Math.min(Number(input.maxNoProgress ?? existing.max_no_progress), 20)),
                         Math.max(1, Math.min(Number(input.maxSameFailure ?? existing.max_same_failure), 20)), deadlineAt, nowIso, nowIso, existing.id);
@@ -342,7 +403,7 @@ export class StructuredRuntimeState {
               ) values (?, ?, ?, ?, 'RUNNING', ?, ?, '[]', '{}', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(id, String(input.conversationScopeId || "unknown"), input.workspaceId ? String(input.workspaceId) : null,
                 String(input.objective ?? "Continue the current DevSpace task until the original user goal is verified complete."),
-                action === "begin" ? "explicit-long" : "compat", JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso, nowIso, nowIso);
+                action === "begin" ? normalizedMode(input.continuationMode, "timeout-recovery") : "compat", JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt, nowIso, nowIso, nowIso, nowIso, nowIso);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(id)), created: true };
         }
         const row = find();
@@ -367,6 +428,9 @@ export class StructuredRuntimeState {
             let observedTurnBudgetMs = profile?.observed_turn_budget_ms ?? row.observed_turn_budget_ms ?? null;
             let recommendedContinueAfterMs = profile?.recommended_continue_after_ms ?? row.recommended_continue_after_ms ?? null;
             let timeoutSamples = Number(profile?.timeout_samples ?? row.host_timeout_samples ?? 0);
+            let confirmedTurnLimitMs = profile?.confirmed_turn_limit_ms ?? row.confirmed_turn_limit_ms ?? null;
+            let confirmedTurnLimitAt = profile?.confirmed_turn_limit_at ?? row.confirmed_turn_limit_at ?? null;
+            let confirmedTurnLimitSource = profile?.confirmed_turn_limit_source ?? row.confirmed_turn_limit_source ?? null;
             if (hostSignal === "timeout" && elapsedMs >= 1000) {
                 if (!observedTurnBudgetMs) {
                     observedTurnBudgetMs = elapsedMs;
@@ -382,36 +446,82 @@ export class StructuredRuntimeState {
                 }
                 recommendedContinueAfterMs = Math.max(1000, Math.floor(observedTurnBudgetMs * 0.88));
                 timeoutSamples += 1;
+                if (elapsedMs >= Number(confirmedTurnLimitMs || 0)) {
+                    confirmedTurnLimitMs = elapsedMs;
+                    confirmedTurnLimitAt = nowIso;
+                    confirmedTurnLimitSource = "host-timeout";
+                }
             }
             if (profile) {
                 this.database.sqlite.prepare(`
                   update continuation_host_profiles set observed_turn_budget_ms=?, recommended_continue_after_ms=?,
-                    timeout_samples=?, last_timeout_at=?, last_signal=?, last_signal_at=?, updated_at=? where id=?
+                    timeout_samples=?, last_timeout_at=?, last_signal=?, last_signal_at=?,
+                    confirmed_turn_limit_ms=?, confirmed_turn_limit_at=?, confirmed_turn_limit_source=?, updated_at=? where id=?
                 `).run(observedTurnBudgetMs, recommendedContinueAfterMs, timeoutSamples,
                     hostSignal === "timeout" ? nowIso : profile.last_timeout_at,
-                    hostSignal, nowIso, nowIso, hostProfileId);
+                    hostSignal, nowIso, confirmedTurnLimitMs, confirmedTurnLimitAt, confirmedTurnLimitSource, nowIso, hostProfileId);
             }
             else {
                 this.database.sqlite.prepare(`
                   insert into continuation_host_profiles (
                     id, observed_turn_budget_ms, recommended_continue_after_ms, timeout_samples,
-                    last_timeout_at, last_signal, last_signal_at, created_at, updated_at
-                  ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_timeout_at, last_signal, last_signal_at,
+                    confirmed_turn_limit_ms, confirmed_turn_limit_at, confirmed_turn_limit_source,
+                    created_at, updated_at
+                  ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `).run(hostProfileId, observedTurnBudgetMs, recommendedContinueAfterMs, timeoutSamples,
-                    hostSignal === "timeout" ? nowIso : null, hostSignal, nowIso, nowIso, nowIso);
+                    hostSignal === "timeout" ? nowIso : null, hostSignal, nowIso,
+                    confirmedTurnLimitMs, confirmedTurnLimitAt, confirmedTurnLimitSource, nowIso, nowIso);
             }
             this.database.sqlite.prepare(`
               update continuation_tasks set host_profile_id=?, observed_turn_budget_ms=?, recommended_continue_after_ms=?,
-                host_timeout_samples=?, last_host_signal=?, last_host_signal_at=?, coordinator_instance_id=?, updated_at=?
+                host_timeout_samples=?, confirmed_turn_limit_ms=?, confirmed_turn_limit_at=?, confirmed_turn_limit_source=?,
+                last_host_signal=?, last_host_signal_at=?, coordinator_instance_id=?, updated_at=?
               where id=?
             `).run(hostProfileId, observedTurnBudgetMs, recommendedContinueAfterMs, timeoutSamples,
+                confirmedTurnLimitMs, confirmedTurnLimitAt, confirmedTurnLimitSource,
                 hostSignal, nowIso, input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : row.coordinator_instance_id,
                 nowIso, taskId);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
         }
+        if (action === "confirm-turn-limit") {
+            if (normalizedMode(row.continuation_mode, "compat") === "compat") {
+                return { task: rowToTask(row), accepted: false, reason: "continuation-mode-required" };
+            }
+            const elapsedRaw = Number(input.elapsedMs ?? 0);
+            const confirmedTurnLimitMs = Number.isFinite(elapsedRaw)
+                ? Math.max(0, Math.min(Math.round(elapsedRaw), 24 * 60 * 60 * 1000))
+                : 0;
+            if (confirmedTurnLimitMs < 30_000) {
+                return { task: rowToTask(row), accepted: false, reason: "confirmed-turn-limit-too-small" };
+            }
+            const source = String(input.note ?? "owner-confirmed").trim().slice(0, 160) || "owner-confirmed";
+            this.database.sqlite.prepare(`
+              update continuation_tasks set confirmed_turn_limit_ms=?, confirmed_turn_limit_at=?,
+                confirmed_turn_limit_source=?, last_activity_at=?, updated_at=? where id=?
+            `).run(confirmedTurnLimitMs, nowIso, source, nowIso, nowIso, taskId);
+            const hostProfileId = String(row.host_profile_id ?? "").trim();
+            if (hostProfileId) {
+                const profile = this.database.sqlite.prepare("select id from continuation_host_profiles where id=?").get(hostProfileId);
+                if (profile) {
+                    this.database.sqlite.prepare(`
+                      update continuation_host_profiles set confirmed_turn_limit_ms=?, confirmed_turn_limit_at=?,
+                        confirmed_turn_limit_source=?, updated_at=? where id=?
+                    `).run(confirmedTurnLimitMs, nowIso, source, nowIso, hostProfileId);
+                }
+            }
+            return {
+                task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)),
+                accepted: true,
+                reason: "confirmed-turn-limit-recorded",
+            };
+        }
         if (action === "watch-process" || action === "unwatch-process") {
             const handle = String(input.processHandle ?? "").trim();
             if (!handle) return { task: rowToTask(row), accepted: false, reason: "process-handle-required" };
+            if (action === "watch-process" && normalizedMode(row.continuation_mode, "compat") !== "resident") {
+                return { task: rowToTask(row), accepted: false, reason: "resident-mode-required" };
+            }
             const handles = new Set(parseJson(row.watch_process_handles_json, []));
             if (action === "watch-process") handles.add(handle);
             else handles.delete(handle);
@@ -446,12 +556,29 @@ export class StructuredRuntimeState {
             if (row.state === "PAUSED_BY_USER") {
                 return { task: rowToTask(row), accepted: false, reason: "task-paused-by-user" };
             }
+            if (normalizedMode(row.continuation_mode, "compat") !== "resident") {
+                return { task: rowToTask(row), accepted: false, reason: "resident-mode-required" };
+            }
             this.database.sqlite.prepare(`
               update continuation_tasks set state='RUNNING', waiting_reason=null,
                 continuation_pending=case when continuation_pending in (1,4) then continuation_pending else 2 end,
                 turn_started_at=?, last_activity_at=?, updated_at=? where id=?
             `).run(nowIso, nowIso, nowIso, taskId);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
+        }
+        if (action === "stage-complete") {
+            if (row.state === "PAUSED_BY_USER") {
+                return { task: rowToTask(row), accepted: false, reason: "task-paused-by-user" };
+            }
+            if (normalizedMode(row.continuation_mode, "compat") !== "resident") {
+                return { task: rowToTask(row), accepted: false, reason: "resident-mode-required" };
+            }
+            this.database.sqlite.prepare(`
+              update continuation_tasks set state='RUNNING', waiting_reason='Resident stage completed; next turn requested.',
+                continuation_pending=case when continuation_pending in (1,4,5) then continuation_pending else 2 end,
+                last_activity_at=?, updated_at=? where id=?
+            `).run(nowIso, nowIso, taskId);
+            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true, reason: "resident-stage-complete" };
         }
         if (action === "checkpoint") {
             const completed = new Set(parseJson(row.completed_milestones_json, []));
@@ -584,6 +711,10 @@ export class StructuredRuntimeState {
                 if (current.state === "WAITING_EXTERNAL") return { accepted: false, reason: "waiting-external", task: rowToTask(current) };
                 let pendingState = Number(current.continuation_pending || 0);
                 const wakePending = pendingState === 2 || pendingState === 3 || pendingState === 4;
+                if (wakePending && normalizedMode(current.continuation_mode, "compat") !== "resident") {
+                    this.database.sqlite.prepare("update continuation_tasks set continuation_pending=0, updated_at=? where id=?").run(nowIso, taskId);
+                    return { accepted: false, reason: "resident-mode-required", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
+                }
                 if (pendingState === 4 || pendingState === 5) {
                     const sendAt = current.last_send_attempt_at ? Date.parse(current.last_send_attempt_at) : NaN;
                     const deliveryAckAge = Number.isFinite(sendAt) ? Math.max(0, now.getTime() - sendAt) : Number.POSITIVE_INFINITY;
@@ -611,6 +742,27 @@ export class StructuredRuntimeState {
                     pendingState = pendingState === 3 ? 2 : 0;
                     this.database.sqlite.prepare("update continuation_tasks set continuation_pending=?, updated_at=? where id=?").run(pendingState, nowIso, taskId);
                     current.continuation_pending = pendingState;
+                }
+                const currentMode = normalizedMode(current.continuation_mode, "compat");
+                const lastHostSignalAt = current.last_host_signal_at ? Date.parse(current.last_host_signal_at) : NaN;
+                const recentTimeout = current.last_host_signal === "timeout"
+                    && Number.isFinite(lastHostSignalAt)
+                    && now.getTime() - lastHostSignalAt <= 2 * 60_000;
+                const continuationNote = String(input.note ?? "");
+                const manualRecovery = /manual recovery/i.test(continuationNote);
+                const confirmedLimitTeardown = /confirmed turn-limit teardown/i.test(continuationNote);
+                const turnStartedAt = current.turn_started_at ? Date.parse(current.turn_started_at) : NaN;
+                const confirmedLimitMs = Number(current.confirmed_turn_limit_ms || 0);
+                const recentConfirmedTeardown = confirmedLimitTeardown
+                    && currentMode !== "compat"
+                    && current.last_host_signal === "teardown"
+                    && Number.isFinite(lastHostSignalAt)
+                    && now.getTime() - lastHostSignalAt <= 2 * 60_000
+                    && Number.isFinite(turnStartedAt)
+                    && confirmedLimitMs >= 30_000
+                    && now.getTime() - turnStartedAt >= confirmedLimitMs + 5_000;
+                if (!wakePending && !manualRecovery && !(currentMode !== "compat" && recentTimeout) && !recentConfirmedTeardown) {
+                    return { accepted: false, reason: "continuation-trigger-not-authorized", task: rowToTask(current) };
                 }
                 if (!wakePending && current.last_continuation_at && now.getTime() - Date.parse(current.last_continuation_at) < 60_000) {
                     return { accepted: false, reason: "continuation-cooldown", task: rowToTask(current) };

@@ -272,7 +272,11 @@ function buildContinuationCard() {
   [
     metadataRow(ZH ? "任务 ID" : "Task ID", task.id),
     metadataRow(ZH ? "状态" : "State", task.state),
-    metadataRow(ZH ? "模式" : "Mode", task.continuationMode === "explicit-long" ? (ZH ? "显式长任务" : "Explicit long task") : (ZH ? "兼容任务" : "Compatibility task")),
+    metadataRow(ZH ? "模式" : "Mode", task.continuationMode === "resident"
+      ? (ZH ? "常驻 / 监控" : "Resident / monitor")
+      : task.continuationMode === "timeout-recovery"
+        ? (ZH ? "仅截断恢复" : "Timeout recovery only")
+        : (ZH ? "兼容任务" : "Compatibility task")),
     metadataRow(ZH ? "里程碑" : "Milestones", `${completed.size}/${required.length}`),
     metadataRow(ZH ? "续轮" : "Continuations", `${task.continuationCount ?? 0}/${task.maxContinuations ?? "—"}`),
     metadataRow(ZH ? "Owner 锁" : "Owner lock", task.ownerLocked ? (ZH ? "已锁定" : "Locked") : (ZH ? "未锁定" : "Unlocked")),
@@ -300,9 +304,11 @@ function buildContinuationCard() {
     ? (ZH ? "续轮消息已被宿主接受，正在等待新 assistant 轮重新连接 DevSpace 并 ACK。" : "Follow-up accepted; waiting for the resumed assistant turn to ACK DevSpace connectivity.")
     : task.continuationWakePending
       ? (ZH ? "已产生持久续轮唤醒，Workspace App 将自动 claim 并发送续轮消息。" : "A durable continuation wake is pending and will be claimed automatically.")
-      : task.continuationMode === "explicit-long"
-        ? (ZH ? "显式长任务会在真实超时、显式进程 wake 或学习预算时续轮；若 Host 静默截断且不发 timeout/teardown，持续静默保护会作为最后兜底。每次自动续轮 ACK 后应复用同一 task 重新挂载本轮 supervisor。" : "Explicit long tasks continue on real host timeouts, explicit process wakes, learned budgets, and a guarded silent-truncation fallback. Re-mount the same task supervisor after each automatic continuation ACK.")
-        : (ZH ? "兼容任务不会因为普通模型/MCP 静默自动创建下一轮；需要跨轮一直运行的工作应显式挂载长任务。" : "Compatibility tasks do not create a new turn from ordinary model/MCP silence; cross-turn work should use an explicit long-task anchor.");
+      : task.continuationMode === "resident"
+        ? (ZH ? "常驻/监控任务只有在 Host 明确超时，或模型显式声明阶段完成 / 显式 watch 的进程结束时才会续轮。" : "Resident/monitor tasks continue only on an explicit Host timeout or an explicit stage/process wake.")
+        : task.continuationMode === "timeout-recovery"
+          ? (ZH ? "仅截断恢复任务只认 Host 明确的 timeout/deadline/budget；普通 teardown、静默、学习预算和进程结束都不会提前创建下一轮。" : "Timeout-recovery tasks only accept explicit Host timeout/deadline/budget signals; teardown, silence, learned budgets, and process completion never pre-empt the current turn.")
+        : (ZH ? "兼容任务不会自动创建下一轮；需要截断恢复时使用 timeout-recovery，需要常驻/监控时由用户明确选择 resident。" : "Compatibility tasks never auto-create a new turn; use timeout-recovery for truncation recovery and explicitly choose resident for user-authorized persistent monitoring.");
   body.append(element("div", { className: "runtime-output-empty", text: note }));
   panel.append(body);
   shell.append(panel);

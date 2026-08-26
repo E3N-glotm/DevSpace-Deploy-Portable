@@ -89,6 +89,16 @@ const migrations = [
         name: "continuation-explicit-long-task-mode",
         up: migrateContinuationExplicitLongTaskMode,
     },
+    {
+        version: 19,
+        name: "continuation-strict-trigger-modes",
+        up: migrateContinuationStrictTriggerModes,
+    },
+    {
+        version: 20,
+        name: "continuation-confirmed-turn-limit",
+        up: migrateContinuationConfirmedTurnLimit,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -554,6 +564,37 @@ function migrateContinuationExplicitLongTaskMode(sqlite) {
     create index if not exists continuation_tasks_mode_state_idx
       on continuation_tasks(continuation_mode, state, updated_at desc);
   `);
+}
+function migrateContinuationStrictTriggerModes(sqlite) {
+    // 1.1.48 briefly used "explicit-long" as a broad automatic-continuation
+    // mode. Convert it to the fail-closed timeout-recovery policy and discard
+    // any stale process-wake lease: process/stage wakes are now reserved for an
+    // explicitly user-authorized resident/monitor task.
+    addColumnIfMissing(sqlite, "continuation_tasks", "continuation_mode", "text not null default 'compat'");
+    sqlite.exec(`
+      update continuation_tasks
+      set continuation_mode='timeout-recovery',
+          watch_process_handles_json='[]',
+          continuation_pending=case when continuation_pending in (2,3,4) then 0 else continuation_pending end
+      where continuation_mode='explicit-long';
+
+      update continuation_tasks
+      set continuation_mode='compat'
+      where continuation_mode not in ('compat','timeout-recovery','resident');
+    `);
+}
+function migrateContinuationConfirmedTurnLimit(sqlite) {
+    // The Apps SDK does not expose a standard assistant-turn deadline and its
+    // resource-teardown notification carries no reason. Store an explicitly
+    // confirmed lower bound so a teardown can be classified as time-limit
+    // ending only after that bound has actually elapsed. This value never
+    // drives a proactive timer.
+    addColumnIfMissing(sqlite, "continuation_tasks", "confirmed_turn_limit_ms", "integer");
+    addColumnIfMissing(sqlite, "continuation_tasks", "confirmed_turn_limit_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "confirmed_turn_limit_source", "text");
+    addColumnIfMissing(sqlite, "continuation_host_profiles", "confirmed_turn_limit_ms", "integer");
+    addColumnIfMissing(sqlite, "continuation_host_profiles", "confirmed_turn_limit_at", "text");
+    addColumnIfMissing(sqlite, "continuation_host_profiles", "confirmed_turn_limit_source", "text");
 }
 function addColumnIfMissing(sqlite, table, column, definition) {
     const columns = sqlite.prepare(`pragma table_info(${table})`).all();
