@@ -1,28 +1,20 @@
 # DevSpace Portable 1.1.48
 
-1.1.48 当前源码同时收口三类真实运行问题：公网 DNS/路径短暂波动被健康监督误判成 tunnel failure 后主动杀 ngrok；continuation 把普通空闲、正常 teardown 或普通进程结束当成必须续轮；以及 Workspace App 长操作记录/偶发 `Waiting for a tool result.` 的可用性问题。
+1.1.48 收口两个在真实 ChatGPT Host 中才能稳定复现的问题：一是持久 continuation task 明明仍为 `RUNNING`，上一轮回复也说明任务尚未完成，但正常结束的 assistant turn 没有产生下一轮；二是 Workspace App 偶发只显示 `Waiting for a tool result.`，同一套代码在不同会话、甚至同一天不同时间表现不一致。
 
-## Continuation 收敛为严格双模式
+## Continuation 不再依赖模型记住额外的 watch/wait
 
-原始目标不是“只要调用了 MCP 就一直续”，而是只有两种自动开启下一轮的场景：第一，Host 单轮时间上限**已经实际截断**未完成工作；第二，用户明确要求常驻/监控任务，并授权当前阶段结束后进入下一轮。当前实现因此改为 fail-closed：无法证明已经截断时，宁可等待用户手工继续，也不提前打断仍在运行的 assistant turn。
+1.1.47 的完整链路已经能处理 `watch-process -> WAITING_EXTERNAL -> process complete -> durable wake -> claim -> app.sendMessage -> resume ACK`，但仍有一个人为依赖：模型启动长进程后必须显式再调用 `continuation_task(action="watch-process")`，并在需要结束当前 turn 时正确进入等待。如果模型只是启动了测试、在文字里写“后续会继续”，然后正常结束 turn，服务端 task 会继续保持 `RUNNING`，但 `watchProcessHandles=[]`、`continuationPending=false`、`continuationWakePending=false`；正常结束又不会产生 timeout sample，因此 Coordinator 没有任何合法触发源可以凭文字承诺创建下一轮。
 
-`exec_command` 即使返回仍在运行的 persistent process，也**不会自动**写入 continuation watch。普通测试、诊断和构建进程结束不会平白制造新一轮。只有用户明确要求常驻/监控行为并把 task 建为 `continuationMode="resident"` 后，才允许显式调用 `continuation_task(action="watch-process")`；resident 还可以在模型完成当前监控阶段后调用 `stage-complete`，明确请求下一轮继续监控。
+1.1.48 将这条依赖移到服务端。`exec_command` 返回仍在运行的 durable process 时，如果当前 conversation/workspace 已存在 active continuation，服务端自动把其 `processHandle` 加入该 task 的 watch 列表。模型仍可显式使用 `watch-process` 管理特殊流程，但不再需要靠模型每次记住它才能保证基本可靠性。
 
-Migration 18 为 continuation task 增加 `continuation_mode`；Migration 19 将模式进一步规范为 `compat`、`timeout-recovery`、`resident`。兼容/`begin-auto` task 保持 `compat`；显式 `continuation_anchor` 默认创建或升级为 `timeout-recovery`。历史 `explicit-long` 会保守迁移为 `timeout-recovery`，并清理旧 process watch / wake pending，避免升级后延续过宽的自动触发语义。
+同时，Workspace App 的 `onTeardown` 不再只在 timeout/deadline/budget 或学习预算达到阈值时恢复。若 task 仍为 `RUNNING` 且 required milestones 尚有未完成项，正常 resource teardown 也会通过正式 Apps SDK `app.sendMessage()` 请求续轮。`WAITING_EXTERNAL`、`WAITING_SUPERVISOR`、terminal task 和已完成全部 required milestones 的任务不会因此被无条件续轮。
 
-`timeout-recovery` 只接受 Host 明确发出的 `timeout/deadline/budget` 作为自动续轮证据，同时要求 required milestones 尚未完成。普通 `resource teardown`、model/MCP 静默、MCP/tunnel 网络断开、learned Host budget 到点和普通 process completion 都**不会**触发 follow-up。Host budget 仍保留为诊断/UI 参考值，但不再用于 proactive continuation；原先的 silent-truncation heuristic 也已删除。
+真实 ChatGPT Web 验收进一步发现，Host 强制截断并不保证发送 `resource teardown` 或 `toolcancelled(timeout)`。因此 1.1.48 最终版又增加独立于 Host 生命周期回调的 **model-activity idle watchdog**：服务端对同一 conversation/workspace 的模型发起 DevSpace 工具调用维护 `lastModelActivityAt`，而 Workspace App 自己的 status/heartbeat 不会刷新该时钟。任务仍为 `RUNNING`、required milestones 未完成、没有仍在运行的 watched process 且模型侧约 60 秒没有继续推进时，Coordinator 会主动走 `claim -> app.sendMessage -> resume ACK`。这不是猜测 ChatGPT 的固定分钟上限；Host 即使以后改变截断时间或完全不发 teardown，静默任务仍可恢复。长时间 durable process 继续由 process watch 独立接管，因此 idle watchdog 不会抢占正在执行的测试/构建。
 
-`resident` 是唯一允许“模型正常完成当前阶段后主动开下一轮”的模式。它同样接受真实 Host timeout，并额外允许两个显式 wake：受监控 durable process 完成，或模型调用 `stage-complete` 表示本阶段监控/检查已结束、应进入下一阶段。非 resident task 调用 `watch-process`、`arm-wake` 或 `stage-complete` 会被 runtime 以 `resident-mode-required` 拒绝。
+主动 watchdog 产生的 follow-up 与 process-wake follow-up 现在都必须等待新 assistant turn 首次 `continuation_task status` ACK 后才退役 delivery lease；如果 Host 接受了消息但新轮没有真正连回 DevSpace，60 秒 ACK lease 到期后 surviving Workspace App 会再次尝试送达。ACK 成功时会重置 turn clock，避免达到阈值后重复续轮。
 
-合法 follow-up 仍必须等待新 assistant turn 首次 `continuation_task status` ACK 后才退役 delivery lease；如果 Host 接受消息但新轮没有真正连回 DevSpace，ACK lease 到期后 surviving Workspace App 可以重试。ACK 还可返回 `reanchorRequired`：未完成的 `timeout-recovery`/`resident` task 会要求用相同 `taskId/workspaceId` 再调用 `continuation_anchor`，重新挂载**当前 assistant turn** 的 supervisor。
-
-真实运行还暴露了一个独立故障：ChatGPT UI 仍显示“续轮锚点已就绪”，但该卡片对应的 iframe/supervisor 可能早已停止 heartbeat。此时即使最终真的到达 Host 时长上限，也没有活着的 `app.sendMessage()` 发送器。因此当前源码增加**同轮 stale-supervisor maintenance**：model-side `status` 仍会在约 45 秒无 coordinator heartbeat 时返回 `reanchorRequired=true`；此外，当前 assistant turn 后续普通 DevSpace 工具调用也会检测 stale supervisor，并在工具结果中要求本轮用同一 task 调用 `continuation_anchor`。这个维护动作本身绝不调用 `app.sendMessage()`、绝不创建下一轮，只是在当前轮重新挂载发送器。
-
-## 公网健康监督：自检失败不等于 tunnel failure
-
-公网 `/mcp` 探测现在保留 curl exit code，并把失败区分为 DNS、connect、timeout、TLS 或其它 curl 错误；这些信息写入 `tunnel-network.json`，不再统一折叠成 `status 0`。
-
-更关键的是，连续三次公网 probe 失败只增加诊断计数，**不是** kill ngrok 的充分条件。ngrok provider 还必须满足：当前 supervisor 自己拥有的 ngrok Agent API 可达，并连续三次确认预期 public URL 的 tunnel 已经不存在。Agent API 不可达、Agent 仍报告 matching tunnel、DNS 暂时失败或公网 hairpin 路径抖动，都保持 child 不动，交给 ngrok 自身 control session 重连。真正满足 owned-agent mismatch 后也受 5 分钟 restart cooldown 限制。
+这仍然不是一个写死的 25 分钟定时器。`continuation_anchor` 只需在非平凡多步任务开始时挂载一次；之后 process completion、Host lifecycle、durable wake 和学习到的 turn budget 共同提供触发源。
 
 ## Owner Continuation 控制中心
 
@@ -35,9 +27,7 @@ Windows 原生控制中心新增“续轮任务 / CONTINUATION”一级页面，
 - continuation pending / durable wake / delivery ACK；
 - Owner 锁。
 
-本机 Owner 可以对列表执行 Ctrl/Shift 多选，并批量暂停、恢复、锁定、解锁、手动结束和删除。Migration 16 持久保存 Owner lock；新的 `PAUSED_BY_USER` 直接复用 task state 字段，不需要新 schema。暂停会清除 pending continuation 但保留 task/process watch，Coordinator、claim、arm-wake 和模型侧 resume 都不能绕过 Owner pause。
-
-列表新增“下一轮”状态。`timeout-recovery` 已存在真实 timeout sample 时，只按已观测 Host turn 长度显示“参考 mm:ss”；参考时间到点后显示“等待截断”，强调它不是自动触发器。`resident` 显示“等待阶段”，存在显式 process watch 时显示“等待进程”；暂停、等待、终态或已完成 milestones 不显示虚假倒计时。
+本机 Owner 可以锁定/解锁、手动结束和恢复任务。Migration 16 持久保存 Owner lock。锁定 task 后，模型侧 `complete`、`cancel`、terminal failure，以及 no-progress、same-failure、continuation-count 和 wall-clock 自动终止都不能把它结束；本机 Owner 的手动 stop 不受锁限制，保证用户始终拥有最终终止权。
 
 ## 修复 `Waiting for a tool result.` 空卡竞态
 
@@ -47,7 +37,7 @@ MCP App iframe 的 HTML/模块加载与 ChatGPT Host 的一次性 `ui/notificati
 
 ## 聚合工具卡片与 Continuation 专属卡片
 
-Portable 默认仍为 `DEVSPACE_WIDGETS=changes`。普通 read/run/write/edit/process 调用保持 headless，避免 ChatGPT 为几十个内部操作各创建一张 MCP App 卡；修改完成后只调用一次 `show_changes`。其中 operation history 改为 `<details>` 折叠区：成功记录默认收起，失败记录默认展开，隐藏内容仍完整保留在 DOM 中。`DEVSPACE_WIDGETS=full` 仅保留兼容模式。
+Portable 默认仍为 `DEVSPACE_WIDGETS=changes`。普通 read/run/write/edit/process 调用保持 headless，避免 ChatGPT 为几十个内部操作各创建一张 MCP App 卡；修改完成后只调用一次 `show_changes`，在一张可展开卡片内查看 operation timeline、文件统计、diff 和预览。`DEVSPACE_WIDGETS=full` 仅保留兼容模式。
 
 `continuation_anchor` 是另一个明确需要 UI 的入口。1.1.48 为它增加专属聚合卡片，持续更新同一个 task 的 state、objective、Owner lock、milestones、continuation count、waiting/wake/ACK，而内部 status/checkpoint/heartbeat 继续保持 headless。
 
@@ -55,22 +45,15 @@ Portable 默认仍为 `DEVSPACE_WIDGETS=changes`。普通 read/run/write/edit/pr
 
 新增/扩展回归覆盖：
 
-- compat task 的正常 teardown / model inactivity 不得产生 follow-up；
-- timeout-recovery task 的普通 teardown、持续静默和 learned budget 到点都不得产生 follow-up；
-- timeout-recovery task 只有收到明确 Host timeout/deadline/budget 且 milestones 未完成时才允许 claim/sendMessage；
-- resident task 才允许显式 process completion wake 与 `stage-complete` wake；
-- 非 resident 的 `watch-process` / `arm-wake` / `stage-complete` 必须被拒绝；
-- resumed model `status` ACK 必须在未完成的 timeout-recovery/resident task 上返回必要的 `reanchorRequired=true`；
-- 当前 assistant turn 中普通 DevSpace 工具活动必须能发现 stale supervisor，并只要求同轮 re-anchor，不得因此调用 `sendMessage`；
-- `exec_command` 不得自动把每个 persistent process 变成 continuation wake；
-- resident 显式 `watch-process` 的 process completion wake 继续可靠工作；
-- `PAUSED_BY_USER` 必须阻止 claim、arm-wake、模型 resume 和 coordinator 自动续轮；
-- native 任务列表多选、批量 pause/resume/lock/unlock/stop/delete 与 timeout-recovery / resident 双模式状态；
-- curl DNS/connect/timeout/TLS 分类、owned ngrok Agent mismatch recovery gate 和 5 分钟 cooldown；
-- timeout-triggered follow-up 与 resident process/stage wake follow-up 都必须完成 resume ACK 才能清除 delivery lease；
+- 正常 teardown + 未完成 required milestone 必须产生一次 follow-up；
+- 正常 teardown + required milestones 全部完成不得产生 follow-up；
+- 无 teardown/timeout 的模型静默仍必须由 model-activity idle watchdog 续轮；
+- 正在运行的 watched process 必须抑制 model-idle 抢跑；
+- proactive follow-up 与 process-wake follow-up 都必须完成 resume ACK 才能清除 delivery lease；
+- durable `exec_command` 自动绑定当前 conversation/workspace continuation watch；
 - Owner lock 阻止模型终止，Owner stop 仍可结束；
 - early Host tool-result buffer/replay；
-- continuation task card 与可折叠 aggregated operation history；
-- 既有 resume-ACK durable wake、resident process/stage wake、WAITING_SUPERVISOR handshake、delivery ACK lease 和 tunnel recovery 回归继续保留。
+- continuation task card 与默认 aggregated operation card；
+- 既有 resume-ACK durable wake、process completion wake、WAITING_SUPERVISOR handshake、delivery ACK lease 和 tunnel recovery 回归继续保留。
 
 Protocol 仍为 1.5。1.1.48 没有改变 Linux Remote Agent wire protocol、Landlock runtime compatibility 或 scoped/full-access 权限语义，因此远端 Agent 不需要因为本次 Portable UI/Continuation 更新重新注册。

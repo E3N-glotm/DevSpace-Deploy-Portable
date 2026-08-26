@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.48**
+当前稳定版本：**1.1.49**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -12,7 +12,7 @@ Portable Protocol：**1.5**
 
 > 上图为 DevSpace Portable Windows 原生控制中心的实际界面截图；公开文档中的截图不展示 Token、Owner Password 等敏感认证信息。
 
-控制中心左侧主要页面分别用于：**状态与部署**（服务/隧道/更新/诊断）、**配置与权限**（公网域名、Token、工作目录和权限）、**远程服务器**（Linux Agent、SSH 救援与安装）、**插件管理**、**续轮任务**（Continuation 状态、Owner 锁、手动结束/恢复）、**会话与回退**、**显式 Memories**、**日志与诊断**；右上角的 Computer Use 开关只控制桌面操作能力，不会替代目录/命令权限配置。
+控制中心左侧主要页面分别用于：**状态与部署**（服务/隧道/更新/诊断）、**配置与权限**（公网域名、Token、工作目录和权限）、**远程服务器**（Linux Agent、SSH 救援与安装）、**插件管理**、**续轮任务**（Continuation 状态、批量暂停/恢复/锁定/删除）、**会话与回退**、**显式 Memories**、**日志与诊断**；右上角的 Computer Use 开关只控制桌面操作能力，不会替代目录/命令权限配置。
 
 ## 这个项目是做什么的
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.48.zip
+DevSpacePortable-Windows-x64-1.1.49.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -344,17 +344,25 @@ https://你的域名/mcp
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
+## 1.1.49 主要变化
+
+- **Continuation 改为 fail-closed 的严格双模式。** 显式长任务默认使用 `timeout-recovery`：只有 Host 明确 `timeout/deadline/budget`，或用户/Owner 已确认真实 Host turn 上限且 teardown 发生在该上限之后，才允许自动开启下一轮。普通 teardown、model/MCP 静默、learned budget 到点和普通进程结束都不会抢跑。
+- **常驻/监控任务必须显式使用 `resident`。** 只有用户明确要求持续监控、训练观察等跨阶段工作时才允许 `watch-process` 或 `stage-complete` 主动唤醒下一轮；普通长任务调用这些 wake API 会被拒绝。
+- **自动续轮不再停在几十秒 ACK/状态汇报。** `continuation_task status` 会返回 `continueRequired`、`nextRequiredMilestones` 和必要时的 `reanchorRequired`；ACK/re-anchor 只是恢复协议，本轮必须继续实际工具工作并推进未完成 milestone。stale supervisor 只会在当前 assistant turn 重新挂载，不会因此新开一轮。
+- **Owner 任务控制升级。** 续轮页支持 Ctrl/Shift 多选与批量暂停、恢复、锁定、解锁、结束、删除；新增持久 `PAUSED_BY_USER`，暂停后自动 claim/wake/resume 都不能绕过 Owner。下一轮列只显示确认/参考时间或 resident 阶段状态，不再把 learned budget 当触发倒计时。
+- **公网 tunnel 自愈不再把普通 DNS/公网抖动放大成主动重启。** 公网 curl 失败保留 DNS/connect/timeout/TLS 分类；只有 owned ngrok Agent API 可达并连续确认预期 tunnel 缺失时才允许重启当前 owned child，同时使用独立 hysteresis 和 5 分钟 cooldown。
+- **长操作记录可折叠。** `show_changes` 的 operation history 使用 `<details>`；成功记录默认收起、失败记录默认展开。Protocol 仍为 **1.5**，Linux Remote Agent wire protocol 与 scoped/full-access 权限模型不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.49.md)
+
 ## 1.1.48 主要变化
 
-- **续轮任务现在有完整的 Owner 控制面板。** 控制中心在“插件管理”和“会话与回退”之间提供“续轮任务 / CONTINUATION”，列表支持多选，以及批量暂停、恢复、锁定、解锁、手动结束和删除；同时显示目标、里程碑、续轮次数、最近活动、等待原因、Owner 锁和“下一轮”状态。`timeout-recovery` 任务如果学到过真实 Host turn 长度，只把它作为“参考”时间展示，参考时间到达后显示“等待截断”，不会提前续轮；`resident` 任务显示“等待阶段”或“等待进程”。暂停、等待、终态或 milestones 已完成时不显示虚假触发时间。
+- **续轮任务现在有独立的 Owner 控制面板。** 控制中心在“插件管理”和“会话与回退”之间新增“续轮任务 / CONTINUATION”，直接显示 task 是否已开始、当前状态、目标、里程碑完成度、续轮次数、最近活动、等待原因和 Owner 锁；支持锁定/解锁、手动结束和恢复。
 - **“锁定”表示任务不能被模型或自动预算提前结束，但 Owner 仍可手动停止。** 锁定后，模型侧 `complete/cancel`、terminal failure、no-progress/same-failure 和 continuation/wall-clock budget 都不能把任务变成 terminal；本机控制中心的 Owner stop 始终保留，因此不会出现锁死后本人也无法结束的问题。
-- **暂停是真正的持久状态。** `PAUSED_BY_USER` 会阻止 Workspace App、resident process/stage wake、claim 和模型侧 resume 自动恢复任务；暂停不删除里程碑或 resident watch，只有 Owner 在本机控制中心点击恢复才重新运行。
-- **自动续轮严格收敛为两种模式。** 普通/`begin-auto` task 保持 `compat`，不会自动续轮。显式 `continuation_anchor` 默认建立 `timeout-recovery`：只有 Host 明确发出 `timeout/deadline/budget` 且 required milestones 尚未完成时，才允许自动创建下一轮；普通 resource teardown、model/MCP 静默、网络断开、learned budget 到点和普通 process completion 都不是续轮证据。只有用户明确要求常驻/监控行为时才设置 `continuationMode=resident`，此模式除真实 Host timeout 外，还允许显式 `watch-process` 或 `stage-complete` 产生下一轮。Migration 19 会把历史 `explicit-long` 任务保守迁移到 `timeout-recovery` 并清理旧 process-wake 状态。
-- **supervisor 失活只做“同轮重挂”，不算续轮。** 自动续轮后的新 assistant turn 仍先用相同 `taskId/workspaceId` 执行 `continuation_task status` ACK；若返回 `reanchorRequired=true`，再用同一个 taskId/workspaceId 调用 `continuation_anchor`。另外，当前 assistant turn 在继续调用普通 DevSpace 工具时，如果服务端发现约 45 秒没有 Workspace App coordinator heartbeat，会在工具结果中返回“同轮 maintenance”提示，要求当前轮重新挂载同一 supervisor。这个动作不会调用 `app.sendMessage()`、不会创建新对话，只用于避免视觉上的 anchor 仍存在但实际 iframe 已失活，导致真正 timeout 到来时无人发送续轮。
-- **手工恢复也复用同一 task。** 对 `timeout-recovery`/`resident` 且 required milestones 未完成的任务，model-side `status` 会检查 supervisor liveness；若 stale 就返回 `reanchorRequired=true`。因此自动 follow-up 没发生时，用户之后手工说“继续”，也能恢复同一个 task 的当前轮 supervisor，而不是依赖旧 iframe。
-- **公网 tunnel 自愈不再仅靠本机公网自检决定 kill ngrok。** 公网探测持久化 curl exit code 和 DNS/connect/timeout/TLS 分类；只有 owned ngrok Agent API 可达、并连续确认预期 tunnel 已缺失时才允许重启 owned child。普通 DNS/公网路径抖动会留给 ngrok 自身重连，并使用更长 cooldown 防止恢复风暴。
+- **修复正常 assistant turn 结束或 Host 强制截断时没有自动续轮。** 1.1.47 主要依靠 watched process、Host timeout/teardown 和学习到的 turn budget；但真实 ChatGPT Web 有时强制截断既不发 teardown，也不发 `toolcancelled(timeout)`。1.1.48 会把仍在运行的 durable `exec_command` 自动绑定到当前 conversation/workspace continuation task，并由服务端单独记录模型发起 DevSpace 调用的 `lastModelActivityAt`。任务仍为 `RUNNING`、里程碑未完成、没有仍在运行的 watched process且模型约 60 秒没有继续推进时，Workspace App 会主动请求下一轮；自己的 status/heartbeat 不会伪造模型活动。
+- **自动续轮仍不依赖固定 25 分钟。** 非平凡多步工作先通过一次 `continuation_anchor` 建立持久 task；之后由 durable process completion、Host lifecycle、model-activity idle watchdog、持久 wake 和真实 timeout 学习出的 host budget共同驱动。主动 follow-up 与 process-wake follow-up 都必须等新 assistant turn 首次 `continuation_task status` resume ACK 后才退役 delivery lease；显式 `WAITING_EXTERNAL`、Owner 手动结束以及 terminal 状态会阻止无意义续轮。
 - **修复 Web 卡片偶发只显示 `Waiting for a tool result.`。** Workspace App 现在在模块初始化前先缓存 Host 发来的 initialize/tool-input/tool-result，再在 UI 与 coordinator listener 就绪后重放，避免 ChatGPT Host 比 iframe JavaScript listener 更早发出一次性 tool-result 时造成永久空卡。
-- **卡片继续以聚合视图为默认，并可主动折叠长操作记录。** 普通 `read/exec/write/edit/process` 默认不各自挂一张 Workspace App；文件修改集中到一次 `show_changes` 卡片，其中 operation history 使用可折叠 `<details>`，成功日志默认收起、失败日志默认展开。Continuation 仍使用单张可展开专属卡片。
+- **卡片继续以聚合视图为默认。** 普通 `read/exec/write/edit/process` 默认不各自挂一张 Workspace App；文件修改集中到一次 `show_changes` 卡片。Continuation 使用一张可展开专属卡片持续展示 task 状态、Owner 锁、milestones、continuation count 和 wake/ACK，而不是每个 status/checkpoint 都新增一张卡片。
 - Protocol 仍为 **1.5**；本版本没有改变 Linux Remote Agent 的协议或 scoped/full-access 权限模型。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.48.md)
