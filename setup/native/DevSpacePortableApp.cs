@@ -4738,7 +4738,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.49 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.50 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5111,7 +5111,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "自动续轮任务尚未读取。默认 timeout-recovery 只在 Host 明确 timeout/deadline/budget 截断后续轮；普通 teardown、静默、学习预算和普通进程结束不会提前开新一轮。只有用户明确授权的 resident/监控任务才允许阶段完成或显式进程 watch 唤醒。stale supervisor 只会在当前 assistant turn 内要求重新挂载，不会自己创建下一轮。",
+                Text = "1.1.50 会为每个 conversation + workspace 自动创建或复用一个非空、completion-driven 的 Task Contract，并由 open_workspace 自动挂载 Anchor Lease。总任务时限和最大续轮默认无限；只要里程碑未完成，模型 Turn Lease 就会在 DevSpace 实际工作时续租，模型若提前结束或资源 teardown，同一个任务会自动恢复。timeout-recovery 仍保留严格 Host 截断语义，resident 仅用于显式常驻/监控。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
@@ -5120,6 +5120,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _continuationGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
             _continuationGrid.Columns.Clear();
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationState", HeaderText = "状态", Width = 132 });
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationSource", HeaderText = "来源", Width = 118 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationLocked", HeaderText = "锁定", Width = 72 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationProgress", HeaderText = "里程碑", Width = 112 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationTurns", HeaderText = "续轮", Width = 84 });
@@ -5590,7 +5591,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.49") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.50") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -5991,8 +5992,26 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
 
         private static bool ContinuationTerminal(string state)
         {
-            return new[] { "SUCCEEDED", "FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED" }
+            return new[] { "SUCCEEDED", "FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED", "ABANDONED_AUTO_TASK" }
                 .Contains(state ?? "", StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static string ContinuationSourceText(Dictionary<string, object> task)
+        {
+            string source = GetString(task, "taskSource");
+            if (string.Equals(source, "auto-conversation", StringComparison.OrdinalIgnoreCase)) return "自动契约";
+            if (string.Equals(source, "model-refined", StringComparison.OrdinalIgnoreCase)) return "模型细化";
+            if (string.Equals(source, "migrated-1.1.49", StringComparison.OrdinalIgnoreCase)) return "1.1.49 升级";
+            if (string.Equals(source, "explicit-anchor", StringComparison.OrdinalIgnoreCase)) return "显式任务";
+            if (string.Equals(source, "legacy-auto", StringComparison.OrdinalIgnoreCase)) return "旧版自动";
+            return string.IsNullOrWhiteSpace(source) || string.Equals(source, "legacy", StringComparison.OrdinalIgnoreCase) ? "历史任务" : source;
+        }
+
+        private static string ContinuationTurnsText(Dictionary<string, object> task)
+        {
+            int count = GetInt(task, "continuationCount");
+            int maximum = GetInt(task, "maxContinuations");
+            return maximum <= 0 ? count + "/∞" : count + "/" + maximum;
         }
 
         private List<Dictionary<string, object>> SelectedContinuations()
@@ -6037,6 +6056,15 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             bool unfinished = required > 0 && completed < required;
             if (!unfinished) return "—";
             if (string.Equals(mode, "resident", StringComparison.OrdinalIgnoreCase)) return "等待阶段";
+            if (string.Equals(mode, "completion-driven", StringComparison.OrdinalIgnoreCase))
+            {
+                DateTimeOffset leaseExpiry;
+                if (!DateTimeOffset.TryParse(GetString(task, "turnLeaseExpiresAt"), out leaseExpiry)) return "等待租约";
+                TimeSpan leaseRemaining = leaseExpiry - DateTimeOffset.UtcNow;
+                if (leaseRemaining.TotalMilliseconds <= 0) return "续轮就绪";
+                if (leaseRemaining.TotalHours >= 1) return "Lease " + ((int)leaseRemaining.TotalHours) + ":" + leaseRemaining.Minutes.ToString("00") + ":" + leaseRemaining.Seconds.ToString("00");
+                return "Lease " + ((int)leaseRemaining.TotalMinutes) + ":" + leaseRemaining.Seconds.ToString("00");
+            }
             if (!string.Equals(mode, "timeout-recovery", StringComparison.OrdinalIgnoreCase)) return "—";
             long confirmedLimitMs = GetLong(task, "confirmedTurnLimitMs");
             long observedMs = GetLong(task, "observedTurnBudgetMs");
@@ -6045,7 +6073,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 && DateTimeOffset.TryParse(GetString(task, "turnStartedAt"), out baseTime))
             {
                 TimeSpan remaining = baseTime.AddMilliseconds(confirmedLimitMs) - DateTimeOffset.UtcNow;
-                if (remaining.TotalMilliseconds <= 0) return "等待截断";
+                if (remaining.TotalMilliseconds <= 0) return "恢复探测";
                 if (remaining.TotalHours >= 1) return "确认 " + ((int)remaining.TotalHours) + ":" + remaining.Minutes.ToString("00") + ":" + remaining.Seconds.ToString("00");
                 return "确认 " + ((int)remaining.TotalMinutes) + ":" + remaining.Seconds.ToString("00");
             }
@@ -6096,9 +6124,10 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     if (DateTime.TryParse(updated, out parsed)) updated = parsed.ToLocalTime().ToString("MM-dd HH:mm:ss");
                     int row = _continuationGrid.Rows.Add(
                         GetString(task, "state"),
+                        ContinuationSourceText(task),
                         GetBool(task, "ownerLocked") ? "已锁定" : "—",
                         completed + "/" + required,
-                        GetInt(task, "continuationCount") + "/" + GetInt(task, "maxContinuations"),
+                        ContinuationTurnsText(task),
                         ContinuationCountdownText(task),
                         updated,
                         GetString(task, "objective"));
@@ -6147,22 +6176,36 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             Dictionary<string, object> task = SelectedContinuation();
             if (task.Count == 0)
             {
-                _continuationSummary.Text = "当前没有可显示的续轮任务。自动续轮不会因为普通 MCP 调用结束就凭空创建下一轮；显式长任务会复用同一持久 task，并在每个自动续轮后的 assistant turn 重新挂载 supervisor。";
+                _continuationSummary.Text = "当前没有可显示的 Task Contract。下一次 conversation 打开 workspace 时会自动创建或复用非空里程碑合同，并挂载同一任务的 Anchor Lease；普通用户无需手工创建续轮任务。";
                 return;
             }
             string state = GetString(task, "state");
             string mode = GetString(task, "continuationMode");
             string modeText = string.Equals(mode, "resident", StringComparison.OrdinalIgnoreCase) ? "常驻 / 监控"
+                : string.Equals(mode, "completion-driven", StringComparison.OrdinalIgnoreCase) ? "里程碑驱动"
                 : string.Equals(mode, "timeout-recovery", StringComparison.OrdinalIgnoreCase) ? "仅截断恢复" : "兼容任务";
             string lockText = GetBool(task, "ownerLocked") ? "已锁定（助手和自动守卫不能终止）" : "未锁定";
             string pending = GetBool(task, "continuationDeliveryAwaitingAck") ? " · 等待新轮 ACK"
                 : GetBool(task, "continuationWakePending") ? " · 已产生续轮唤醒"
                 : GetBool(task, "continuationPending") ? " · 正在续轮" : "";
             string wait = GetString(task, "waitingReason");
+            string conversation = GetString(task, "conversationScopeId");
+            if (conversation.Length > 18) conversation = conversation.Substring(0, 18) + "…";
+            string workspace = GetString(task, "workspaceId");
+            string anchorLease = GetString(task, "anchorLeaseExpiresAt");
+            DateTimeOffset anchorExpiry;
+            string anchorText = DateTimeOffset.TryParse(anchorLease, out anchorExpiry)
+                ? anchorExpiry.ToLocalTime().ToString("HH:mm:ss") : "未挂载";
+            string turnLease = GetString(task, "turnLeaseExpiresAt");
+            DateTimeOffset turnExpiry;
+            string turnText = DateTimeOffset.TryParse(turnLease, out turnExpiry)
+                ? turnExpiry.ToLocalTime().ToString("HH:mm:ss") : "—";
+            string wallClockText = GetBool(task, "unlimitedWallClock") || string.IsNullOrWhiteSpace(GetString(task, "deadlineAt")) ? "无限" : GetString(task, "deadlineAt");
             _continuationSummary.Text =
-                state + pending + "  ·  " + modeText + "  ·  " + lockText + "  ·  里程碑 " + GetInt(task, "progressCompleted") + "/" + GetInt(task, "progressRequired") +
-                "  ·  续轮 " + GetInt(task, "continuationCount") + "/" + GetInt(task, "maxContinuations") +
-                "  ·  下一轮 " + ContinuationCountdownText(task) + Environment.NewLine +
+                state + pending + "  ·  " + modeText + "  ·  " + ContinuationSourceText(task) + "  ·  " + lockText + "  ·  里程碑 " + GetInt(task, "progressCompleted") + "/" + GetInt(task, "progressRequired") +
+                "  ·  续轮 " + ContinuationTurnsText(task) +
+                "  ·  下一轮 " + ContinuationCountdownText(task) + "  ·  Turn " + turnText + "  ·  Anchor " + anchorText + "  ·  总时限 " + wallClockText + Environment.NewLine +
+                "Conversation " + (string.IsNullOrWhiteSpace(conversation) ? "—" : conversation) + "  ·  Workspace " + (string.IsNullOrWhiteSpace(workspace) ? "—" : workspace) + Environment.NewLine +
                 GetString(task, "objective") + (string.IsNullOrWhiteSpace(wait) ? "" : Environment.NewLine + "等待原因：" + wait);
         }
 

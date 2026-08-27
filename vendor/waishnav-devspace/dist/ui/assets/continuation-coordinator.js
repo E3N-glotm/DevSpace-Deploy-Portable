@@ -2,6 +2,9 @@ const TASK_TOOL = "continuation_task";
 const DEFAULT_SUPERVISOR_TICK_MS = 15_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
 const CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS = 5_000;
+const CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS = 20_000;
+const CONFIRMED_TURN_LIMIT_MODEL_QUIET_MS = 30_000;
+const TRANSIENT_RETRY_DELAYS_MS = [0, 750, 2_000, 5_000];
 
 const TERMINAL_STATES = new Set([
   "SUCCEEDED",
@@ -9,6 +12,7 @@ const TERMINAL_STATES = new Set([
   "CANCELLED_BY_USER",
   "ABORTED_NO_PROGRESS",
   "BUDGET_EXHAUSTED",
+  "ABANDONED_AUTO_TASK",
 ]);
 
 function uniqueId() {
@@ -88,6 +92,10 @@ function residentTask(task) {
   return task?.continuationMode === "resident";
 }
 
+function completionDrivenTask(task) {
+  return task?.continuationMode === "completion-driven";
+}
+
 function hasUnfinishedMilestones(task) {
   if (!task || terminal(task)) return false;
   const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
@@ -106,6 +114,31 @@ function taskElapsedMs(task) {
   return Number.isFinite(started) ? Math.max(0, Date.now() - started) : 0;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms || 0))));
+}
+
+function transientTransportFailure(value) {
+  const text = String(value?.message ?? value ?? "").toLowerCase();
+  return /unavailable|connection failed|network|fetch|econn|socket|tls|ssl|handshake|temporar|timed?\s*out|timeout/.test(text);
+}
+
+function confirmedCutoffRecoveryReady(task) {
+  if (!task || task.state !== "RUNNING" || task.continuationMode === "compat" || !hasUnfinishedMilestones(task)) return false;
+  const confirmedLimitMs = Number(task.confirmedTurnLimitMs || 0);
+  if (confirmedLimitMs < 30_000) return false;
+  if (taskElapsedMs(task) < confirmedLimitMs + CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS) return false;
+  const lastModelAt = Date.parse(task.lastModelActivityAt || "");
+  if (!Number.isFinite(lastModelAt)) return false;
+  return Date.now() - lastModelAt >= CONFIRMED_TURN_LIMIT_MODEL_QUIET_MS;
+}
+
+function completionTurnLeaseExpired(task) {
+  if (!completionDrivenTask(task) || task?.state !== "RUNNING" || !hasUnfinishedMilestones(task)) return false;
+  const expiresAt = Date.parse(task.turnLeaseExpiresAt || "");
+  return Number.isFinite(expiresAt) && Date.now() >= expiresAt;
+}
+
 function cancellationIsUserAction(reason) {
   return /user|manual|cancel|stop|abort/i.test(String(reason || "")) && !/timeout|deadline|budget/i.test(String(reason || ""));
 }
@@ -117,7 +150,7 @@ function isChinese() {
 function continuationText(task, reason) {
   const id = task?.id ? ` ${task.id}` : "";
   const workspace = task?.workspaceId ? `，workspaceId=${task.workspaceId}` : "";
-  return `继续 DevSpace 任务${id}${workspace}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、持久任务状态和已完成里程碑，不要重新开始。这次自动续轮只能来自两类已授权事件：Host 明确 timeout/deadline/budget 截断且任务未完成，或用户明确授权的 resident/monitor 任务完成了一个阶段/显式 watch。第一步必须调用 continuation_task action=status，并显式传入这个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}；若 MCP 暂时 UNAVAILABLE/Connection failed，等待连接恢复后重试，不要新建任务。若 status 返回 continueRequired=true，则本轮禁止只做 ACK、状态汇报或进度总结后结束；必须继续执行 nextRequiredMilestones 中至少一个尚未完成的实际工作步骤。若同时返回 reanchorRequired=true，第二步先调用 continuation_anchor，显式传入同一个 taskId 和 workspaceId，重新挂载本轮 supervisor。ACK/re-anchor 只是恢复协议，不是任务进展本身。只有原始目标经验证完成后才调用 complete 并结束。`;
+  return `继续 DevSpace 任务${id}${workspace}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、Task Contract、持久 checkpoint 和已完成里程碑，不要重新开始。completion-driven Task Contract 会在里程碑未完成且模型 Turn Lease 到期或资源 teardown 时续轮；timeout-recovery 仍只接受明确 Host timeout/deadline/budget 或确认 cutoff 后的保守恢复；resident/monitor 另外允许显式阶段/进程 wake。第一步必须调用 continuation_task action=status，并显式传入这个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}；若 MCP 暂时 UNAVAILABLE/Connection failed，等待后按退避重试同一操作，不要新建任务。若 status 返回 continueRequired=true 或 finalResponseAllowed=false，则本轮禁止只做 ACK、状态汇报或进度总结后结束；必须继续执行 nextRequiredMilestones/remainingMilestones 中尚未完成的实际工作并 checkpoint。若同时返回 reanchorRequired=true，先调用 continuation_anchor，显式传入同一个 taskId 和 workspaceId，刷新本轮 Anchor Lease。ACK/re-anchor 只是恢复协议，不是任务进展本身。只有原始目标经验证完成后才调用 complete 并结束。`;
 }
 
 function continuationContext(task, workspaceId, reason) {
@@ -130,7 +163,7 @@ function continuationContext(task, workspaceId, reason) {
     `completedMilestones: ${(task?.completedMilestones ?? []).join(" | ") || "none recorded"}`,
     `requiredMilestones: ${(task?.requiredMilestones ?? []).join(" | ") || "none recorded"}`,
     `continuationReason: ${reason}`,
-    "Automatic continuation is fail-closed: timeout-recovery mode only follows an explicit Host timeout/deadline/budget interruption; resident mode additionally permits an explicitly requested resident stage/process wake. Ordinary resource teardown, model/MCP silence, learned host budgets, and ordinary process completion are never sufficient. If model-side continuation_task status returns continueRequired=true, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and advance at least one nextRequiredMilestone unless blocked by an actual external condition. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first. Resume existing process handles and workspace state. Do not restart completed work.",
+    "completion-driven mode is an explicit Task Contract completion guard: while required milestones remain, model-side DevSpace activity renews a Turn Lease; if the assistant turn ends or goes completely inactive past that lease, a surviving Workspace App may continue the same task. timeout-recovery remains fail-closed before a proven Host cutoff, and resident additionally permits explicit stage/process wakes. Learned budgets and ordinary process completion never trigger completion-driven/timeout-recovery tasks. If status returns continueRequired=true or finalResponseAllowed=false, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and checkpoint progress. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first. Resume existing process handles and workspace state. Do not restart completed work.",
   ].join("\n");
 }
 
@@ -204,22 +237,35 @@ export function installContinuationCoordinator(app, options = {}) {
 
   async function callTask(action, extra = {}) {
     if (!state.connected) throw new Error("DevSpace Workspace App is not connected to the host yet.");
-    const result = await app.callServerTool({
-      name: TASK_TOOL,
-      arguments: {
-        action,
-        ...(state.task?.id ? { taskId: state.task.id } : {}),
-        ...(state.workspaceId ? { workspaceId: state.workspaceId } : {}),
-        coordinatorInstanceId: state.instanceId,
-        ...extra,
-      },
-    });
-    const outcome = normalizeTaskOutcome(result);
-    if (outcome?.task) {
-      state.task = outcome.task;
-      publishTaskForCard(state.task);
+    let lastError;
+    for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
+      if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
+      try {
+        const result = await app.callServerTool({
+          name: TASK_TOOL,
+          arguments: {
+            action,
+            ...(state.task?.id ? { taskId: state.task.id } : {}),
+            ...(state.workspaceId ? { workspaceId: state.workspaceId } : {}),
+            coordinatorInstanceId: state.instanceId,
+            ...extra,
+          },
+        });
+        if (result?.isError && transientTransportFailure(textFromToolResult(result))) {
+          throw new Error(textFromToolResult(result) || "Transient MCP transport failure");
+        }
+        const outcome = normalizeTaskOutcome(result);
+        if (outcome?.task) {
+          state.task = outcome.task;
+          publishTaskForCard(state.task);
+        }
+        return outcome;
+      } catch (error) {
+        lastError = error;
+        if (!transientTransportFailure(error) || attempt === TRANSIENT_RETRY_DELAYS_MS.length - 1) throw error;
+      }
     }
-    return outcome;
+    throw lastError ?? new Error("DevSpace continuation transport retry exhausted.");
   }
 
   function stopSupervisor() {
@@ -268,17 +314,21 @@ export function installContinuationCoordinator(app, options = {}) {
   async function sendFollowUp(text) {
     let officialError;
     if (typeof app.sendMessage === "function") {
-      try {
-        const result = await app.sendMessage(
-          { role: "user", content: [{ type: "text", text }] },
-          typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-            ? { signal: AbortSignal.timeout(15000) }
-            : undefined,
-        );
-        if (result?.isError) throw new Error("Host rejected ui/message.");
-        return { method: "app.sendMessage", result: "accepted" };
-      } catch (error) {
-        officialError = error;
+      for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
+        if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        try {
+          const result = await app.sendMessage(
+            { role: "user", content: [{ type: "text", text }] },
+            typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+              ? { signal: AbortSignal.timeout(15000) }
+              : undefined,
+          );
+          if (result?.isError) throw new Error("Host rejected ui/message.");
+          return { method: "app.sendMessage", result: "accepted" };
+        } catch (error) {
+          officialError = error;
+          if (!transientTransportFailure(error) || attempt === TRANSIENT_RETRY_DELAYS_MS.length - 1) break;
+        }
       }
     }
     const fallback = typeof window !== "undefined" ? window.openai?.sendFollowUpMessage : undefined;
@@ -417,10 +467,24 @@ export function installContinuationCoordinator(app, options = {}) {
     }
 
     if (automationSuppressed(state.task)) return;
-    // Intentionally no learned-budget, inactivity, or normal-teardown trigger.
-    // Without an explicit Host timeout signal DevSpace cannot prove that a turn
-    // has actually been truncated, so it fails closed instead of pre-empting an
-    // assistant turn that is still legitimately running.
+    if (completionTurnLeaseExpired(state.task)) {
+      // P0 completion guard: only completion-driven Task Contracts can use
+      // model Turn Lease expiry. timeout-recovery and resident semantics remain
+      // unchanged, so generic inactivity can never wake those modes.
+      await attemptContinuation("task contract turn lease expired", { force: true });
+      return;
+    }
+    if (confirmedCutoffRecoveryReady(state.task)) {
+      // This is deliberately NOT a generic silence/learned-budget watchdog. It
+      // is available only after a user/Owner-confirmed real Host cutoff lower
+      // bound has already elapsed, plus a grace period and model quiet window.
+      // It covers hosts that visibly truncate the assistant turn but omit both
+      // toolcancelled timeout and resource-teardown reason signals.
+      await attemptContinuation("confirmed turn-limit lease expired", { force: true });
+      return;
+    }
+    // Intentionally no learned-budget or ordinary process-completion trigger.
+    // Generic inactivity remains disabled outside explicit completion-driven mode.
   }
 
   function startSupervisor() {
@@ -553,12 +617,20 @@ export function installContinuationCoordinator(app, options = {}) {
       const confirmedLimitElapsed = !timedOut
         && confirmedLimitMs >= 30_000
         && taskElapsedMs(state.task) >= confirmedLimitMs + CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS;
-      if ((timedOut || confirmedLimitElapsed)
+      const completionDrivenTeardown = !timedOut
+        && completionDrivenTask(state.task)
+        && state.task?.state === "RUNNING"
+        && hasUnfinishedMilestones(state.task);
+      if ((timedOut || confirmedLimitElapsed || completionDrivenTeardown)
         && state.task?.continuationMode !== "compat"
         && state.task?.state === "RUNNING"
         && hasUnfinishedMilestones(state.task)) {
         await attemptContinuation(
-          timedOut ? `host teardown: ${reason}` : "confirmed turn-limit teardown",
+          timedOut
+            ? `host teardown: ${reason}`
+            : completionDrivenTeardown
+              ? "task contract resource teardown"
+              : "confirmed turn-limit teardown",
           { force: true },
         );
       }

@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.49";
+export const DEVSPACE_SERVER_VERSION = "1.1.50";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -157,6 +157,14 @@ const FEATURE_CATALOG = [
     { id: "mcp-continuation-confirmed-turn-limit", maturity: "stable", since: "1.1.49" },
     { id: "mcp-ui-stale-supervisor-reanchor", maturity: "stable", since: "1.1.49" },
     { id: "mcp-tunnel-owned-agent-recovery-gate", maturity: "stable", since: "1.1.49" },
+    { id: "mcp-conversation-task-contract", maturity: "stable", since: "1.1.50" },
+    { id: "mcp-continuation-turn-anchor-lease", maturity: "stable", since: "1.1.50" },
+    { id: "mcp-continuation-completion-driven-turn-lease", maturity: "stable", since: "1.1.50" },
+    { id: "mcp-continuation-unbounded-default", maturity: "stable", since: "1.1.50" },
+    { id: "mcp-open-workspace-auto-anchor", maturity: "stable", since: "1.1.50" },
+    { id: "mcp-continuation-confirmed-cutoff-recovery-probe", maturity: "stable", since: "1.1.50" },
+    { id: "mcp-continuation-task-origin-observability", maturity: "stable", since: "1.1.50" },
+    { id: "mcp-continuation-transport-retry", maturity: "stable", since: "1.1.50" },
     { id: "remote-agent-runtime-device-compatibility", maturity: "stable", since: "1.1.46" },
     { id: "remote-agent-ephemeral-runtime-scratch", maturity: "stable", since: "1.1.46" },
 ];

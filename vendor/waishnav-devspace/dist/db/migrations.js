@@ -99,6 +99,16 @@ const migrations = [
         name: "continuation-confirmed-turn-limit",
         up: migrateContinuationConfirmedTurnLimit,
     },
+    {
+        version: 21,
+        name: "continuation-task-contract-turn-lease",
+        up: migrateContinuationTaskContractTurnLease,
+    },
+    {
+        version: 22,
+        name: "continuation-completion-driven-unbounded",
+        up: migrateContinuationCompletionDrivenUnbounded,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -595,6 +605,79 @@ function migrateContinuationConfirmedTurnLimit(sqlite) {
     addColumnIfMissing(sqlite, "continuation_host_profiles", "confirmed_turn_limit_ms", "integer");
     addColumnIfMissing(sqlite, "continuation_host_profiles", "confirmed_turn_limit_at", "text");
     addColumnIfMissing(sqlite, "continuation_host_profiles", "confirmed_turn_limit_source", "text");
+}
+function migrateContinuationTaskContractTurnLease(sqlite) {
+    // 1.1.50 makes continuation state a conversation+workspace task contract
+    // instead of an optional empty guard.  Source/lease metadata is persisted
+    // so the control center can explain who created a task and so a recreated
+    // Workspace App can refresh the same recovery sender without shadow tasks.
+    addColumnIfMissing(sqlite, "continuation_tasks", "task_source", "text not null default 'legacy'");
+    addColumnIfMissing(sqlite, "continuation_tasks", "source_tool", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "contract_version", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "auto_created", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "substantive_activity_count", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "turn_lease_id", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "last_anchor_mounted_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "anchor_lease_expires_at", "text");
+    sqlite.exec(`
+      create index if not exists continuation_tasks_source_state_idx
+        on continuation_tasks(task_source, state, updated_at desc);
+
+      update continuation_tasks
+      set task_source=case
+            when task_source is null or trim(task_source)='' then 'legacy'
+            else task_source
+          end,
+          contract_version=case
+            when contract_version is null then 0
+            else contract_version
+          end,
+          auto_created=coalesce(auto_created, 0),
+          substantive_activity_count=coalesce(substantive_activity_count, 0);
+
+      update continuation_tasks
+      set task_source='legacy-auto', auto_created=1
+      where task_source='legacy'
+        and continuation_mode='compat'
+        and required_milestones_json='[]'
+        and objective like 'Continue the current DevSpace work%';
+    `);
+}
+function migrateContinuationCompletionDrivenUnbounded(sqlite) {
+    // 1.1.50 Task Contracts are completion-driven: while required milestones
+    // remain, the task owns a renewable model Turn Lease and may recover a
+    // prematurely-ended assistant turn.  Continuation-count and wall-clock
+    // budgets default to unlimited (0 / NULL) and are no longer terminal gates
+    // unless an owner/model explicitly supplies a positive budget.
+    addColumnIfMissing(sqlite, "continuation_tasks", "turn_lease_expires_at", "text");
+    sqlite.exec(`
+      update continuation_tasks
+      set continuation_mode='completion-driven',
+          max_continuations=0,
+          deadline_at=null,
+          turn_lease_expires_at=coalesce(
+            turn_lease_expires_at,
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+3 minutes')
+          ),
+          task_source=case
+            when contract_version=0 and task_source='legacy' then 'migrated-1.1.49'
+            else task_source
+          end,
+          contract_version=case when contract_version < 1 then 1 else contract_version end
+      where state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
+        and (
+          (contract_version >= 1 and task_source in ('auto-conversation','model-refined'))
+          or (
+            contract_version=0
+            and task_source='legacy'
+            and continuation_mode='timeout-recovery'
+            and coalesce(required_milestones_json,'[]') <> '[]'
+          )
+        );
+
+      create index if not exists continuation_tasks_turn_lease_idx
+        on continuation_tasks(continuation_mode, state, turn_lease_expires_at);
+    `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {
     const columns = sqlite.prepare(`pragma table_info(${table})`).all();

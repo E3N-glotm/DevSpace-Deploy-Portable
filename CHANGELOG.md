@@ -2,6 +2,18 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.50
+
+- P0：普通多步任务默认改为 `completion-driven` Task Contract。`open_workspace` 自动按 conversation + workspace 创建/复用非空 milestones 并挂载 Workspace App Anchor；模型侧 DevSpace 活动续租 Turn Lease，未完成任务在模型提前结束后的 Turn Lease 到期或 resource teardown 时可恢复同一个持久 task。
+- completion-driven 的总 wall-clock 和最大 continuation count 默认无限：`deadline_at=NULL`、`max_continuations=0` 不再触发 budget terminal；只有显式正数才启用兼容预算。所有 required milestones 与 evidence 验证完成后，模型才显式 `complete`。
+- completion-driven 的 no-progress / repeated-failure 计数改为诊断告警，不再把未完成 Task Contract 自动置为 terminal；migration 22 同时将 1.1.49 中已有、带真实 milestones 的 legacy `timeout-recovery` 活跃任务升级为 completion-driven、无限预算并初始化 Turn Lease。
+- `begin/status/checkpoint/resume` 统一暴露 `taskIncomplete`、`remainingMilestones`、`continueRequired`、`finalResponseAllowed`；`finalResponseAllowed=false` 时 ACK、状态汇报、re-anchor 或“稍后继续”都不能结束当前 assistant turn。
+- 三种模式分工明确：`completion-driven` 负责普通任务的“做到完成”；`timeout-recovery` 保留严格 Host cutoff-only 恢复；`resident` 仅供用户明确授权的常驻/监控 stage/process wake。learned budget 和普通 process completion 不会触发 completion-driven/timeout-recovery。
+- 控制中心新增 Task Contract 来源、Conversation/Workspace、Turn/Anchor Lease、无限续轮/总时限显示；Workspace App 对 `UNAVAILABLE`、`Connection failed`、fetch/ECONN/TLS/timeout 使用有界退避并保持 side-effect-aware 重试。
+- 1.1.49 的 owned ngrok Agent 恢复门与 DNS/TLS 抖动保护保持不变；Protocol 仍为 1.5，Linux Remote Agent wire protocol 与权限模型不变。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.50.md)
+
 ## 1.1.49
 
 - Continuation 改为 fail-closed 的严格双模式：普通显式长任务默认 `timeout-recovery`，只在 Host 明确 `timeout/deadline/budget`，或已确认 Host turn 上限且 teardown 发生在上限之后时自动续轮；普通 teardown、model/MCP 静默、learned budget 到点和普通进程结束都不再提前开启新 assistant turn。

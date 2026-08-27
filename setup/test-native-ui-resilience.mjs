@@ -108,7 +108,9 @@ try {
   assert.ok(initialTasks.tasks.some((task) => task.id === ownerTask.task.id));
   const listedOwnerTask = initialTasks.tasks.find((task) => task.id === ownerTask.task.id);
   assert.ok(listedOwnerTask.turnStartedAt);
-  assert.equal(listedOwnerTask.continuationMode, "timeout-recovery");
+  assert.equal(listedOwnerTask.continuationMode, "completion-driven");
+  assert.equal(listedOwnerTask.unlimitedContinuations, true);
+  assert.equal(listedOwnerTask.unlimitedWallClock, true);
   assert.ok(listedOwnerTask.lastModelActivityAt);
   assert.equal(listedOwnerTask.hostTimeoutSamples, 1);
   assert.equal(listedOwnerTask.recommendedContinueAfterMs, 8800);
@@ -140,8 +142,10 @@ try {
   assert.match(nativeSource, /Name = "continuationCountdown"[\s\S]*?HeaderText = "下一轮"/);
   assert.match(nativeSource, /_continuationCountdownTimer\.Interval = 1000/);
   assert.doesNotMatch(nativeSource, /prefix = "静默 "|explicitSilentContinueAfterMs|explicit-long/);
+  assert.match(nativeSource, /continuationMode[\s\S]*?completion-driven/);
   assert.match(nativeSource, /continuationMode[\s\S]*?timeout-recovery/);
   assert.match(nativeSource, /continuationMode[\s\S]*?resident/);
+  assert.match(nativeSource, /无限/);
   assert.match(nativeSource, /等待截断/);
   assert.match(nativeSource, /等待阶段/);
   assert.match(nativeSource, /confirmedTurnLimitMs/);

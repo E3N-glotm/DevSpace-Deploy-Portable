@@ -8,7 +8,9 @@ const RUNTIME_TOOLS = new Set([
   "bash",
 ]);
 const REVIEW_TOOLS = new Set(["apply_patch", "show_changes", "session_changes", "write", "edit"]);
-const CONTINUATION_TOOLS = new Set(["continuation_anchor"]);
+// open_workspace mounts the first conversation Task Contract in 1.1.50, so the
+// same compact milestone card is useful there as for an explicit re-anchor.
+const CONTINUATION_TOOLS = new Set(["continuation_anchor", "open_workspace"]);
 const ZH = String(navigator.language || "").toLowerCase().startsWith("zh");
 
 const state = {
@@ -242,7 +244,7 @@ function buildRuntimeCard() {
 function continuationStateTone(task = {}) {
   const value = String(task.state || "RUNNING");
   if (["SUCCEEDED"].includes(value)) return "success";
-  if (["FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED"].includes(value)) return "failed";
+  if (["FAILED_TERMINAL", "CANCELLED_BY_USER", "ABORTED_NO_PROGRESS", "BUDGET_EXHAUSTED", "ABANDONED_AUTO_TASK"].includes(value)) return "failed";
   if (["WAITING_EXTERNAL", "WAITING_SUPERVISOR", "PAUSED_BY_USER"].includes(value)) return "waiting";
   return "running";
 }
@@ -272,13 +274,19 @@ function buildContinuationCard() {
   [
     metadataRow(ZH ? "任务 ID" : "Task ID", task.id),
     metadataRow(ZH ? "状态" : "State", task.state),
+    metadataRow(ZH ? "来源" : "Source", task.taskSource),
+    metadataRow(ZH ? "工作区" : "Workspace", task.workspaceId),
     metadataRow(ZH ? "模式" : "Mode", task.continuationMode === "resident"
       ? (ZH ? "常驻 / 监控" : "Resident / monitor")
+      : task.continuationMode === "completion-driven"
+        ? (ZH ? "里程碑驱动" : "Completion driven")
       : task.continuationMode === "timeout-recovery"
         ? (ZH ? "仅截断恢复" : "Timeout recovery only")
         : (ZH ? "兼容任务" : "Compatibility task")),
     metadataRow(ZH ? "里程碑" : "Milestones", `${completed.size}/${required.length}`),
-    metadataRow(ZH ? "续轮" : "Continuations", `${task.continuationCount ?? 0}/${task.maxContinuations ?? "—"}`),
+    metadataRow(ZH ? "续轮" : "Continuations", `${task.continuationCount ?? 0}/${Number(task.maxContinuations || 0) <= 0 ? "∞" : task.maxContinuations}`),
+    metadataRow(ZH ? "Turn Lease" : "Turn Lease", task.turnLeaseExpiresAt),
+    metadataRow(ZH ? "总时限" : "Wall clock", task.unlimitedWallClock || !task.deadlineAt ? (ZH ? "无限" : "Unlimited") : task.deadlineAt),
     metadataRow(ZH ? "Owner 锁" : "Owner lock", task.ownerLocked ? (ZH ? "已锁定" : "Locked") : (ZH ? "未锁定" : "Unlocked")),
     metadataRow(ZH ? "等待原因" : "Waiting", task.waitingReason),
   ].filter(Boolean).forEach((row) => summary.append(row));
@@ -306,8 +314,10 @@ function buildContinuationCard() {
       ? (ZH ? "已产生持久续轮唤醒，Workspace App 将自动 claim 并发送续轮消息。" : "A durable continuation wake is pending and will be claimed automatically.")
       : task.continuationMode === "resident"
         ? (ZH ? "常驻/监控任务只有在 Host 明确超时，或模型显式声明阶段完成 / 显式 watch 的进程结束时才会续轮。" : "Resident/monitor tasks continue only on an explicit Host timeout or an explicit stage/process wake.")
+        : task.continuationMode === "completion-driven"
+          ? (ZH ? "里程碑驱动任务默认没有总时限和最大续轮上限。模型每次实际 DevSpace 工作都会续租 Turn Lease；只要里程碑未完成，模型提前结束、Turn Lease 到期或资源 teardown 时都可恢复同一任务，直到显式 complete。" : "Completion-driven tasks default to unlimited wall-clock duration and continuation count. Substantive DevSpace work renews the model Turn Lease; while milestones remain, premature turn end, lease expiry, or resource teardown can resume the same task until explicit complete.")
         : task.continuationMode === "timeout-recovery"
-          ? (ZH ? "仅截断恢复任务只认 Host 明确的 timeout/deadline/budget；普通 teardown、静默、学习预算和进程结束都不会提前创建下一轮。" : "Timeout-recovery tasks only accept explicit Host timeout/deadline/budget signals; teardown, silence, learned budgets, and process completion never pre-empt the current turn.")
+          ? (ZH ? "仅截断恢复不会使用学习预算、普通静默、早期 teardown 或普通进程结束抢跑。若用户已确认真实 Host cutoff 下界，越过下界与宽限期后可由仍存活的 Anchor Lease 做保守恢复探测。" : "Timeout recovery never pre-empts on learned budgets, generic silence, early teardown, or ordinary process completion. After a user-confirmed real Host cutoff lower bound plus its grace period, a surviving Anchor Lease may make a conservative recovery probe.")
         : (ZH ? "兼容任务不会自动创建下一轮；需要截断恢复时使用 timeout-recovery，需要常驻/监控时由用户明确选择 resident。" : "Compatibility tasks never auto-create a new turn; use timeout-recovery for truncation recovery and explicitly choose resident for user-authorized persistent monitoring.");
   body.append(element("div", { className: "runtime-output-empty", text: note }));
   panel.append(body);
@@ -589,7 +599,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-    text: "DevSpace Portable 1.1.49 · Protocol 1.5",
+    text: "DevSpace Portable 1.1.50 · Protocol 1.5",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);
