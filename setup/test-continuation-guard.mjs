@@ -194,8 +194,12 @@ assert.match(coordinator, /deliveryToken=/,
   "synthetic continuation messages must carry a durable delivery generation token so manual turns can supersede late automatic turns");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
-assert.match(coordinator, /已经授权[\s\S]{0,800}没有收到新的用户指令[\s\S]{0,1200}readiness race/,
-  "synthetic continuation text must be authoritative and must not let the resumed model wait for a fresh user instruction");
+assert.match(coordinator, /已授权的恢复续轮[\s\S]{0,700}第一项业务动作必须调用 continuation_task action=status[\s\S]{0,900}必须立刻调用实际 DevSpace 工具/,
+  "synthetic continuation text must be short, action-first, and must move directly from status ACK to substantive work");
+assert.match(coordinator, /syntheticResumeWorkRetryDue[\s\S]{0,900}syntheticResumeWorkRequired[\s\S]{0,600}deliveryToken/,
+  "the coordinator must retain a durable resumed-turn work obligation after the connectivity ACK");
+assert.match(coordinator, /synthetic resume work lease expired/,
+  "status-only resumed turns must have a dedicated recovery path rather than being treated as successfully completed continuations");
 assert.match(coordinator, /deliveryAckRetryDue[\s\S]{0,1500}deliveryAckRetryAfterAt/,
   "delivery ACK retransmission must honor the persisted retry schedule instead of polling new turns every supervisor tick");
 assert.match(server, /automatic Workspace App continuation is an authorized continuation[\s\S]{0,1600}roughly 30 seconds[\s\S]{0,1400}retransmits the same logical continuation/,
@@ -1785,11 +1789,70 @@ try {
   assert.equal(proactiveModelAck.finalResponseAllowed, false);
   assert.deepEqual(proactiveModelAck.remainingMilestones, ["finish after timeout recovery"]);
   assert.equal(proactiveModelAck.task.continuationDeliveryAwaitingAck, false);
+  assert.equal(proactiveModelAck.task.syntheticResumeWorkRequired, true,
+    "a connectivity status ACK must retain a durable obligation to perform real DevSpace work");
+  assert.equal(proactiveModelAck.task.deliveryOwner, "synthetic-active");
   assert.equal(proactiveModelAck.task.deliveryAckRetryCount, 0);
   assert.equal(proactiveModelAck.task.deliveryAckRetryAfterAt, undefined,
     "a successful model-side status ACK must clear the persisted readiness retry schedule");
   assert.ok(proactiveModelAck.task.turnStartedAt);
   assert.ok(proactiveModelAck.task.lastModelActivityAt);
+
+  const statusOnlyRetryTooEarly = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: proactiveAck.task.id,
+    note: "synthetic resume work lease expired",
+  });
+  assert.equal(statusOnlyRetryTooEarly.accepted, false,
+    "status-only recovery must not create a second assistant turn while the resumed Turn Lease is still active");
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set turn_lease_expires_at=? where id=?
+  `).run(new Date(Date.now() - 1_000).toISOString(), proactiveAck.task.id);
+  const statusOnlyRetry = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: proactiveAck.task.id,
+    note: "synthetic resume work lease expired",
+  });
+  assert.equal(statusOnlyRetry.accepted, true,
+    "a synthetic turn that only ACKed status and failed to do real work must be recoverable after its own Turn Lease expires without inventing a new Host cutoff");
+  assert.equal(statusOnlyRetry.syntheticResumeWorkRetry, true);
+  assert.notEqual(statusOnlyRetry.deliveryToken, proactiveClaim.deliveryToken,
+    "status-only recovery must create a new generation so a late failed turn cannot execute in parallel");
+  assert.equal(statusOnlyRetry.deliveryGeneration, proactiveClaim.deliveryGeneration + 1);
+  assert.equal(statusOnlyRetry.task.continuationCount, proactiveClaim.task.continuationCount + 1);
+  runtime.continuationTask({
+    action: "delivery-result",
+    taskId: proactiveAck.task.id,
+    deliveryResult: "accepted",
+    deliveryMethod: "app.sendMessage",
+    note: "synthetic resume work lease expired",
+  });
+  const retriedModelAck = runtime.continuationTask({
+    action: "status",
+    taskId: proactiveAck.task.id,
+    deliveryToken: statusOnlyRetry.deliveryToken,
+  });
+  assert.equal(retriedModelAck.reason, "continuation-resume-acknowledged");
+  assert.equal(retriedModelAck.task.syntheticResumeWorkRequired, true);
+  const fulfilledToken = statusOnlyRetry.deliveryToken;
+  const touchedAfterResume = runtime.touchContinuationModelActivity({
+    workspaceId: "ws_proactive_ack",
+    conversationScopeId: "conversation-proactive-ack",
+    substantive: true,
+  });
+  assert.equal(touchedAfterResume, proactiveAck.task.id);
+  const fulfilledResume = runtime.continuationTask({ action: "status", taskId: proactiveAck.task.id });
+  assert.equal(fulfilledResume.task.syntheticResumeWorkRequired, false,
+    "the first substantive non-control DevSpace operation must fulfill the synthetic resumed-turn work obligation");
+  assert.equal(fulfilledResume.task.deliveryOwner, "synthetic-worked");
+  const lateFulfilledSynthetic = runtime.continuationTask({
+    action: "status",
+    taskId: proactiveAck.task.id,
+    deliveryToken: fulfilledToken,
+  });
+  assert.equal(lateFulfilledSynthetic.accepted, false);
+  assert.equal(lateFulfilledSynthetic.reason, "synthetic-continuation-superseded",
+    "once real work fulfills a synthetic generation, duplicate delivery of that old generation must be rejected");
 
   const manualTakeover = runtime.continuationTask({
     action: "begin",
@@ -1876,6 +1939,8 @@ try {
     manualTurnSupersedesLateSyntheticTurn: true,
     deliveryReadinessBackoff: true,
     durableSyntheticTurnRetransmission: true,
+    syntheticResumeRequiresSubstantiveWork: true,
+    syntheticStatusOnlyTurnRecovery: true,
     residentProcessCompletionWake: true,
     residentStageWake: true,
     nonResidentProcessWakeRejected: true,

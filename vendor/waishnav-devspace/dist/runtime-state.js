@@ -223,11 +223,16 @@ export class StructuredRuntimeState {
         if (!row)
             return undefined;
         const substantiveIncrement = input.substantive === false ? 0 : 1;
+        const fulfillsSyntheticResume = substantiveIncrement > 0 && row.delivery_owner === "synthetic-active";
         const turnLeaseExpiresAt = new Date(Date.now() + COMPLETION_STALL_SUSPECT_MS).toISOString();
         this.database.sqlite.prepare(`
           update continuation_tasks
           set workspace_id=?, last_model_activity_at=?, last_activity_at=?,
               substantive_activity_count=coalesce(substantive_activity_count,0)+?,
+              superseded_delivery_token=case when ? then delivery_token else superseded_delivery_token end,
+              delivery_token=case when ? then null else delivery_token end,
+              delivery_owner=case when ? then 'synthetic-worked' else delivery_owner end,
+              delivery_owner_expires_at=case when ? then null else delivery_owner_expires_at end,
               turn_lease_expires_at=case when continuation_mode='completion-driven' then ? else turn_lease_expires_at end,
               stall_state=case when continuation_mode='completion-driven' then 'ACTIVE' else stall_state end,
               stall_suspected_at=case when continuation_mode='completion-driven' then null else stall_suspected_at end,
@@ -237,7 +242,10 @@ export class StructuredRuntimeState {
               stall_evidence=case when continuation_mode='completion-driven' then null else stall_evidence end,
               updated_at=?
           where id=?
-        `).run(workspaceId, nowIso, nowIso, substantiveIncrement, turnLeaseExpiresAt, nowIso, row.id);
+        `).run(workspaceId, nowIso, nowIso, substantiveIncrement,
+            fulfillsSyntheticResume ? 1 : 0, fulfillsSyntheticResume ? 1 : 0,
+            fulfillsSyntheticResume ? 1 : 0, fulfillsSyntheticResume ? 1 : 0,
+            turnLeaseExpiresAt, nowIso, row.id);
         return row.id;
     }
     reapAbandonedContinuationTasks(input = {}) {
@@ -436,6 +444,7 @@ export class StructuredRuntimeState {
             deliveryGeneration: Number(row.delivery_generation ?? 0),
             deliveryToken: row.delivery_token ?? undefined,
             deliveryOwner: row.delivery_owner ?? undefined,
+            syntheticResumeWorkRequired: row.delivery_owner === "synthetic-active",
             deliveryOwnerExpiresAt: row.delivery_owner_expires_at ?? undefined,
             manualTakeoverAt: row.manual_takeover_at ?? undefined,
             coordinatorInstanceId: row.coordinator_instance_id ?? undefined,
@@ -1307,6 +1316,7 @@ export class StructuredRuntimeState {
                 const confirmedLimitTeardown = /confirmed turn-limit teardown/i.test(continuationNote);
                 const confirmedLimitLeaseExpired = /confirmed turn-limit lease expired/i.test(continuationNote);
                 const completionStallCorroborated = /task contract stall corroborated/i.test(continuationNote);
+                const syntheticResumeWorkRetry = /synthetic resume work lease expired/i.test(continuationNote);
                 const turnStartedAt = current.turn_started_at ? Date.parse(current.turn_started_at) : NaN;
                 const confirmedLimitMs = Number(current.confirmed_turn_limit_ms || 0);
                 const lastModelActivityAt = current.last_model_activity_at ? Date.parse(current.last_model_activity_at) : NaN;
@@ -1335,12 +1345,21 @@ export class StructuredRuntimeState {
                     && current.state === "RUNNING"
                     && taskIncomplete
                     && String(current.stall_state || "ACTIVE") === "CONTINUATION_ARMED";
+                const syntheticResumeWorkRecoveryReady = syntheticResumeWorkRetry
+                    && currentMode === "completion-driven"
+                    && current.state === "RUNNING"
+                    && taskIncomplete
+                    && String(current.delivery_owner || "") === "synthetic-active"
+                    && Boolean(current.delivery_token)
+                    && Number.isFinite(Date.parse(current.turn_lease_expires_at || ""))
+                    && now.getTime() >= Date.parse(current.turn_lease_expires_at);
                 if (!wakePending && !deliveryAckRetryAuthorized && !manualRecovery && !(currentMode !== "compat" && recentTimeout)
                     && !recentConfirmedTeardown && !confirmedLeaseRecoveryReady
-                    && !completionStallRecoveryReady) {
+                    && !completionStallRecoveryReady && !syntheticResumeWorkRecoveryReady) {
                     return { accepted: false, reason: "continuation-trigger-not-authorized", task: rowToTask(current) };
                 }
-                if (!wakePending && !deliveryAckRetryAuthorized && current.last_continuation_at && now.getTime() - Date.parse(current.last_continuation_at) < 60_000) {
+                if (!wakePending && !deliveryAckRetryAuthorized && !syntheticResumeWorkRecoveryReady
+                    && current.last_continuation_at && now.getTime() - Date.parse(current.last_continuation_at) < 60_000) {
                     return { accepted: false, reason: "continuation-cooldown", task: rowToTask(current) };
                 }
                 if (current.deadline_at && Date.parse(current.deadline_at) <= now.getTime()) {
@@ -1376,6 +1395,7 @@ export class StructuredRuntimeState {
                 return {
                     accepted: true,
                     ...(deliveryAckRetryAuthorized ? { deliveryAckRetry: true } : {}),
+                    ...(syntheticResumeWorkRecoveryReady ? { syntheticResumeWorkRetry: true } : {}),
                     deliveryToken: nextDeliveryToken,
                     deliveryGeneration: nextDeliveryGeneration,
                     task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)),

@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.51**
+当前稳定版本：**1.1.52**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.51.zip
+DevSpacePortable-Windows-x64-1.1.52.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -343,6 +343,16 @@ https://你的域名/mcp
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.52 主要变化
+
+- **修复 synthetic continuation “只 ACK 32 秒就结束”的真实问题。** 1.1.51 的 `finalResponseAllowed=false` 只能作为模型可读约束，第一次 `continuation_task status` 成功后 readiness delivery 就已经被视为 ACK；真实现场因此出现自动续轮成功进入新轮，却只检查 Task Contract 状态、约 32 秒后直接输出进度摘要的情况。1.1.52 把“连接 ACK”和“恢复工作完成”拆成两个持久阶段。
+- **status ACK 后新增 substantive-work obligation。** synthetic 模型轮正确 token 的第一次 `status` 只将 owner 置为 `synthetic-active`；只有后续至少一次非 continuation 控制类 DevSpace 实际工具操作才把 generation 置为 `synthetic-worked` 并废弃旧 token。单纯 status、heartbeat、re-anchor 或状态说明不再满足恢复契约。
+- **status-only 短轮会自动再次恢复，但不靠写死分钟数。** 如果 synthetic status 已 ACK、required milestones 仍未完成，却一直没有 substantive DevSpace work，则复用当前 completion-driven Turn Lease。Lease 到期后 Workspace App 会把同一未履行 obligation 作为失败恢复，创建新的 delivery generation/token；旧 synthetic token 被 supersede，避免迟到轮并发执行。
+- **普通 resource teardown 继续 fail-closed。** 1.1.52 没有把 iframe/card teardown 重新当成模型结束证据；因此卡片刷新或 UI 重建不会仅因为 synthetic-active 就抢开第二轮。明确 Host timeout、confirmed cutoff、resident stage/process wake 等既有授权路径保持不变。
+- **synthetic 提示改成短的 action-first 指令。** 自动消息首先要求同 task/workspace `status`，成功后若 `continueRequired=true` / `finalResponseAllowed=false`，必须立即执行 `nextRequiredMilestones/remainingMilestones` 的实际 DevSpace 工具工作；连接协议说明不再占据一大段 synthetic 用户消息。Protocol 仍为 **1.5**。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.52.md)
 
 ## 1.1.51 主要变化
 

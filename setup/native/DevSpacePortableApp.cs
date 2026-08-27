@@ -4919,7 +4919,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.51 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.52 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5292,7 +5292,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "1.1.51 将 Task Contract 的持久身份收敛为 conversation 单例，workspace 只是执行上下文；升级时会自动合并重复/幽灵任务并修复旧 Anchor 元数据。普通 teardown、静默和进程结束默认 fail-closed，只有明确 Host timeout 或 confirmed cutoff + grace + quiet + 未完成里程碑才允许 completion-driven 恢复。自动续轮带持久 delivery generation；若用户手动新消息先接管任务，迟到的 synthetic turn 会被废弃，避免并发重复执行。MCP session 采用重连保留窗口、在途请求保护和硬上限，降低高频 connector 重建导致的断连。",
+                Text = "1.1.52 修复真实自动续轮进入新 assistant turn 后只调用 continuation status、思考几十秒便提前结束的问题。synthetic status 现在只表示连接 ACK，不再等价于续轮工作已完成；Task Contract 会持久保留 substantive-work obligation，直到发生至少一次非 continuation 控制类 DevSpace 实际操作、进入真实 WAITING_EXTERNAL 或完成任务。若模型只 ACK 后停止，resumed Turn Lease 到期会以新 generation/token 自动恢复；普通 iframe/resource teardown 仍 fail-closed，避免 UI 重建误开并行轮。续轮提示改为短的 action-first 指令，要求 status 后立即执行 remaining milestones。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
@@ -5772,7 +5772,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.51") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.52") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }

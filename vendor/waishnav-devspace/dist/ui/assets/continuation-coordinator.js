@@ -150,6 +150,12 @@ function completionActivityLeaseExpired(task) {
   return Number.isFinite(expiresAt) && Date.now() >= expiresAt;
 }
 
+function syntheticResumeWorkRetryDue(task) {
+  return completionActivityLeaseExpired(task)
+    && task?.syntheticResumeWorkRequired === true
+    && Boolean(task?.deliveryToken);
+}
+
 function completionStallArmed(task) {
   return completionDrivenTask(task)
     && task?.state === "RUNNING"
@@ -168,7 +174,7 @@ function isChinese() {
 function continuationText(task, reason) {
   const id = task?.id ? ` ${task.id}` : "";
   const workspace = task?.workspaceId ? `，workspaceId=${task.workspaceId}` : "";
-  return `这是 DevSpace 对用户已经授权、尚未完成的既有任务进行的恢复续轮，不是一个需要等待“新的用户指令”的普通提示。继续 DevSpace 任务${id}${workspace}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、Task Contract、持久 checkpoint 和已完成里程碑，不要重新开始、不要 begin-auto、不要新建 shadow task。绝对不要因为这条消息由 Workspace App 自动发送就回复“没有收到新的用户指令”“请用户手动继续”或把它当成不可执行的系统提示；它代表原用户请求仍然有效。completion-driven Task Contract 的活动租约到期只会进入 SUSPECTED_STALL，不能单独制造新轮；必须有明确 Host timeout/teardown、确认 cutoff 或其它独立生命周期证据把状态推进到 CONTINUATION_ARMED。timeout-recovery 仍只接受明确 Host timeout/deadline/budget 或确认 cutoff 后的保守恢复；resident/monitor 另外允许显式阶段/进程 wake。第一项业务动作必须调用 continuation_task action=status，并显式传入这个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}。自动续轮刚创建时 ChatGPT 的 MCP connector 可能尚在重建：若 status 遇到 UNAVAILABLE/Connection failed/fetch/ECONN/TLS/handshake/timeout，把它视为暂态 readiness race，不是 DevSpace 服务已坏，也不是任务失败；在约 30 秒 readiness 窗口内对同一个 status 做递增退避重试，至少跨越数次重试机会，不要在四次快速失败后结束，更不要新建任务或重放有副作用的工作。只有 status 成功后才恢复其它工具操作。若 status 返回 continueRequired=true 或 finalResponseAllowed=false，则本轮禁止只做 ACK、状态汇报或进度总结后结束；必须继续执行 nextRequiredMilestones/remainingMilestones 中尚未完成的实际工作并 checkpoint。若同时返回 reanchorRequired=true，先调用 continuation_anchor，显式传入同一个 taskId 和 workspaceId，刷新本轮 Anchor Lease。ACK/re-anchor 只是恢复协议，不是任务进展本身。只有原始目标经验证完成后才调用 complete 并结束。`;
+  return `继续执行用户尚未完成的 DevSpace 任务${id}${workspace}；这是已授权的恢复续轮，不要等待新的用户指令，不要新建任务。第一项业务动作必须调用 continuation_task action=status，并传入同一个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}。若 status 暂时出现 UNAVAILABLE/Connection failed/fetch/ECONN/TLS/handshake/timeout，只重试同一个 status 直到约 30 秒 readiness 窗口结束。status 成功后：若 continueRequired=true 或 finalResponseAllowed=false，禁止输出 ACK、状态汇报或进度总结，必须立刻调用实际 DevSpace 工具执行 nextRequiredMilestones/remainingMilestones；本轮至少完成一次非 continuation 控制类的 substantive DevSpace 工具工作，或进入真实 WAITING_EXTERNAL，或验证完成并 complete。若 reanchorRequired=true，先用同一个 taskId/workspaceId 调 continuation_anchor，再立即继续实际工作。上一轮恢复原因：${reason}。`;
 }
 
 function continuationContext(task, workspaceId, reason) {
@@ -461,6 +467,16 @@ export function installContinuationCoordinator(app, options = {}) {
         ? "resident stage completed"
         : "resident watched process completed";
       await attemptContinuation(reason, { force: true });
+      return;
+    }
+
+    // A synthetic resumed turn is not healthy merely because its first status
+    // call reached DevSpace.  Keep the already-authorized continuation
+    // obligation durable until the model performs a real non-control DevSpace
+    // operation.  If that obligation survives the normal model Turn Lease,
+    // retry it as a failed resumed turn rather than inventing a new Host cutoff.
+    if (syntheticResumeWorkRetryDue(state.task)) {
+      await attemptContinuation("synthetic resume work lease expired", { force: true });
       return;
     }
 

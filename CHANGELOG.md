@@ -2,6 +2,16 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.52
+
+- 修复真实 synthetic continuation 已成功进入新 assistant turn，却只调用 `continuation_task status`、思考几十秒便输出状态摘要并结束的问题。`finalResponseAllowed=false` 不再被当作唯一保障；服务端新增持久 synthetic resumed-turn substantive-work obligation。
+- synthetic status ACK 只证明 MCP readiness，不再代表恢复工作已推进。正确 token ACK 后任务保持 `synthetic-active`，直到后续非 continuation 控制类 DevSpace 实际工具调用把该 generation 标记为 `synthetic-worked` 并 supersede 旧 token。
+- 如果 status ACK 后没有实际工作且 required milestones 仍未完成，复用现有 completion-driven Turn Lease；Lease 到期才允许以新的 delivery generation/token 恢复该未履行 obligation。该路径不依赖固定 32 秒、60 秒或 ChatGPT 25 分钟限制。
+- 普通 iframe/resource teardown 继续 fail-closed，避免 UI/card 重建时误开并行 synthetic turn；人工新消息优先、Host timeout/confirmed cutoff、resident stage/process wake、MCP reconnect grace 等 1.1.51 语义保持不变。
+- synthetic continuation 文本压缩为 action-first 协议：先 status，随后立即执行 remaining milestones 的实际 DevSpace 工具工作；status/re-anchor/ACK/进度总结本身不能满足续轮工作义务。Protocol 仍为 1.5。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.52.md)
+
 ## 1.1.51
 
 - continuation Task Contract 改为强制 conversation 单例；migration 26 会重复执行 singleton reconciliation，自愈同版本热修复/中断迁移留下的重复任务，并修复历史 `continuation_anchor` 已调用但 mount 时间缺失的问题。Portable 控制中心只隐藏/回收真正零进展、零 evidence、零 watch、零 continuation 的 provisional fallback，不碰真实任务与 resident monitor。

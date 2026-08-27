@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.51";
+export const DEVSPACE_SERVER_VERSION = "1.1.52";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },
@@ -170,6 +170,8 @@ const FEATURE_CATALOG = [
     { id: "mcp-continuation-fail-closed-resource-teardown", maturity: "stable", since: "1.1.51" },
     { id: "mcp-session-reconnect-grace", maturity: "stable", since: "1.1.51" },
     { id: "mcp-session-inflight-eviction-protection", maturity: "stable", since: "1.1.51" },
+    { id: "mcp-continuation-synthetic-work-obligation", maturity: "stable", since: "1.1.52" },
+    { id: "mcp-continuation-status-only-turn-recovery", maturity: "stable", since: "1.1.52" },
     { id: "remote-agent-runtime-device-compatibility", maturity: "stable", since: "1.1.46" },
     { id: "remote-agent-ephemeral-runtime-scratch", maturity: "stable", since: "1.1.46" },
 ];
