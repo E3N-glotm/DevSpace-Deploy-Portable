@@ -1402,6 +1402,21 @@ namespace DevSpacePortable.NativeUI
             using (RemoteAgentsDialog agents = new RemoteAgentsDialog(manager))
             {
                 agents.CreateControl();
+                TableLayoutPanel scrollContent = FindControls<TableLayoutPanel>(agents).FirstOrDefault(panel => panel.Name == "RemoteAgentScrollableContent");
+                bool remoteAgentDefaultEditorCollapsed = scrollContent != null
+                    && scrollContent.RowStyles.Count >= 4
+                    && scrollContent.RowStyles[2].Height <= 0.1F
+                    && scrollContent.RowStyles[3].Height <= 0.1F
+                    && scrollContent.Height <= 400;
+                System.Reflection.MethodInfo beginNewAgentEditor = typeof(RemoteAgentsDialog).GetMethod("BeginNewAgentEditor", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (beginNewAgentEditor == null) throw new InvalidOperationException("Remote Agent new-server editor entry point is missing.");
+                beginNewAgentEditor.Invoke(agents, null);
+                agents.PerformLayout();
+                bool remoteAgentExplicitEditorExpanded = scrollContent != null
+                    && scrollContent.RowStyles.Count >= 4
+                    && scrollContent.RowStyles[2].Height >= 219F
+                    && scrollContent.RowStyles[3].Height >= 423F
+                    && scrollContent.Height >= 1000;
                 Size[] remoteSizes = new[]
                 {
                     new Size(1040, 760),
@@ -1421,7 +1436,6 @@ namespace DevSpacePortable.NativeUI
                 int remoteInputCount = FindControls<RemoteInputHost>(agents).Count();
                 int remoteCardCount = FindControls<RemoteCard>(agents).Count();
                 Panel scrollViewport = FindControls<Panel>(agents).FirstOrDefault(panel => panel.Name == "RemoteAgentScrollViewport");
-                TableLayoutPanel scrollContent = FindControls<TableLayoutPanel>(agents).FirstOrDefault(panel => panel.Name == "RemoteAgentScrollableContent");
                 agents.Size = new Size(1040, 760);
                 agents.PerformLayout();
                 if (scrollViewport != null) scrollViewport.PerformLayout();
@@ -1431,7 +1445,12 @@ namespace DevSpacePortable.NativeUI
                     && !scrollContent.AutoSize
                     && scrollContent.Height > scrollViewport.ClientSize.Height
                     && scrollViewport.DisplayRectangle.Height >= scrollContent.Bottom;
-                bool remoteButtonsUnclipped = FindControls<ModernButton>(agents).All(button => button.Parent == null || button.Bottom <= button.Parent.ClientSize.Height + 1);
+                bool remoteButtonsUnclipped = FindControls<ModernButton>(agents).All(button => button.Parent == null
+                    || (button.Top >= -1 && button.Bottom <= button.Parent.ClientSize.Height + 1));
+                FlowLayoutPanel remoteHeaderActions = FindControls<FlowLayoutPanel>(agents).FirstOrDefault(panel => panel.Name == "RemoteAgentHeaderActions");
+                bool remoteHeaderButtonsUnclipped = remoteHeaderActions != null
+                    && remoteHeaderActions.ClientSize.Height >= 68
+                    && FindControls<ModernButton>(remoteHeaderActions).All(button => button.Top >= 0 && button.Bottom <= remoteHeaderActions.ClientSize.Height);
                 Label sshHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("优先通过现有 Agent", StringComparison.Ordinal));
                 Label privilegeHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("无管理员权限", StringComparison.Ordinal));
                 bool remoteHintsUnclipped = new[] { sshHint, privilegeHint }.All(label =>
@@ -1448,11 +1467,14 @@ namespace DevSpacePortable.NativeUI
                     && FindControls<TextBox>(agents).Count() >= 3
                     && FindControls<SurfacePanel>(agents).Count() == 0
                     && FindControls<FieldHost>(agents).Count() == 0
+                    && remoteAgentDefaultEditorCollapsed
+                    && remoteAgentExplicitEditorExpanded
                     && remoteCardCount >= 3
                     && remoteInputCount >= 7
                     && remoteTileCount >= 1
                     && remoteButtonMinHeight >= 44
                     && remoteButtonsUnclipped
+                    && remoteHeaderButtonsUnclipped
                     && remoteHintsUnclipped
                     && remoteScrollableLayout
                     && commandBox != null
@@ -1463,8 +1485,11 @@ namespace DevSpacePortable.NativeUI
                 report["remoteAgentCardCount"] = remoteCardCount;
                 report["remoteAgentButtonMinHeight"] = remoteButtonMinHeight;
                 report["remoteAgentButtonsUnclipped"] = remoteButtonsUnclipped;
+                report["remoteAgentHeaderButtonsUnclipped"] = remoteHeaderButtonsUnclipped;
                 report["remoteAgentHintsUnclipped"] = remoteHintsUnclipped;
                 report["remoteAgentScrollableLayout"] = remoteScrollableLayout;
+                report["remoteAgentDefaultEditorCollapsed"] = remoteAgentDefaultEditorCollapsed;
+                report["remoteAgentExplicitEditorExpanded"] = remoteAgentExplicitEditorExpanded;
                 report["remoteAgentScrollContentHeight"] = scrollContent == null ? 0 : scrollContent.Height;
                 report["remoteAgentScrollViewportHeight"] = scrollViewport == null ? 0 : scrollViewport.ClientSize.Height;
                 report["remoteAgentSshHintHeight"] = sshHint == null ? 0 : sshHint.ClientSize.Height;
@@ -2451,6 +2476,13 @@ namespace DevSpacePortable.NativeUI
         private readonly Label _status = new Label();
         private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         private Dictionary<string, object> _selectedAgent = new Dictionary<string, object>();
+        private TableLayoutPanel _remoteRoot;
+        private RemoteCard _sshEditorCard;
+        private RemoteCard _agentEditorCard;
+        private Button _newAgentButton;
+        private Button _closeAgentEditorButton;
+        private Button _deployAgentButton;
+        private bool _creatingNewAgent;
         private bool _sshBusy;
         private static readonly Dictionary<string, DateTime> BackgroundSshAttempts = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
@@ -2516,6 +2548,7 @@ namespace DevSpacePortable.NativeUI
                 BackColor = UiPalette.Background,
                 Margin = new Padding(0),
             };
+            _remoteRoot = root;
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
             // Keep a real, AutoSize content surface inside a separate scrolling
@@ -2572,10 +2605,16 @@ namespace DevSpacePortable.NativeUI
                 BackColor = UiPalette.Surface,
                 Margin = new Padding(0),
             };
-            agentSection.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            // ActionButton is intentionally taller than a stock WinForms
+            // button.  A 44px header clips its rounded top edge at 100% DPI and
+            // becomes worse under DPI scaling.  Reserve the preferred control
+            // height plus vertical breathing room so Add Server / Refresh are
+            // always fully inside the card.
+            agentSection.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
             agentSection.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            TableLayoutPanel agentHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = UiPalette.Surface, Margin = new Padding(0) };
+            TableLayoutPanel agentHeader = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = UiPalette.Surface, Margin = new Padding(0) };
             agentHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            agentHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             agentHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             agentHeader.Controls.Add(new Label
             {
@@ -2588,13 +2627,36 @@ namespace DevSpacePortable.NativeUI
             }, 0, 0);
             agentHeader.Controls.Add(new Label
             {
-                Text = "点击磁贴选择 Agent",
+                Text = "点击磁贴进入编辑",
                 AutoSize = true,
                 Anchor = AnchorStyles.Right,
                 Font = UiTypography.Ui(8.7F),
                 ForeColor = UiPalette.TextMuted,
                 Margin = new Padding(8, 0, 4, 0),
             }, 1, 0);
+            FlowLayoutPanel agentHeaderActions = new FlowLayoutPanel
+            {
+                Name = "RemoteAgentHeaderActions",
+                AutoSize = false,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = UiPalette.Surface,
+                Margin = new Padding(6, 0, 0, 0),
+                Padding = new Padding(0, 10, 0, 10),
+                Dock = DockStyle.Fill,
+                MinimumSize = new Size(0, 68),
+            };
+            _newAgentButton = ActionButton("添加服务器", delegate { BeginNewAgentEditor(); }, true, false, 126);
+            _newAgentButton.Name = "RemoteAgentNewButton";
+            _closeAgentEditorButton = ActionButton("收起编辑", delegate { CloseAgentEditor(); }, false, false, 112);
+            _closeAgentEditorButton.Name = "RemoteAgentCloseEditorButton";
+            _closeAgentEditorButton.Visible = false;
+            Button refreshAgentButton = ActionButton("刷新", async delegate { await LoadAgentsAsync(); }, false, false, 104);
+            refreshAgentButton.Name = "RemoteAgentRefreshButton";
+            agentHeaderActions.Controls.Add(_newAgentButton);
+            agentHeaderActions.Controls.Add(_closeAgentEditorButton);
+            agentHeaderActions.Controls.Add(refreshAgentButton);
+            agentHeader.Controls.Add(agentHeaderActions, 2, 0);
             _agentTiles.Dock = DockStyle.Fill;
             _agentTiles.AutoScroll = true;
             _agentTiles.WrapContents = true;
@@ -2611,7 +2673,8 @@ namespace DevSpacePortable.NativeUI
             agentCard.Controls.Add(agentSection);
             root.Controls.Add(agentCard, 0, 1);
 
-            RemoteCard sshCard = new RemoteCard { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 4, 0, 6) };
+            RemoteCard sshCard = new RemoteCard { Name = "RemoteAgentSshEditorCard", Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 4, 0, 6) };
+            _sshEditorCard = sshCard;
             TableLayoutPanel sshLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -2652,7 +2715,9 @@ namespace DevSpacePortable.NativeUI
             sshActions.WrapContents = false;
             sshActions.Controls.Add(ActionButton("保存 SSH 配置", delegate { SaveCurrentSshProfile(true); }, false, false, 138));
             sshActions.Controls.Add(ActionButton("测试 SSH", async delegate { await TestSshAsync(); }, false, false, 116));
-            sshActions.Controls.Add(ActionButton("一键恢复 / 安装 Agent", async delegate { await RecoverAgentViaSshAsync(false); }, true, false, 190));
+            _deployAgentButton = ActionButton("一键恢复 / 安装 Agent", async delegate { await RecoverAgentViaSshAsync(false); }, true, false, 190);
+            _deployAgentButton.Name = "RemoteAgentDeployButton";
+            sshActions.Controls.Add(_deployAgentButton);
             _sshAutoRecover.Text = "选中 Agent 离线时自动尝试 SSH 救援";
             _sshAutoRecover.AutoSize = true;
             _sshAutoRecover.Checked = true;
@@ -2677,7 +2742,8 @@ namespace DevSpacePortable.NativeUI
             sshCard.Controls.Add(sshLayout);
             root.Controls.Add(sshCard, 0, 2);
 
-            RemoteCard formCard = new RemoteCard { Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 4, 0, 6) };
+            RemoteCard formCard = new RemoteCard { Name = "RemoteAgentConfigEditorCard", Dock = DockStyle.Fill, Padding = new Padding(16), Margin = new Padding(0, 4, 0, 6) };
+            _agentEditorCard = formCard;
             TableLayoutPanel form = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -2795,7 +2861,61 @@ namespace DevSpacePortable.NativeUI
             root.Controls.Add(_status, 0, 4);
             viewport.Controls.Add(root);
             Controls.Add(viewport);
+            SetAgentEditorVisible(false);
             fitScrollableContent();
+        }
+
+        private void SetAgentEditorVisible(bool visible)
+        {
+            if (_sshEditorCard != null) _sshEditorCard.Visible = visible;
+            if (_agentEditorCard != null) _agentEditorCard.Visible = visible;
+            if (_closeAgentEditorButton != null) _closeAgentEditorButton.Visible = visible;
+            if (_newAgentButton != null) _newAgentButton.Text = visible && _creatingNewAgent ? "正在添加" : "添加服务器";
+            if (_deployAgentButton != null)
+                _deployAgentButton.Text = _creatingNewAgent ? "一键部署新 Agent" : "一键恢复 / 更新 Agent";
+            if (_remoteRoot != null && _remoteRoot.RowStyles.Count >= 5)
+            {
+                _remoteRoot.RowStyles[2].SizeType = SizeType.Absolute;
+                _remoteRoot.RowStyles[2].Height = visible ? 220 : 0;
+                _remoteRoot.RowStyles[3].SizeType = SizeType.Absolute;
+                _remoteRoot.RowStyles[3].Height = visible ? 424 : 0;
+                _remoteRoot.Height = visible ? 1024 : 380;
+                _remoteRoot.PerformLayout();
+            }
+        }
+
+        private void ResetNewAgentEditorFields()
+        {
+            _name.Text = "";
+            _installRoot.Text = "/home/ubuntu/workspace";
+            _roots.Text = "/home/ubuntu/workspace";
+            _fullAccess.Checked = false;
+            _installCommand.Text = "";
+            _sshHost.Text = "";
+            _sshPort.Text = "22";
+            _sshUser.Text = "ubuntu";
+            _sshPassword.Text = "";
+            _sshAutoRecover.Checked = true;
+        }
+
+        private void BeginNewAgentEditor()
+        {
+            foreach (RemoteAgentTile tile in _agentTiles.Controls.OfType<RemoteAgentTile>()) tile.Selected = false;
+            _selectedAgent = new Dictionary<string, object>();
+            _creatingNewAgent = true;
+            ResetNewAgentEditorFields();
+            SetAgentEditorVisible(true);
+            _status.Text = "新增服务器模式：填写新的 SSH 与 Agent 信息后可一键部署；不会修改现有磁贴对应的服务器。";
+            _sshHost.Focus();
+        }
+
+        private void CloseAgentEditor()
+        {
+            foreach (RemoteAgentTile tile in _agentTiles.Controls.OfType<RemoteAgentTile>()) tile.Selected = false;
+            _selectedAgent = new Dictionary<string, object>();
+            _creatingNewAgent = false;
+            SetAgentEditorVisible(false);
+            _status.Text = "未选择服务器。点击磁贴可编辑已有服务器，或点击“添加服务器”新建。";
         }
 
         private void ResizeAgentTiles()
@@ -2813,11 +2933,12 @@ namespace DevSpacePortable.NativeUI
             try
             {
                 Dictionary<string, object> result = await _manager.RunJsonAsync("remote-agent-list");
-                string selectedId = ValueText(_selectedAgent, "id");
+                string selectedId = _creatingNewAgent ? "" : ValueText(_selectedAgent, "id");
                 _agentTiles.SuspendLayout();
                 _agentTiles.Controls.Clear();
                 _selectedAgent = new Dictionary<string, object>();
                 int count = 0;
+                bool restoredSelection = false;
                 foreach (Dictionary<string, object> agent in Dictionaries(result, "agents"))
                 {
                     RemoteAgentTile tile = new RemoteAgentTile { Tag = agent };
@@ -2842,7 +2963,10 @@ namespace DevSpacePortable.NativeUI
                     _agentTiles.Controls.Add(tile);
                     count++;
                     if (!string.IsNullOrWhiteSpace(selectedId) && string.Equals(selectedId, ValueText(agent, "id"), StringComparison.Ordinal))
+                    {
                         SelectAgentTile(tile);
+                        restoredSelection = true;
+                    }
                 }
                 if (count == 0)
                 {
@@ -2852,6 +2976,12 @@ namespace DevSpacePortable.NativeUI
                 }
                 _agentTiles.ResumeLayout(true);
                 ResizeAgentTiles();
+                if (!_creatingNewAgent && !restoredSelection)
+                {
+                    _selectedAgent = new Dictionary<string, object>();
+                    foreach (RemoteAgentTile tile in _agentTiles.Controls.OfType<RemoteAgentTile>()) tile.Selected = false;
+                    SetAgentEditorVisible(false);
+                }
                 _status.Text = "已登记 " + count + " 个 Linux Agent。绿色状态磁贴表示最近 heartbeat 正常。";
             }
             catch (Exception ex)
@@ -2872,8 +3002,10 @@ namespace DevSpacePortable.NativeUI
             }
             try
             {
+                string agentId = _creatingNewAgent ? "" : ValueText(_selectedAgent, "id");
                 Dictionary<string, object> result = await _manager.RunJsonAsync("remote-agent-create-enrollment", new
                 {
+                    agentId = agentId,
                     name = _name.Text.Trim(),
                     installRoot = installRoot,
                     accessMode = fullAccess ? "full-access" : "scoped",
@@ -2883,7 +3015,9 @@ namespace DevSpacePortable.NativeUI
                 _installCommand.Text = ValueText(result, "installCommand");
                 _status.Text = string.IsNullOrWhiteSpace(_installCommand.Text)
                     ? "Enrollment 已生成，但当前 publicBaseUrl 不完整，因此没有生成公网安装命令。"
-                    : "一次性安装命令已生成。默认用户级安装，不需要 sudo 密码，也不需要把 SSH 密码交给 DevSpace。";
+                    : string.IsNullOrWhiteSpace(agentId)
+                        ? "新服务器的一次性安装命令已生成。默认用户级安装，不需要 sudo 密码，也不需要把 SSH 密码交给 DevSpace。"
+                        : "已为当前选中的服务器生成更新/重新登记命令。";
             }
             catch (Exception ex)
             {
@@ -3518,14 +3652,18 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             {
                 SaveCurrentSshProfile(false);
                 string agentId = ValueText(_selectedAgent, "id");
+                bool createNew = _creatingNewAgent || string.IsNullOrWhiteSpace(agentId);
                 string agentName = ValueText(_selectedAgent, "name");
                 if (string.IsNullOrWhiteSpace(agentName)) agentName = (_name.Text ?? "").Trim();
-                if (IsAgentHeartbeatHealthy(ValueText(_selectedAgent, "status")))
+                if (!createNew && IsAgentHeartbeatHealthy(ValueText(_selectedAgent, "status")))
                 {
                     _status.Text = "Remote Workspace Agent 最近 heartbeat 正常，当前无需执行 SSH 救援。";
                     return;
                 }
-                string[] selectedRoots = Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+                string[] selectedWritableRoots = Strings(_selectedAgent, "writableRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+                string[] selectedRoots = selectedWritableRoots.Length > 0
+                    ? selectedWritableRoots
+                    : Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
                 string[] roots = selectedRoots.Length > 0
                     ? selectedRoots
                     : _roots.Lines.Select(value => value.Trim()).Where(value => value.Length > 0).ToArray();
@@ -3535,6 +3673,34 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 if (string.IsNullOrWhiteSpace(installRoot)) installRoot = (_installRoot.Text ?? "").Trim();
                 if (string.IsNullOrWhiteSpace(agentName) || string.IsNullOrWhiteSpace(installRoot) || (!string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) && roots.Length == 0))
                     throw new InvalidOperationException("请填写服务器显示名和 Agent 安装目录；Scoped 模式还需要至少一个 Linux 可写目录。 ");
+
+                if (createNew)
+                {
+                    _status.Text = "正在通过 SSH 部署新的 Remote Workspace Agent…";
+                    Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(_manager, "", agentName, roots, installRoot, accessMode);
+                    SshRunResult install = await InstallEnrollmentViaLocalSshAsync(enrollment, agentName, roots);
+                    if (install.ExitCode != 0)
+                    {
+                        string detail = !string.IsNullOrWhiteSpace(install.Error) ? install.Error : install.Output;
+                        throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
+                            ? "通过本机 SSH 部署新的 Remote Agent 失败。"
+                            : detail);
+                    }
+                    bool newOnline = await WaitForAgentOnlineAsync("", agentName, 8);
+                    if (!newOnline)
+                    {
+                        SshRunResult diagnostic = await RunSshScriptAsync(AgentRecoveryDiagnosticScript("", roots, installRoot), 15000);
+                        string diagnosticText = string.Join("\r\n", new[] { diagnostic.Output, diagnostic.Error }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                        throw new InvalidOperationException("新 Agent 已通过 SSH 安装，但 heartbeat 仍未恢复。远端诊断：\r\n" + (string.IsNullOrWhiteSpace(diagnosticText) ? "未返回诊断输出。" : diagnosticText));
+                    }
+                    _creatingNewAgent = false;
+                    _selectedAgent = new Dictionary<string, object>();
+                    await LoadAgentsAsync();
+                    SetAgentEditorVisible(false);
+                    _status.Text = "新的 Remote Workspace Agent 已部署并上线。未修改原有服务器配置。";
+                    return;
+                }
+
                 _status.Text = "Agent 离线救援：正在通过 SSH 检查并启动已有 Agent…";
                 SshRunResult recovery = await RunSshScriptAsync(ExistingAgentRecoveryScript(agentId, roots, installRoot), 30000);
                 bool notInstalled = recovery.ExitCode == 42 || recovery.Output.Contains("DEVSPACE_AGENT_NOT_INSTALLED");
@@ -3615,8 +3781,19 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private void SelectAgentTile(RemoteAgentTile selected)
         {
             if (selected == null || selected.Tag == null) return;
+            Dictionary<string, object> target = selected.Tag as Dictionary<string, object> ?? new Dictionary<string, object>();
+            string targetId = ValueText(target, "id");
+            if (!_creatingNewAgent
+                && selected.Selected
+                && !string.IsNullOrWhiteSpace(targetId)
+                && string.Equals(targetId, ValueText(_selectedAgent, "id"), StringComparison.Ordinal))
+            {
+                CloseAgentEditor();
+                return;
+            }
+            _creatingNewAgent = false;
             foreach (RemoteAgentTile tile in _agentTiles.Controls.OfType<RemoteAgentTile>()) tile.Selected = ReferenceEquals(tile, selected);
-            _selectedAgent = selected.Tag as Dictionary<string, object> ?? new Dictionary<string, object>();
+            _selectedAgent = target;
             selected.Focus();
             string name = ValueText(_selectedAgent, "name");
             string id = ValueText(_selectedAgent, "id");
@@ -3624,9 +3801,13 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             string installRoot = ValueText(_selectedAgent, "installRoot");
             if (!string.IsNullOrWhiteSpace(installRoot)) _installRoot.Text = installRoot;
             _fullAccess.Checked = string.Equals(ValueText(_selectedAgent, "accessMode"), "full-access", StringComparison.OrdinalIgnoreCase);
-            string[] selectedRoots = Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+            string[] writableRoots = Strings(_selectedAgent, "writableRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+            string[] selectedRoots = writableRoots.Length > 0
+                ? writableRoots
+                : Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
             if (selectedRoots.Length > 0) _roots.Lines = selectedRoots;
             LoadSelectedSshProfile();
+            SetAgentEditorVisible(true);
             _status.Text = string.IsNullOrWhiteSpace(id) ? "已选择 Linux Agent。" : "已选择 " + name + "（" + id + "）。";
         }
 
@@ -4738,7 +4919,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.50 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.51 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5111,7 +5292,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "1.1.50 会为每个 conversation + workspace 自动创建或复用一个非空、completion-driven 的 Task Contract，并由 open_workspace 自动挂载 Anchor Lease。总任务时限和最大续轮默认无限；只要里程碑未完成，模型 Turn Lease 就会在 DevSpace 实际工作时续租，模型若提前结束或资源 teardown，同一个任务会自动恢复。timeout-recovery 仍保留严格 Host 截断语义，resident 仅用于显式常驻/监控。",
+                Text = "1.1.51 将 Task Contract 的持久身份收敛为 conversation 单例，workspace 只是执行上下文；升级时会自动合并重复/幽灵任务并修复旧 Anchor 元数据。普通 teardown、静默和进程结束默认 fail-closed，只有明确 Host timeout 或 confirmed cutoff + grace + quiet + 未完成里程碑才允许 completion-driven 恢复。自动续轮带持久 delivery generation；若用户手动新消息先接管任务，迟到的 synthetic turn 会被废弃，避免并发重复执行。MCP session 采用重连保留窗口、在途请求保护和硬上限，降低高频 connector 重建导致的断连。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
@@ -5124,7 +5305,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationLocked", HeaderText = "锁定", Width = 72 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationProgress", HeaderText = "里程碑", Width = 112 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationTurns", HeaderText = "续轮", Width = 84 });
-            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationCountdown", HeaderText = "下一轮", Width = 104 });
+            _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationCountdown", HeaderText = "恢复状态", Width = 124 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationUpdated", HeaderText = "最近活动", Width = 158 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationObjective", HeaderText = "任务目标", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 320 });
             _continuationGrid.SelectionChanged += delegate { RenderContinuationSummary(); };
@@ -5591,7 +5772,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.50") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.51") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -6049,7 +6230,18 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             string mode = GetString(task, "continuationMode");
             if (string.Equals(state, "PAUSED_BY_USER", StringComparison.OrdinalIgnoreCase)) return "已暂停";
             if (ContinuationTerminal(state) || !string.Equals(state, "RUNNING", StringComparison.OrdinalIgnoreCase)) return "—";
-            if (GetBool(task, "continuationDeliveryAwaitingAck") || GetBool(task, "continuationWakePending") || GetBool(task, "continuationPending")) return "触发中";
+            if (GetBool(task, "continuationDeliveryAwaitingAck"))
+            {
+                int retryCount = Math.Max(1, GetInt(task, "deliveryAckRetryCount"));
+                DateTimeOffset retryAt;
+                if (DateTimeOffset.TryParse(GetString(task, "deliveryAckRetryAfterAt"), out retryAt))
+                {
+                    int seconds = Math.Max(0, (int)Math.Ceiling((retryAt - DateTimeOffset.UtcNow).TotalSeconds));
+                    return "等待恢复 ACK #" + retryCount + " · " + seconds + "s";
+                }
+                return "等待恢复 ACK #" + retryCount;
+            }
+            if (GetBool(task, "continuationWakePending") || GetBool(task, "continuationPending")) return "触发中";
             if (GetStringList(task, "watchProcessHandles").Count > 0) return "等待进程";
             int required = GetInt(task, "progressRequired");
             int completed = GetInt(task, "progressCompleted");
@@ -6058,34 +6250,16 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             if (string.Equals(mode, "resident", StringComparison.OrdinalIgnoreCase)) return "等待阶段";
             if (string.Equals(mode, "completion-driven", StringComparison.OrdinalIgnoreCase))
             {
-                DateTimeOffset leaseExpiry;
-                if (!DateTimeOffset.TryParse(GetString(task, "turnLeaseExpiresAt"), out leaseExpiry)) return "等待租约";
-                TimeSpan leaseRemaining = leaseExpiry - DateTimeOffset.UtcNow;
-                if (leaseRemaining.TotalMilliseconds <= 0) return "续轮就绪";
-                if (leaseRemaining.TotalHours >= 1) return "Lease " + ((int)leaseRemaining.TotalHours) + ":" + leaseRemaining.Minutes.ToString("00") + ":" + leaseRemaining.Seconds.ToString("00");
-                return "Lease " + ((int)leaseRemaining.TotalMinutes) + ":" + leaseRemaining.Seconds.ToString("00");
+                string stall = GetString(task, "stallState", "ACTIVE");
+                if (string.Equals(stall, "CONTINUATION_ARMED", StringComparison.OrdinalIgnoreCase)) return "恢复已就绪";
+                if (string.Equals(stall, "SUSPECTED_STALL", StringComparison.OrdinalIgnoreCase)) return "疑似静默";
+                return "Turn 活跃";
             }
             if (!string.Equals(mode, "timeout-recovery", StringComparison.OrdinalIgnoreCase)) return "—";
-            long confirmedLimitMs = GetLong(task, "confirmedTurnLimitMs");
-            long observedMs = GetLong(task, "observedTurnBudgetMs");
-            DateTimeOffset baseTime;
-            if (confirmedLimitMs > 0
-                && DateTimeOffset.TryParse(GetString(task, "turnStartedAt"), out baseTime))
-            {
-                TimeSpan remaining = baseTime.AddMilliseconds(confirmedLimitMs) - DateTimeOffset.UtcNow;
-                if (remaining.TotalMilliseconds <= 0) return "恢复探测";
-                if (remaining.TotalHours >= 1) return "确认 " + ((int)remaining.TotalHours) + ":" + remaining.Minutes.ToString("00") + ":" + remaining.Seconds.ToString("00");
-                return "确认 " + ((int)remaining.TotalMinutes) + ":" + remaining.Seconds.ToString("00");
-            }
-            if (GetInt(task, "hostTimeoutSamples") > 0 && observedMs > 0
-                && DateTimeOffset.TryParse(GetString(task, "turnStartedAt"), out baseTime))
-            {
-                TimeSpan remaining = baseTime.AddMilliseconds(observedMs) - DateTimeOffset.UtcNow;
-                if (remaining.TotalMilliseconds <= 0) return "等待截断";
-                if (remaining.TotalHours >= 1) return "参考 " + ((int)remaining.TotalHours) + ":" + remaining.Minutes.ToString("00") + ":" + remaining.Seconds.ToString("00");
-                return "参考 " + ((int)remaining.TotalMinutes) + ":" + remaining.Seconds.ToString("00");
-            }
-            return "等待截断";
+            if (string.Equals(GetString(task, "lastHostSignal"), "timeout", StringComparison.OrdinalIgnoreCase)) return "Host 已截断";
+            if (GetLong(task, "confirmedTurnLimitMs") > 0) return "等待 Host 信号";
+            if (GetInt(task, "hostTimeoutSamples") > 0) return "Host profile 已学习";
+            return "等待 Host 信号";
         }
 
         private void UpdateContinuationCountdownDisplay()
@@ -6105,7 +6279,6 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         {
             if (_continuationListLoading) return;
             _continuationListLoading = true;
-            HashSet<string> selectedIds = new HashSet<string>(SelectedContinuationIds(), StringComparer.OrdinalIgnoreCase);
             try
             {
                 Dictionary<string, object> value = await _manager.RunJsonAsync("continuation-list", new
@@ -6113,6 +6286,15 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     includeTerminal = _showTerminalContinuations == null || _showTerminalContinuations.Checked,
                     limit = 300,
                 });
+                // Capture UI state after the awaited refresh returns. Capturing it
+                // before the await races with Ctrl/Shift selection changes made by
+                // the owner while the request is in flight and used to restore a
+                // stale selection snapshot every five seconds.
+                HashSet<string> selectedIds = new HashSet<string>(SelectedContinuationIds(), StringComparer.OrdinalIgnoreCase);
+                string currentId = "";
+                DataGridViewRow previousCurrentRow = _continuationGrid.CurrentRow;
+                Dictionary<string, object> previousCurrentTask = previousCurrentRow == null ? null : previousCurrentRow.Tag as Dictionary<string, object>;
+                if (previousCurrentTask != null) currentId = GetString(previousCurrentTask, "id");
                 _allContinuationTasks = GetDictionaryList(value, "tasks");
                 _continuationGrid.Rows.Clear();
                 foreach (Dictionary<string, object> task in _allContinuationTasks)
@@ -6133,20 +6315,27 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                         GetString(task, "objective"));
                     _continuationGrid.Rows[row].Tag = task;
                 }
-                _continuationGrid.ClearSelection();
+                DataGridViewRow currentRow = null;
                 DataGridViewRow firstSelectedRow = null;
+                foreach (DataGridViewRow row in _continuationGrid.Rows)
+                {
+                    Dictionary<string, object> task = row.Tag as Dictionary<string, object>;
+                    string id = GetString(task, "id");
+                    if (!string.IsNullOrWhiteSpace(currentId) && string.Equals(id, currentId, StringComparison.OrdinalIgnoreCase)) currentRow = row;
+                    if (selectedIds.Contains(id) && firstSelectedRow == null) firstSelectedRow = row;
+                }
+                if (currentRow == null) currentRow = firstSelectedRow;
+                if (currentRow != null) _continuationGrid.CurrentCell = currentRow.Cells[0];
+                _continuationGrid.ClearSelection();
                 if (selectedIds.Count > 0)
                 {
                     foreach (DataGridViewRow row in _continuationGrid.Rows)
                     {
                         Dictionary<string, object> task = row.Tag as Dictionary<string, object>;
-                        if (!selectedIds.Contains(GetString(task, "id"))) continue;
-                        row.Selected = true;
-                        if (firstSelectedRow == null) firstSelectedRow = row;
+                        if (selectedIds.Contains(GetString(task, "id"))) row.Selected = true;
                     }
                 }
-                if (firstSelectedRow != null) _continuationGrid.CurrentCell = firstSelectedRow.Cells[0];
-                if (_continuationGrid.SelectedRows.Count == 0 && _continuationGrid.Rows.Count > 0)
+                if (selectedIds.Count == 0 && string.IsNullOrWhiteSpace(currentId) && _continuationGrid.Rows.Count > 0)
                 {
                     _continuationGrid.Rows[0].Selected = true;
                     _continuationGrid.CurrentCell = _continuationGrid.Rows[0].Cells[0];
@@ -6196,15 +6385,17 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             DateTimeOffset anchorExpiry;
             string anchorText = DateTimeOffset.TryParse(anchorLease, out anchorExpiry)
                 ? anchorExpiry.ToLocalTime().ToString("HH:mm:ss") : "未挂载";
-            string turnLease = GetString(task, "turnLeaseExpiresAt");
-            DateTimeOffset turnExpiry;
-            string turnText = DateTimeOffset.TryParse(turnLease, out turnExpiry)
-                ? turnExpiry.ToLocalTime().ToString("HH:mm:ss") : "—";
+            string stallState = GetString(task, "stallState", "ACTIVE");
+            int cutoffEpoch = GetInt(task, "cutoffEpoch");
+            int deliveryRetryCount = GetInt(task, "deliveryAckRetryCount");
+            string deliveryRetryText = GetBool(task, "continuationDeliveryAwaitingAck")
+                ? "  ·  MCP readiness retry #" + Math.Max(1, deliveryRetryCount)
+                : "";
             string wallClockText = GetBool(task, "unlimitedWallClock") || string.IsNullOrWhiteSpace(GetString(task, "deadlineAt")) ? "无限" : GetString(task, "deadlineAt");
             _continuationSummary.Text =
                 state + pending + "  ·  " + modeText + "  ·  " + ContinuationSourceText(task) + "  ·  " + lockText + "  ·  里程碑 " + GetInt(task, "progressCompleted") + "/" + GetInt(task, "progressRequired") +
                 "  ·  续轮 " + ContinuationTurnsText(task) +
-                "  ·  下一轮 " + ContinuationCountdownText(task) + "  ·  Turn " + turnText + "  ·  Anchor " + anchorText + "  ·  总时限 " + wallClockText + Environment.NewLine +
+                "  ·  恢复状态 " + ContinuationCountdownText(task) + deliveryRetryText + "  ·  Stall " + stallState + "  ·  Host regime #" + cutoffEpoch + "  ·  Anchor " + anchorText + "  ·  总时限 " + wallClockText + Environment.NewLine +
                 "Conversation " + (string.IsNullOrWhiteSpace(conversation) ? "—" : conversation) + "  ·  Workspace " + (string.IsNullOrWhiteSpace(workspace) ? "—" : workspace) + Environment.NewLine +
                 GetString(task, "objective") + (string.IsNullOrWhiteSpace(wait) ? "" : Environment.NewLine + "等待原因：" + wait);
         }

@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.50**
+当前稳定版本：**1.1.51**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.50.zip
+DevSpacePortable-Windows-x64-1.1.51.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -344,14 +344,26 @@ https://你的域名/mcp
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
 
+## 1.1.51 主要变化
+
+- **Task Contract 真正收敛为 conversation 单例。** workspace 只作为执行上下文；migration 25/26 会自动合并旧重复任务、建立 partial unique index，并修复已经调用过 `continuation_anchor` 却缺少 mount 时间的历史记录，避免升级/重连时继续堆积重复卡片。
+- **普通 teardown / 静默 / process completion 全部 fail-closed。** 它们本身不再被当作 Host 截断证据。completion-driven 只有明确 Host timeout，或 confirmed cutoff 已越过且同时满足 recovery grace、model quiet、required milestones 未完成，才会恢复；resident 显式 stage/process wake 单独处理。
+- **人工输入优先于迟到的自动续轮。** 每次 synthetic continuation 带持久 `deliveryGeneration + deliveryToken`；用户手动消息形成的新模型轮如果先访问 DevSpace，会接管 Task Contract 并废弃旧 generation。迟到 synthetic turn 会收到 `synthetic-continuation-superseded` 并停止，避免两个 assistant turn 并发重放写操作。
+- **MCP session churn 不再靠简单 32-session LRU 硬切。** registry 使用 32 soft cap、96 hard cap、2 分钟 reconnect grace 和在途请求引用保护；正在处理请求的 session 不会被容量/idle 淘汰，并增加 `mcp_session_missing` 诊断以区分 connector session miss 与 tunnel/TLS/本地服务故障。
+- **控制中心清理 provisional 噪声更保守。** 只有 24 小时无 anchor、无 evidence/checkpoint、无 watch、无 continuation、无 owner lock、无实质活动的 compatibility fallback 才会自动标记 abandoned；真正任务、已推进任务和 resident monitor 不会被清理。
+- 1.1.50 的 early `toolresult` replay、versioned Workspace App、聚合 operation card、Continuation 专属卡片、Owner pause/lock/stop/delete 与 transport side-effect-aware retry 均保留。Protocol 仍为 **1.5**。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.51.md)
+
 ## 1.1.50 主要变化
 
-- **P0：Task Contract 改为 completion-driven。** 每个 conversation + workspace 在 `open_workspace` 时自动创建或复用一个非空 Task Contract，并同时挂载 Workspace App Anchor。只要 required milestones 尚未全部完成，模型侧 DevSpace 活动就会续租 Turn Lease；如果模型提前结束、Turn Lease 到期，或 incomplete task 对应的 Workspace App 收到 resource teardown，同一个持久 task 都可以恢复，而不是依赖模型“记得继续”。
+- **P0：Task Contract 改为 completion-driven，但 activity lease 不再冒充 Host 截断。** 每个 conversation + workspace 在 `open_workspace` 时自动创建或复用一个非空 Task Contract；默认 `widgets=changes` 下 `open_workspace` 本身保持 headless，需要续轮保护的多步工作只挂载一次 `continuation_anchor` recovery card。模型侧 DevSpace 活动会续租 Turn Lease；lease 到期只把任务标记为 `SUSPECTED_STALL`，不能单独制造新 assistant turn。只有明确 Host timeout/teardown、确认过的 adaptive cutoff 等第二个独立证据把状态推进到 `CONTINUATION_ARMED` 后才允许自动恢复。
 - **总任务时限和最大续轮默认无限。** completion-driven task 的 `maxContinuations=0` 与 `deadlineAt=null` 表示无限，不会因为续轮次数或运行时长自动变成 `BUDGET_EXHAUSTED`。只有显式传入正数时才启用兼容预算；正常完成必须在全部里程碑和验证 evidence 已持久化后，由模型显式调用 `complete`。
 - **未完成的 completion-driven Contract 不会再被 no-progress / repeated-failure 自动终止。** 这些计数只保留为诊断告警；除非用户/Owner 显式停止、显式 terminal fail，或全部 milestones + evidence 验证后显式 `complete`，Task Contract 保持非终态。升级 1.1.49 时，已有非空 `timeout-recovery` 长任务也会迁移为 completion-driven、无限时限/续轮，并获得新的 Turn Lease。
 - **未完成任务禁止状态汇报式收尾。** `begin/status/checkpoint/resume` 都会返回 `taskIncomplete`、`remainingMilestones`、`continueRequired` 和 `finalResponseAllowed`；`finalResponseAllowed=false` 时，ACK、re-anchor、进度摘要或“稍后继续”都不是合法结束条件，模型必须继续实际 DevSpace 工作并 checkpoint。
-- **三种续轮模式职责分离。** `completion-driven` 是普通多步任务默认模式；`timeout-recovery` 保留 1.1.49 的严格 Host cutoff 语义，不会因普通静默或 teardown 续轮；`resident` 仍只用于用户明确授权的常驻/监控任务，并允许显式 `watch-process` / `stage-complete` wake。learned Host budget 继续只做观测，不抢跑当前 turn。
-- **Turn Lease、Anchor Lease 与网络恢复可观测。** 控制中心显示 task 来源、Conversation/Workspace、里程碑、Turn/Anchor Lease、`∞` 续轮上限和无限总时限；Workspace App 对 `UNAVAILABLE`、`Connection failed`、fetch/ECONN/TLS/timeout 使用有界退避，并要求在重放有副作用操作前检查持久状态，避免网络只丢响应时重复执行命令。
+- **三种续轮模式职责分离，Host cutoff 自适应。** `completion-driven` 是普通多步任务默认模式；`timeout-recovery` 保留 1.1.49 的严格 Host cutoff 语义；`resident` 仍只用于用户明确授权的常驻/监控任务，并允许显式 `watch-process` / `stage-complete` wake。真实 timeout 采用可升/可降档的 cutoff regime 样本窗口，不写死 ChatGPT 25 分钟，也不把旧 25m52 永久当成下界。
+- **恢复状态与 synthetic-turn MCP readiness 可观测。** 控制中心显示 `Turn 活跃 / 疑似静默 / 恢复已就绪 / 等待恢复 ACK #N`，而不是“到点必续”的假倒计时；synthetic continuation 创建后必须先用同一 task 的 `status` 证明 MCP readiness。若 ChatGPT connector 尚在 rehydrate 而出现 `Connection failed` / `UNAVAILABLE`，模型在约 30 秒窗口内对 status 递增退避；Workspace App 还会持久化 delivery ACK，并按 `15→30→60→120→240→300s cap` 重发同一个逻辑 continuation。ACK 重发不增加逻辑 continuation count，成功 status 会清除 retry schedule。
+- **Continuation 卡片收敛为单一入口。** ChatGPT 会把每次带 `ui.resourceUri` / `openai/outputTemplate` 的 MCP 调用渲染为一张新的会话卡片，因此旧实现把 Workspace App 同时挂在 workspace 工具与 `continuation_anchor` 上时，会在重连、重开 workspace 后不断复制同一任务卡。1.1.50 默认模式下 workspace 工具改为 headless，只由 `continuation_anchor` 提供 recovery UI；正常情况下一个任务只保留一个活动 anchor，真正失活时才允许 re-anchor。已经写进历史会话的旧卡片无法由 MCP 服务端反向删除。
 - **1.1.49 tunnel 非破坏性自愈策略保持不变。** 公网 DNS/TLS/curl 瞬时失败仍不能单独重启健康 ngrok；只有 owned Agent API 连续证明预期 tunnel 缺失时才允许重启 owned child。Protocol 仍为 **1.5**，Linux Remote Agent wire protocol 与权限模型不变。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.50.md)

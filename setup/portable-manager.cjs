@@ -66,7 +66,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.50";
+const PORTABLE_VERSION = "1.1.51";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -1455,11 +1455,17 @@ async function runContinuationAdmin(action, payload = {}) {
       confirmedTurnLimitMs: Number(row.confirmed_turn_limit_ms || 0),
       confirmedTurnLimitAt: row.confirmed_turn_limit_at || "",
       confirmedTurnLimitSource: row.confirmed_turn_limit_source || "",
+      cutoffSamples: parse(row.cutoff_samples_json, []),
+      cutoffEpoch: Number(row.cutoff_epoch || 0),
+      cutoffRegimeChangedAt: row.cutoff_regime_changed_at || "",
       lastHostSignal: row.last_host_signal || "",
       lastActivityAt: row.last_activity_at || row.updated_at,
       lastContinuationAt: row.last_continuation_at || "",
       lastSendAttemptAt: row.last_send_attempt_at || "",
       lastSendResult: parse(row.last_send_result, {}),
+      deliveryAckStartedAt: row.delivery_ack_started_at || "",
+      deliveryAckRetryCount: Number(row.delivery_ack_retry_count || 0),
+      deliveryAckRetryAfterAt: row.delivery_ack_retry_after_at || "",
       watchProcessHandles: parse(row.watch_process_handles_json, []),
       taskSource: row.task_source || "legacy",
       sourceTool: row.source_tool || "",
@@ -1468,6 +1474,12 @@ async function runContinuationAdmin(action, payload = {}) {
       substantiveActivityCount: Number(row.substantive_activity_count || 0),
       turnLeaseId: row.turn_lease_id || "",
       turnLeaseExpiresAt: row.turn_lease_expires_at || "",
+      stallState: row.stall_state || "ACTIVE",
+      stallSuspectedAt: row.stall_suspected_at || "",
+      stallProbeCount: Number(row.stall_probe_count || 0),
+      stallLastProbeAt: row.stall_last_probe_at || "",
+      stallArmedAt: row.stall_armed_at || "",
+      stallEvidence: row.stall_evidence || "",
       lastAnchorMountedAt: row.last_anchor_mounted_at || "",
       anchorLeaseExpiresAt: row.anchor_lease_expires_at || "",
       unlimitedContinuations: Number(row.max_continuations || 0) <= 0,
@@ -1491,9 +1503,31 @@ async function runContinuationAdmin(action, payload = {}) {
           and coalesce(watch_process_handles_json,'[]')='[]'
           and coalesce(last_activity_at,updated_at,created_at) < ?
       `).run(abandonedAt, abandonedCutoff);
+      database.sqlite.prepare(`
+        update continuation_tasks
+        set state='ABANDONED_AUTO_TASK', terminal_reason='stale-provisional-auto-task', continuation_pending=0,
+          watch_process_handles_json='[]', waiting_reason=null,
+          owner_control_note='Provisional compatibility Task Contract expired without any visible anchor or substantive work.', updated_at=?
+        where auto_created=1 and task_source='auto-conversation' and owner_locked=0 and state='RUNNING'
+          and continuation_pending=0 and continuation_count=0 and coalesce(watch_process_handles_json,'[]')='[]'
+          and coalesce(last_anchor_mounted_at,'')=''
+          and coalesce(completed_milestones_json,'[]')='[]'
+          and coalesce(evidence_json,'{}')='{}'
+          and coalesce(substantive_activity_count,0)=0
+          and coalesce(source_tool,'') in ('compatibility-fallback','open_workspace')
+          and coalesce(last_activity_at,updated_at,created_at) < ?
+      `).run(abandonedAt, abandonedCutoff);
       const limit = Math.max(1, Math.min(Number(payload.limit || 200), 1000));
       const includeTerminal = payload.includeTerminal !== false;
-      const where = includeTerminal ? "" : "where state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')";
+      const includeProvisional = payload.includeProvisional === true;
+      const clauses = [];
+      if (!includeTerminal) {
+        clauses.push("state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')");
+      }
+      if (!includeProvisional) {
+        clauses.push("not (auto_created=1 and task_source='auto-conversation' and coalesce(last_anchor_mounted_at,'')='' and coalesce(completed_milestones_json,'[]')='[]' and coalesce(evidence_json,'{}')='{}' and continuation_count=0 and coalesce(watch_process_handles_json,'[]')='[]' and coalesce(substantive_activity_count,0)=0)");
+      }
+      const where = clauses.length ? `where ${clauses.join(" and ")}` : "";
       const rows = database.sqlite.prepare(`select * from continuation_tasks ${where} order by updated_at desc limit ?`).all(limit);
       return {
         tasks: rows.map(taskFromRow),
@@ -1555,6 +1589,8 @@ async function runContinuationAdmin(action, payload = {}) {
           database.sqlite.prepare(`
             update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
               continuation_pending=0, turn_started_at=?, last_model_activity_at=?, turn_lease_expires_at=?,
+              stall_state='ACTIVE', stall_suspected_at=null, stall_probe_count=0,
+              stall_last_probe_at=null, stall_armed_at=null, stall_evidence=null,
               owner_control_note='Resumed explicitly by Portable owner UI.', updated_at=? where id=?
           `).run(now, now, turnLeaseExpiresAt, now, taskId);
         }

@@ -599,7 +599,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-    text: "DevSpace Portable 1.1.50 · Protocol 1.5",
+    text: "DevSpace Portable 1.1.51 · Protocol 1.5",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);

@@ -2,14 +2,25 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.51
+
+- continuation Task Contract 改为强制 conversation 单例；migration 26 会重复执行 singleton reconciliation，自愈同版本热修复/中断迁移留下的重复任务，并修复历史 `continuation_anchor` 已调用但 mount 时间缺失的问题。Portable 控制中心只隐藏/回收真正零进展、零 evidence、零 watch、零 continuation 的 provisional fallback，不碰真实任务与 resident monitor。
+- completion-driven 恢复重新严格 fail-closed：普通 iframe/resource teardown、普通进程结束、单纯模型静默都不能创建新 assistant turn。只有明确 Host timeout，或已确认 cutoff 且同时满足 recovery grace、model quiet、里程碑未完成，才允许恢复；resident 的显式 stage/process wake 保持独立。
+- synthetic continuation 新增持久 `deliveryToken + deliveryGeneration` 所有权协议。自动恢复轮必须携带 token ACK；若用户手动新消息对应的模型轮先访问 DevSpace，则人工轮接管 Task Contract、废弃旧 synthetic generation，迟到自动轮收到 `synthetic-continuation-superseded` 并停止，避免并发重复副作用。
+- MCP session registry 增加 2 分钟 reconnect grace、32 soft cap / 96 hard cap、在途请求引用保护和 `mcp_session_missing` 诊断。OpenAI connector 高频创建 session 时不再简单 LRU 关闭仍在请求中的或刚创建的 session，同时保持故障风暴下有界内存。
+- 保留 1.1.50 的 early toolResult replay、versioned Workspace App URI、聚合 operation cards、Continuation 专属卡片、Owner pause/lock/stop 控制与 side-effect-aware transport retry；Protocol 仍为 1.5。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.51.md)
+
 ## 1.1.50
 
-- P0：普通多步任务默认改为 `completion-driven` Task Contract。`open_workspace` 自动按 conversation + workspace 创建/复用非空 milestones 并挂载 Workspace App Anchor；模型侧 DevSpace 活动续租 Turn Lease，未完成任务在模型提前结束后的 Turn Lease 到期或 resource teardown 时可恢复同一个持久 task。
+- P0：普通多步任务默认改为 `completion-driven` Task Contract。`open_workspace` 自动按 conversation + workspace 创建/复用非空 milestones，但在默认 `widgets=changes` 模式下保持 headless；需要续轮保护的多步工作只通过一次 `continuation_anchor` 挂载 Workspace App recovery sender，避免 workspace 重开/复用时在会话中堆叠同一任务的重复卡片。模型侧 DevSpace 活动续租 Turn Lease，但 lease 到期只进入 `SUSPECTED_STALL`，不能单独产生新 assistant turn。必须由明确 Host timeout/teardown、确认 cutoff 等独立生命周期证据推进到 `CONTINUATION_ARMED` 后才允许恢复。
 - completion-driven 的总 wall-clock 和最大 continuation count 默认无限：`deadline_at=NULL`、`max_continuations=0` 不再触发 budget terminal；只有显式正数才启用兼容预算。所有 required milestones 与 evidence 验证完成后，模型才显式 `complete`。
 - completion-driven 的 no-progress / repeated-failure 计数改为诊断告警，不再把未完成 Task Contract 自动置为 terminal；migration 22 同时将 1.1.49 中已有、带真实 milestones 的 legacy `timeout-recovery` 活跃任务升级为 completion-driven、无限预算并初始化 Turn Lease。
 - `begin/status/checkpoint/resume` 统一暴露 `taskIncomplete`、`remainingMilestones`、`continueRequired`、`finalResponseAllowed`；`finalResponseAllowed=false` 时 ACK、状态汇报、re-anchor 或“稍后继续”都不能结束当前 assistant turn。
-- 三种模式分工明确：`completion-driven` 负责普通任务的“做到完成”；`timeout-recovery` 保留严格 Host cutoff-only 恢复；`resident` 仅供用户明确授权的常驻/监控 stage/process wake。learned budget 和普通 process completion 不会触发 completion-driven/timeout-recovery。
-- 控制中心新增 Task Contract 来源、Conversation/Workspace、Turn/Anchor Lease、无限续轮/总时限显示；Workspace App 对 `UNAVAILABLE`、`Connection failed`、fetch/ECONN/TLS/timeout 使用有界退避并保持 side-effect-aware 重试。
+- 三种模式分工明确：`completion-driven` 负责普通任务的“做到完成”；`timeout-recovery` 保留严格 Host cutoff-only 恢复；`resident` 仅供用户明确授权的常驻/监控 stage/process wake。Host cutoff 使用带 `cutoffEpoch` 的有限样本 regime，可在 ChatGPT 缩短时限时降档，不再单调固化旧 25 分钟级观测值。
+- 控制中心改为显示 `Turn 活跃 / 疑似静默 / 恢复已就绪 / 等待恢复 ACK #N` 等恢复状态。synthetic continuation 后先以同 task `status` 验证 MCP connector readiness；瞬时 `Connection failed` / `UNAVAILABLE` 使用约 30 秒 model-side readiness 退避。delivery ACK 另以持久 `15→30→60→120→240→300s cap` 退避重发同一个逻辑 continuation，重发不增加 continuation count，避免 `app.sendMessage accepted` 与新 turn MCP rehydrate 的竞态把任务错误停住。
+- 修复会话中重复出现大量相同 DevSpace continuation 卡片的问题：默认 `widgets=changes` 下 `open_workspace` / workspace 类工具不再附带 Workspace App output template，唯一常规 UI 入口为 `continuation_anchor`；只有旧 sender 确认失活并返回 `reanchorRequired=true` 时才允许创建替代 anchor。历史会话里已经生成的旧卡片不会被服务端追溯删除。
 - 1.1.49 的 owned ngrok Agent 恢复门与 DNS/TLS 抖动保护保持不变；Protocol 仍为 1.5，Linux Remote Agent wire protocol 与权限模型不变。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.50.md)

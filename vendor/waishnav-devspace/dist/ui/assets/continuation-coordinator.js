@@ -4,7 +4,10 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
 const CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS = 5_000;
 const CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS = 20_000;
 const CONFIRMED_TURN_LIMIT_MODEL_QUIET_MS = 30_000;
-const TRANSIENT_RETRY_DELAYS_MS = [0, 750, 2_000, 5_000];
+// A resumed ChatGPT turn can be created before its MCP connector has fully
+// rehydrated. Keep retrying the same idempotent control call across roughly a
+// 30-second readiness window instead of giving up after ~8 seconds.
+const TRANSIENT_RETRY_DELAYS_MS = [0, 750, 2_000, 5_000, 8_000, 12_000];
 
 const TERMINAL_STATES = new Set([
   "SUCCEEDED",
@@ -123,6 +126,14 @@ function transientTransportFailure(value) {
   return /unavailable|connection failed|network|fetch|econn|socket|tls|ssl|handshake|temporar|timed?\s*out|timeout/.test(text);
 }
 
+function deliveryAckRetryDue(task) {
+  if (!task?.continuationDeliveryAwaitingAck) return false;
+  const retryAt = Date.parse(task.deliveryAckRetryAfterAt || "");
+  if (Number.isFinite(retryAt)) return Date.now() >= retryAt;
+  const sentAt = Date.parse(task.lastSendAttemptAt || "");
+  return !Number.isFinite(sentAt) || Date.now() - sentAt >= 15_000;
+}
+
 function confirmedCutoffRecoveryReady(task) {
   if (!task || task.state !== "RUNNING" || task.continuationMode === "compat" || !hasUnfinishedMilestones(task)) return false;
   const confirmedLimitMs = Number(task.confirmedTurnLimitMs || 0);
@@ -133,10 +144,17 @@ function confirmedCutoffRecoveryReady(task) {
   return Date.now() - lastModelAt >= CONFIRMED_TURN_LIMIT_MODEL_QUIET_MS;
 }
 
-function completionTurnLeaseExpired(task) {
+function completionActivityLeaseExpired(task) {
   if (!completionDrivenTask(task) || task?.state !== "RUNNING" || !hasUnfinishedMilestones(task)) return false;
   const expiresAt = Date.parse(task.turnLeaseExpiresAt || "");
   return Number.isFinite(expiresAt) && Date.now() >= expiresAt;
+}
+
+function completionStallArmed(task) {
+  return completionDrivenTask(task)
+    && task?.state === "RUNNING"
+    && hasUnfinishedMilestones(task)
+    && task?.stallState === "CONTINUATION_ARMED";
 }
 
 function cancellationIsUserAction(reason) {
@@ -150,7 +168,7 @@ function isChinese() {
 function continuationText(task, reason) {
   const id = task?.id ? ` ${task.id}` : "";
   const workspace = task?.workspaceId ? `，workspaceId=${task.workspaceId}` : "";
-  return `继续 DevSpace 任务${id}${workspace}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、Task Contract、持久 checkpoint 和已完成里程碑，不要重新开始。completion-driven Task Contract 会在里程碑未完成且模型 Turn Lease 到期或资源 teardown 时续轮；timeout-recovery 仍只接受明确 Host timeout/deadline/budget 或确认 cutoff 后的保守恢复；resident/monitor 另外允许显式阶段/进程 wake。第一步必须调用 continuation_task action=status，并显式传入这个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}；若 MCP 暂时 UNAVAILABLE/Connection failed，等待后按退避重试同一操作，不要新建任务。若 status 返回 continueRequired=true 或 finalResponseAllowed=false，则本轮禁止只做 ACK、状态汇报或进度总结后结束；必须继续执行 nextRequiredMilestones/remainingMilestones 中尚未完成的实际工作并 checkpoint。若同时返回 reanchorRequired=true，先调用 continuation_anchor，显式传入同一个 taskId 和 workspaceId，刷新本轮 Anchor Lease。ACK/re-anchor 只是恢复协议，不是任务进展本身。只有原始目标经验证完成后才调用 complete 并结束。`;
+  return `这是 DevSpace 对用户已经授权、尚未完成的既有任务进行的恢复续轮，不是一个需要等待“新的用户指令”的普通提示。继续 DevSpace 任务${id}${workspace}。上一轮因 ${reason} 需要续轮；恢复现有 workspace、processHandle、Task Contract、持久 checkpoint 和已完成里程碑，不要重新开始、不要 begin-auto、不要新建 shadow task。绝对不要因为这条消息由 Workspace App 自动发送就回复“没有收到新的用户指令”“请用户手动继续”或把它当成不可执行的系统提示；它代表原用户请求仍然有效。completion-driven Task Contract 的活动租约到期只会进入 SUSPECTED_STALL，不能单独制造新轮；必须有明确 Host timeout/teardown、确认 cutoff 或其它独立生命周期证据把状态推进到 CONTINUATION_ARMED。timeout-recovery 仍只接受明确 Host timeout/deadline/budget 或确认 cutoff 后的保守恢复；resident/monitor 另外允许显式阶段/进程 wake。第一项业务动作必须调用 continuation_task action=status，并显式传入这个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}。自动续轮刚创建时 ChatGPT 的 MCP connector 可能尚在重建：若 status 遇到 UNAVAILABLE/Connection failed/fetch/ECONN/TLS/handshake/timeout，把它视为暂态 readiness race，不是 DevSpace 服务已坏，也不是任务失败；在约 30 秒 readiness 窗口内对同一个 status 做递增退避重试，至少跨越数次重试机会，不要在四次快速失败后结束，更不要新建任务或重放有副作用的工作。只有 status 成功后才恢复其它工具操作。若 status 返回 continueRequired=true 或 finalResponseAllowed=false，则本轮禁止只做 ACK、状态汇报或进度总结后结束；必须继续执行 nextRequiredMilestones/remainingMilestones 中尚未完成的实际工作并 checkpoint。若同时返回 reanchorRequired=true，先调用 continuation_anchor，显式传入同一个 taskId 和 workspaceId，刷新本轮 Anchor Lease。ACK/re-anchor 只是恢复协议，不是任务进展本身。只有原始目标经验证完成后才调用 complete 并结束。`;
 }
 
 function continuationContext(task, workspaceId, reason) {
@@ -163,7 +181,7 @@ function continuationContext(task, workspaceId, reason) {
     `completedMilestones: ${(task?.completedMilestones ?? []).join(" | ") || "none recorded"}`,
     `requiredMilestones: ${(task?.requiredMilestones ?? []).join(" | ") || "none recorded"}`,
     `continuationReason: ${reason}`,
-    "completion-driven mode is an explicit Task Contract completion guard: while required milestones remain, model-side DevSpace activity renews a Turn Lease; if the assistant turn ends or goes completely inactive past that lease, a surviving Workspace App may continue the same task. timeout-recovery remains fail-closed before a proven Host cutoff, and resident additionally permits explicit stage/process wakes. Learned budgets and ordinary process completion never trigger completion-driven/timeout-recovery tasks. If status returns continueRequired=true or finalResponseAllowed=false, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and checkpoint progress. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first. Resume existing process handles and workspace state. Do not restart completed work.",
+    "This is an authorized recovery of the user's already-active unfinished Task Contract. Do not wait for a new user instruction and do not treat the synthetic Workspace App message as non-actionable. completion-driven mode is an explicit Task Contract completion guard. Model-side DevSpace activity renews an activity lease, but lease expiry is only a weak SUSPECTED_STALL signal and never creates a new turn by itself. A continuation requires independent Host/lifecycle evidence that arms CONTINUATION_ARMED. timeout-recovery remains fail-closed before a proven Host cutoff, and resident additionally permits explicit stage/process wakes. Learned budgets and ordinary process completion never trigger completion-driven/timeout-recovery tasks. The resumed turn must prove MCP readiness with continuation_task status before side-effecting work. Transient UNAVAILABLE/Connection failed/TLS/fetch errors immediately after app.sendMessage are a connector-readiness race: retry the same status across an increasing-backoff readiness window instead of concluding the service is down or asking the user to continue manually. If status returns continueRequired=true or finalResponseAllowed=false, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and checkpoint progress. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first. Resume existing process handles and workspace state. Do not restart completed work.",
   ].join("\n");
 }
 
@@ -224,6 +242,7 @@ export function installContinuationCoordinator(app, options = {}) {
     supervisorTimer: undefined,
     lastHeartbeatAt: 0,
     deliveryInFlight: false,
+    supervisorTickInFlight: false,
     hostProfileId: undefined,
   };
   const supervisorTickMs = Math.max(250, Number(options.supervisorTickMs ?? DEFAULT_SUPERVISOR_TICK_MS));
@@ -343,14 +362,14 @@ export function installContinuationCoordinator(app, options = {}) {
     throw officialError ?? new Error("The host exposes no supported follow-up messaging path.");
   }
 
-  async function attemptContinuation(reason, { force = false } = {}) {
+  async function attemptContinuation(reason, { force = false, skipPrepare = false } = {}) {
     if (state.deliveryInFlight) return false;
     if (state.disposed && !force) return false;
     if (!force) return false;
     const wakeRetry = Boolean(state.task?.continuationWakePending) || reason === "watched process completed";
     state.deliveryInFlight = true;
     try {
-      const prepared = await prepareContinuation(reason);
+      const prepared = skipPrepare ? true : await prepareContinuation(reason);
       if (!prepared || !state.task || terminal(state.task) || automationSuppressed(state.task)) {
         if (!wakeRetry || !state.task || terminal(state.task)) stopSupervisor();
         return false;
@@ -358,8 +377,12 @@ export function installContinuationCoordinator(app, options = {}) {
       const claim = await callTask("claim-continuation", { note: reason });
       if (!claim?.accepted) return false;
       if (claim.task) state.task = claim.task;
+      const deliveryToken = claim.deliveryToken ?? claim.task?.deliveryToken;
       try {
-        const delivery = await sendFollowUp(continuationText(state.task, reason));
+        const tokenInstruction = deliveryToken
+          ? `\n\nDevSpace continuation deliveryToken=${deliveryToken}. The first continuation_task status call in this synthetic resumed turn MUST include exactly this deliveryToken. If status returns synthetic-continuation-superseded, a newer manual/user turn took ownership: stop this synthetic turn immediately and do not execute or replay side effects.`
+          : "";
+        const delivery = await sendFollowUp(continuationText(state.task, reason) + tokenInstruction);
         const recorded = await callTask("delivery-result", {
           deliveryResult: delivery.result,
           deliveryMethod: delivery.method,
@@ -406,7 +429,7 @@ export function installContinuationCoordinator(app, options = {}) {
     }
   }
 
-  async function supervisorTick() {
+  async function supervisorTickImpl() {
     if (state.disposed || !state.task || terminal(state.task)) return;
 
     // The assistant registers watch-process through a headless continuation_task
@@ -424,6 +447,7 @@ export function installContinuationCoordinator(app, options = {}) {
     // reached DevSpace. Keep retrying the same persisted continuation after its
     // ACK lease expires, for both process-wake and proactive continuations.
     if (state.task.continuationDeliveryAwaitingAck) {
+      if (!deliveryAckRetryDue(state.task)) return;
       await attemptContinuation("delivery ACK retry", { force: true });
       return;
     }
@@ -467,14 +491,21 @@ export function installContinuationCoordinator(app, options = {}) {
     }
 
     if (automationSuppressed(state.task)) return;
-    if (completionTurnLeaseExpired(state.task)) {
-      // P0 completion guard: only completion-driven Task Contracts can use
-      // model Turn Lease expiry. timeout-recovery and resident semantics remain
-      // unchanged, so generic inactivity can never wake those modes.
-      await attemptContinuation("task contract turn lease expired", { force: true });
+    if (completionActivityLeaseExpired(state.task) && state.task?.stallState === "ACTIVE") {
+      // P0 two-phase guard: model inactivity alone is not proof that ChatGPT
+      // ended the assistant turn. Ask the server to persist SUSPECTED_STALL;
+      // this heartbeat is only a liveness probe and cannot authorize delivery.
+      const probed = await callTask("heartbeat", {
+        note: "activity lease expired; mark suspected stall only",
+      }).catch(() => undefined);
+      if (probed?.task) state.task = probed.task;
+      if (state.task) publishTaskForCard(state.task);
+    }
+    if (completionStallArmed(state.task)) {
+      await attemptContinuation("task contract stall corroborated", { force: true });
       return;
     }
-    if (confirmedCutoffRecoveryReady(state.task)) {
+    if (state.task?.continuationMode !== "completion-driven" && confirmedCutoffRecoveryReady(state.task)) {
       // This is deliberately NOT a generic silence/learned-budget watchdog. It
       // is available only after a user/Owner-confirmed real Host cutoff lower
       // bound has already elapsed, plus a grace period and model quiet window.
@@ -485,6 +516,16 @@ export function installContinuationCoordinator(app, options = {}) {
     }
     // Intentionally no learned-budget or ordinary process-completion trigger.
     // Generic inactivity remains disabled outside explicit completion-driven mode.
+  }
+
+  async function supervisorTick() {
+    if (state.supervisorTickInFlight) return;
+    state.supervisorTickInFlight = true;
+    try {
+      await supervisorTickImpl();
+    } finally {
+      state.supervisorTickInFlight = false;
+    }
   }
 
   function startSupervisor() {
@@ -612,27 +653,23 @@ export function installContinuationCoordinator(app, options = {}) {
       if (state.disposed) return;
       const reason = String(params?.reason ?? "resource teardown");
       const timedOut = /timeout|deadline|budget/i.test(reason);
-      await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
-      const confirmedLimitMs = Number(state.task?.confirmedTurnLimitMs || 0);
-      const confirmedLimitElapsed = !timedOut
-        && confirmedLimitMs >= 30_000
-        && taskElapsedMs(state.task) >= confirmedLimitMs + CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS;
-      const completionDrivenTeardown = !timedOut
-        && completionDrivenTask(state.task)
-        && state.task?.state === "RUNNING"
-        && hasUnfinishedMilestones(state.task);
-      if ((timedOut || confirmedLimitElapsed || completionDrivenTeardown)
+      // Resource teardown is not proof that ChatGPT truncated the model turn.
+      // It can happen during ordinary iframe replacement, navigation, UI asset
+      // refresh, or connector lifecycle churn. Fail closed unless the Host
+      // explicitly reports timeout/deadline/budget, or the persisted confirmed
+      // cutoff lower bound + recovery grace + model-quiet gate has elapsed.
+      const confirmedLimitElapsed = !timedOut && confirmedCutoffRecoveryReady(state.task);
+      if ((timedOut || confirmedLimitElapsed)
         && state.task?.continuationMode !== "compat"
         && state.task?.state === "RUNNING"
         && hasUnfinishedMilestones(state.task)) {
+        await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
         await attemptContinuation(
-          timedOut
-            ? `host teardown: ${reason}`
-            : completionDrivenTeardown
-              ? "task contract resource teardown"
-              : "confirmed turn-limit teardown",
+          timedOut ? `host teardown: ${reason}` : "confirmed turn-limit teardown",
           { force: true },
         );
+      } else {
+        await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
       }
       controller.dispose();
     },

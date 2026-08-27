@@ -65,7 +65,45 @@ async function removeTemporaryDirectory(path, timeoutMs = 30_000) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 250));
     }
   }
-  if (existsSync(path)) throw lastError;
+  if (!existsSync(path)) return;
+
+  // A better-sqlite3 handle owned by this Node test process can keep the WAL
+  // mapping alive until process teardown on Windows even after close(). In
+  // that case retrying rmSync in the same process can never succeed, while the
+  // directory becomes removable immediately after this process exits. Defer
+  // only the final filesystem cleanup to a detached helper instead of turning
+  // an already-successful functional regression into a false failure.
+  const parentPid = process.pid;
+  const cleanupScript = `
+    const { existsSync, rmSync } = require("node:fs");
+    const target = ${JSON.stringify(path)};
+    const parentPid = ${parentPid};
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    (async () => {
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        try { process.kill(parentPid, 0); }
+        catch { break; }
+        await sleep(250);
+      }
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        try {
+          rmSync(target, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 });
+          process.exit(0);
+        } catch (error) {
+          if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes(error?.code)) process.exit(2);
+          await sleep(250);
+        }
+      }
+      process.exit(existsSync(target) ? 3 : 0);
+    })();
+  `;
+  const cleaner = spawn(process.execPath, ["-e", cleanupScript], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  cleaner.unref();
+  console.warn(`Deferred temporary cleanup until test process exit: ${path} (${lastError?.code ?? "locked"})`);
 }
 
 mkdirSync(configDir, { recursive: true });
@@ -102,7 +140,7 @@ try {
     taskId: ownerTask.task.id,
     hostProfileId: "native-ui-test-host",
     hostSignal: "timeout",
-    elapsedMs: 10_000,
+    elapsedMs: 30_000,
   });
   const initialTasks = manager("continuation-list", { includeTerminal: true });
   assert.ok(initialTasks.tasks.some((task) => task.id === ownerTask.task.id));
@@ -113,9 +151,9 @@ try {
   assert.equal(listedOwnerTask.unlimitedWallClock, true);
   assert.ok(listedOwnerTask.lastModelActivityAt);
   assert.equal(listedOwnerTask.hostTimeoutSamples, 1);
-  assert.equal(listedOwnerTask.recommendedContinueAfterMs, 8800);
-  assert.equal(listedOwnerTask.confirmedTurnLimitMs, 10_000);
-  assert.equal(listedOwnerTask.confirmedTurnLimitSource, "host-timeout");
+  assert.equal(listedOwnerTask.recommendedContinueAfterMs, 26_400);
+  assert.equal(listedOwnerTask.confirmedTurnLimitMs, 30_000);
+  assert.equal(listedOwnerTask.confirmedTurnLimitSource, "host-timeout-initial-regime");
   const batchIds = [ownerTask.task.id, secondOwnerTask.task.id];
   const lockedTasks = manager("continuation-lock", { taskIds: batchIds });
   assert.equal(lockedTasks.affected, 2);
@@ -139,19 +177,32 @@ try {
   assert.deepEqual(deletedTask.deletedIds, [secondOwnerTask.task.id]);
   assert.equal(manager("continuation-list", { includeTerminal: true }).tasks.some((task) => task.id === secondOwnerTask.task.id), false);
   assert.match(nativeSource, /_continuationGrid\.MultiSelect = true/);
-  assert.match(nativeSource, /Name = "continuationCountdown"[\s\S]*?HeaderText = "下一轮"/);
+  assert.match(nativeSource, /Dictionary<string, object> value = await _manager\.RunJsonAsync\("continuation-list"[\s\S]*?HashSet<string> selectedIds = new HashSet<string>\(SelectedContinuationIds\(\), StringComparer\.OrdinalIgnoreCase\)/);
+  assert.doesNotMatch(nativeSource, /HashSet<string> selectedIds = new HashSet<string>\(SelectedContinuationIds\(\), StringComparer\.OrdinalIgnoreCase\);[\s\S]{0,300}?Dictionary<string, object> value = await _manager\.RunJsonAsync\("continuation-list"/);
+  assert.match(nativeSource, /Name = "continuationCountdown"[\s\S]*?HeaderText = "恢复状态"/);
   assert.match(nativeSource, /_continuationCountdownTimer\.Interval = 1000/);
   assert.doesNotMatch(nativeSource, /prefix = "静默 "|explicitSilentContinueAfterMs|explicit-long/);
   assert.match(nativeSource, /continuationMode[\s\S]*?completion-driven/);
   assert.match(nativeSource, /continuationMode[\s\S]*?timeout-recovery/);
   assert.match(nativeSource, /continuationMode[\s\S]*?resident/);
   assert.match(nativeSource, /无限/);
-  assert.match(nativeSource, /等待截断/);
+  assert.match(nativeSource, /等待 Host 信号/);
+  assert.match(nativeSource, /Host 已截断/);
   assert.match(nativeSource, /等待阶段/);
+  assert.match(nativeSource, /SUSPECTED_STALL/);
+  assert.match(nativeSource, /CONTINUATION_ARMED/);
+  assert.match(nativeSource, /等待恢复 ACK #/);
+  assert.match(nativeSource, /MCP readiness retry #/);
   assert.match(nativeSource, /confirmedTurnLimitMs/);
-  assert.match(nativeSource, /"确认 "/);
   assert.match(nativeSource, /continuation-pause[\s\S]*?taskIds = ids/);
   assert.match(nativeSource, /continuation-delete[\s\S]*?taskIds = ids/);
+  assert.match(nativeSource, /Name = "RemoteAgentNewButton"/);
+  assert.match(nativeSource, /SetAgentEditorVisible\(false\)/);
+  assert.match(nativeSource, /BeginNewAgentEditor\(\)[\s\S]*?_creatingNewAgent = true[\s\S]*?SetAgentEditorVisible\(true\)/);
+  assert.match(nativeSource, /bool createNew = _creatingNewAgent \|\| string\.IsNullOrWhiteSpace\(agentId\)/);
+  assert.match(nativeSource, /if \(createNew\)[\s\S]*?CreateSshEnrollmentAsync\(_manager, "", agentName[\s\S]*?新的 Remote Workspace Agent 已部署并上线/);
+  assert.match(nativeSource, /remoteAgentDefaultEditorCollapsed/);
+  assert.match(nativeSource, /remoteAgentExplicitEditorExpanded/);
   continuationRuntime.close?.();
 
   // A deleted lease must be replaced automatically by the next heartbeat.

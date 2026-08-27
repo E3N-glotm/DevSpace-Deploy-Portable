@@ -109,6 +109,26 @@ const migrations = [
         name: "continuation-completion-driven-unbounded",
         up: migrateContinuationCompletionDrivenUnbounded,
     },
+    {
+        version: 23,
+        name: "continuation-stall-detector-host-regimes",
+        up: migrateContinuationStallDetectorHostRegimes,
+    },
+    {
+        version: 24,
+        name: "continuation-delivery-readiness-backoff",
+        up: migrateContinuationDeliveryReadinessBackoff,
+    },
+    {
+        version: 25,
+        name: "continuation-conversation-singleton",
+        up: migrateContinuationConversationSingleton,
+    },
+    {
+        version: 26,
+        name: "continuation-manual-takeover-and-singleton-repair",
+        up: migrateContinuationManualTakeoverAndSingletonRepair,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -677,6 +697,168 @@ function migrateContinuationCompletionDrivenUnbounded(sqlite) {
 
       create index if not exists continuation_tasks_turn_lease_idx
         on continuation_tasks(continuation_mode, state, turn_lease_expires_at);
+    `);
+}
+function migrateContinuationStallDetectorHostRegimes(sqlite) {
+    // A model-activity lease is only a weak liveness hint.  Expiry must move an
+    // unfinished completion-driven task into SUSPECTED_STALL first; a later,
+    // independent Workspace App heartbeat can corroborate the suspicion before
+    // the server exposes CONTINUATION_ARMED.  This prevents a long model think
+    // with no MCP calls from being treated as a definitive assistant-turn end.
+    addColumnIfMissing(sqlite, "continuation_tasks", "stall_state", "text not null default 'ACTIVE'");
+    addColumnIfMissing(sqlite, "continuation_tasks", "stall_suspected_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "stall_probe_count", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "stall_last_probe_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "stall_armed_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "stall_evidence", "text");
+
+    // Host cutoff values are a current regime estimate, not a permanent
+    // monotonic lower bound.  Keep a small authoritative timeout sample window
+    // so shorter (or, after corroboration, longer) ChatGPT host regimes can be
+    // learned without baking a product-specific minute limit into DevSpace.
+    addColumnIfMissing(sqlite, "continuation_host_profiles", "cutoff_samples_json", "text not null default '[]'");
+    addColumnIfMissing(sqlite, "continuation_host_profiles", "cutoff_epoch", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_host_profiles", "cutoff_regime_changed_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "cutoff_samples_json", "text not null default '[]'");
+    addColumnIfMissing(sqlite, "continuation_tasks", "cutoff_epoch", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "cutoff_regime_changed_at", "text");
+
+    sqlite.exec(`
+      update continuation_tasks
+      set stall_state=case
+            when continuation_mode='completion-driven' and state='RUNNING' then 'ACTIVE'
+            else coalesce(nullif(stall_state,''), 'ACTIVE')
+          end,
+          stall_probe_count=coalesce(stall_probe_count, 0),
+          cutoff_samples_json=coalesce(nullif(cutoff_samples_json,''), '[]'),
+          cutoff_epoch=coalesce(cutoff_epoch, 0);
+
+      update continuation_host_profiles
+      set cutoff_samples_json=coalesce(nullif(cutoff_samples_json,''), '[]'),
+          cutoff_epoch=coalesce(cutoff_epoch, 0);
+
+      create index if not exists continuation_tasks_stall_state_idx
+        on continuation_tasks(continuation_mode, state, stall_state, updated_at desc);
+    `);
+}
+function migrateContinuationDeliveryReadinessBackoff(sqlite) {
+    // app.sendMessage acceptance only proves that the Host accepted a synthetic
+    // continuation message. It does not prove that the newly-created model turn
+    // has already rehydrated its MCP connector. Persist the post-delivery ACK
+    // retry schedule so a surviving Workspace App can retry the same logical
+    // continuation with bounded exponential backoff until a model-side status
+    // call proves DevSpace connectivity.
+    addColumnIfMissing(sqlite, "continuation_tasks", "delivery_ack_started_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "delivery_ack_retry_count", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "delivery_ack_retry_after_at", "text");
+    sqlite.exec(`
+      update continuation_tasks
+      set delivery_ack_started_at=case
+            when continuation_pending in (4,5) then coalesce(delivery_ack_started_at, last_send_attempt_at)
+            else delivery_ack_started_at
+          end,
+          delivery_ack_retry_count=case
+            when continuation_pending in (4,5) and coalesce(delivery_ack_retry_count,0)=0 then 1
+            else coalesce(delivery_ack_retry_count,0)
+          end,
+          delivery_ack_retry_after_at=case
+            when continuation_pending in (4,5) and delivery_ack_retry_after_at is null and last_send_attempt_at is not null
+              then strftime('%Y-%m-%dT%H:%M:%fZ', last_send_attempt_at, '+15 seconds')
+            else delivery_ack_retry_after_at
+          end;
+
+      create index if not exists continuation_tasks_delivery_ack_idx
+        on continuation_tasks(continuation_pending, delivery_ack_retry_after_at);
+    `);
+}
+function migrateContinuationConversationSingleton(sqlite) {
+    // ChatGPT conversation scope is the durable Task Contract identity.  A
+    // conversation may move between DevSpace workspaces, but that must not
+    // create multiple active software tasks.  Reconcile old 1.1.50 duplicates
+    // first, then let SQLite enforce the invariant for all real v1/* scopes.
+    sqlite.exec(`
+      with ranked as (
+        select id,
+          row_number() over (
+            partition by conversation_scope_id
+            order by
+              case task_source
+                when 'model-refined' then 60
+                when 'explicit-anchor' then 50
+                when 'auto-conversation' then 40
+                when 'migrated-1.1.49' then 30
+                when 'legacy' then 20
+                else 10
+              end desc,
+              case when coalesce(required_milestones_json,'[]') <> '[]' then 1 else 0 end desc,
+              coalesce(substantive_activity_count,0) desc,
+              updated_at desc
+          ) as rn
+        from continuation_tasks
+        where conversation_scope_id glob 'v1/*'
+          and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
+      )
+      update continuation_tasks
+      set state='ABANDONED_AUTO_TASK',
+          terminal_reason='merged-duplicate-conversation-contract',
+          continuation_pending=0,
+          watch_process_handles_json='[]',
+          waiting_reason=null,
+          owner_control_note='Merged by conversation-scoped singleton migration.',
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      where id in (select id from ranked where rn > 1);
+
+      create index if not exists continuation_tasks_conversation_state_idx
+        on continuation_tasks(conversation_scope_id, state, updated_at desc);
+
+      create unique index if not exists continuation_tasks_conversation_active_unique
+        on continuation_tasks(conversation_scope_id)
+        where conversation_scope_id glob 'v1/*'
+          and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK');
+
+      update continuation_tasks
+      set contract_version=case when contract_version < 2 then 2 else contract_version end
+      where conversation_scope_id glob 'v1/*'
+        and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK');
+    `);
+}
+function migrateContinuationManualTakeoverAndSingletonRepair(sqlite) {
+    // Re-run the singleton reconciliation deliberately.  This makes the
+    // invariant self-healing for installations that recorded an interrupted or
+    // same-version 1.1.50 migration while the old runtime was still active.
+    migrateContinuationConversationSingleton(sqlite);
+    addColumnIfMissing(sqlite, "continuation_tasks", "delivery_generation", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "delivery_token", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "delivery_owner", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "delivery_owner_expires_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "manual_takeover_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "superseded_delivery_token", "text");
+    sqlite.exec(`
+      update continuation_tasks
+      set delivery_generation=coalesce(delivery_generation,0),
+          delivery_owner=case
+            when continuation_pending in (4,5) and delivery_owner is null then 'legacy-pending'
+            else delivery_owner
+          end;
+
+      -- Same-version 1.1.50 builds could successfully invoke the UI-bearing
+      -- continuation_anchor while failing to persist the mount timestamp.  The
+      -- durable source_tool is authoritative evidence that the immutable card
+      -- was actually requested, so repair that metadata instead of asking the
+      -- model to create another visible card after upgrade.
+      update continuation_tasks
+      set last_anchor_mounted_at=coalesce(last_anchor_mounted_at, updated_at, created_at),
+          anchor_lease_expires_at=null,
+          owner_control_note=case
+            when owner_control_note is null or trim(owner_control_note)='' then 'Repaired historical continuation_anchor mount metadata during 1.1.51 migration.'
+            else owner_control_note
+          end
+      where state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
+        and source_tool='continuation_anchor'
+        and coalesce(last_anchor_mounted_at,'')='';
+
+      create index if not exists continuation_tasks_delivery_owner_idx
+        on continuation_tasks(delivery_owner, delivery_owner_expires_at, updated_at desc);
     `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

@@ -39,6 +39,21 @@ for (const pattern of [
   /continuation-task-contract-turn-lease/,
   /version: 22/,
   /continuation-completion-driven-unbounded/,
+  /version: 23/,
+  /continuation-stall-detector-host-regimes/,
+  /version: 24/,
+  /continuation-delivery-readiness-backoff/,
+  /version: 25/,
+  /continuation-conversation-singleton/,
+  /version: 26/,
+  /continuation-manual-takeover-and-singleton-repair/,
+  /continuation_tasks_conversation_active_unique/,
+  /merged-duplicate-conversation-contract/,
+  /delivery_generation/,
+  /delivery_token/,
+  /delivery_owner/,
+  /manual_takeover_at/,
+  /superseded_delivery_token/,
   /continuation_mode[\s\S]{0,80}default 'compat'/,
   /owner_locked[\s\S]{0,80}integer not null default 0/,
   /last_model_activity_at/,
@@ -63,6 +78,17 @@ for (const pattern of [
   /turn_lease_expires_at/,
   /last_anchor_mounted_at/,
   /anchor_lease_expires_at/,
+  /stall_state/,
+  /stall_suspected_at/,
+  /stall_probe_count/,
+  /stall_armed_at/,
+  /stall_evidence/,
+  /cutoff_samples_json/,
+  /cutoff_epoch/,
+  /cutoff_regime_changed_at/,
+  /delivery_ack_started_at/,
+  /delivery_ack_retry_count/,
+  /delivery_ack_retry_after_at/,
 ]) assert.match(migrations, pattern);
 assert.match(migrations, /migrated-1\.1\.49/,
   "1.1.50 migration must explicitly identify active legacy 1.1.49 Task Contracts that are upgraded to completion-driven mode");
@@ -137,10 +163,12 @@ for (const pattern of [
 ]) assert.match(coordinator, pattern);
 assert.doesNotMatch(coordinator, /model activity idle watchdog|DEFAULT_MODEL_IDLE_CONTINUE_MS|modelIdleContinueMs|adaptive host-budget watchdog|explicit long-task silent truncation guard|DEFAULT_EXPLICIT_SILENT_CONTINUE_MS/,
   "legacy generic inactivity and learned-budget watchdogs must stay removed");
-assert.match(coordinator, /completionTurnLeaseExpired[\s\S]{0,1800}task contract turn lease expired/,
-  "completion-driven Task Contracts must have a dedicated Turn Lease fallback instead of the removed generic idle watchdog");
-assert.match(coordinator, /Generic inactivity remains disabled outside explicit completion-driven mode/,
-  "timeout-recovery/resident modes must remain protected from generic inactivity wakeups");
+assert.match(coordinator, /completionActivityLeaseExpired[\s\S]{0,2200}SUSPECTED_STALL[\s\S]{0,2200}task contract stall corroborated/,
+  "completion-driven activity-lease expiry must enter a two-phase suspected-stall path before any continuation delivery");
+assert.doesNotMatch(coordinator, /attemptContinuation\("task contract turn lease expired"/,
+  "plain activity-lease expiry must never directly create another assistant turn");
+assert.match(coordinator, /completionStallArmed[\s\S]{0,1800}CONTINUATION_ARMED/,
+  "completion-driven recovery must require persisted corroborated stall state");
 assert.match(server, /completion-driven[\s\S]{0,900}timeout-recovery[\s\S]{0,900}resident/,
   "tool contract must expose completion-driven, strict timeout-recovery, and explicit resident modes");
 assert.match(server, /maxContinuations[\s\S]{0,260}0 or omitted means unlimited[\s\S]{0,900}wallClockMinutes[\s\S]{0,260}0 or omitted means unlimited/,
@@ -149,27 +177,53 @@ assert.match(server, /completion-driven no-progress\/repeated-failure counters a
   "completion-driven Task Contracts must not be closed automatically by progress/failure counters while milestones remain");
 assert.match(server, /confirm-turn-limit[\s\S]{0,900}(?:real observed Host cutoff|learned budgets never pre-empt)/,
   "tool contract must reserve confirm-turn-limit for an explicitly observed real Host cutoff and keep learned budgets non-preemptive");
+assert.match(server, /SUSPECTED_STALL[\s\S]{0,700}CONTINUATION_ARMED/,
+  "server guidance must explain that activity silence is only a suspicion and independent Host/lifecycle evidence arms recovery");
+assert.match(server, /adaptive regime[\s\S]{0,700}move down|adaptive Host cutoff|regime profile/i,
+  "Host cutoff guidance must be adaptive to future shorter Host limits instead of treating one observed duration as permanent");
 assert.match(coordinator, /CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS/);
 assert.match(coordinator, /confirmed turn-limit teardown/);
 assert.match(coordinator, /CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS/);
 assert.match(coordinator, /confirmed turn-limit lease expired/,
   "a user-confirmed real cutoff must have a conservative no-host-signal recovery path after the lower bound expires");
-assert.match(coordinator, /task contract resource teardown/,
-  "completion-driven Task Contracts must be able to recover a prematurely-ended assistant turn on resource teardown");
+assert.doesNotMatch(coordinator, /attemptContinuation\("task contract resource teardown"/,
+  "ordinary resource teardown must fail closed instead of creating another model turn");
+assert.match(coordinator, /Resource teardown is not proof that ChatGPT truncated the model turn/,
+  "coordinator must document the fail-closed teardown rule explicitly");
+assert.match(coordinator, /deliveryToken=/,
+  "synthetic continuation messages must carry a durable delivery generation token so manual turns can supersede late automatic turns");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
-assert.match(server, /reanchorRequired=true[\s\S]{0,900}continuation_anchor[\s\S]{0,500}same taskId\/workspaceId/,
-  "a resumed or manually recovered assistant turn must re-mount the same continuation task supervisor instead of relying on an old iframe");
-assert.match(server, /finalResponseAllowed=false[\s\S]{0,900}same assistant turn[\s\S]{0,1400}nextRequiredMilestones/,
-  "a resumed Task Contract must make same-turn work continuation machine-readable instead of relying on a prose ACK convention");
+assert.match(coordinator, /已经授权[\s\S]{0,800}没有收到新的用户指令[\s\S]{0,1200}readiness race/,
+  "synthetic continuation text must be authoritative and must not let the resumed model wait for a fresh user instruction");
+assert.match(coordinator, /deliveryAckRetryDue[\s\S]{0,1500}deliveryAckRetryAfterAt/,
+  "delivery ACK retransmission must honor the persisted retry schedule instead of polling new turns every supervisor tick");
+assert.match(server, /automatic Workspace App continuation is an authorized continuation[\s\S]{0,1600}roughly 30 seconds[\s\S]{0,1400}retransmits the same logical continuation/,
+  "server guidance must treat post-sendMessage MCP readiness as a recoverable transport race, not as missing user intent");
+assert.match(server, /initial continuation anchor required[\s\S]{0,900}continuation_anchor exactly once/,
+  "substantive workspace work must hard-gate on the one initial visible continuation card");
+assert.match(server, /finalResponseAllowed=false[\s\S]{0,1200}same assistant turn/,
+  "an unfinished Task Contract must forbid a status-only final response and require same-turn work");
+assert.match(server, /automatic Workspace App continuation[\s\S]{0,3200}nextRequiredMilestones/,
+  "a resumed Task Contract must make the remaining milestones machine-readable instead of relying on a prose ACK convention");
 assert.match(server, /Task Contract[\s\S]{0,1200}finalResponseAllowed=false[\s\S]{0,1000}checkpoint/,
   "ordinary DevSpace work must surface a conversation task contract that forbids a status-only final response while milestones remain");
-assert.match(server, /transient MCP transport failures[\s\S]{0,900}bounded backoff[\s\S]{0,900}avoid duplicating/,
-  "server guidance must make Connection failed/UNAVAILABLE retries bounded and side-effect aware");
-assert.match(server, /continuationSupervisorDirective[\s\S]{0,1200}same assistant turn; this is NOT a continuation trigger/,
-  "ordinary DevSpace tool results must surface a stale-supervisor re-anchor advisory without creating a new turn");
-assert.match(server, /Before the next substantive DevSpace step, call continuation_anchor[\s\S]{0,500}Do not send or infer a new conversation turn/,
-  "stale-supervisor maintenance must explicitly re-anchor inside the current assistant turn");
+assert.match(server, /UNAVAILABLE[\s\S]{0,1200}(?:increasing-backoff|bounded backoff|readiness)/,
+  "server guidance must make Connection failed/UNAVAILABLE retries bounded rather than treating the service as permanently unavailable");
+assert.match(server, /Before replaying a potentially side-effecting command[\s\S]{0,700}avoid duplicating/,
+  "transport recovery must remain side-effect aware before replaying uncertain mutations");
+assert.match(server, /initialAnchorRequired[\s\S]{0,1400}isError: true[\s\S]{0,1400}continuation_anchor exactly once/,
+  "the server must block later substantive tools until the initial anchor is mounted instead of merely advising the model");
+assert.match(server, /sourceTool: "continuation_task", anchorMounted: false/,
+  "headless continuation_task begin must never mark the visible continuation anchor as mounted");
+assert.match(server, /sourceTool: "continuation_anchor"[\s\S]{0,120}anchorMounted: true/,
+  "only the UI-bearing continuation_anchor path may mark the visible anchor as mounted");
+assert.match(server, /heartbeat\/lease aging is handled headlessly[\s\S]{0,500}must not create additional ChatGPT cards/,
+  "ordinary liveness maintenance must never produce periodic re-anchor cards");
+assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 750, 2_000, 5_000, 8_000, 12_000\]/,
+  "resumed-turn MCP readiness retry must cover roughly 30 seconds instead of the old ~8-second window");
+assert.match(coordinator, /supervisorTickInFlight[\s\S]{0,1200}supervisorTickImpl/,
+  "the continuation supervisor must single-flight long retry ticks during network instability");
 assert.doesNotMatch(coordinator, /window\.parent\.postMessage|querySelector\([^)]*(?:textarea|composer|send)/i, "continuation must use the connected App rather than raw host/DOM automation");
 assert.doesNotMatch(coordinator, /23\s*\*\s*60\s*\*\s*1000|24\.5\s*\*\s*60\s*\*\s*1000|25(?:\.\d+)?\s*\*\s*60\s*\*\s*1000/, "continuation must not depend on a fixed ChatGPT minute limit");
 assert.match(workspaceBundle, /window\.__DEVSPACE_MCP_APP__=Y_/);
@@ -192,12 +246,16 @@ for (const kind of ["runtime", "shell", "write", "edit", "read", "search", "dire
 const anchorMeta = toolWidgetDescriptorMeta(descriptorConfig, "continuation-anchor");
 const anchorUri = workspaceAppUri(descriptorConfig);
 const workspaceMeta = toolWidgetDescriptorMeta(descriptorConfig, "workspace");
-assert.equal(workspaceMeta?._meta?.ui?.resourceUri, anchorUri,
-  "open_workspace must mount the single Workspace App so ordinary users automatically receive a recovery sender");
-assert.equal(workspaceMeta?._meta?.["openai/outputTemplate"], anchorUri);
+assert.equal(workspaceMeta?._meta?.ui?.resourceUri, undefined,
+  "open_workspace must stay headless in widgets=changes so workspace reuse cannot accumulate duplicate recovery cards");
+assert.equal(workspaceMeta?._meta?.["openai/outputTemplate"], undefined);
 assert.match(anchorUri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/);
 assert.equal(anchorMeta?._meta?.ui?.resourceUri, anchorUri);
 assert.equal(anchorMeta?._meta?.["openai/outputTemplate"], anchorUri);
+const fullWorkspaceMeta = toolWidgetDescriptorMeta({ ...descriptorConfig, widgets: "full" }, "workspace");
+assert.equal(fullWorkspaceMeta?._meta?.ui?.resourceUri, anchorUri,
+  "widgets=full keeps the explicit compatibility behavior where workspace calls render cards");
+assert.equal(fullWorkspaceMeta?._meta?.["openai/outputTemplate"], anchorUri);
 assert.notEqual(workspaceAppUri({ ...descriptorConfig, publicBaseUrl: "https://other.example.test" }), anchorUri, "changing the public asset origin must produce a fresh Workspace App URI");
 const renderedWorkspaceApp = workspaceAppHtml(descriptorConfig);
 assert.match(renderedWorkspaceApp, /<script type="module">[\s\S]*installContinuationCoordinator/, "Workspace App HTML must embed the continuation coordinator directly in the versioned MCP App resource");
@@ -315,7 +373,15 @@ class FakeApp {
       if (wakeReady) this.task = { ...this.task, watchProcessHandles: [] };
       return { structuredContent: { task: this.task, accepted: true, wakeReady, watchedProcesses: [] } };
     }
-    if (input.action === "status" || input.action === "heartbeat" || input.action === "delivery-result" || input.action === "release-continuation") {
+    if (input.action === "heartbeat") {
+      if (this.task?.continuationMode === "completion-driven"
+        && this.task?.stallState !== "CONTINUATION_ARMED"
+        && Date.parse(this.task?.turnLeaseExpiresAt || "") <= Date.now()) {
+        this.task = { ...this.task, stallState: "SUSPECTED_STALL", stallProbeCount: Number(this.task?.stallProbeCount || 0) + 1 };
+      }
+      return { structuredContent: { task: this.task, accepted: true } };
+    }
+    if (input.action === "status" || input.action === "delivery-result" || input.action === "release-continuation") {
       return { structuredContent: { task: this.task, accepted: true } };
     }
     if (input.action === "claim-continuation") {
@@ -495,6 +561,7 @@ completionLeaseApp.task = {
   completedMilestones: [],
   continuationPending: false,
   watchProcessHandles: [],
+  stallState: "ACTIVE",
   turnLeaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
   lastModelActivityAt: new Date(Date.now() - 4 * 60_000).toISOString(),
   turnStartedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
@@ -507,11 +574,35 @@ const completionLeaseController = installContinuationCoordinator(completionLease
 completionLeaseApp.emit("toolinput", { arguments: { workspaceId: "ws_completion_lease", taskId: "task_completion_lease" } });
 await completionLeaseController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
-assert.equal(completionLeaseApp.messages.length, 1,
-  "an incomplete completion-driven Task Contract must recover when its model Turn Lease expires");
-assert.equal(completionLeaseApp.callInputs.find((entry) => entry.action === "claim-continuation")?.note,
-  "task contract turn lease expired");
+assert.equal(completionLeaseApp.messages.length, 0,
+  "activity-lease expiry alone must not create another assistant turn during a long model think");
+assert.equal(completionLeaseApp.task.stallState, "SUSPECTED_STALL",
+  "activity-lease expiry should only persist a suspected stall");
+assert.equal(completionLeaseApp.callInputs.some((entry) => entry.action === "claim-continuation"), false,
+  "the first stall phase must not even claim a continuation");
 completionLeaseController.dispose();
+
+const completionArmedApp = new FakeApp();
+completionArmedApp.task = {
+  ...completionLeaseApp.task,
+  id: "task_completion_armed",
+  workspaceId: "ws_completion_armed",
+  stallState: "CONTINUATION_ARMED",
+  turnLeaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
+};
+const completionArmedController = installContinuationCoordinator(completionArmedApp, {
+  supervisorTickMs: 5,
+  heartbeatIntervalMs: 25,
+  instanceId: "ui_completion_armed",
+});
+completionArmedApp.emit("toolinput", { arguments: { workspaceId: "ws_completion_armed", taskId: "task_completion_armed" } });
+await completionArmedController.onConnected();
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
+assert.equal(completionArmedApp.messages.length, 1,
+  "a corroborated completion-driven stall should resume the persisted task");
+assert.equal(completionArmedApp.callInputs.find((entry) => entry.action === "claim-continuation")?.note,
+  "task contract stall corroborated");
+completionArmedController.dispose();
 
 const completionTeardownApp = new FakeApp();
 completionTeardownApp.task = {
@@ -532,10 +623,10 @@ const completionTeardownController = installContinuationCoordinator(completionTe
 completionTeardownApp.emit("toolinput", { arguments: { workspaceId: "ws_completion_teardown", taskId: "task_completion_teardown" } });
 await completionTeardownController.onConnected();
 await completionTeardownController.onTeardown({ reason: "resource teardown" });
-assert.equal(completionTeardownApp.messages.length, 1,
-  "completion-driven resource teardown must recover the same unfinished Task Contract even before the Turn Lease expires");
-assert.equal(completionTeardownApp.callInputs.find((entry) => entry.action === "claim-continuation")?.note,
-  "task contract resource teardown");
+assert.equal(completionTeardownApp.messages.length, 0,
+  "ordinary completion-driven resource teardown must fail closed before an explicit timeout or confirmed cutoff gate");
+assert.equal(completionTeardownApp.callInputs.some((entry) => entry.action === "claim-continuation"), false,
+  "ordinary iframe teardown must not even claim a continuation");
 completionTeardownController.dispose();
 
 const confirmedLeaseEarlyApp = new FakeApp();
@@ -810,7 +901,8 @@ confirmedLimitElapsedApp.task = {
   completedMilestones: [],
   continuationPending: false,
   confirmedTurnLimitMs: 30_000,
-  turnStartedAt: new Date(Date.now() - 40_000).toISOString(),
+  turnStartedAt: new Date(Date.now() - 60_000).toISOString(),
+  lastModelActivityAt: new Date(Date.now() - 35_000).toISOString(),
 };
 const confirmedLimitElapsedController = installContinuationCoordinator(confirmedLimitElapsedApp, { timers: false, instanceId: "ui_confirmed_limit_elapsed" });
 confirmedLimitElapsedApp.emit("toolinput", { arguments: { workspaceId: "ws_confirmed_limit_elapsed", taskId: "task_confirmed_limit_elapsed" } });
@@ -862,7 +954,7 @@ try {
   assert.equal(a.task.unlimitedWallClock, true);
   assert.equal(a.task.autoCreated, true);
   assert.equal(a.task.taskSource, "auto-conversation");
-  assert.equal(a.task.contractVersion, 1);
+  assert.equal(a.task.contractVersion, 2);
   assert.ok(a.task.requiredMilestones.length >= 2, "automatic task contracts must never be 0/0");
   assert.ok(a.task.turnStartedAt);
   assert.ok(a.task.turnLeaseId);
@@ -903,6 +995,66 @@ try {
   assert.equal(completionContractReap.abandoned, 0,
     "completion-driven Task Contracts must never be auto-abandoned because their total wall-clock lifetime is intentionally unlimited");
   assert.equal(runtime.continuationTask({ action: "status", taskId: a.task.id }).task.state, "RUNNING");
+
+  const conversationSingletonA = runtime.continuationTask({
+    action: "begin-auto",
+    conversationScopeId: "v1/test-conversation-singleton",
+    workspaceId: "ws_singleton_a",
+  });
+  const conversationSingletonB = runtime.ensureContinuationTaskContract({
+    conversationScopeId: "v1/test-conversation-singleton",
+    workspaceId: "ws_singleton_b",
+    sourceTool: "read",
+    substantive: true,
+  });
+  assert.equal(conversationSingletonB.task.id, conversationSingletonA.task.id,
+    "one real ChatGPT conversation must reuse the same active Task Contract across workspace switches");
+  assert.equal(conversationSingletonB.task.workspaceId, "ws_singleton_b",
+    "workspaceId is current execution context, not Task Contract identity");
+  const singletonRows = runtime.database.sqlite.prepare(`
+    select count(*) as count from continuation_tasks
+    where conversation_scope_id='v1/test-conversation-singleton'
+      and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
+  `).get();
+  assert.equal(Number(singletonRows.count), 1, "SQLite must enforce one active task per real conversation scope");
+
+  const headlessAuto = runtime.continuationTask({
+    action: "begin-auto",
+    conversationScopeId: "v1/test-headless-refine",
+    workspaceId: "ws_headless_refine",
+  });
+  const headlessRefined = runtime.continuationTask({
+    action: "begin",
+    taskId: headlessAuto.task.id,
+    conversationScopeId: "v1/test-headless-refine",
+    workspaceId: "ws_headless_refine",
+    objective: "headless model refinement",
+    requiredMilestones: ["verify visible anchor"],
+    sourceTool: "continuation_task",
+    anchorMounted: false,
+  });
+  assert.equal(headlessRefined.task.lastAnchorMountedAt, undefined,
+    "headless continuation_task begin must not impersonate a mounted Workspace App card");
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-headless-refine",
+    workspaceId: "ws_headless_refine",
+  })?.reason, "initial-anchor-required",
+    "headless refinement must continue to require exactly one initial visible anchor");
+  const visibleAnchor = runtime.continuationTask({
+    action: "begin",
+    taskId: headlessAuto.task.id,
+    conversationScopeId: "v1/test-headless-refine",
+    workspaceId: "ws_headless_refine",
+    sourceTool: "continuation_anchor",
+    anchorMounted: true,
+  });
+  assert.ok(visibleAnchor.task.lastAnchorMountedAt,
+    "the UI-bearing continuation_anchor path must mark the single visible card as mounted");
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-headless-refine",
+    workspaceId: "ws_headless_refine",
+  }), undefined,
+    "after the one visible anchor mounts, no later supervisor maintenance may request a duplicate card");
 
   const boundedCompatibility = runtime.continuationTask({
     action: "begin",
@@ -954,8 +1106,8 @@ try {
   assert.equal(upgraded.task.deadlineAt, undefined, "model refinement must preserve the unlimited wall-clock default");
   assert.equal(upgraded.task.maxContinuations, 0, "model refinement must preserve unlimited continuations unless a positive compatibility budget is requested");
   const staleSupervisorStatus = runtime.continuationTask({ action: "status", taskId: a.task.id });
-  assert.equal(staleSupervisorStatus.reanchorRequired, true,
-    "an unfinished completion-driven task with no live coordinator heartbeat must request a current-turn re-anchor");
+  assert.equal(Boolean(staleSupervisorStatus.reanchorRequired), false,
+    "once the initial visible anchor has mounted, heartbeat aging must never request another immutable ChatGPT card");
   assert.equal(staleSupervisorStatus.continueRequired, true,
     "an unfinished completion-driven task must explicitly require real work after the model-side status ACK");
   assert.deepEqual(staleSupervisorStatus.nextRequiredMilestones, ["tests", "git", "release"]);
@@ -963,10 +1115,8 @@ try {
     conversationScopeId: "conversation-a",
     workspaceId: "ws_shared",
   });
-  assert.equal(staleDirective?.reanchorRequired, true,
-    "an active completion-driven task must surface stale-supervisor maintenance on ordinary model tool activity");
-  assert.equal(staleDirective?.taskId, a.task.id);
-  assert.equal(staleDirective?.continuationMode, "completion-driven");
+  assert.equal(staleDirective, undefined,
+    "a previously mounted task must keep all heartbeat/lease maintenance headless");
   const heartbeat = runtime.continuationTask({ action: "heartbeat", taskId: a.task.id, coordinatorInstanceId: "ui_test" });
   assert.equal(heartbeat.accepted, true);
   assert.ok(heartbeat.task.lastUiHeartbeatAt);
@@ -995,22 +1145,58 @@ try {
   const prematureCompletionLeaseClaim = runtime.continuationTask({
     action: "claim-continuation",
     taskId: completionLeaseRuntime.task.id,
-    note: "task contract turn lease expired",
+    note: "task contract stall corroborated",
   });
   assert.equal(prematureCompletionLeaseClaim.accepted, false,
-    "completion Turn Lease reason text must not be enough before the persisted lease actually expires");
+    "corroborated-stall reason text must not be enough before persisted state is armed");
   assert.equal(prematureCompletionLeaseClaim.reason, "continuation-trigger-not-authorized");
   runtime.database.sqlite.prepare("update continuation_tasks set turn_lease_expires_at=? where id=?")
     .run(new Date(Date.now() - 1000).toISOString(), completionLeaseRuntime.task.id);
   const expiredCompletionLeaseClaim = runtime.continuationTask({
     action: "claim-continuation",
     taskId: completionLeaseRuntime.task.id,
-    note: "task contract turn lease expired",
+    note: "task contract stall corroborated",
   });
-  assert.equal(expiredCompletionLeaseClaim.accepted, true,
-    "an expired completion-driven model Turn Lease must authorize recovery while milestones remain");
-  assert.equal(expiredCompletionLeaseClaim.task.continuationCount, 1);
-  assert.equal(expiredCompletionLeaseClaim.task.maxContinuations, 0,
+  assert.equal(expiredCompletionLeaseClaim.accepted, false,
+    "an expired activity lease alone must remain fail-closed during a long model think");
+  const suspectedCompletionStall = runtime.continuationTask({
+    action: "heartbeat",
+    taskId: completionLeaseRuntime.task.id,
+    coordinatorInstanceId: "ui_stall_probe",
+  });
+  assert.equal(suspectedCompletionStall.task.stallState, "SUSPECTED_STALL",
+    "the first independent UI probe after activity-lease expiry should persist SUSPECTED_STALL only");
+  const suspectedClaim = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: completionLeaseRuntime.task.id,
+    note: "task contract stall corroborated",
+  });
+  assert.equal(suspectedClaim.accepted, false,
+    "SUSPECTED_STALL without a corroborating Host/lifecycle signal must not create another turn");
+  runtime.continuationTask({
+    action: "confirm-turn-limit",
+    taskId: completionLeaseRuntime.task.id,
+    elapsedMs: 30_000,
+    note: "test-confirmed-cutoff",
+  });
+  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=?, last_model_activity_at=?, turn_lease_expires_at=? where id=?")
+    .run(new Date(Date.now() - 60_000).toISOString(), new Date(Date.now() - 40_000).toISOString(), new Date(Date.now() - 1000).toISOString(), completionLeaseRuntime.task.id);
+  const armedCompletionStall = runtime.continuationTask({
+    action: "heartbeat",
+    taskId: completionLeaseRuntime.task.id,
+    coordinatorInstanceId: "ui_stall_probe",
+  });
+  assert.equal(armedCompletionStall.task.stallState, "CONTINUATION_ARMED",
+    "confirmed Host cutoff + quiet window + surviving UI heartbeat should corroborate a suspected stall");
+  const armedCompletionClaim = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: completionLeaseRuntime.task.id,
+    note: "task contract stall corroborated",
+  });
+  assert.equal(armedCompletionClaim.accepted, true,
+    "only a persisted CONTINUATION_ARMED completion-driven task may recover through the stall path");
+  assert.equal(armedCompletionClaim.task.continuationCount, 1);
+  assert.equal(armedCompletionClaim.task.maxContinuations, 0,
     "unlimited continuation mode must still count resumptions without imposing a terminal maximum");
 
   const completionTeardownRuntime = runtime.continuationTask({
@@ -1019,27 +1205,14 @@ try {
     workspaceId: "ws_completion_teardown_runtime",
     requiredMilestones: ["finish"],
   });
-  const forgedCompletionTeardown = runtime.continuationTask({
+  const atomicCompletionTeardown = runtime.continuationTask({
     action: "claim-continuation",
     taskId: completionTeardownRuntime.task.id,
     note: "task contract resource teardown",
   });
-  assert.equal(forgedCompletionTeardown.accepted, false,
-    "completion-driven teardown recovery must require a fresh persisted Host teardown signal");
-  runtime.continuationTask({
-    action: "host-signal",
-    taskId: completionTeardownRuntime.task.id,
-    hostProfileId: "completion-teardown@test",
-    hostSignal: "teardown",
-    elapsedMs: 30_000,
-  });
-  const acceptedCompletionTeardown = runtime.continuationTask({
-    action: "claim-continuation",
-    taskId: completionTeardownRuntime.task.id,
-    note: "task contract resource teardown",
-  });
-  assert.equal(acceptedCompletionTeardown.accepted, true,
-    "a fresh resource teardown must authorize recovery only for an unfinished completion-driven Task Contract");
+  assert.equal(atomicCompletionTeardown.accepted, false,
+    "ordinary resource teardown must not authorize a completion-driven continuation");
+  assert.equal(atomicCompletionTeardown.reason, "continuation-trigger-not-authorized");
 
   runtime.continuationTask({
     action: "host-signal",
@@ -1173,8 +1346,8 @@ try {
     conversationScopeId: "conversation-resident",
     workspaceId: "ws_resident",
   });
-  assert.equal(residentWaitDirective?.reason, "resident-supervisor-stale",
-    "a resident process wait must re-anchor in the current turn if its supervisor dies before the process completes");
+  assert.equal(residentWaitDirective, undefined,
+    "once the visible resident anchor exists, supervisor staleness must stay headless instead of creating a duplicate ChatGPT card");
   runtime.database.sqlite.prepare("update continuation_tasks set state='RUNNING', last_ui_heartbeat_at=null where id=?")
     .run(resident.task.id);
   const residentStage = runtime.continuationTask({ action: "stage-complete", taskId: resident.task.id, note: "epoch review complete" });
@@ -1196,8 +1369,11 @@ try {
   assert.equal(learnedBudget.task.observedTurnBudgetMs, 600000);
   assert.equal(learnedBudget.task.recommendedContinueAfterMs, 528000);
   assert.equal(learnedBudget.task.hostTimeoutSamples, 1);
-  assert.equal(learnedBudget.task.confirmedTurnLimitMs, 1_549_000,
-    "a shorter timeout sample must not lower an explicitly confirmed no-preemption bound");
+  assert.equal(learnedBudget.task.confirmedTurnLimitMs, 600000,
+    "an authoritative materially shorter Host timeout must start a new cutoff regime instead of preserving a stale 25-minute lower bound");
+  assert.ok(learnedBudget.task.cutoffEpoch >= 1,
+    "a material downward Host cutoff change must advance the regime epoch");
+  assert.equal(learnedBudget.task.confirmedTurnLimitSource, "host-timeout-regime-down");
   const learnedReuseTask = runtime.continuationTask({
     action: "begin-auto",
     conversationScopeId: "conversation-budget-reuse",
@@ -1213,8 +1389,9 @@ try {
   });
   assert.equal(learnedReuse.task.observedTurnBudgetMs, 600000, "new tasks should reuse the learned host budget");
   assert.equal(learnedReuse.task.recommendedContinueAfterMs, 528000);
-  assert.equal(learnedReuse.task.confirmedTurnLimitMs, 1_549_000,
-    "new tasks on the same Host profile should inherit the explicitly confirmed turn limit");
+  assert.equal(learnedReuse.task.confirmedTurnLimitMs, 600000,
+    "new tasks on the same Host profile should inherit the current adaptive cutoff regime");
+  assert.equal(learnedReuse.task.cutoffEpoch, learnedBudget.task.cutoffEpoch);
   const shorterBudget = runtime.continuationTask({
     action: "host-signal",
     taskId: learnedReuseTask.task.id,
@@ -1225,6 +1402,9 @@ try {
   });
   assert.equal(shorterBudget.task.observedTurnBudgetMs, 330000, "a shorter host limit should be learned aggressively");
   assert.equal(shorterBudget.task.recommendedContinueAfterMs, 290400);
+  assert.equal(shorterBudget.task.confirmedTurnLimitMs, 300000,
+    "a second material downward change must remain learnable rather than being blocked by monotonic confirmedTurnLimit logic");
+  assert.ok(shorterBudget.task.cutoffEpoch > learnedReuse.task.cutoffEpoch);
   const delivery = runtime.continuationTask({
     action: "delivery-result",
     taskId: a.task.id,
@@ -1474,11 +1654,14 @@ try {
   const deliveryStillLeased = runtime.continuationTask({ action: "claim-continuation", taskId: wake.task.id });
   assert.equal(deliveryStillLeased.accepted, false);
   assert.equal(deliveryStillLeased.reason, "continuation-delivery-awaiting-ack");
-  runtime.database.sqlite.prepare("update continuation_tasks set last_send_attempt_at=? where id=?")
-    .run(new Date(Date.now() - 61_000).toISOString(), wake.task.id);
+  runtime.database.sqlite.prepare("update continuation_tasks set delivery_ack_retry_after_at=? where id=?")
+    .run(new Date(Date.now() - 1_000).toISOString(), wake.task.id);
   const deliveryRetry = runtime.continuationTask({ action: "claim-continuation", taskId: wake.task.id });
-  assert.equal(deliveryRetry.accepted, false, "the configured continuation budget is already exhausted in this fixture after the retry becomes eligible");
-  assert.equal(deliveryRetry.reason, "continuation-budget");
+  assert.equal(deliveryRetry.accepted, true,
+    "an already-authorized delivery-ACK retry must not consume or be blocked by the logical continuation budget");
+  assert.equal(deliveryRetry.deliveryAckRetry, true);
+  assert.equal(deliveryRetry.task.continuationCount, 3,
+    "transport retransmission is the same logical continuation and must not increment continuationCount");
 
   const ackWake = runtime.continuationTask({
     action: "begin",
@@ -1491,6 +1674,8 @@ try {
   runtime.continuationTask({ action: "arm-wake", taskId: ackWake.task.id });
   const ackClaim = runtime.continuationTask({ action: "claim-continuation", taskId: ackWake.task.id });
   assert.equal(ackClaim.accepted, true);
+  assert.match(ackClaim.deliveryToken, /^[0-9a-f-]{36}$/i,
+    "every logical synthetic continuation must receive a durable delivery token");
   const ackDelivered = runtime.continuationTask({
     action: "delivery-result",
     taskId: ackWake.task.id,
@@ -1498,11 +1683,15 @@ try {
     deliveryMethod: "app.sendMessage",
   });
   assert.equal(ackDelivered.task.continuationDeliveryAwaitingAck, true);
-  const modelAck = runtime.continuationTask({ action: "status", taskId: ackWake.task.id });
+  const modelAck = runtime.continuationTask({
+    action: "status",
+    taskId: ackWake.task.id,
+    deliveryToken: ackClaim.deliveryToken,
+  });
   assert.equal(modelAck.accepted, true);
   assert.equal(modelAck.reason, "continuation-resume-acknowledged");
-  assert.equal(modelAck.reanchorRequired, true,
-    "an unfinished resident task must tell the resumed model to re-mount the same supervisor");
+  assert.equal(Boolean(modelAck.reanchorRequired), false,
+    "resume ACK must reuse the already-mounted resident card instead of creating a duplicate anchor");
   assert.equal(modelAck.continueRequired, true,
     "resume ACK must explicitly tell the model to continue tool work in the same assistant turn");
   assert.deepEqual(modelAck.nextRequiredMilestones, ["finish after resumed turn"]);
@@ -1526,6 +1715,8 @@ try {
   });
   const proactiveClaim = runtime.continuationTask({ action: "claim-continuation", taskId: proactiveAck.task.id });
   assert.equal(proactiveClaim.accepted, true);
+  assert.match(proactiveClaim.deliveryToken, /^[0-9a-f-]{36}$/i);
+  assert.equal(proactiveClaim.deliveryGeneration, 1);
   const proactiveDelivered = runtime.continuationTask({
     action: "delivery-result",
     taskId: proactiveAck.task.id,
@@ -1536,17 +1727,119 @@ try {
     "timeout-triggered continuations must retain a delivery lease until the resumed model reconnects");
   assert.equal(proactiveDelivered.task.continuationWakePending, false,
     "timeout-triggered delivery ACK state must not masquerade as a resident process/stage wake");
-  const proactiveModelAck = runtime.continuationTask({ action: "status", taskId: proactiveAck.task.id });
+  assert.equal(proactiveDelivered.task.deliveryAckRetryCount, 1);
+  assert.ok(Date.parse(proactiveDelivered.task.deliveryAckRetryAfterAt) > Date.now(),
+    "first accepted synthetic turn must persist a future readiness retry instead of immediately creating another turn");
+  const proactiveRetryTooSoon = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: proactiveAck.task.id,
+    note: "delivery ACK retry",
+  });
+  assert.equal(proactiveRetryTooSoon.accepted, false);
+  assert.equal(proactiveRetryTooSoon.reason, "continuation-delivery-awaiting-ack");
+  assert.ok(proactiveRetryTooSoon.retryAfterMs > 0);
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks
+    set delivery_ack_retry_after_at=?, last_host_signal_at=?, last_continuation_at=?
+    where id=?
+  `).run(
+    new Date(Date.now() - 1_000).toISOString(),
+    new Date(Date.now() - 5 * 60_000).toISOString(),
+    new Date().toISOString(),
+    proactiveAck.task.id,
+  );
+  const proactiveRetryClaim = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: proactiveAck.task.id,
+    note: "delivery ACK retry",
+  });
+  assert.equal(proactiveRetryClaim.accepted, true,
+    "an unacknowledged synthetic turn must remain retransmittable after the original Host timeout freshness window expires");
+  assert.equal(proactiveRetryClaim.deliveryAckRetry, true);
+  assert.equal(proactiveRetryClaim.deliveryToken, proactiveClaim.deliveryToken,
+    "readiness retransmission must reuse the same synthetic delivery generation token");
+  assert.equal(proactiveRetryClaim.deliveryGeneration, proactiveClaim.deliveryGeneration,
+    "readiness retransmission must not create a second delivery generation");
+  assert.equal(proactiveRetryClaim.task.continuationCount, proactiveClaim.task.continuationCount,
+    "connector-readiness retransmission must not count as a second logical continuation");
+  const proactiveRedelivered = runtime.continuationTask({
+    action: "delivery-result",
+    taskId: proactiveAck.task.id,
+    deliveryResult: "accepted",
+    deliveryMethod: "app.sendMessage",
+    note: "delivery ACK retry",
+  });
+  assert.equal(proactiveRedelivered.task.deliveryAckRetryCount, 2);
+  assert.ok(Date.parse(proactiveRedelivered.task.deliveryAckRetryAfterAt) - Date.now() > 20_000,
+    "second accepted synthetic delivery must back off longer than the first readiness retry");
+  const proactiveModelAck = runtime.continuationTask({
+    action: "status",
+    taskId: proactiveAck.task.id,
+    deliveryToken: proactiveClaim.deliveryToken,
+  });
   assert.equal(proactiveModelAck.reason, "continuation-resume-acknowledged");
-  assert.equal(proactiveModelAck.reanchorRequired, true,
-    "an unfinished Task Contract must request a fresh Anchor Lease in the resumed turn");
+  assert.equal(Boolean(proactiveModelAck.reanchorRequired), false,
+    "an unfinished resumed Task Contract must reuse its existing visible anchor");
   assert.equal(proactiveModelAck.continueRequired, true,
     "a resumed unfinished task must force real work after the connectivity ACK");
   assert.equal(proactiveModelAck.finalResponseAllowed, false);
   assert.deepEqual(proactiveModelAck.remainingMilestones, ["finish after timeout recovery"]);
   assert.equal(proactiveModelAck.task.continuationDeliveryAwaitingAck, false);
+  assert.equal(proactiveModelAck.task.deliveryAckRetryCount, 0);
+  assert.equal(proactiveModelAck.task.deliveryAckRetryAfterAt, undefined,
+    "a successful model-side status ACK must clear the persisted readiness retry schedule");
   assert.ok(proactiveModelAck.task.turnStartedAt);
   assert.ok(proactiveModelAck.task.lastModelActivityAt);
+
+  const manualTakeover = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-manual-takeover",
+    workspaceId: "ws_manual_takeover",
+    requiredMilestones: ["finish exactly once"],
+    maxContinuations: 4,
+  });
+  runtime.continuationTask({
+    action: "host-signal",
+    taskId: manualTakeover.task.id,
+    hostProfileId: "manual-race@test",
+    hostSignal: "timeout",
+    elapsedMs: 10_000,
+  });
+  const manualRaceClaim = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: manualTakeover.task.id,
+  });
+  assert.equal(manualRaceClaim.accepted, true);
+  const supersededToken = manualRaceClaim.deliveryToken;
+  runtime.continuationTask({
+    action: "delivery-result",
+    taskId: manualTakeover.task.id,
+    deliveryResult: "accepted",
+    deliveryMethod: "app.sendMessage",
+  });
+  const manualOwner = runtime.continuationTask({
+    action: "status",
+    taskId: manualTakeover.task.id,
+  });
+  assert.equal(manualOwner.accepted, true);
+  assert.equal(manualOwner.reason, "manual-turn-took-over",
+    "a real/manual model turn that reaches DevSpace without the synthetic token must win the race");
+  assert.equal(manualOwner.task.deliveryOwner, "manual");
+  assert.equal(manualOwner.task.continuationPending, false);
+  assert.ok(manualOwner.task.manualTakeoverAt);
+  assert.equal(manualOwner.continueRequired, true,
+    "manual takeover preserves the original unfinished Task Contract instead of cancelling the user's work");
+  const lateSynthetic = runtime.continuationTask({
+    action: "status",
+    taskId: manualTakeover.task.id,
+    deliveryToken: supersededToken,
+  });
+  assert.equal(lateSynthetic.accepted, false);
+  assert.equal(lateSynthetic.reason, "synthetic-continuation-superseded",
+    "a late automatic turn must stop instead of executing alongside the newer manual turn");
+  assert.equal(lateSynthetic.superseded, true);
+  assert.equal(lateSynthetic.continueRequired, false);
+  assert.equal(lateSynthetic.finalResponseAllowed, true);
 
   console.log(JSON.stringify({
     persistentTaskState: true,
@@ -1568,15 +1861,21 @@ try {
     compatNormalTeardownDoesNotContinue: true,
     timeoutRecoverySilenceFailsClosed: true,
     timeoutRecoveryNormalTeardownFailsClosed: true,
-    completionDrivenTurnLeaseRecovery: true,
-    completionDrivenTeardownRecovery: true,
+    completionDrivenCorroboratedStallRecovery: true,
+    activityLeaseSilenceDoesNotContinue: true,
+    adaptiveHostCutoffRegime: true,
+    completionDrivenNormalTeardownFailsClosed: true,
     unlimitedCompletionDrivenBudgets: true,
-    openWorkspaceAutoAnchor: true,
+    openWorkspaceHeadlessSingleAnchor: true,
     explicitHostTimeoutRecovery: true,
-    resumedTurnReanchorRequired: true,
-    staleSupervisorSameTurnReanchor: true,
+    resumedTurnSingleAnchor: true,
+    staleSupervisorHeadlessRecovery: true,
     ownerPauseSuppressesAutomation: true,
     timeoutDeliveryResumeAck: true,
+    syntheticDeliveryGenerationToken: true,
+    manualTurnSupersedesLateSyntheticTurn: true,
+    deliveryReadinessBackoff: true,
+    durableSyntheticTurnRetransmission: true,
     residentProcessCompletionWake: true,
     residentStageWake: true,
     nonResidentProcessWakeRejected: true,

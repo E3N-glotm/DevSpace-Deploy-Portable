@@ -33,7 +33,10 @@ assert.match(nativeSource, /new FieldHost\(_clientSecret\)/);
 assert.match(nativeSource, /internal sealed class RemoteAgentTile/);
 assert.match(nativeSource, /internal sealed class RemoteInputHost/);
 assert.match(nativeSource, /internal sealed class RemoteCard/);
-assert.match(nativeSource, /点击磁贴选择 Agent/);
+assert.match(nativeSource, /点击磁贴进入编辑/);
+assert.match(nativeSource, /ActionButton\("添加服务器"/);
+assert.match(nativeSource, /Name = "RemoteAgentSshEditorCard"/);
+assert.match(nativeSource, /Name = "RemoteAgentConfigEditorCard"/);
 assert.match(nativeSource, /默认无 sudo/);
 assert.match(nativeSource, /AddNavigation\(navStack, 5, "远程服务器", "LINUX AGENTS", 2\)/);
 assert.match(nativeSource, /BuildRemoteAgentsTab\(\)/);
@@ -63,6 +66,8 @@ try {
   assert.equal(report.splitterLayout?.oauthDialog, true);
   assert.equal(report.splitterLayout?.oauthResponsiveColumns, true);
   assert.equal(report.splitterLayout?.remoteAgentsStableLayout, true);
+  assert.equal(report.splitterLayout?.remoteAgentDefaultEditorCollapsed, true);
+  assert.equal(report.splitterLayout?.remoteAgentExplicitEditorExpanded, true);
   assert.ok(report.splitterLayout?.remoteAgentTileCount >= 1);
   assert.ok(report.splitterLayout?.remoteAgentInputHostCount >= 3);
   assert.ok(report.splitterLayout?.remoteAgentCardCount >= 2);
@@ -91,7 +96,7 @@ try {
   const requiredButtons = [
     "添加工作目录", "安装插件", "刷新插件", "启用", "禁用",
     "绑定", "解除", "保存并部署本地 MCP", "只保存设置",
-    "保存 SSH 配置", "测试 SSH", "一键恢复 / 安装 Agent", "生成一次性安装命令", "刷新列表",
+    "保存 SSH 配置", "测试 SSH", "一键恢复 / 更新 Agent", "添加服务器", "收起编辑", "生成一次性安装命令", "刷新列表",
     "启动本地 MCP", "重启本地 MCP", "启动公网隧道", "重启公网隧道", "停止公网隧道",
     "停止全部并退出", "停止并禁用", "恢复并启动全部", "详细信息", "检查更新", "查看本轮修改",
     "刷新任务", "暂停所选", "恢复所选", "锁定所选", "解锁所选", "手动结束", "删除所选",
