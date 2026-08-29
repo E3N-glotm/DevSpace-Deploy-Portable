@@ -4937,7 +4937,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.52 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.53 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5310,7 +5310,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "1.1.52 修复真实自动续轮进入新 assistant turn 后只调用 continuation status、思考几十秒便提前结束的问题。synthetic status 现在只表示连接 ACK，不再等价于续轮工作已完成；Task Contract 会持久保留 substantive-work obligation，直到发生至少一次非 continuation 控制类 DevSpace 实际操作、进入真实 WAITING_EXTERNAL 或完成任务。若模型只 ACK 后停止，resumed Turn Lease 到期会以新 generation/token 自动恢复；普通 iframe/resource teardown 仍 fail-closed，避免 UI 重建误开并行轮。续轮提示改为短的 action-first 指令，要求 status 后立即执行 remaining milestones。",
+                Text = "1.1.53 修复里程碑卡 requested 但 iframe 从未真实挂载时永久漏卡的问题。只有 Workspace App 使用当前 mount token ACK 后才会写入 verified；未验证 generation 在后续 Host turn 可安全轮换并重新挂载，旧 generation 若被延迟懒加载会自动 supersede。已经 verified 的 conversation 仍永久复用唯一卡片。continuation_anchor 现在允许在 workspace 尚未绑定时先挂载 conversation Task Contract，解决 pre-workspace 引导与工具 schema 互相矛盾的问题。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
@@ -5790,7 +5790,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.52") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.53") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }

@@ -134,6 +134,11 @@ const migrations = [
         name: "continuation-verified-anchor-mount",
         up: migrateContinuationVerifiedAnchorMount,
     },
+    {
+        version: 28,
+        name: "continuation-anchor-generation-turn-fingerprint",
+        up: migrateContinuationAnchorGenerationTurnFingerprint,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -683,6 +688,26 @@ function migrateContinuationVerifiedAnchorMount(sqlite) {
     sqlite.exec(`
       create index if not exists continuation_tasks_anchor_verified_idx
         on continuation_tasks(anchor_mount_verified_at, state, updated_at desc);
+    `);
+}
+function migrateContinuationAnchorGenerationTurnFingerprint(sqlite) {
+    // An Apps SDK tool result may be accepted into chat history without the
+    // Host ever initializing its iframe.  Track a monotonically increasing
+    // anchor generation plus a privacy-preserving Host-turn fingerprint so a
+    // later assistant turn can recover an unmounted (ghost) issuance on the
+    // same lifetime task.  The raw Host trace id is never persisted.
+    addColumnIfMissing(sqlite, "continuation_tasks", "anchor_mount_generation", "integer not null default 0");
+    addColumnIfMissing(sqlite, "continuation_tasks", "anchor_mount_host_turn_hash", "text");
+    sqlite.exec(`
+      update continuation_tasks
+      set anchor_mount_generation=case
+            when coalesce(anchor_mount_generation,0) > 0 then anchor_mount_generation
+            when anchor_mount_requested_at is not null then 1
+            else 0
+          end;
+
+      create index if not exists continuation_tasks_anchor_generation_idx
+        on continuation_tasks(anchor_mount_verified_at, anchor_mount_generation, anchor_mount_requested_at);
     `);
 }
 function migrateContinuationCompletionDrivenUnbounded(sqlite) {

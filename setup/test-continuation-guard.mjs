@@ -97,6 +97,10 @@ assert.match(migrations, /contract_version=0[\s\S]{0,500}task_source='legacy'[\s
   "active 1.1.49 timeout-recovery tasks with real milestones must migrate into the new completion-driven contract instead of remaining on the old P0-prone semantics");
 assert.match(migrations, /max_continuations=0[\s\S]{0,500}deadline_at=null[\s\S]{0,700}strftime\([^)]*\+3 minutes/,
   "migrated Task Contracts must start unlimited and receive an initial Turn Lease");
+assert.match(migrations, /version:\s*28[\s\S]{0,180}continuation-anchor-generation-turn-fingerprint/,
+  "ghost-card recovery must persist a monotonic anchor generation and opaque Host-turn fingerprint");
+assert.match(migrations, /anchor_mount_generation[\s\S]{0,240}integer not null default 0[\s\S]{0,500}anchor_mount_host_turn_hash/,
+  "the migration must store generation plus only a hashed Host-turn hint, never the raw trace id");
 
 for (const pattern of [
   /registerAppTool\(server, "continuation_anchor"/,
@@ -224,8 +228,8 @@ assert.match(coordinator, /deliveryAckRetryDue[\s\S]{0,1500}deliveryAckRetryAfte
   "delivery ACK retransmission must honor the persisted retry schedule instead of polling new turns every supervisor tick");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 750, 2_000, 5_000, 8_000, 12_000\]/,
   "post-sendMessage MCP readiness must retain the roughly 30-second bounded retry window");
-assert.match(server, /conversation milestone precondition: initial card required[\s\S]{0,900}continuation_anchor exactly once/,
-  "substantive workspace work must hard-gate on the one initial visible continuation card");
+assert.match(server, /conversation milestone precondition: initial card required[\s\S]{0,1400}provisional Host-turn window[\s\S]{0,900}recovery issuance/,
+  "substantive workspace work must require initial card issuance and support explicit stale-ghost recovery without same-turn self-lock");
 assert.match(server, /const finalResponseAllowed = outcome\.finalResponseAllowed !== false/,
   "Task Contract rendering must preserve the structured finalResponseAllowed gate");
 assert.match(server, /Do not end with an ACK[\s\S]{0,700}same assistant turn[\s\S]{0,700}checkpoint completed milestones/,
@@ -238,8 +242,8 @@ assert.match(server, /UNAVAILABLE\/Connection failed\/fetch\/ECONN\/TLS\/handsha
   "server guidance must retain bounded transport-readiness retries");
 assert.match(server, /Before replaying uncertain side effects[\s\S]{0,300}durable process\/file\/task state/,
   "transport recovery must remain side-effect aware before replaying uncertain mutations");
-assert.match(server, /initialAnchorRequired[\s\S]{0,1400}isError: true[\s\S]{0,1400}continuation_anchor exactly once/,
-  "the server must block later substantive tools until the initial anchor is mounted instead of merely advising the model");
+assert.match(server, /initialAnchorRequired[\s\S]{0,1400}isError: true[\s\S]{0,1600}continuation_anchor[\s\S]{0,1200}provisional Host-turn window/,
+  "the server must block stale/unissued card state while allowing fresh issuance to enter a bounded provisional Host-turn window");
 assert.match(server, /name === "open_workspace"[\s\S]{0,900}initialAnchorRequired[\s\S]{0,1600}MANDATORY NEXT TOOL CALL: continuation_anchor[\s\S]{0,1200}isError: true/,
   "the first headless open_workspace result must hard-require the one visible anchor instead of relying on a soft success hint");
 assert.match(server, /anchorToolCallRequired: true/,
@@ -254,26 +258,40 @@ assert.match(coordinator, /anchorSurface:\s*false/,
   "the continuation coordinator must distinguish the dedicated anchor iframe from ordinary Workspace App surfaces");
 assert.match(coordinator, /anchorMountToken:\s*undefined/,
   "the continuation coordinator must hold the server-issued one-time mount capability only inside the anchor surface");
+assert.match(coordinator, /anchorMountGeneration:\s*undefined[\s\S]{0,200}anchorSuperseded:\s*false/,
+  "the anchor surface must track its issuance generation and whether a newer recovery card superseded it");
+assert.match(coordinator, /authoritativeGeneration[\s\S]{0,500}surfaceGeneration[\s\S]{0,500}markAnchorSuperseded\(\)/,
+  "a lazily mounted old ghost generation must become inert before it can ACK or start the supervisor");
+assert.match(coordinator, /data-devspace-anchor-superseded[\s\S]{0,500}replaceChildren\(\)/,
+  "a superseded immutable historical card must collapse its own iframe surface instead of remaining a second active milestone UI");
 assert.match(coordinator, /const mountToken = state\.anchorMountToken[\s\S]{0,500}callTask\("heartbeat",\s*\{\s*note:\s*`anchor-mount-ack:\$\{mountToken\}`\s*\}\)/,
   "the actual continuation_anchor iframe must support an old-schema-compatible token-authenticated heartbeat ACK");
 assert.match(coordinator, /callTask\("anchor-mounted",\s*\{\s*anchorMountToken:\s*mountToken\s*\}\)/,
   "the actual continuation_anchor iframe must retain the explicit anchor-mounted ACK as the preferred/new-schema telemetry path");
 assert.match(coordinator, /!state\.anchorSurface \|\| !state\.task\?\.anchorMountVerifiedAt/,
   "generic Workspace App cards must not run the continuation supervisor or impersonate the milestone card");
-assert.match(server, /anchorMountRequestedAt[\s\S]{0,600}best-effort UI telemetry[\s\S]{0,500}must never re-lock substantive work/,
-  "server gating must use the one card issuance as the hard precondition while keeping iframe execution as best-effort telemetry");
-assert.match(runtimeStateSource, /initialAnchorRequired:\s*!status\.task\?\.anchorMountRequestedAt/,
-  "initial hard gating must clear after the single continuation anchor result is issued, even if the Host never executes its iframe");
-assert.match(runtimeStateSource, /if \(row\.anchor_mount_requested_at\)\s*return undefined/,
-  "supervisor gating must not request duplicate immutable cards after anchor issuance");
+assert.match(server, /fresh UI-bearing issuance[\s\S]{0,900}provisional Host-turn window[\s\S]{0,1200}ghost[\s\S]{0,1000}anchorMountVerifiedAt/,
+  "server guidance must distinguish fresh provisional issuance, stale ghost recovery, and permanent verified-card state");
+assert.match(runtimeStateSource, /function anchorMountRecoveryRequired[\s\S]{0,1000}anchor_mount_verified_at[\s\S]{0,1000}anchor_mount_requested_at/,
+  "runtime gating must calculate mount recovery from verified truth plus a bounded provisional issuance window");
+assert.match(runtimeStateSource, /issuedHostTurnFingerprint[\s\S]{0,500}currentHostTurn[\s\S]{0,500}issuedHostTurnFingerprint !== currentHostTurn[\s\S]{0,300}anchorMountProvisionalMs/,
+  "runtime gating must recover an unverified ghost immediately on a later Host turn while retaining the bounded time fallback");
+assert.match(runtimeStateSource, /initialAnchorRequired:\s*anchorMountRecoveryRequired\(existing, now\.getTime\(\), input\.hostTurnFingerprint\)/,
+  "initial hard gating must use the current model Host-turn fingerprint rather than trusting an old issuance forever");
+assert.match(runtimeStateSource, /if \(!anchorMountRecoveryRequired\(row, Date\.now\(\), input\.hostTurnFingerprint\)\)\s*return undefined/,
+  "supervisor gating must stay headless in the issuing turn but reopen immediately for an unverified later-turn ghost");
+assert.match(runtimeStateSource, /previousGeneration[\s\S]{0,900}previousGeneration \+ 1[\s\S]{0,900}anchor_mount_generation[\s\S]{0,500}anchor_mount_host_turn_hash/,
+  "ghost recovery must rotate the mount capability generation and persist only the opaque issuing-turn hash");
+assert.match(server, /function hostTurnFingerprint[\s\S]{0,700}x-datadog-trace-id[\s\S]{0,500}createHash\("sha256"\)/,
+  "ChatGPT turn-aware recovery must hash the optional trace hint before it reaches persistent runtime state");
 assert.match(runtimeStateSource, /const verifiedAnchorHeartbeat = Boolean\(row\.anchor_mount_verified_at\)/,
   "ordinary liveness maintenance must require an already-verified milestone surface");
 assert.match(runtimeStateSource, /coordinatorInstanceId === row\.anchor_mount_coordinator_id/,
   "ordinary liveness maintenance must be bound to the verified milestone coordinator instead of any Workspace App iframe");
 assert.match(server, /Later new work reactivates the same taskId with continuation_task action=begin/,
   "server instructions must make the one-card invariant span sequential user tasks, not only one active task epoch");
-assert.match(server, /new milestone required on the existing card[\s\S]{0,1000}continuation_task action=begin[\s\S]{0,900}continuation_anchor is NOT needed/,
-  "a completed conversation ledger must hard-gate new substantive work until the same taskId is reactivated with a new milestone");
+assert.match(server, /new milestone required on the existing card[\s\S]{0,1000}continuation_task action=begin[\s\S]{0,1200}initialAnchorRequired\/reanchorRequired/,
+  "a completed conversation ledger must reactivate the same taskId and only authorize anchor recovery when mount state explicitly requires it");
 assert.match(server, /continue\/resume reuses unfinished milestones/,
   "continue/resume must reuse unfinished milestones instead of manufacturing duplicate work items");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 750, 2_000, 5_000, 8_000, 12_000\]/,
@@ -1350,6 +1368,10 @@ try {
     conversationScopeId: "v1/test-ghost-anchor",
   });
   assert.ok(ghostMountRequest.anchorMountToken);
+  assert.equal(ghostMountRequest.recoveryRetry, false,
+    "the first UI-bearing issuance is not a recovery retry");
+  assert.ok(ghostMountRequest.anchorMountProvisionalUntil,
+    "a fresh issuance must expose the bounded Host-turn provisional deadline");
   assert.equal(ghostMountRequest.task.anchorMountVerifiedAt, undefined,
     "issuing the one-time token must not fabricate actual iframe mount telemetry");
   const ghostAfterIssuance = runtime.ensureContinuationTaskContract({
@@ -1359,27 +1381,73 @@ try {
     substantive: true,
   });
   assert.equal(ghostAfterIssuance.initialAnchorRequired, false,
-    "once the single UI-bearing anchor result is issued, Host lazy iframe execution must not re-lock substantive work");
+    "a fresh UI-bearing issuance must not self-lock substantive work in the same Host turn");
+  assert.equal(ghostAfterIssuance.task.anchorMountRecoveryRequired, false,
+    "fresh provisional issuance must not immediately request a duplicate card");
   assert.equal(runtime.continuationSupervisorDirective({
     conversationScopeId: "v1/test-ghost-anchor",
     workspaceId: "ws_ghost_anchor",
   }), undefined,
-    "anchor issuance must suppress duplicate immutable-card requests even while mount telemetry is absent");
-  const ghostCompleted = runtime.continuationTask({
+    "fresh provisional issuance must suppress immediate duplicate immutable-card requests while Host commits the turn");
+
+  runtime.database.sqlite.prepare(
+    "update continuation_tasks set anchor_mount_requested_at=? where id=?",
+  ).run("2020-01-01T00:00:00.000Z", ghostAnchor.task.id);
+  const ghostAfterStaleIssuance = runtime.ensureContinuationTaskContract({
+    conversationScopeId: "v1/test-ghost-anchor",
+    workspaceId: "ws_ghost_anchor",
+    sourceTool: "read",
+    substantive: false,
+  });
+  assert.equal(ghostAfterStaleIssuance.initialAnchorRequired, true,
+    "an unverified issuance that outlives the Host-turn provisional window must become a recoverable ghost");
+  assert.equal(ghostAfterStaleIssuance.task.anchorMountRecoveryRequired, true,
+    "stale unverified card state must be machine-readable instead of silently trusting anchorMountRequestedAt forever");
+  const ghostStaleDirective = runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-ghost-anchor",
+    workspaceId: "ws_ghost_anchor",
+  });
+  assert.equal(ghostStaleDirective?.reanchorRequired, true,
+    "stale ghost issuance must request same-task recovery instead of leaving DevSpace permanently headless");
+  const staleComplete = runtime.continuationTask({
     action: "complete",
     taskId: ghostAnchor.task.id,
-    evidence: { work: "done", anchor: "issued; iframe telemetry remains optional" },
+    evidence: { work: "done but the issued card never actually mounted" },
   });
-  assert.equal(ghostCompleted.task.state, "SUCCEEDED",
-    "completion must depend on one-card issuance plus milestone evidence, not Host iframe scheduling");
-  assert.equal(ghostCompleted.task.anchorMountVerifiedAt, undefined,
-    "completion after issuance must not backfill fake iframe mount telemetry");
+  assert.equal(staleComplete.accepted, false);
+  assert.equal(staleComplete.reason, "continuation-anchor-required",
+    "a stale unverified ghost must not be canonically completed as if the user had a working milestone card");
+
+  const ghostRecoveryRequest = runtime.prepareContinuationAnchorMount({
+    taskId: ghostAnchor.task.id,
+    conversationScopeId: "v1/test-ghost-anchor",
+  });
+  assert.equal(ghostRecoveryRequest.recoveryRetry, true,
+    "stale ghost recovery must be explicitly distinguished from the first issuance");
+  assert.notEqual(ghostRecoveryRequest.anchorMountToken, ghostMountRequest.anchorMountToken,
+    "stale ghost recovery must rotate the one-time mount capability so a delayed old iframe cannot certify the new card");
+  assert.notEqual(ghostRecoveryRequest.task.anchorMountRequestedAt, "2020-01-01T00:00:00.000Z",
+    "recovery issuance must refresh the provisional Host-turn timestamp");
+  const ghostAfterRecoveryIssuance = runtime.ensureContinuationTaskContract({
+    conversationScopeId: "v1/test-ghost-anchor",
+    workspaceId: "ws_ghost_anchor",
+    sourceTool: "read",
+    substantive: false,
+  });
+  assert.equal(ghostAfterRecoveryIssuance.initialAnchorRequired, false,
+    "the recovery result itself must open a fresh provisional window instead of self-locking its assistant turn");
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-ghost-anchor",
+    workspaceId: "ws_ghost_anchor",
+  }), undefined,
+    "fresh recovery issuance must remain headless until its provisional window expires");
+
   const wrongGhostAck = runtime.continuationTask({
     action: "anchor-mounted",
     taskId: ghostAnchor.task.id,
     conversationScopeId: "v1/test-ghost-anchor",
     coordinatorInstanceId: "ui_real_anchor",
-    anchorMountToken: "00000000-0000-4000-8000-000000000099",
+    anchorMountToken: ghostMountRequest.anchorMountToken,
   });
   assert.equal(wrongGhostAck.accepted, false);
   assert.equal(wrongGhostAck.reason, "anchor-mount-token-mismatch");
@@ -1388,16 +1456,176 @@ try {
     taskId: ghostAnchor.task.id,
     conversationScopeId: "v1/test-ghost-anchor",
     coordinatorInstanceId: "ui_real_anchor",
-    anchorMountToken: ghostMountRequest.anchorMountToken,
+    anchorMountToken: ghostRecoveryRequest.anchorMountToken,
   });
   assert.equal(correctGhostAck.accepted, true);
   assert.ok(correctGhostAck.task.anchorMountVerifiedAt);
   assert.equal(correctGhostAck.task.anchorMountCoordinatorId, "ui_real_anchor");
+  assert.equal(correctGhostAck.task.anchorMountRecoveryRequired, false,
+    "a token-authenticated iframe ACK must permanently clear ghost recovery state");
   const verifiedAt = correctGhostAck.task.anchorMountVerifiedAt;
   const ghostAfterOtherApp = runtime.continuationTask({ action: "status", taskId: ghostAnchor.task.id });
   assert.equal(ghostAfterOtherApp.task.anchorMountVerifiedAt, verifiedAt);
   assert.equal(ghostAfterOtherApp.task.anchorMountCoordinatorId, "ui_real_anchor",
     "a later review/patch iframe must not steal ownership from the one verified milestone card");
+  runtime.database.sqlite.prepare(
+    "update continuation_tasks set anchor_mount_requested_at=? where id=?",
+  ).run("2020-01-01T00:00:00.000Z", ghostAnchor.task.id);
+  const verifiedStillHeadless = runtime.ensureContinuationTaskContract({
+    conversationScopeId: "v1/test-ghost-anchor",
+    workspaceId: "ws_ghost_anchor",
+    sourceTool: "read",
+    substantive: false,
+  });
+  assert.equal(verifiedStillHeadless.initialAnchorRequired, false,
+    "verified mount truth must dominate an old requestedAt timestamp and permanently suppress re-anchor");
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-ghost-anchor",
+    workspaceId: "ws_ghost_anchor",
+  }), undefined,
+    "a verified card must never be duplicated because of age, reconnect, or later task activity");
+  const noThirdAnchor = runtime.prepareContinuationAnchorMount({
+    taskId: ghostAnchor.task.id,
+    conversationScopeId: "v1/test-ghost-anchor",
+  });
+  assert.equal(noThirdAnchor.alreadyVerified, true,
+    "continuation_anchor must become an idempotent no-op after verified mount truth exists");
+  assert.equal(noThirdAnchor.anchorMountToken, undefined,
+    "verified card state must not mint another mount token");
+  const ghostCompleted = runtime.continuationTask({
+    action: "complete",
+    taskId: ghostAnchor.task.id,
+    evidence: { work: "done", anchor: "token-authenticated" },
+  });
+  assert.equal(ghostCompleted.task.state, "SUCCEEDED",
+    "verified mount truth plus milestone evidence must allow canonical completion");
+
+  const turnGhostAnchor = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    workspaceId: "ws_turn_aware_ghost",
+    objective: "recover a ghost card on the next Host assistant turn",
+    requiredMilestones: ["verify turn-aware recovery"],
+    sourceTool: "continuation_anchor",
+    anchorMounted: false,
+  });
+  const turnAFirstIssuance = runtime.prepareContinuationAnchorMount({
+    taskId: turnGhostAnchor.task.id,
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    hostTurnFingerprint: "host-turn-a-hash",
+  });
+  assert.equal(turnAFirstIssuance.recoveryRetry, false);
+  assert.equal(turnAFirstIssuance.anchorMountGeneration, 1,
+    "the first visible issuance must start at generation one");
+  assert.ok(turnAFirstIssuance.anchorMountToken);
+  const turnASameTurnRepeat = runtime.prepareContinuationAnchorMount({
+    taskId: turnGhostAnchor.task.id,
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    hostTurnFingerprint: "host-turn-a-hash",
+  });
+  assert.equal(turnASameTurnRepeat.recoveryRetry, false,
+    "same-turn retries must stay idempotent instead of minting another card generation");
+  assert.equal(turnASameTurnRepeat.anchorMountGeneration, 1);
+  assert.equal(turnASameTurnRepeat.anchorMountToken, turnAFirstIssuance.anchorMountToken);
+  const turnAWork = runtime.ensureContinuationTaskContract({
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    workspaceId: "ws_turn_aware_ghost",
+    sourceTool: "read",
+    substantive: false,
+    hostTurnFingerprint: "host-turn-a-hash",
+  });
+  assert.equal(turnAWork.initialAnchorRequired, false,
+    "the issuing Host turn must keep its provisional window and avoid self-locking");
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    workspaceId: "ws_turn_aware_ghost",
+    hostTurnFingerprint: "host-turn-a-hash",
+  }), undefined,
+    "the issuing turn must not request a second immutable card");
+
+  const turnBWork = runtime.ensureContinuationTaskContract({
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    workspaceId: "ws_turn_aware_ghost",
+    sourceTool: "read",
+    substantive: false,
+    hostTurnFingerprint: "host-turn-b-hash",
+  });
+  assert.equal(turnBWork.initialAnchorRequired, true,
+    "a later Host turn must immediately recover an unverified ghost even while the timestamp fallback is still fresh");
+  assert.equal(turnBWork.task.anchorMountRecoveryRequired, true);
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    workspaceId: "ws_turn_aware_ghost",
+    hostTurnFingerprint: "host-turn-b-hash",
+  })?.reanchorRequired, true,
+    "the later Host turn must request same-task recovery without waiting tens of minutes");
+  const turnBRecovery = runtime.prepareContinuationAnchorMount({
+    taskId: turnGhostAnchor.task.id,
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    hostTurnFingerprint: "host-turn-b-hash",
+  });
+  assert.equal(turnBRecovery.recoveryRetry, true);
+  assert.equal(turnBRecovery.anchorMountGeneration, 2,
+    "a later-turn recovery must advance the anchor generation exactly once");
+  assert.notEqual(turnBRecovery.anchorMountToken, turnAFirstIssuance.anchorMountToken,
+    "the later generation must rotate its token so a delayed old iframe cannot become active");
+  const turnBSameTurnRepeat = runtime.prepareContinuationAnchorMount({
+    taskId: turnGhostAnchor.task.id,
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    hostTurnFingerprint: "host-turn-b-hash",
+  });
+  assert.equal(turnBSameTurnRepeat.recoveryRetry, false,
+    "the recovery issuance must itself be idempotent for the remainder of that Host turn");
+  assert.equal(turnBSameTurnRepeat.anchorMountGeneration, 2);
+  assert.equal(turnBSameTurnRepeat.anchorMountToken, turnBRecovery.anchorMountToken);
+  const turnBWorkAfterRecovery = runtime.ensureContinuationTaskContract({
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    workspaceId: "ws_turn_aware_ghost",
+    sourceTool: "read",
+    substantive: false,
+    hostTurnFingerprint: "host-turn-b-hash",
+  });
+  assert.equal(turnBWorkAfterRecovery.initialAnchorRequired, false,
+    "the recovered generation must not self-lock the same assistant turn");
+  const staleTurnAAck = runtime.continuationTask({
+    action: "anchor-mounted",
+    taskId: turnGhostAnchor.task.id,
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    coordinatorInstanceId: "ui_delayed_generation_one",
+    anchorMountToken: turnAFirstIssuance.anchorMountToken,
+  });
+  assert.equal(staleTurnAAck.accepted, false);
+  assert.equal(staleTurnAAck.reason, "anchor-mount-token-mismatch",
+    "a delayed old generation must never certify itself after recovery supersedes it");
+  const turnBVerified = runtime.continuationTask({
+    action: "anchor-mounted",
+    taskId: turnGhostAnchor.task.id,
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    coordinatorInstanceId: "ui_generation_two",
+    anchorMountToken: turnBRecovery.anchorMountToken,
+  });
+  assert.equal(turnBVerified.accepted, true);
+  assert.ok(turnBVerified.task.anchorMountVerifiedAt);
+  assert.equal(turnBVerified.task.anchorMountGeneration, 2);
+  const turnCAfterVerified = runtime.ensureContinuationTaskContract({
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    workspaceId: "ws_turn_aware_ghost",
+    sourceTool: "read",
+    substantive: false,
+    hostTurnFingerprint: "host-turn-c-hash",
+  });
+  assert.equal(turnCAfterVerified.initialAnchorRequired, false,
+    "verified mount truth must permanently suppress recovery on every later Host turn");
+  assert.equal(runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
+    workspaceId: "ws_turn_aware_ghost",
+    hostTurnFingerprint: "host-turn-c-hash",
+  }), undefined);
+  const turnAwareRows = runtime.database.sqlite.prepare(
+    "select count(*) as count from continuation_tasks where conversation_scope_id=?",
+  ).get("v1/test-turn-aware-ghost-anchor");
+  assert.equal(Number(turnAwareRows.count), 1,
+    "recovery generations must remain inside one lifetime task instead of creating shadow tasks");
 
   const globalFirst = runtime.ensureContinuationTaskContract({
     conversationScopeId: "v1/test-global-first-card",

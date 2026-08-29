@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.53
+
+- 修复 continuation 里程碑卡“已经请求生成，但 iframe 实际从未挂载”的 ghost-anchor 漏卡。`anchor_mount_requested_at` 不再永久等价于“卡片存在”；只有 Workspace App iframe 使用当前 mount token 完成 ACK 后才写入 `anchor_mount_verified_at`。
+- 未验证的 anchor 增加 generation + 不透明 Host-turn fingerprint。若后续 Host turn 到来而旧 iframe 仍未 ACK，会轮换 mount token/generation 并允许重新挂载；同一轮内则保持 provisional，避免一次 MCP 工作流产生重复卡片。Host 不提供 turn hint 时使用有界 provisional timeout 作为安全回退，避免永久自锁。
+- 老 generation 的 iframe 即使被 ChatGPT 延迟懒加载，也会在发现 authoritative generation 已推进后自我 supersede，不再发送 heartbeat、ACK 或 continuation，避免恢复后出现两张同时工作的卡片。
+- 已 verified 的 anchor 仍然是 conversation 生命周期单例：一旦真实挂载成功，后续 heartbeat/lease/resource 重建都不会触发第二张卡。普通 `open_workspace` 继续 headless；只有首个真实 anchor 或已证明 ghost 的恢复 generation 才带可见 Workspace App。
+- 修复 pre-workspace 引导与工具 schema 的矛盾：`continuation_anchor.workspaceId` 改为可选，因此自动创建的 conversation Task Contract 可以在 workspace 尚未绑定时先挂载唯一可见卡；之后 `open_workspace` 只绑定执行上下文，不创建第二个 task/card。Protocol 保持 1.5。
+- 收紧发行包安全边界：本地 `workspace-archives`/live backup 永久排除，构建器在 checksum/ZIP 前额外 fail-closed 拒绝任何 `auth.json`、`.sqlite`、`.sqlite3` 运行状态文件。该防线由发行布局回归覆盖，避免本地回滚快照被误打进公开 ZIP。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.53.md)
+
 ## 1.1.52
 
 - 修复真实 synthetic continuation 已成功进入新 assistant turn，却只调用 `continuation_task status`、思考几十秒便输出状态摘要并结束的问题。`finalResponseAllowed=false` 不再被当作唯一保障；服务端新增持久 synthetic resumed-turn substantive-work obligation。

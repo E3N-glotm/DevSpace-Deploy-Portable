@@ -39,6 +39,10 @@ EXCLUDED_TOP_LEVEL_DIRS = {
     "vendor",
     "release-assets",
     "release-output",
+    # Local live-deployment snapshots may intentionally preserve auth.json,
+    # OAuth/SQLite state, and other operator data for rollback.  They are
+    # never distributable source material.
+    "workspace-archives",
 }
 EXCLUDED_TOP_LEVEL_FILES = {
     ".gitattributes",
@@ -54,6 +58,13 @@ EXCLUDED_TOP_LEVEL_FILES = {
 }
 RELEASE_DIRECTORY_PREFIX = "DevSpacePortable-Windows-x64-"
 TEMP_NATIVE_UI_PATTERN = re.compile(r"^[0-9a-fA-F-]{36}_DevSpace-Portable\.exe$")
+FORBIDDEN_RELEASE_BASENAMES = {
+    "auth.json",
+}
+FORBIDDEN_RELEASE_STATE_SUFFIXES = {
+    ".sqlite",
+    ".sqlite3",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -245,6 +256,31 @@ def release_files() -> list[Path]:
     return sorted(files, key=lambda item: item.as_posix())
 
 
+def validate_release_payload(files: list[Path]) -> None:
+    """Fail closed if runtime credentials/state escaped the directory filters.
+
+    Directory exclusions are the first line of defense, but source checkouts
+    can accumulate live-deployment snapshots under new directory names.  A
+    second content-independent path check prevents a future backup folder from
+    silently placing authentication or SQLite state in a release archive.
+    The validator inspects names only and never opens sensitive files.
+    """
+    forbidden: list[str] = []
+    for relative in files:
+        name = relative.name.lower()
+        if name in FORBIDDEN_RELEASE_BASENAMES or relative.suffix.lower() in FORBIDDEN_RELEASE_STATE_SUFFIXES:
+            forbidden.append(relative.as_posix())
+    if forbidden:
+        preview = "\n".join(forbidden[:20])
+        remainder = len(forbidden) - min(len(forbidden), 20)
+        if remainder:
+            preview += f"\n... and {remainder} more"
+        raise RuntimeError(
+            "Release payload contains credential/runtime-state file names and was blocked before checksumming:\n"
+            + preview
+        )
+
+
 def release_version() -> str:
     manifest = json.loads((ROOT / "VERSION-MANIFEST.json").read_text(encoding="utf-8"))
     release = str(manifest.get("release", ""))
@@ -318,6 +354,7 @@ def main() -> int:
     plugin_entries = release_plugin_entries()
     validate_release_plugins(plugin_entries)
     files = release_files()
+    validate_release_payload(files)
     print(f"Release {version}: {len(files) + len(plugin_entries)} payload files", flush=True)
     write_checksums(files, plugin_entries)
     output = write_zip(files, plugin_entries, version)

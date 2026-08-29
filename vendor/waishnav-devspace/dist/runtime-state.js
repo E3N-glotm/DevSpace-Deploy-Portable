@@ -8,6 +8,10 @@ const DEFAULT_TASK_CONTRACT_MILESTONES = [
 ];
 const TASK_CONTRACT_VERSION = 2;
 const ANCHOR_LEASE_MS = 90_000;
+const DEFAULT_ANCHOR_MOUNT_PROVISIONAL_MS = 30 * 60_000;
+const MIN_ANCHOR_MOUNT_PROVISIONAL_MS = 10 * 60_000;
+const MAX_ANCHOR_MOUNT_PROVISIONAL_MS = 45 * 60_000;
+const ANCHOR_MOUNT_HOST_GRACE_MS = 5 * 60_000;
 // This is an activity-suspicion threshold, not a ChatGPT turn deadline.  Its
 // expiry can only move an unfinished task to SUSPECTED_STALL; it is never, by
 // itself, sufficient to create another assistant turn.
@@ -60,6 +64,35 @@ function median(values) {
 function deliveryAckRetryDelayMs(retryCount) {
     const exponent = Math.max(0, Math.min(8, Math.round(Number(retryCount || 1)) - 1));
     return Math.min(DELIVERY_ACK_RETRY_MAX_MS, DELIVERY_ACK_RETRY_BASE_MS * (2 ** exponent));
+}
+function anchorMountProvisionalMs(row) {
+    const confirmedTurnLimitMs = Number(row?.confirmed_turn_limit_ms || 0);
+    const preferred = confirmedTurnLimitMs >= HOST_CUTOFF_MIN_SAMPLE_MS
+        ? confirmedTurnLimitMs + ANCHOR_MOUNT_HOST_GRACE_MS
+        : DEFAULT_ANCHOR_MOUNT_PROVISIONAL_MS;
+    return Math.max(MIN_ANCHOR_MOUNT_PROVISIONAL_MS, Math.min(preferred, MAX_ANCHOR_MOUNT_PROVISIONAL_MS));
+}
+function anchorMountRecoveryRequired(row, nowMs = Date.now(), currentHostTurnFingerprint) {
+    if (!row)
+        return true;
+    if (row.anchor_mount_verified_at)
+        return false;
+    const requestedAtMs = Date.parse(String(row.anchor_mount_requested_at || ""));
+    if (!Number.isFinite(requestedAtMs))
+        return true;
+    const issuedHostTurnFingerprint = String(row.anchor_mount_host_turn_hash || "").trim();
+    const currentHostTurn = String(currentHostTurnFingerprint || "").trim();
+    if (issuedHostTurnFingerprint && currentHostTurn && issuedHostTurnFingerprint !== currentHostTurn)
+        return true;
+    return nowMs - requestedAtMs >= anchorMountProvisionalMs(row);
+}
+function anchorMountProvisionalUntil(row) {
+    if (!row || row.anchor_mount_verified_at || !row.anchor_mount_requested_at)
+        return undefined;
+    const requestedAtMs = Date.parse(String(row.anchor_mount_requested_at));
+    if (!Number.isFinite(requestedAtMs))
+        return undefined;
+    return new Date(requestedAtMs + anchorMountProvisionalMs(row)).toISOString();
 }
 function adaptHostCutoffRegime({ elapsedMs, confirmedTurnLimitMs, confirmedTurnLimitSource, cutoffSamples, cutoffEpoch, cutoffRegimeChangedAt, nowIso, }) {
     const elapsed = Math.round(Number(elapsedMs || 0));
@@ -259,6 +292,7 @@ export class StructuredRuntimeState {
     prepareContinuationAnchorMount(input = {}) {
         const taskId = String(input.taskId ?? "").trim();
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
+        const hostTurnFingerprint = String(input.hostTurnFingerprint ?? "").trim() || undefined;
         if (!taskId || !conversationScopeId)
             return { task: undefined, accepted: false, reason: "task-and-conversation-required" };
         const row = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
@@ -268,16 +302,32 @@ export class StructuredRuntimeState {
         if (row.anchor_mount_verified_at) {
             return { ...status, accepted: true, alreadyVerified: true };
         }
-        const nowIso = new Date().toISOString();
-        const token = row.anchor_mount_token || randomUUID();
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+        const recoveryRetry = Boolean(row.anchor_mount_requested_at) && anchorMountRecoveryRequired(row, nowMs, hostTurnFingerprint);
+        const token = recoveryRetry || !row.anchor_mount_token ? randomUUID() : row.anchor_mount_token;
+        const requestedAt = recoveryRetry || !row.anchor_mount_requested_at ? nowIso : row.anchor_mount_requested_at;
+        const previousGeneration = Math.max(0, Number(row.anchor_mount_generation || 0));
+        const generation = !row.anchor_mount_requested_at
+            ? Math.max(1, previousGeneration || 1)
+            : recoveryRetry ? Math.max(1, previousGeneration + 1) : Math.max(1, previousGeneration || 1);
+        const storedHostTurnFingerprint = recoveryRetry || !row.anchor_mount_requested_at
+            ? (hostTurnFingerprint ?? null)
+            : (row.anchor_mount_host_turn_hash ?? hostTurnFingerprint ?? null);
         this.database.sqlite.prepare(`
-          update continuation_tasks set anchor_mount_token=?, anchor_mount_requested_at=?, updated_at=? where id=?
-        `).run(token, row.anchor_mount_requested_at ?? nowIso, nowIso, taskId);
+          update continuation_tasks
+          set anchor_mount_token=?, anchor_mount_requested_at=?, anchor_mount_generation=?,
+              anchor_mount_host_turn_hash=?, updated_at=?
+          where id=?
+        `).run(token, requestedAt, generation, storedHostTurnFingerprint, nowIso, taskId);
         return {
-            ...this.continuationTask({ action: "status", taskId, conversationScopeId }),
+            ...this.continuationTask({ action: "status", taskId, conversationScopeId, hostTurnFingerprint }),
             accepted: true,
             anchorMountToken: token,
+            anchorMountGeneration: generation,
             alreadyVerified: false,
+            recoveryRetry,
+            anchorMountProvisionalUntil: new Date(Date.parse(requestedAt) + anchorMountProvisionalMs(row)).toISOString(),
         };
     }
     reapAbandonedContinuationTasks(input = {}) {
@@ -327,14 +377,14 @@ export class StructuredRuntimeState {
                 this.database.sqlite.prepare("update continuation_tasks set workspace_id=?, updated_at=? where id=?")
                     .run(workspaceId, nowIso, existing.id);
             }
-            const status = this.continuationTask({ action: "status", taskId: existing.id, ...(workspaceId ? { workspaceId } : {}), conversationScopeId });
+            const status = this.continuationTask({ action: "status", taskId: existing.id, ...(workspaceId ? { workspaceId } : {}), conversationScopeId, hostTurnFingerprint: input.hostTurnFingerprint });
             return {
                 ...status,
                 created: false,
                 taskContract: true,
                 conversationLifetimeSingleton: isCanonicalConversationScope(conversationScopeId),
                 newMilestoneRequired: TERMINAL_CONTINUATION_STATES.has(String(status.task?.state ?? "")),
-                initialAnchorRequired: !status.task?.anchorMountRequestedAt,
+                initialAnchorRequired: anchorMountRecoveryRequired(existing, now.getTime(), input.hostTurnFingerprint),
             };
         }
         const required = Array.isArray(input.requiredMilestones)
@@ -362,7 +412,7 @@ export class StructuredRuntimeState {
             Math.max(1, Math.min(Number(input.maxSameFailure ?? 3), 20)),
             nowIso, nowIso, nowIso, sourceTool, TASK_CONTRACT_VERSION,
             input.substantive ? 1 : 0, turnLeaseId, turnLeaseExpiresAt, nowIso, nowIso);
-        const status = this.continuationTask({ action: "status", taskId: id, ...(workspaceId ? { workspaceId } : {}), conversationScopeId });
+        const status = this.continuationTask({ action: "status", taskId: id, ...(workspaceId ? { workspaceId } : {}), conversationScopeId, hostTurnFingerprint: input.hostTurnFingerprint });
         return { ...status, created: true, taskContract: true, needsRefinement: required.length === 0, initialAnchorRequired: true };
     }
     continuationSupervisorDirective(input = {}) {
@@ -399,18 +449,20 @@ export class StructuredRuntimeState {
         const completed = new Set(parseJson(row.completed_milestones_json, []));
         const unfinished = required.length > 0 && required.some((milestone) => !completed.has(milestone));
         const watchedHandles = parseJson(row.watch_process_handles_json, []);
-        const activeTurnNeedsSupervisor = row.state === "RUNNING" && unfinished;
+        const activeTurnNeedsSupervisor = row.state === "RUNNING"
+            && (unfinished || anchorMountRecoveryRequired(row, Date.now(), input.hostTurnFingerprint));
         const residentWaitNeedsSupervisor = continuationMode === "resident"
             && ["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(row.state)
             && watchedHandles.length > 0;
         if (!activeTurnNeedsSupervisor && !residentWaitNeedsSupervisor)
             return undefined;
-        // A visible Apps SDK card is immutable conversation history: calling the
-        // UI-bearing continuation_anchor again creates another card.  Therefore
-        // a normal heartbeat/lease expiry must NEVER ask the model to re-anchor.
-        // The coordinator refreshes its own liveness headlessly.  Only a Task
-        // Contract that has never mounted its first card may require anchoring.
-        if (row.anchor_mount_requested_at)
+        // A fresh UI-bearing issuance is provisional for at least one Host turn
+        // because ChatGPT may not initialize the iframe until the assistant turn
+        // is committed.  Do not self-lock that turn.  If the issuance remains
+        // unverified beyond the full turn-sized provisional window, treat it as
+        // a ghost and permit a same-task recovery issuance.  Once verified, this
+        // path stays permanently headless and can never request a duplicate card.
+        if (!anchorMountRecoveryRequired(row, Date.now(), input.hostTurnFingerprint))
             return undefined;
         return {
             taskId: row.id,
@@ -523,6 +575,9 @@ export class StructuredRuntimeState {
             anchorMountVerifiedAt: row.anchor_mount_verified_at ?? undefined,
             anchorMountRequestedAt: row.anchor_mount_requested_at ?? undefined,
             anchorMountCoordinatorId: row.anchor_mount_coordinator_id ?? undefined,
+            anchorMountGeneration: Math.max(0, Number(row.anchor_mount_generation ?? 0)),
+            anchorMountRecoveryRequired: anchorMountRecoveryRequired(row, now.getTime(), input.hostTurnFingerprint),
+            anchorMountProvisionalUntil: anchorMountProvisionalUntil(row),
             unlimitedContinuations: Number(row.max_continuations || 0) <= 0,
             unlimitedWallClock: !row.deadline_at,
             createdAt: row.created_at,
@@ -534,11 +589,10 @@ export class StructuredRuntimeState {
             if (required.length === 0) return false;
             const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
             if (!required.some((milestone) => !completed.has(milestone))) return false;
-            // The model may mount the UI-bearing continuation_anchor exactly
-            // once per conversation.  Once that card exists, coordinator
-            // heartbeat expiry is a liveness/recovery concern, not permission
-            // to create another immutable ChatGPT card.
-            return !row.anchor_mount_requested_at;
+            // Fresh issuance is provisional rather than an immediate hard mount
+            // proof.  Only an unissued or stale-unverified ghost needs another
+            // UI-bearing recovery attempt.  Verified cards never re-anchor.
+            return anchorMountRecoveryRequired(row, now.getTime(), input.hostTurnFingerprint);
         };
         const continuationDirective = (task) => {
             if (!task) return {
@@ -730,7 +784,7 @@ export class StructuredRuntimeState {
                 const completed = new Set(Array.isArray(refreshedTask?.completedMilestones) ? refreshedTask.completedMilestones : []);
                 const reanchorRequired = refreshedTask?.state === "RUNNING"
                     && refreshedTask?.continuationMode !== "compat"
-                    && !refreshedTask?.lastAnchorMountedAt
+                    && refreshedTask?.anchorMountRecoveryRequired === true
                     && required.length > 0
                     && required.some((milestone) => !completed.has(milestone));
                 return {
@@ -1350,7 +1404,7 @@ export class StructuredRuntimeState {
             if (row.owner_locked) {
                 return { task: rowToTask(row), accepted: false, reason: "task-owner-locked" };
             }
-            if (isCanonicalConversationScope(row.conversation_scope_id) && !row.anchor_mount_requested_at) {
+            if (isCanonicalConversationScope(row.conversation_scope_id) && anchorMountRecoveryRequired(row, now.getTime(), input.hostTurnFingerprint)) {
                 return {
                     task: rowToTask(row),
                     accepted: false,

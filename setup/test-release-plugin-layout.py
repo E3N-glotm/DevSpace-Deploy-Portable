@@ -13,6 +13,7 @@ def main() -> int:
     module = runpy.run_path(str(BUILD_RELEASE))
     release_plugin_entries = module["release_plugin_entries"]
     release_files = module["release_files"]
+    validate_release_payload = module["validate_release_payload"]
     validate_release_plugins = module["validate_release_plugins"]
 
     entries = release_plugin_entries()
@@ -42,6 +43,7 @@ def main() -> int:
     wrong_root = [target for target in targets if target.startswith("plugins/installed/")]
     assert not wrong_root, f"plugin must not be packaged at repository root: {wrong_root}"
     packaged_files = release_files()
+    validate_release_payload(packaged_files)
     assert Path("true") not in packaged_files, "source-local updater test output leaked into release payload"
     assert not any(
         item.parent == Path(".") and item.name.startswith(".tmp-")
@@ -51,13 +53,37 @@ def main() -> int:
         item.parent == Path(".") and item.suffix.lower() == ".blockmap"
         for item in packaged_files
     ), "source-local blockmap artifact leaked into release payload"
-    excluded_cache_roots = {".test-cache", ".tmp-delta-audit", ".update-staging", "release-output"}
+    excluded_cache_roots = {
+        ".test-cache",
+        ".tmp-delta-audit",
+        ".update-staging",
+        "release-output",
+        "workspace-archives",
+    }
     assert not any(item.parts and item.parts[0] in excluded_cache_roots for item in packaged_files), (
         "source-local build/test cache leaked into release payload"
     )
     assert not any(item.parts[:2] == ("packages", "staging") for item in packaged_files), (
         "package staging cache leaked into release payload"
     )
+    assert not any(item.name.lower() == "auth.json" for item in packaged_files), (
+        "authentication state leaked into release payload"
+    )
+    assert not any(item.suffix.lower() in {".sqlite", ".sqlite3"} for item in packaged_files), (
+        "SQLite runtime state leaked into release payload"
+    )
+    try:
+        validate_release_payload([Path("future-backup/auth.json")])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("release safety validator did not fail closed on auth.json")
+    try:
+        validate_release_payload([Path("future-backup/devspace.sqlite")])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("release safety validator did not fail closed on SQLite state")
 
     print(
         json.dumps(
@@ -71,6 +97,8 @@ def main() -> int:
                 "rootTemporaryDiagnosticsExcluded": True,
                 "sourceLocalBlockmapExcluded": True,
                 "sourceLocalBuildCachesExcluded": True,
+                "liveBackupArchivesExcluded": True,
+                "credentialAndSqliteStateFailClosed": True,
             },
             ensure_ascii=False,
         )

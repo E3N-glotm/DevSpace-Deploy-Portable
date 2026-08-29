@@ -72,9 +72,14 @@ function anchorMountFromResult(params) {
   const nested = parseJsonObject(structured?.result) ?? parseJsonObject(textFromToolResult(params)) ?? {};
   const continuationAnchor = structured?.continuationAnchor ?? nested?.continuationAnchor;
   const anchorMountToken = structured?.anchorMountToken ?? nested?.anchorMountToken;
+  const rawGeneration = structured?.anchorMountGeneration ?? nested?.anchorMountGeneration;
+  const anchorMountGeneration = Number(rawGeneration);
   return {
     continuationAnchor: continuationAnchor === true,
     anchorMountToken: typeof anchorMountToken === "string" ? anchorMountToken : undefined,
+    anchorMountGeneration: Number.isFinite(anchorMountGeneration) && anchorMountGeneration > 0
+      ? Math.floor(anchorMountGeneration)
+      : undefined,
   };
 }
 
@@ -281,7 +286,9 @@ export function installContinuationCoordinator(app, options = {}) {
     task: undefined,
     anchorSurface: false,
     anchorMountToken: undefined,
+    anchorMountGeneration: undefined,
     anchorMountAcked: false,
+    anchorSuperseded: false,
     ensuringTask: undefined,
     supervisorTimer: undefined,
     lastHeartbeatAt: 0,
@@ -334,6 +341,20 @@ export function installContinuationCoordinator(app, options = {}) {
   function stopSupervisor() {
     if (state.supervisorTimer) clearInterval(state.supervisorTimer);
     state.supervisorTimer = undefined;
+  }
+
+  function markAnchorSuperseded() {
+    state.anchorSuperseded = true;
+    state.anchorMountToken = undefined;
+    state.anchorMountAcked = false;
+    stopSupervisor();
+    if (typeof document !== "undefined") {
+      document.documentElement?.setAttribute?.("data-devspace-anchor-superseded", "true");
+      if (document.body) {
+        document.body.replaceChildren();
+        Object.assign(document.body.style, { margin: "0", padding: "0", minHeight: "0", height: "0", overflow: "hidden" });
+      }
+    }
   }
 
   async function heartbeat(note = "workspace-app") {
@@ -617,7 +638,7 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   async function ensureTask() {
-    if (!state.connected || !state.anchorSurface || state.currentTool !== "continuation_anchor") return state.task;
+    if (!state.connected || !state.anchorSurface || state.currentTool !== "continuation_anchor" || state.anchorSuperseded) return state.task;
     if (state.ensuringTask) return state.ensuringTask;
     state.ensuringTask = (async () => {
       try {
@@ -642,6 +663,12 @@ export function installContinuationCoordinator(app, options = {}) {
             objective: "Continue the current DevSpace work until the original user request is verified complete; preserve the existing workspace, process handles, milestones, and evidence across assistant turns.",
           });
           if (outcome?.task) state.task = outcome.task;
+        }
+        const authoritativeGeneration = Math.max(0, Number(state.task?.anchorMountGeneration || 0));
+        const surfaceGeneration = Math.max(0, Number(state.anchorMountGeneration || 0));
+        if (surfaceGeneration > 0 && authoritativeGeneration > surfaceGeneration) {
+          markAnchorSuperseded();
+          return state.task;
         }
         if (!state.task?.anchorMountVerifiedAt) {
           if (!state.anchorMountToken) return state.task;
@@ -703,6 +730,7 @@ export function installContinuationCoordinator(app, options = {}) {
     const mount = anchorMountFromResult(params);
     if (mount.continuationAnchor || state.currentTool === "continuation_anchor") state.anchorSurface = true;
     if (mount.anchorMountToken) state.anchorMountToken = mount.anchorMountToken;
+    if (mount.anchorMountGeneration) state.anchorMountGeneration = mount.anchorMountGeneration;
     const resultTask = taskFromResult(params);
     if (resultTask) {
       state.task = resultTask;

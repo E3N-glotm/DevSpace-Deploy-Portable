@@ -2,7 +2,7 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.52**
+当前稳定版本：**1.1.53**
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
@@ -41,7 +41,7 @@ flowchart LR
 进入本仓库的 [Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases) 页面，下载：
 
 ```text
-DevSpacePortable-Windows-x64-1.1.52.zip
+DevSpacePortable-Windows-x64-1.1.53.zip
 ```
 
 不要下载 GitHub 自动生成的 `Source code (zip)`，那只是源码，不能直接运行。
@@ -343,6 +343,17 @@ https://你的域名/mcp
 - 1.1.40、1.1.41 与 1.1.42 兼容 Release 均保留 `1.1.33 -> target` Rescue，用于兼容 1.1.33 已知的旧 Apply 路径问题。
 - 每个 Release 同时提供 `update-manifest.json` 与 `SHA256SUMS-release.txt`，用于更新检查和完整性校验；1.1.42 的清单同时固定 blockmap header SHA-256 和 Range 布局元数据。
 - 不要下载 GitHub 自动生成的 Source code ZIP 作为可运行程序；该压缩包只包含源码。
+
+## 1.1.53 主要变化
+
+- **修复 requested≠mounted 的 ghost-anchor 漏卡。** `continuation_anchor` 返回过 UI result 不再等价于卡片真实存在；只有 iframe 携带当前 mount token 完成 ACK 后才写入 `anchor_mount_verified_at`。这样 Host 丢弃或懒加载 UI 时不会把一次未挂载 issuance 永久当成成功。
+- **未验证卡片使用 generation + Host-turn hint 做有界恢复。** 同一 assistant turn 内保持 provisional，不重复发卡；后续 Host turn 到来而旧卡仍未 ACK 时旋转 generation/token 并允许重新挂载。Host 不提供 turn hint 时使用有界 provisional timeout，因此既不会每个 MCP 请求都堆卡，也不会永久自锁。
+- **迟到旧 iframe 自动失效。** Workspace App 在 ACK/heartbeat 前会核对 authoritative generation；发现自己属于旧 generation 就清空并停止 supervisor，避免 ChatGPT 后来才懒加载旧 UI 形成双卡/双 coordinator。
+- **真实 verified 后仍严格单卡。** 一旦当前 conversation 的 anchor 完成 ACK，后续 workspace 切换、heartbeat、lease、普通 resource teardown 都不能重新签发第二张里程碑卡。
+- **修复 pre-workspace schema 死锁。** `continuation_anchor.workspaceId` 改为可选，因此 conversation Task Contract 可以先挂载唯一卡，再由 `open_workspace` 绑定执行目录；工具提示与实际 MCP schema 现在一致。Protocol 仍为 **1.5**。
+- **发行构建增加凭据/状态 fail-closed。** `workspace-archives` 等 live rollback 快照不再属于发行输入，而且在写 checksum/ZIP 前会再次拒绝任何 `auth.json`、`.sqlite`、`.sqlite3`，即使未来备份目录改名也不能静默把本机 OAuth/SQLite 状态带入公开包。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.53.md)
 
 ## 1.1.52 主要变化
 
