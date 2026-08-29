@@ -44,6 +44,10 @@ def main() -> int:
     packaged_files = release_files()
     assert Path("true") not in packaged_files, "source-local updater test output leaked into release payload"
     assert not any(
+        item.parent == Path(".") and item.name.startswith(".tmp-")
+        for item in packaged_files
+    ), "root-local temporary diagnostics leaked into release payload"
+    assert not any(
         item.parent == Path(".") and item.suffix.lower() == ".blockmap"
         for item in packaged_files
     ), "source-local blockmap artifact leaked into release payload"
@@ -64,6 +68,7 @@ def main() -> int:
                 "wrongRootEntries": 0,
                 "virtualMappingKeepsLocalDataUntouched": True,
                 "sourceLocalTestOutputExcluded": True,
+                "rootTemporaryDiagnosticsExcluded": True,
                 "sourceLocalBlockmapExcluded": True,
                 "sourceLocalBuildCachesExcluded": True,
             },

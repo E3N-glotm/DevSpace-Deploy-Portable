@@ -140,6 +140,7 @@ try {
   const changesConfig = {
     widgets: "changes",
     toolMode: "codex",
+    features: { continuationGuard: true },
     oauth: { scopes: ["devspace"] },
     publicBaseUrl: "https://devspace.example.test",
   };
@@ -151,6 +152,12 @@ try {
   }
   if (!shouldAttachWidget(changesConfig, "show_changes")) {
     throw new Error("show_changes must remain the dedicated render tool");
+  }
+  if (shouldAttachWidget(changesConfig, "workspace")) {
+    throw new Error("open_workspace must stay headless so reopening/reconnecting cannot create duplicate milestone cards");
+  }
+  if (!shouldAttachWidget(changesConfig, "continuation-anchor")) {
+    throw new Error("continuation_anchor must remain the one deliberate visible milestone-card entry point");
   }
   const renderMeta = toolWidgetDescriptorMeta(changesConfig, "show_changes");
   const renderUri = renderMeta._meta?.ui?.resourceUri;
@@ -170,8 +177,24 @@ try {
   if (toolInvocationStatus("workspace").invoked !== "工作区已就绪") {
     throw new Error("workspace invocation status is incorrect");
   }
+  const anchorMeta = toolWidgetDescriptorMeta(changesConfig, "continuation-anchor");
+  if (anchorMeta._meta?.ui?.resourceUri !== renderUri || anchorMeta._meta?.["openai/outputTemplate"] !== renderUri) {
+    throw new Error("continuation_anchor must render the same revisioned Workspace App through the one explicit card entry point");
+  }
   const enhancementSource = await readFile(
     new URL("../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js", import.meta.url),
+    "utf8",
+  );
+  const enhancementCss = await readFile(
+    new URL("../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.css", import.meta.url),
+    "utf8",
+  );
+  const featureToolsSource = await readFile(
+    new URL("../app/node_modules/@waishnav/devspace/dist/feature-tools.js", import.meta.url),
+    "utf8",
+  );
+  const serverSource = await readFile(
+    new URL("../app/node_modules/@waishnav/devspace/dist/server.js", import.meta.url),
     "utf8",
   );
   const portableVersion = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
@@ -179,6 +202,36 @@ try {
       || !enhancementSource.includes("session_rollback")
       || !enhancementSource.includes("session_changes")) {
     throw new Error("session review, rollback, or version footer is missing from the Workspace App");
+  }
+  if (!enhancementSource.includes('const CONTINUATION_TOOLS = new Set(["continuation_anchor"]);')) {
+    throw new Error("only continuation_anchor may render the continuation milestone mode");
+  }
+  if (!enhancementSource.includes('devspace-review-collapsed')) {
+    throw new Error("review cards must support a compact collapsed state rather than leaving Applied patch permanently expanded");
+  }
+  if (!enhancementCss.includes('.tool-card.review.devspace-review-collapsed .tool-header')
+      || !enhancementCss.includes('min-height:54px')) {
+    throw new Error("collapsed review cards must shrink to the compact milestone-card scale");
+  }
+  if (!enhancementSource.includes('session_rollback')) {
+    throw new Error("session rollback must be wired to a real Workspace App tool call instead of rendering a dead control");
+  }
+  if (!enhancementSource.includes('app.callServerTool({ name, arguments: args })')) {
+    throw new Error("Workspace App actions must prefer the initialized Apps SDK callServerTool transport");
+  }
+  if (enhancementSource.includes('window.confirm(')) {
+    throw new Error("rollback confirmation must remain inside the card because sandboxed Apps may suppress native modal dialogs");
+  }
+  if (!featureToolsSource.includes('...appToolMeta("review")')
+      || !featureToolsSource.includes('...appToolMeta("write")')
+      || !serverSource.includes('appToolMeta: (kind) => appCallableToolMeta(config, kind)')) {
+    throw new Error("session_changes/session_rollback must be explicitly callable from the rendered App");
+  }
+  if (!enhancementSource.includes('review-loading-state') || !enhancementSource.includes('review-error-state')) {
+    throw new Error("review preview must expose finite loading/error states instead of a permanent Loading review placeholder");
+  }
+  if (!enhancementSource.includes('8_000') || !enhancementSource.includes('Collapse and expand to retry')) {
+    throw new Error("review loading must time out into a retryable state instead of spinning forever");
   }
   if (!/element\("details", \{ className: "devspace-operation-timeline" \}\)/.test(enhancementSource)
       || !enhancementSource.includes("operation-timeline-summary")) {
@@ -197,8 +250,12 @@ try {
       operationTimeline: true,
       runtimeAssets: true,
       decoupledRenderTool: true,
+      singleContinuationCardEntry: true,
       invocationStatusMetadata: true,
       sessionReviewUi: true,
+      compactReviewCollapse: true,
+      appCallableRollback: true,
+      finiteReviewLoading: true,
       collapsibleOperationHistory: true,
       versionFooter: true,
     }),

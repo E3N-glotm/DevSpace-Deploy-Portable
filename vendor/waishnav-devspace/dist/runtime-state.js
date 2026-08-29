@@ -204,7 +204,7 @@ export class StructuredRuntimeState {
     touchContinuationModelActivity(input = {}) {
         const workspaceId = String(input.workspaceId ?? "").trim();
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
-        if (!workspaceId || !conversationScopeId)
+        if (!conversationScopeId)
             return undefined;
         const nowIso = new Date().toISOString();
         const row = isCanonicalConversationScope(conversationScopeId)
@@ -214,25 +214,30 @@ export class StructuredRuntimeState {
                 and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
               order by updated_at desc limit 1
             `).get(conversationScopeId)
-            : this.database.sqlite.prepare(`
+            : workspaceId ? this.database.sqlite.prepare(`
               select * from continuation_tasks
               where workspace_id=? and conversation_scope_id=?
                 and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
               order by updated_at desc limit 1
-            `).get(workspaceId, conversationScopeId);
+            `).get(workspaceId, conversationScopeId) : undefined;
         if (!row)
             return undefined;
         const substantiveIncrement = input.substantive === false ? 0 : 1;
-        const fulfillsSyntheticResume = substantiveIncrement > 0 && row.delivery_owner === "synthetic-active";
+        const fulfillsSyntheticResume = substantiveIncrement > 0
+            && ["synthetic-pending", "synthetic-active"].includes(String(row.delivery_owner || ""));
         const turnLeaseExpiresAt = new Date(Date.now() + COMPLETION_STALL_SUSPECT_MS).toISOString();
         this.database.sqlite.prepare(`
           update continuation_tasks
-          set workspace_id=?, last_model_activity_at=?, last_activity_at=?,
+          set workspace_id=coalesce(?,workspace_id), last_model_activity_at=?, last_activity_at=?,
               substantive_activity_count=coalesce(substantive_activity_count,0)+?,
+              continuation_pending=case when ? then 0 else continuation_pending end,
               superseded_delivery_token=case when ? then delivery_token else superseded_delivery_token end,
               delivery_token=case when ? then null else delivery_token end,
               delivery_owner=case when ? then 'synthetic-worked' else delivery_owner end,
               delivery_owner_expires_at=case when ? then null else delivery_owner_expires_at end,
+              delivery_ack_started_at=case when ? then null else delivery_ack_started_at end,
+              delivery_ack_retry_count=case when ? then 0 else delivery_ack_retry_count end,
+              delivery_ack_retry_after_at=case when ? then null else delivery_ack_retry_after_at end,
               turn_lease_expires_at=case when continuation_mode='completion-driven' then ? else turn_lease_expires_at end,
               stall_state=case when continuation_mode='completion-driven' then 'ACTIVE' else stall_state end,
               stall_suspected_at=case when continuation_mode='completion-driven' then null else stall_suspected_at end,
@@ -242,11 +247,38 @@ export class StructuredRuntimeState {
               stall_evidence=case when continuation_mode='completion-driven' then null else stall_evidence end,
               updated_at=?
           where id=?
-        `).run(workspaceId, nowIso, nowIso, substantiveIncrement,
+        `).run(workspaceId || null, nowIso, nowIso, substantiveIncrement,
+            fulfillsSyntheticResume ? 1 : 0,
             fulfillsSyntheticResume ? 1 : 0, fulfillsSyntheticResume ? 1 : 0,
             fulfillsSyntheticResume ? 1 : 0, fulfillsSyntheticResume ? 1 : 0,
+            fulfillsSyntheticResume ? 1 : 0, fulfillsSyntheticResume ? 1 : 0,
+            fulfillsSyntheticResume ? 1 : 0,
             turnLeaseExpiresAt, nowIso, row.id);
         return row.id;
+    }
+    prepareContinuationAnchorMount(input = {}) {
+        const taskId = String(input.taskId ?? "").trim();
+        const conversationScopeId = String(input.conversationScopeId ?? "").trim();
+        if (!taskId || !conversationScopeId)
+            return { task: undefined, accepted: false, reason: "task-and-conversation-required" };
+        const row = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
+        if (!row || (row.conversation_scope_id && row.conversation_scope_id !== conversationScopeId))
+            return { task: undefined, accepted: false, reason: "task-conversation-mismatch" };
+        const status = this.continuationTask({ action: "status", taskId, conversationScopeId });
+        if (row.anchor_mount_verified_at) {
+            return { ...status, accepted: true, alreadyVerified: true };
+        }
+        const nowIso = new Date().toISOString();
+        const token = row.anchor_mount_token || randomUUID();
+        this.database.sqlite.prepare(`
+          update continuation_tasks set anchor_mount_token=?, anchor_mount_requested_at=?, updated_at=? where id=?
+        `).run(token, row.anchor_mount_requested_at ?? nowIso, nowIso, taskId);
+        return {
+            ...this.continuationTask({ action: "status", taskId, conversationScopeId }),
+            accepted: true,
+            anchorMountToken: token,
+            alreadyVerified: false,
+        };
     }
     reapAbandonedContinuationTasks(input = {}) {
         const now = Date.now();
@@ -266,8 +298,8 @@ export class StructuredRuntimeState {
     ensureContinuationTaskContract(input = {}) {
         const workspaceId = String(input.workspaceId ?? "").trim();
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
-        if (!workspaceId || !conversationScopeId)
-            return { task: undefined, created: false, accepted: false, reason: "workspace-and-conversation-required" };
+        if (!conversationScopeId)
+            return { task: undefined, created: false, accepted: false, reason: "conversation-required" };
         this.reapAbandonedContinuationTasks();
         const now = new Date();
         const nowIso = now.toISOString();
@@ -275,25 +307,35 @@ export class StructuredRuntimeState {
             ? this.database.sqlite.prepare(`
               select * from continuation_tasks
               where conversation_scope_id=?
-                and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
-              order by updated_at desc limit 1
+              order by
+                case when state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK') then 0 else 1 end,
+                case when anchor_mount_verified_at is not null then 0 else 1 end,
+                updated_at desc
+              limit 1
             `).get(conversationScopeId)
-            : this.database.sqlite.prepare(`
+            : workspaceId ? this.database.sqlite.prepare(`
               select * from continuation_tasks
               where workspace_id=? and conversation_scope_id=?
                 and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
               order by updated_at desc limit 1
-            `).get(workspaceId, conversationScopeId);
+            `).get(workspaceId, conversationScopeId) : undefined;
         if (existing) {
             if (input.substantive) {
                 this.touchContinuationModelActivity({ workspaceId, conversationScopeId, substantive: true });
             }
-            else if (isCanonicalConversationScope(conversationScopeId) && existing.workspace_id !== workspaceId) {
+            else if (workspaceId && isCanonicalConversationScope(conversationScopeId) && existing.workspace_id !== workspaceId) {
                 this.database.sqlite.prepare("update continuation_tasks set workspace_id=?, updated_at=? where id=?")
                     .run(workspaceId, nowIso, existing.id);
             }
-            const status = this.continuationTask({ action: "status", taskId: existing.id, workspaceId, conversationScopeId });
-            return { ...status, created: false, taskContract: true, initialAnchorRequired: !status.task?.lastAnchorMountedAt };
+            const status = this.continuationTask({ action: "status", taskId: existing.id, ...(workspaceId ? { workspaceId } : {}), conversationScopeId });
+            return {
+                ...status,
+                created: false,
+                taskContract: true,
+                conversationLifetimeSingleton: isCanonicalConversationScope(conversationScopeId),
+                newMilestoneRequired: TERMINAL_CONTINUATION_STATES.has(String(status.task?.state ?? "")),
+                initialAnchorRequired: !status.task?.anchorMountRequestedAt,
+            };
         }
         const required = Array.isArray(input.requiredMilestones)
             ? [...new Set(input.requiredMilestones.map((value) => String(value).trim()).filter(Boolean))].slice(0, 64)
@@ -313,20 +355,20 @@ export class StructuredRuntimeState {
             substantive_activity_count, turn_lease_id, turn_lease_expires_at, created_at, updated_at
           ) values (?, ?, ?, ?, 'RUNNING', 'completion-driven', ?, '[]', '{}',
             0, ?, ?, null, ?, ?, ?, 'auto-conversation', ?, ?, 1, ?, ?, ?, ?, ?)
-        `).run(id, conversationScopeId, workspaceId,
+        `).run(id, conversationScopeId, workspaceId || null,
             String(input.objective ?? "Complete the original user-requested DevSpace work and verify the result before ending the task."),
             JSON.stringify(milestones),
             Math.max(1, Math.min(Number(input.maxNoProgress ?? 3), 20)),
             Math.max(1, Math.min(Number(input.maxSameFailure ?? 3), 20)),
             nowIso, nowIso, nowIso, sourceTool, TASK_CONTRACT_VERSION,
             input.substantive ? 1 : 0, turnLeaseId, turnLeaseExpiresAt, nowIso, nowIso);
-        const status = this.continuationTask({ action: "status", taskId: id, workspaceId, conversationScopeId });
+        const status = this.continuationTask({ action: "status", taskId: id, ...(workspaceId ? { workspaceId } : {}), conversationScopeId });
         return { ...status, created: true, taskContract: true, needsRefinement: required.length === 0, initialAnchorRequired: true };
     }
     continuationSupervisorDirective(input = {}) {
         const workspaceId = String(input.workspaceId ?? "").trim();
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
-        if (!workspaceId || !conversationScopeId)
+        if (!conversationScopeId)
             return undefined;
         const row = isCanonicalConversationScope(conversationScopeId)
             ? this.database.sqlite.prepare(`
@@ -335,12 +377,12 @@ export class StructuredRuntimeState {
                 and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
               order by updated_at desc limit 1
             `).get(conversationScopeId)
-            : this.database.sqlite.prepare(`
+            : workspaceId ? this.database.sqlite.prepare(`
               select * from continuation_tasks
               where workspace_id=? and conversation_scope_id=?
                 and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
               order by updated_at desc limit 1
-            `).get(workspaceId, conversationScopeId);
+            `).get(workspaceId, conversationScopeId) : undefined;
         if (!row)
             return undefined;
         const rawMode = String(row.continuation_mode ?? "compat").trim().toLowerCase();
@@ -368,11 +410,11 @@ export class StructuredRuntimeState {
         // a normal heartbeat/lease expiry must NEVER ask the model to re-anchor.
         // The coordinator refreshes its own liveness headlessly.  Only a Task
         // Contract that has never mounted its first card may require anchoring.
-        if (row.last_anchor_mounted_at)
+        if (row.anchor_mount_requested_at)
             return undefined;
         return {
             taskId: row.id,
-            workspaceId: row.workspace_id ?? workspaceId,
+            workspaceId: row.workspace_id ?? (workspaceId || undefined),
             continuationMode,
             reanchorRequired: true,
             initialAnchorRequired: true,
@@ -478,6 +520,9 @@ export class StructuredRuntimeState {
             stallEvidence: row.stall_evidence ?? undefined,
             lastAnchorMountedAt: row.last_anchor_mounted_at ?? undefined,
             anchorLeaseExpiresAt: row.anchor_lease_expires_at ?? undefined,
+            anchorMountVerifiedAt: row.anchor_mount_verified_at ?? undefined,
+            anchorMountRequestedAt: row.anchor_mount_requested_at ?? undefined,
+            anchorMountCoordinatorId: row.anchor_mount_coordinator_id ?? undefined,
             unlimitedContinuations: Number(row.max_continuations || 0) <= 0,
             unlimitedWallClock: !row.deadline_at,
             createdAt: row.created_at,
@@ -493,7 +538,7 @@ export class StructuredRuntimeState {
             // once per conversation.  Once that card exists, coordinator
             // heartbeat expiry is a liveness/recovery concern, not permission
             // to create another immutable ChatGPT card.
-            return !row.last_anchor_mounted_at;
+            return !row.anchor_mount_requested_at;
         };
         const continuationDirective = (task) => {
             if (!task) return {
@@ -545,8 +590,11 @@ export class StructuredRuntimeState {
                     return this.database.sqlite.prepare(`
                       select * from continuation_tasks
                       where conversation_scope_id=?
-                        and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
-                      order by updated_at desc limit 1
+                      order by
+                        case when state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK') then 0 else 1 end,
+                        case when anchor_mount_verified_at is not null then 0 else 1 end,
+                        updated_at desc
+                      limit 1
                     `).get(String(input.conversationScopeId));
                 }
                 return this.database.sqlite.prepare(`
@@ -573,14 +621,16 @@ export class StructuredRuntimeState {
                     ? "WAITING_EXTERNAL"
                     : row.state;
                 const coordinatorInstanceId = String(input.coordinatorInstanceId);
-                const newlyMounted = !row.coordinator_instance_id || row.coordinator_instance_id !== coordinatorInstanceId;
-                const lastAnchorMountedAt = newlyMounted ? nowIso : (row.last_anchor_mounted_at ?? nowIso);
-                const anchorLeaseExpiresAt = new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString();
+                const verifiedAnchorHeartbeat = Boolean(row.anchor_mount_verified_at)
+                    && coordinatorInstanceId === row.anchor_mount_coordinator_id;
+                const anchorLeaseExpiresAt = verifiedAnchorHeartbeat
+                    ? new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString()
+                    : row.anchor_lease_expires_at;
                 this.database.sqlite.prepare(`
                   update continuation_tasks set state=?, last_activity_at=?, last_ui_heartbeat_at=?,
-                    coordinator_instance_id=?, last_anchor_mounted_at=?, anchor_lease_expires_at=?, updated_at=? where id=?
+                    coordinator_instance_id=?, anchor_lease_expires_at=?, updated_at=? where id=?
                 `).run(acknowledgedState, nowIso, nowIso, coordinatorInstanceId,
-                    lastAnchorMountedAt, anchorLeaseExpiresAt, nowIso, row.id);
+                    anchorLeaseExpiresAt, nowIso, row.id);
                 return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id)) };
             }
             const deliveryToken = input.deliveryToken ? String(input.deliveryToken) : "";
@@ -718,8 +768,29 @@ export class StructuredRuntimeState {
                 else {
                     this.database.sqlite.prepare("update continuation_tasks set state='BUDGET_EXHAUSTED', terminal_reason='wall-clock-budget', continuation_pending=0, updated_at=? where id=?")
                         .run(nowIso, existing.id);
-                    existing = undefined;
+                    existing = action === "begin"
+                        ? this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id)
+                        : undefined;
                 }
+            }
+            if (existing && action === "begin" && terminalStates.has(existing.state)) {
+                const turnLeaseId = `turn_${randomUUID()}`;
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
+                    continuation_pending=0, watch_process_handles_json='[]',
+                    delivery_ack_started_at=null, delivery_ack_retry_count=0, delivery_ack_retry_after_at=null,
+                    turn_started_at=?, turn_lease_id=?, turn_lease_expires_at=?,
+                    last_model_activity_at=?, last_activity_at=?,
+                    stall_state='ACTIVE', stall_suspected_at=null, stall_probe_count=0,
+                    stall_last_probe_at=null, stall_armed_at=null, stall_evidence=null,
+                    updated_at=? where id=?
+                `).run(nowIso, turnLeaseId, completionTurnLeaseExpiresAt(), nowIso, nowIso, nowIso, existing.id);
+                existing = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id);
+            }
+            if (existing && action === "begin-auto" && terminalStates.has(existing.state)
+                && isCanonicalConversationScope(input.conversationScopeId ?? existing.conversation_scope_id)) {
+                const task = rowToTask(existing);
+                return { task, created: false, ...continuationDirective(task) };
             }
             if (existing && !terminalStates.has(existing.state)) {
                 if (action === "begin") {
@@ -763,18 +834,11 @@ export class StructuredRuntimeState {
                     const maxContinuations = input.maxContinuations === undefined
                         ? normalizeContinuationLimit(existing.max_continuations, 0)
                         : normalizeContinuationLimit(input.maxContinuations, 0);
-                    const anchorMounted = input.anchorMounted !== false;
-                    const firstAnchorMountedAt = anchorMounted
-                        ? (existing.last_anchor_mounted_at ?? nowIso)
-                        : existing.last_anchor_mounted_at;
-                    const anchorLeaseExpiresAt = anchorMounted
-                        ? new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString()
-                        : existing.anchor_lease_expires_at;
                     this.database.sqlite.prepare(`
                       update continuation_tasks set objective=?, required_milestones_json=?,
                         continuation_mode=?, max_continuations=?, max_no_progress=?, max_same_failure=?, deadline_at=?,
                         task_source=?, source_tool=?, contract_version=?, turn_lease_id=?, turn_lease_expires_at=?,
-                        workspace_id=?, last_anchor_mounted_at=?, anchor_lease_expires_at=?,
+                        workspace_id=coalesce(?,workspace_id),
                         last_model_activity_at=?, last_activity_at=?,
                         stall_state=case when ?='completion-driven' then 'ACTIVE' else stall_state end,
                         stall_suspected_at=case when ?='completion-driven' then null else stall_suspected_at end,
@@ -788,8 +852,8 @@ export class StructuredRuntimeState {
                         Math.max(1, Math.min(Number(input.maxNoProgress ?? existing.max_no_progress), 20)),
                         Math.max(1, Math.min(Number(input.maxSameFailure ?? existing.max_same_failure), 20)), deadlineAt,
                         taskSource, sourceTool, Math.max(Number(existing.contract_version || 0), TASK_CONTRACT_VERSION),
-                        turnLeaseId, turnLeaseExpiresAt, input.workspaceId ?? existing.workspace_id,
-                        firstAnchorMountedAt, anchorLeaseExpiresAt, nowIso, nowIso,
+                        turnLeaseId, turnLeaseExpiresAt, input.workspaceId ?? null,
+                        nowIso, nowIso,
                         requestedMode, requestedMode, requestedMode, requestedMode, requestedMode, requestedMode,
                         nowIso, existing.id);
                     const task = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id));
@@ -826,25 +890,70 @@ export class StructuredRuntimeState {
                 mode, JSON.stringify(required), maxContinuations, maxNoProgress, maxSameFailure, deadlineAt,
                 nowIso, nowIso, nowIso, taskSource, sourceTool, TASK_CONTRACT_VERSION,
                 action === "begin-auto" ? 1 : 0, 0, turnLeaseId, turnLeaseExpiresAt, nowIso, nowIso);
-            if (action === "begin" && input.anchorMounted !== false) {
-                this.database.sqlite.prepare(`
-                  update continuation_tasks set last_anchor_mounted_at=?, anchor_lease_expires_at=?, updated_at=? where id=?
-                `).run(nowIso, new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString(), nowIso, id);
-            }
             const task = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(id));
             return { task, created: true, ...continuationDirective(task) };
         }
         const row = find();
         if (!row) return { task: undefined, accepted: false, reason: "task-not-found" };
-        if (terminalStates.has(row.state) && !["status"].includes(action)) {
+        if (terminalStates.has(row.state) && !["status", "anchor-mounted"].includes(action)) {
             return { task: rowToTask(row), accepted: false, reason: "task-terminal" };
         }
         const taskId = row.id;
+        if (action === "anchor-mounted") {
+            const token = String(input.anchorMountToken ?? "").trim();
+            const coordinatorInstanceId = String(input.coordinatorInstanceId ?? "").trim();
+            if (!token || !coordinatorInstanceId)
+                return { task: rowToTask(row), accepted: false, reason: "anchor-mount-token-and-coordinator-required" };
+            if (row.anchor_mount_verified_at) {
+                return { task: rowToTask(row), accepted: true, reason: "anchor-mount-already-verified" };
+            }
+            if (!row.anchor_mount_token || token !== row.anchor_mount_token) {
+                return { task: rowToTask(row), accepted: false, reason: "anchor-mount-token-mismatch" };
+            }
+            const leaseExpiresAt = new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString();
+            this.database.sqlite.prepare(`
+              update continuation_tasks set anchor_mount_verified_at=?, anchor_mount_coordinator_id=?,
+                anchor_mount_token=null, last_anchor_mounted_at=?, anchor_lease_expires_at=?,
+                last_ui_heartbeat_at=?, coordinator_instance_id=?, last_activity_at=?, updated_at=?
+              where id=?
+            `).run(nowIso, coordinatorInstanceId, nowIso, leaseExpiresAt,
+                nowIso, coordinatorInstanceId, nowIso, nowIso, taskId);
+            return {
+                task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)),
+                accepted: true,
+                reason: "anchor-mount-verified",
+            };
+        }
         if (action === "heartbeat") {
             const coordinatorInstanceId = input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : row.coordinator_instance_id;
-            const newlyMounted = coordinatorInstanceId && coordinatorInstanceId !== row.coordinator_instance_id;
-            const lastAnchorMountedAt = newlyMounted ? nowIso : (row.last_anchor_mounted_at ?? (coordinatorInstanceId ? nowIso : null));
-            const anchorLeaseExpiresAt = coordinatorInstanceId ? new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString() : row.anchor_lease_expires_at;
+            const anchorMountAckPrefix = "anchor-mount-ack:";
+            const heartbeatNote = String(input.note ?? "");
+            if (!row.anchor_mount_verified_at && heartbeatNote.startsWith(anchorMountAckPrefix)) {
+                const token = heartbeatNote.slice(anchorMountAckPrefix.length).trim();
+                if (!token || !coordinatorInstanceId)
+                    return { task: rowToTask(row), accepted: false, reason: "anchor-mount-token-and-coordinator-required" };
+                if (!row.anchor_mount_token || token !== row.anchor_mount_token)
+                    return { task: rowToTask(row), accepted: false, reason: "anchor-mount-token-mismatch" };
+                const leaseExpiresAt = new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString();
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set anchor_mount_verified_at=?, anchor_mount_coordinator_id=?,
+                    anchor_mount_token=null, last_anchor_mounted_at=?, anchor_lease_expires_at=?,
+                    last_ui_heartbeat_at=?, coordinator_instance_id=?, last_activity_at=?, updated_at=?
+                  where id=?
+                `).run(nowIso, coordinatorInstanceId, nowIso, leaseExpiresAt,
+                    nowIso, coordinatorInstanceId, nowIso, nowIso, taskId);
+                return {
+                    task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)),
+                    accepted: true,
+                    reason: "anchor-mount-verified-via-heartbeat",
+                };
+            }
+            const verifiedAnchorHeartbeat = Boolean(row.anchor_mount_verified_at)
+                && Boolean(coordinatorInstanceId)
+                && coordinatorInstanceId === row.anchor_mount_coordinator_id;
+            const anchorLeaseExpiresAt = verifiedAnchorHeartbeat
+                ? new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString()
+                : row.anchor_lease_expires_at;
             const mode = normalizedMode(row.continuation_mode, "compat");
             const required = parseJson(row.required_milestones_json, []);
             const completed = new Set(parseJson(row.completed_milestones_json, []));
@@ -887,11 +996,11 @@ export class StructuredRuntimeState {
             }
             this.database.sqlite.prepare(`
               update continuation_tasks set last_activity_at=?, last_ui_heartbeat_at=?, coordinator_instance_id=?,
-                last_anchor_mounted_at=?, anchor_lease_expires_at=?,
+                anchor_lease_expires_at=?,
                 stall_state=?, stall_suspected_at=?, stall_probe_count=?, stall_last_probe_at=?, stall_armed_at=?, stall_evidence=?,
                 updated_at=?
               where id=?
-            `).run(nowIso, nowIso, coordinatorInstanceId, lastAnchorMountedAt, anchorLeaseExpiresAt,
+            `).run(nowIso, nowIso, coordinatorInstanceId, anchorLeaseExpiresAt,
                 stallState, stallSuspectedAt, stallProbeCount, stallLastProbeAt, stallArmedAt, stallEvidence,
                 nowIso, taskId);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
@@ -1101,6 +1210,12 @@ export class StructuredRuntimeState {
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true, reason: "resident-stage-complete" };
         }
         if (action === "checkpoint") {
+            const required = new Set(parseJson(row.required_milestones_json, []));
+            for (const value of Array.isArray(input.requiredMilestones) ? input.requiredMilestones : []) {
+                const item = String(value).trim();
+                if (item) required.add(item);
+            }
+            const requiredMilestones = [...required].slice(0, 64);
             const completed = new Set(parseJson(row.completed_milestones_json, []));
             for (const value of Array.isArray(input.completedMilestones) ? input.completedMilestones : []) {
                 const item = String(value).trim();
@@ -1160,7 +1275,7 @@ export class StructuredRuntimeState {
                 ? completionTurnLeaseExpiresAt()
                 : row.turn_lease_expires_at;
             this.database.sqlite.prepare(`
-              update continuation_tasks set state=?, completed_milestones_json=?, evidence_json=?, progress_fingerprint=?, failure_fingerprint=?,
+              update continuation_tasks set state=?, required_milestones_json=?, completed_milestones_json=?, evidence_json=?, progress_fingerprint=?, failure_fingerprint=?,
                 no_progress_count=?, same_failure_count=?, waiting_reason=?, terminal_reason=?, continuation_pending=0,
                 last_model_activity_at=?, last_activity_at=?, turn_lease_expires_at=?,
                 stall_state=case when ?='RUNNING' and continuation_mode='completion-driven' then 'ACTIVE' else stall_state end,
@@ -1171,7 +1286,7 @@ export class StructuredRuntimeState {
                 stall_evidence=case when ?='RUNNING' and continuation_mode='completion-driven' then null else stall_evidence end,
                 updated_at=?
               where id=?
-            `).run(state, JSON.stringify([...completed]), JSON.stringify(evidence), progress || null, failure || null, noProgress, sameFailure,
+            `).run(state, JSON.stringify(requiredMilestones), JSON.stringify([...completed]), JSON.stringify(evidence), progress || null, failure || null, noProgress, sameFailure,
                 pausedByUser ? (row.waiting_reason || "Paused by Portable owner UI.")
                     : input.waitingExternal ? String(input.note ?? "Waiting for an external condition.") : progressWarning,
                 terminalReason, nowIso, nowIso, checkpointLeaseExpiresAt,
@@ -1234,6 +1349,13 @@ export class StructuredRuntimeState {
         if (action === "complete") {
             if (row.owner_locked) {
                 return { task: rowToTask(row), accepted: false, reason: "task-owner-locked" };
+            }
+            if (isCanonicalConversationScope(row.conversation_scope_id) && !row.anchor_mount_requested_at) {
+                return {
+                    task: rowToTask(row),
+                    accepted: false,
+                    reason: "continuation-anchor-required",
+                };
             }
             const required = new Set(parseJson(row.required_milestones_json, []));
             const completed = new Set(parseJson(row.completed_milestones_json, []));
@@ -1316,7 +1438,7 @@ export class StructuredRuntimeState {
                 const confirmedLimitTeardown = /confirmed turn-limit teardown/i.test(continuationNote);
                 const confirmedLimitLeaseExpired = /confirmed turn-limit lease expired/i.test(continuationNote);
                 const completionStallCorroborated = /task contract stall corroborated/i.test(continuationNote);
-                const syntheticResumeWorkRetry = /synthetic resume work lease expired/i.test(continuationNote);
+                const syntheticResumeWorkRetry = /synthetic resume work (?:ownership )?lease expired/i.test(continuationNote);
                 const turnStartedAt = current.turn_started_at ? Date.parse(current.turn_started_at) : NaN;
                 const confirmedLimitMs = Number(current.confirmed_turn_limit_ms || 0);
                 const lastModelActivityAt = current.last_model_activity_at ? Date.parse(current.last_model_activity_at) : NaN;
@@ -1345,14 +1467,22 @@ export class StructuredRuntimeState {
                     && current.state === "RUNNING"
                     && taskIncomplete
                     && String(current.stall_state || "ACTIVE") === "CONTINUATION_ARMED";
+                const syntheticWorkOwnerLeaseAt = current.delivery_owner_expires_at
+                    ? Date.parse(current.delivery_owner_expires_at)
+                    : NaN;
+                const syntheticTurnLeaseAt = current.turn_lease_expires_at
+                    ? Date.parse(current.turn_lease_expires_at)
+                    : NaN;
+                const syntheticWorkLeaseExpired = Number.isFinite(syntheticWorkOwnerLeaseAt)
+                    ? now.getTime() >= syntheticWorkOwnerLeaseAt
+                    : Number.isFinite(syntheticTurnLeaseAt) && now.getTime() >= syntheticTurnLeaseAt;
                 const syntheticResumeWorkRecoveryReady = syntheticResumeWorkRetry
                     && currentMode === "completion-driven"
                     && current.state === "RUNNING"
                     && taskIncomplete
                     && String(current.delivery_owner || "") === "synthetic-active"
                     && Boolean(current.delivery_token)
-                    && Number.isFinite(Date.parse(current.turn_lease_expires_at || ""))
-                    && now.getTime() >= Date.parse(current.turn_lease_expires_at);
+                    && syntheticWorkLeaseExpired;
                 if (!wakePending && !deliveryAckRetryAuthorized && !manualRecovery && !(currentMode !== "compat" && recentTimeout)
                     && !recentConfirmedTeardown && !confirmedLeaseRecoveryReady
                     && !completionStallRecoveryReady && !syntheticResumeWorkRecoveryReady) {

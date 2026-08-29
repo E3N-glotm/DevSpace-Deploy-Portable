@@ -51,6 +51,79 @@ function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $UpdateLog -Value $line -Encoding UTF8
 }
 
+function Start-DeferredUpdateCleanup([string]$BackupPath, [string]$StagePath, [string]$CleanupTransactionId) {
+    # A controller may itself be running from runtime\node\node.exe while it
+    # waits for this PowerShell updater. Windows keeps that executable image
+    # locked even after the runtime directory has been moved into the backup,
+    # so the backup cannot always be deleted before this updater returns. The
+    # filesystem lock is the authoritative readiness signal: process ancestry
+    # is not (Apply may be launched by Update.exe, Task Scheduler, a legacy
+    # Node controller, or another compatible caller). Use a detached system
+    # PowerShell process that immediately attempts the two transaction-scoped
+    # removals and retries only while Windows still reports them present.
+    $backupLiteral = $BackupPath.Replace("'", "''")
+    $stageLiteral = $StagePath.Replace("'", "''")
+    $resultLiteral = $ResultFile.Replace("'", "''")
+    $transactionLiteral = $CleanupTransactionId.Replace("'", "''")
+    $cleanupScript = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+`$backupRemoved = -not (Test-Path -LiteralPath '$backupLiteral')
+`$stageRemoved = -not (Test-Path -LiteralPath '$stageLiteral')
+for (`$i = 0; `$i -lt 360 -and (-not `$backupRemoved -or -not `$stageRemoved); `$i++) {
+    if (-not `$backupRemoved) { Remove-Item -LiteralPath '$backupLiteral' -Recurse -Force -ErrorAction SilentlyContinue }
+    if (-not `$stageRemoved) { Remove-Item -LiteralPath '$stageLiteral' -Recurse -Force -ErrorAction SilentlyContinue }
+    `$backupRemoved = -not (Test-Path -LiteralPath '$backupLiteral')
+    `$stageRemoved = -not (Test-Path -LiteralPath '$stageLiteral')
+    if (-not `$backupRemoved -or -not `$stageRemoved) { Start-Sleep -Milliseconds 250 }
+}
+`$resultUpdated = `$false
+for (`$writeAttempt = 0; `$writeAttempt -lt 60 -and -not `$resultUpdated; `$writeAttempt++) {
+    `$tmp = '$resultLiteral' + '.cleanup-' + `$PID + '-' + `$writeAttempt
+    try {
+        if (-not (Test-Path -LiteralPath '$resultLiteral')) {
+            Start-Sleep -Milliseconds 200
+            continue
+        }
+        `$current = Get-Content -LiteralPath '$resultLiteral' -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ([string]`$current.cleanupTransactionId -ne '$transactionLiteral') {
+            # A newer update owns the shared result file. Never let a stale
+            # deferred cleaner overwrite its status.
+            break
+        }
+        `$current.backupRemoved = `$backupRemoved
+        `$current.stageRemoved = `$stageRemoved
+        `$current.cleanupScheduled = `$true
+        `$current | Add-Member -NotePropertyName cleanupSucceeded -NotePropertyValue ([bool](`$backupRemoved -and `$stageRemoved)) -Force
+        `$current | Add-Member -NotePropertyName cleanupCompletedAt -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
+        `$current | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath `$tmp -Encoding UTF8 -ErrorAction Stop
+        Move-Item -LiteralPath `$tmp -Destination '$resultLiteral' -Force -ErrorAction Stop
+        `$resultUpdated = `$true
+    } catch {
+        Remove-Item -LiteralPath `$tmp -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 200
+    }
+}
+"@
+    try {
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanupScript))
+        $cleanupWorkingDirectory = if ($env:SystemRoot -and (Test-Path -LiteralPath $env:SystemRoot)) {
+            $env:SystemRoot
+        } elseif ($env:TEMP -and (Test-Path -LiteralPath $env:TEMP)) {
+            $env:TEMP
+        } else {
+            [System.IO.Path]::GetTempPath()
+        }
+        Start-Process -FilePath "powershell.exe" -ArgumentList @(
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-WindowStyle", "Hidden", "-EncodedCommand", $encoded
+        ) -WorkingDirectory $cleanupWorkingDirectory -WindowStyle Hidden | Out-Null
+        return $true
+    } catch {
+        Write-UpdateLog "Deferred update cleanup could not be launched: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Get-StageMutexName {
     $sha256 = [Security.Cryptography.SHA256]::Create()
     try {
@@ -1736,6 +1809,134 @@ function Invoke-Manager([string]$Command, [switch]$IgnoreFailure) {
     return $output.Trim()
 }
 
+function Get-ProcessImagePath([System.Diagnostics.Process]$Process) {
+    if (-not $Process) { return "" }
+    try {
+        return [IO.Path]::GetFullPath([string]$Process.MainModule.FileName)
+    } catch {
+        return ""
+    }
+}
+
+function Stop-ValidatedPortableUiProcess([int]$ProcessId) {
+    if ($ProcessId -le 0) { return $false }
+    $process = $null
+    try { $process = Get-Process -Id $ProcessId -ErrorAction Stop }
+    catch { return $false }
+    try {
+        $expected = [IO.Path]::GetFullPath((Join-Path $Root "DevSpace-Portable.exe"))
+        $actual = Get-ProcessImagePath $process
+        if ([string]::IsNullOrWhiteSpace($actual) -or -not ($actual -ieq $expected)) {
+            throw "Refusing to stop PID $ProcessId because it is not this Portable installation's DevSpace-Portable.exe."
+        }
+        Write-UpdateLog "Closing validated Portable control center PID $ProcessId before applying program files."
+        try { [void]$process.CloseMainWindow() } catch { }
+        if ($process.WaitForExit(3500)) { return $true }
+        try { $process.Kill() }
+        catch { throw "Portable control center PID $ProcessId could not be terminated before the update: $($_.Exception.Message)" }
+        if (-not $process.WaitForExit(7000)) {
+            throw "Portable control center PID $ProcessId did not exit before the update. No program files were changed."
+        }
+        return $true
+    } finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
+function Stop-PortableUiBeforeApply([int]$RequestedUiPid) {
+    $expected = [IO.Path]::GetFullPath((Join-Path $Root "DevSpace-Portable.exe"))
+    if ($RequestedUiPid -gt 0) {
+        $process = $null
+        try { $process = Get-Process -Id $RequestedUiPid -ErrorAction Stop }
+        catch { return }
+        try {
+            $actual = Get-ProcessImagePath $process
+            if ([string]::IsNullOrWhiteSpace($actual) -or -not ($actual -ieq $expected)) {
+                throw "UiPid $RequestedUiPid is not this Portable installation's DevSpace-Portable.exe. No program files were changed."
+            }
+            Write-UpdateLog "Waiting for validated native UI PID $RequestedUiPid to exit before applying program files."
+            if ($process.WaitForExit(90000)) { return }
+        } finally {
+            if ($process) { $process.Dispose() }
+        }
+        [void](Stop-ValidatedPortableUiProcess $RequestedUiPid)
+        return
+    }
+
+    # The normal Update.exe handoff already closes the control center before
+    # it invokes this backend with -UiPid 0. Direct/internal callers can reach
+    # Apply without that handoff, though. Discover only the exact executable
+    # path for this installation so we never terminate an unrelated process.
+    foreach ($process in @(Get-Process -Name "DevSpace-Portable" -ErrorAction SilentlyContinue)) {
+        try {
+            $actual = Get-ProcessImagePath $process
+            if (-not [string]::IsNullOrWhiteSpace($actual) -and ($actual -ieq $expected)) {
+                [void](Stop-ValidatedPortableUiProcess ([int]$process.Id))
+            }
+        } finally {
+            try { $process.Dispose() } catch { }
+        }
+    }
+}
+
+function Get-UpdaterAncestorProcessIds {
+    $ids = @()
+    $seen = @{}
+    $currentId = [int]$PID
+    for ($depth = 0; $depth -lt 16; $depth++) {
+        $record = $null
+        try {
+            $record = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $currentId" -ErrorAction Stop
+        } catch {
+            # Failure to prove ancestry must never create an exemption.
+            break
+        }
+        if (-not $record) { break }
+        $parentId = [int]$record.ParentProcessId
+        if ($parentId -le 0 -or $seen.ContainsKey([string]$parentId)) { break }
+        $seen[[string]$parentId] = $true
+        $ids += $parentId
+        $currentId = $parentId
+    }
+    return @($ids)
+}
+
+function Get-PortableRootExecutableProcesses([int[]]$AllowedProcessIds = @()) {
+    $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    $matches = @()
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        try {
+            if ([int]$process.Id -eq [int]$PID) { continue }
+            if ($AllowedProcessIds -contains [int]$process.Id) { continue }
+            $actual = Get-ProcessImagePath $process
+            if ([string]::IsNullOrWhiteSpace($actual)) { continue }
+            if ($actual.Length -ge $prefix.Length -and ($actual.Substring(0, $prefix.Length) -ieq $prefix)) {
+                $matches += [pscustomobject]@{ pid = [int]$process.Id; path = $actual }
+            }
+        } finally {
+            try { $process.Dispose() } catch { }
+        }
+    }
+    return @($matches)
+}
+
+function Assert-PortableExecutableImagesDrained {
+    # A synchronous installed-runtime launcher can remain alive while its
+    # PowerShell child performs the transaction. Windows permits the runtime
+    # tree to be renamed in that case; the existing deferred-cleanup path
+    # removes the backup after that launch carrier exits. Exempt only the
+    # updater's proven ancestor chain, never arbitrary Portable workers.
+    $allowedProcessIds = @(Get-UpdaterAncestorProcessIds)
+    $residual = @()
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        $residual = @(Get-PortableRootExecutableProcesses -AllowedProcessIds $allowedProcessIds)
+        if ($residual.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    $details = ($residual | ForEach-Object { "PID $($_.pid): $($_.path)" }) -join "; "
+    throw "Portable executable images are still running after the pre-update stop. No program files were changed. $details"
+}
+
 function Stop-PortableBeforeApply {
     try {
         $output = Invoke-WithRetry -Description "Portable pre-update stop" -Attempts 3 -Operation {
@@ -1862,17 +2063,16 @@ function Apply-StagedUpdate {
         Write-UpdateProgress -Phase "apply-started" -Message "Detached updater is running and waiting for the control center to close"
     }
 
-    if ($UiPid -gt 0) {
-        Write-UpdateLog "Waiting for native UI PID $UiPid to exit before applying $targetVersion."
-        Wait-Process -Id $UiPid -Timeout 90 -ErrorAction SilentlyContinue
-    }
+    Stop-PortableUiBeforeApply $UiPid
 
     $shouldRestartServices = (Test-Path (Join-Path $Root "data\config\config.json")) -and (Test-Path (Join-Path $Root "data\config\auth.json"))
     Write-UpdateProgress -Phase "applying" -Message "Stopping Portable-owned processes before applying $targetVersion"
     Write-UpdateLog "Stopping Portable services before applying $targetVersion."
     Stop-PortableBeforeApply | Out-Null
+    Assert-PortableExecutableImagesDrained
 
-    $backup = Join-Path $Root (".update-backup-{0}-{1}" -f $targetVersion, [guid]::NewGuid().ToString("N"))
+    $cleanupTransactionId = [guid]::NewGuid().ToString("N")
+    $backup = Join-Path $Root (".update-backup-{0}-{1}" -f $targetVersion, $cleanupTransactionId)
     New-Item -ItemType Directory -Force -Path $backup | Out-Null
     $movedOld = New-Object System.Collections.Generic.List[string]
     $movedNew = New-Object System.Collections.Generic.List[string]
@@ -1947,10 +2147,22 @@ function Apply-StagedUpdate {
                 if ($persistent -contains $item.Name) { continue }
                 $target = Join-Path $Root $item.Name
                 if (Test-Path $target) {
-                    Move-Item -LiteralPath $target -Destination (Join-Path $backup $item.Name) -Force
+                    try {
+                        Invoke-WithRetry -Description "Move existing top-level item '$($item.Name)' into update backup" -Attempts 4 -Operation {
+                            Move-Item -LiteralPath $target -Destination (Join-Path $backup $item.Name) -Force -ErrorAction Stop
+                        } | Out-Null
+                    } catch {
+                        throw "Failed to move existing top-level item '$($item.Name)' into the update backup: $($_.Exception.Message)"
+                    }
                     [void]$movedOld.Add($item.Name)
                 }
-                Move-Item -LiteralPath $item.FullName -Destination $target -Force
+                try {
+                    Invoke-WithRetry -Description "Install staged top-level item '$($item.Name)'" -Attempts 4 -Operation {
+                        Move-Item -LiteralPath $item.FullName -Destination $target -Force -ErrorAction Stop
+                    } | Out-Null
+                } catch {
+                    throw "Failed to install staged top-level item '$($item.Name)': $($_.Exception.Message)"
+                }
                 [void]$movedNew.Add($item.Name)
             }
         }
@@ -1987,6 +2199,17 @@ function Apply-StagedUpdate {
             $uiStartError = $_.Exception.Message
             Write-UpdateLog "Update completed, but the control center could not be started automatically: $uiStartError"
         }
+        Remove-TransientUpdateTask
+        Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        $backupRemoved = -not (Test-Path -LiteralPath $backup)
+        $stageRemoved = -not (Test-Path -LiteralPath $stage)
+        $needsDeferredCleanup = (-not $backupRemoved -or -not $stageRemoved)
+        # Persist the owning transaction before the detached cleaner starts.
+        # This makes the hand-off deterministic and gives the cleaner an
+        # identity guard so an old cleanup process can never overwrite the
+        # result from a newer update.
+        $cleanupScheduled = $needsDeferredCleanup
         $result = [ordered]@{
             success = $true
             version = $targetVersion
@@ -1998,9 +2221,21 @@ function Apply-StagedUpdate {
             serviceRecoveryError = $serviceRecoveryError
             uiStarted = $uiStarted
             uiStartError = $uiStartError
-            backupRemoved = $true
+            backupRemoved = $backupRemoved
+            stageRemoved = $stageRemoved
+            cleanupScheduled = $cleanupScheduled
+            cleanupSucceeded = [bool]($backupRemoved -and $stageRemoved)
+            cleanupTransactionId = $cleanupTransactionId
         }
         Write-UpdateResult $result
+        if ($needsDeferredCleanup) {
+            $cleanupScheduled = Start-DeferredUpdateCleanup -BackupPath $backup -StagePath $stage -CleanupTransactionId $cleanupTransactionId
+            if (-not $cleanupScheduled) {
+                $result.cleanupScheduled = $false
+                Write-UpdateResult $result
+            }
+            Write-UpdateLog "Immediate transaction cleanup incomplete. backupRemoved=$backupRemoved stageRemoved=$stageRemoved deferredCleanupScheduled=$cleanupScheduled"
+        }
         Write-UpdateLog "Update $targetVersion program files applied successfully. servicesRecovered=$servicesRecovered"
         $completionMessage = if ($servicesRecovered) {
             "DevSpace Portable $targetVersion update completed"
@@ -2008,9 +2243,6 @@ function Apply-StagedUpdate {
             "DevSpace Portable $targetVersion files updated; service recovery needs attention"
         }
         Write-UpdateProgress -Phase "completed" -Message $completionMessage
-        Remove-TransientUpdateTask
-        Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
         return $result
     } catch {
         $originalError = $_

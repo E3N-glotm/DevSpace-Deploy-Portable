@@ -224,6 +224,13 @@ def release_files() -> list[Path]:
             relative = file_path.relative_to(ROOT)
             if relative.parent == Path(".") and file_name in EXCLUDED_TOP_LEVEL_FILES:
                 continue
+            # Source/regression tests intentionally leave a handful of
+            # root-local `.tmp-*` diagnostics behind for post-failure review.
+            # They are runtime/test state, not distributable payload. Exclude
+            # the entire root-level namespace so future tests cannot silently
+            # leak another temporary log/json/text artifact into a release ZIP.
+            if relative.parent == Path(".") and file_name.startswith(".tmp-"):
+                continue
             if relative == Path("SHA256SUMS.txt"):
                 continue
             if relative.suffix.lower() == ".zip":

@@ -21,6 +21,7 @@
 .session-review-confirmation code{color:var(--color-text-secondary,#d6d6dc);font-family:var(--font-mono,ui-monospace,monospace);word-break:break-all}
 .session-review-actions{align-items:center;gap:10px;display:flex}
 .session-review-rollback{border:1px solid var(--color-border-danger,#7d3737);background:color-mix(in srgb,var(--color-background-danger,#4c1c1c) 45%,transparent);color:var(--color-text-danger,#ee7676);cursor:pointer;border-radius:7px;padding:7px 10px}
+.session-review-rollback.session-review-confirm-pending{border-color:var(--color-border-warning,#b88a34);background:color-mix(in srgb,var(--color-background-warning,#4a3817) 45%,transparent);color:var(--color-text-warning,#e8bd68)}
 .session-review-rollback:disabled{opacity:.45;cursor:not-allowed}
 .session-review-action-status{color:var(--color-text-tertiary,#a3a3aa);font-size:11px}
 .devspace-version-footer{color:var(--color-text-tertiary,#888891);font-family:var(--font-mono,ui-monospace,monospace);font-size:10px;text-align:right;padding:6px 4px 2px}

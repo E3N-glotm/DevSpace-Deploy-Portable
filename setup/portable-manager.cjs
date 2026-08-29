@@ -1922,6 +1922,59 @@ function stopRecordedTunnelProcess() {
   }
 }
 
+function isLocalMcpServiceProcess(item) {
+  const command = String(item?.commandLine || "").replace(/\\/g, "/").toLowerCase();
+  if (!command) return false;
+  const root = ROOT.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
+  const startCmd = `${root}/scripts/start-devspace.cmd`;
+  const startSh = `${root}/scripts/start-devspace.sh`;
+  const loggedLauncher = `${root}/setup/logged-launcher.cjs`;
+  const devspaceLog = `${root}/logs/devspace.log`;
+  const cli = `${root}/app/node_modules/@waishnav/devspace/dist/cli.js`;
+  return command.includes(startCmd)
+    || command.includes(startSh)
+    || (command.includes(loggedLauncher) && command.includes(devspaceLog))
+    || (command.includes(cli) && /(?:^|[\s"'])serve(?:[\s"']|$)/i.test(command));
+}
+
+function stopLocalMcpServiceProcesses(port) {
+  const killed = [];
+  const deadline = Date.now() + PORTABLE_STOP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const snapshot = portableProcessSnapshot();
+    const serviceProcesses = snapshot.filter(isLocalMcpServiceProcess);
+    const listeners = listenerPids(port);
+    if (!serviceProcesses.length && !listeners.length) break;
+
+    const byPid = new Map(snapshot.map((item) => [item.pid, item]));
+    const depth = (item) => {
+      let value = 0;
+      let current = item;
+      const visited = new Set();
+      while (current && byPid.has(current.parentPid) && !visited.has(current.pid)) {
+        visited.add(current.pid);
+        value += 1;
+        current = byPid.get(current.parentPid);
+      }
+      return value;
+    };
+    const candidates = serviceProcesses.sort((left, right) => depth(right) - depth(left));
+    if (!candidates.length) break;
+    for (const item of candidates) {
+      // Never use /T here. The MCP server may have user-launched descendants
+      // that do not belong to the Portable service chain. Kill only processes
+      // whose own command line identifies them as start-devspace wrappers,
+      // logged-launcher, or the cli.js serve listener.
+      runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
+      killed.push({ pid: item.pid, name: item.name, executablePath: item.executablePath });
+    }
+    sleepSync(300);
+  }
+  const remainingProcesses = portableProcessSnapshot().filter(isLocalMcpServiceProcess);
+  const remainingListeners = listenerPids(port);
+  return { killed, remainingProcesses, remainingListeners };
+}
+
 function powershellLiteral(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
@@ -2103,11 +2156,16 @@ function stopLocalServiceOnly(options = {}) {
   if (owned) setOwnedTaskEnabled(TASK_MCP, false);
   endOwnedTask(TASK_MCP);
   stopRecordedProcess(MCP_PID_FILE, "node.exe", port);
-  if (!options.leaveDisabled && owned && wasEnabled) setOwnedTaskEnabled(TASK_MCP, true);
-  const remaining = recordedProcessStatus(MCP_PID_FILE, "node.exe", port);
-  if (remaining.running || remaining.listenerMatch) {
-    throw new Error(`Local MCP stop did not fully release 127.0.0.1:${port}.`);
+  const serviceStop = stopLocalMcpServiceProcesses(port);
+  fs.rmSync(MCP_PID_FILE, { force: true });
+  if (serviceStop.remainingProcesses.length || serviceStop.remainingListeners.length) {
+    const details = [
+      ...serviceStop.remainingProcesses.map((item) => `${item.pid} ${item.name} ${item.commandLine}`),
+      ...serviceStop.remainingListeners.map((pid) => `${pid} still listens on 127.0.0.1:${port}`),
+    ];
+    throw new Error(`Local MCP stop did not fully release 127.0.0.1:${port}:\n${details.join("\n")}`);
   }
+  if (!options.leaveDisabled && owned && wasEnabled) setOwnedTaskEnabled(TASK_MCP, true);
   return `Local MCP service stopped. Public tunnel state was left unchanged.`;
 }
 
@@ -2209,6 +2267,11 @@ async function startLocalService(port) {
   for (let attempt = 1; attempt <= SERVICE_START_ATTEMPTS; attempt += 1) {
     endOwnedTask(TASK_MCP);
     stopRecordedProcess(MCP_PID_FILE, "node.exe", port);
+    const beforeStart = stopLocalMcpServiceProcesses(port);
+    if (beforeStart.remainingProcesses.length || beforeStart.remainingListeners.length) {
+      const listeners = beforeStart.remainingListeners.join(", ") || "none";
+      throw new Error(`DevSpace local service cannot start because 127.0.0.1:${port} is still occupied after service cleanup (listener PID(s): ${listeners}).`);
+    }
     taskCommand("run", TASK_MCP);
     const result = await waitForCondition(LOCAL_SERVICE_START_TIMEOUT_MS, async () => ({
       ready: await localServiceReady(port),
@@ -2218,6 +2281,7 @@ async function startLocalService(port) {
     lastReason = `attempt ${attempt} did not expose both local OAuth metadata endpoints`;
     endOwnedTask(TASK_MCP);
     stopRecordedProcess(MCP_PID_FILE, "node.exe", port);
+    stopLocalMcpServiceProcesses(port);
     await delay(750);
   }
   throw new Error(`DevSpace local service failed after ${SERVICE_START_ATTEMPTS} attempts: ${lastReason}. Check logs\\devspace.log.`);

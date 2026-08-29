@@ -129,6 +129,11 @@ const migrations = [
         name: "continuation-manual-takeover-and-singleton-repair",
         up: migrateContinuationManualTakeoverAndSingletonRepair,
     },
+    {
+        version: 27,
+        name: "continuation-verified-anchor-mount",
+        up: migrateContinuationVerifiedAnchorMount,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -661,6 +666,23 @@ function migrateContinuationTaskContractTurnLease(sqlite) {
         and continuation_mode='compat'
         and required_milestones_json='[]'
         and objective like 'Continue the current DevSpace work%';
+    `);
+}
+function migrateContinuationVerifiedAnchorMount(sqlite) {
+    // `last_anchor_mounted_at` predates a trustworthy UI acknowledgement.  It
+    // could be written by the model-side continuation_anchor invocation itself
+    // and, historically, by any Workspace App heartbeat.  Keep the legacy
+    // columns for diagnostics, but never backfill the new verified field from
+    // them: an existing conversation must prove that the actual continuation
+    // iframe initialized before the server treats the one-card precondition as
+    // satisfied.
+    addColumnIfMissing(sqlite, "continuation_tasks", "anchor_mount_verified_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "anchor_mount_token", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "anchor_mount_requested_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "anchor_mount_coordinator_id", "text");
+    sqlite.exec(`
+      create index if not exists continuation_tasks_anchor_verified_idx
+        on continuation_tasks(anchor_mount_verified_at, state, updated_at desc);
     `);
 }
 function migrateContinuationCompletionDrivenUnbounded(sqlite) {

@@ -6,12 +6,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -19,6 +21,7 @@ const SOURCE_NODE = join(SOURCE_ROOT, "runtime", "node", "node.exe");
 const SOURCE_UPDATER = join(SOURCE_ROOT, "setup", "portable-updater.ps1");
 const POWERSHELL = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const NOOP_EXE = join(process.env.SystemRoot || "C:\\Windows", "System32", "where.exe");
+const LONG_RUNNING_EXE = join(process.env.SystemRoot || "C:\\Windows", "System32", "ping.exe");
 
 function writeJson(path, value) {
   writeFileSync(path, JSON.stringify(value, null, 2), "utf8");
@@ -28,13 +31,24 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
 }
 
-function installNode(target) {
+function installNode(target, { allowHardLink = true } = {}) {
   mkdirSync(dirname(target), { recursive: true });
-  try { linkSync(SOURCE_NODE, target); }
-  catch { copyFileSync(SOURCE_NODE, target); }
+  if (allowHardLink) {
+    try {
+      linkSync(SOURCE_NODE, target);
+      return;
+    } catch { }
+  }
+  copyFileSync(SOURCE_NODE, target);
 }
 
-function createFixture({ failFirstStart = false, badTargetManifest = false, failStop = false } = {}) {
+function samePhysicalFile(left, right) {
+  const a = statSync(left, { bigint: true });
+  const b = statSync(right, { bigint: true });
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function createFixture({ failFirstStart = false, badTargetManifest = false, failStop = false, isolatedRuntimeNode = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devspace-updater-apply-"));
   const state = join(root, "data", "state");
   const config = join(root, "data", "config");
@@ -50,7 +64,7 @@ function createFixture({ failFirstStart = false, badTargetManifest = false, fail
   writeJson(join(root, "VERSION-MANIFEST.json"), { runtime: { devspacePortable: "1.1.26" } });
   copyFileSync(NOOP_EXE, join(root, "DevSpace-Portable.exe"));
 
-  installNode(join(root, "runtime", "node", "node.exe"));
+  installNode(join(root, "runtime", "node", "node.exe"), { allowHardLink: !isolatedRuntimeNode });
   writeFileSync(join(setup, "portable-manager.cjs"), String.raw`
 "use strict";
 const fs = require("fs");
@@ -130,6 +144,75 @@ function runApply(fixture) {
   });
 }
 
+function runApplyThroughRuntimeNode(fixture) {
+  const runtimeNode = join(fixture.root, "runtime", "node", "node.exe");
+  // This scenario models an installed Portable runtime launching its updater.
+  // It must use a distinct physical executable. A hard link to SOURCE_NODE
+  // would also be held open by this test runner itself and would manufacture
+  // a lock that no real D:\DevSpacePortable installation has.
+  assert.equal(samePhysicalFile(SOURCE_NODE, runtimeNode), false,
+    "locked-runtime fixture must not hard-link the test runner's node.exe");
+  installNode(join(fixture.stage, "payload", "runtime", "node", "node.exe"), { allowHardLink: false });
+  const childScript = String.raw`
+const { spawnSync } = require("node:child_process");
+const p = spawnSync(${JSON.stringify(POWERSHELL)}, [
+  "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+  "-File", ${JSON.stringify(join(fixture.stage, "portable-updater.ps1"))},
+  "-Action", "Apply",
+  "-Root", ${JSON.stringify(fixture.root)},
+  "-Repository", "E3N-glotm/DevSpace-Deploy-Portable",
+  "-CurrentVersion", "1.1.26",
+  "-StagingPath", ${JSON.stringify(fixture.stage)},
+  "-UiPid", "0",
+], { encoding: "utf8", windowsHide: true });
+process.stdout.write(JSON.stringify({ status: p.status, stdout: p.stdout, stderr: p.stderr }));
+process.exit(p.status ?? 1);
+`;
+  return spawnSync(runtimeNode, ["-e", childScript], {
+    cwd: fixture.root,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 120_000,
+    env: { ...process.env, DEVSPACE_TEST_FAIL_FIRST_START: "0", DEVSPACE_TEST_FAIL_STOP: "0" },
+  });
+}
+
+function waitFor(predicate, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
+  return predicate();
+}
+
+function processExists(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function startLongRunningImage(path) {
+  const child = spawn(path, ["-t", "127.0.0.1"], {
+    cwd: dirname(path),
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  const started = waitFor(() => Number.isInteger(child.pid) && child.pid > 0 && processExists(child.pid), 2_000);
+  assert.equal(started, true, `long-running image failed to start: ${path}`);
+  return child;
+}
+
+function updateBackups(root) {
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(".update-backup-"))
+    .map((entry) => entry.name);
+}
+
 function managerCommands(root) {
   return readFileSync(join(root, "data", "state", "mock-manager-events.jsonl"), "utf8")
     .trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line).command);
@@ -139,6 +222,11 @@ const successFixture = createFixture();
 const serviceRecoveryFixture = createFixture({ failFirstStart: true });
 const rollbackFixture = createFixture({ badTargetManifest: true });
 const stopFailureFixture = createFixture({ failStop: true });
+const lockedRuntimeFixture = createFixture({ isolatedRuntimeNode: true });
+const directUiFixture = createFixture();
+const residualWorkerFixture = createFixture();
+let directUiProcess = null;
+let residualWorkerProcess = null;
 try {
   const success = runApply(successFixture);
   assert.equal(success.status, 0, success.stderr || success.stdout);
@@ -182,6 +270,47 @@ try {
   assert.deepEqual(managerCommands(stopFailureFixture.root), ["stop", "stop", "stop"]);
   assert.match(`${stopFailure.stdout}\n${stopFailure.stderr}`, /No program files were changed/i);
 
+  const lockedRuntime = runApplyThroughRuntimeNode(lockedRuntimeFixture);
+  assert.equal(lockedRuntime.status, 0, lockedRuntime.stderr || lockedRuntime.stdout);
+  const stageRemoved = waitFor(() => !existsSync(lockedRuntimeFixture.stage));
+  assert.equal(stageRemoved, true, "deferred cleanup should remove the staged update");
+  const cleanupResultUpdated = waitFor(() => {
+    try { return readJson(join(lockedRuntimeFixture.root, "data", "state", "update-result.json")).backupRemoved === true; }
+    catch { return false; }
+  });
+  assert.equal(cleanupResultUpdated, true, "deferred cleanup should update the result after the runtime-node image lock is released");
+  const lockedResult = readJson(join(lockedRuntimeFixture.root, "data", "state", "update-result.json"));
+  assert.equal(lockedResult.success, true);
+  assert.equal(lockedResult.backupRemoved, true);
+  assert.equal(lockedResult.stageRemoved, true);
+  assert.equal(lockedResult.cleanupScheduled, true);
+  assert.deepEqual(updateBackups(lockedRuntimeFixture.root), []);
+
+  const directUiPath = join(directUiFixture.root, "DevSpace-Portable.exe");
+  copyFileSync(LONG_RUNNING_EXE, directUiPath);
+  directUiProcess = startLongRunningImage(directUiPath);
+  const directUiPid = directUiProcess.pid;
+  const directUi = runApply(directUiFixture);
+  assert.equal(directUi.status, 0, directUi.stderr || directUi.stdout);
+  assert.equal(readJson(join(directUiFixture.root, "VERSION-MANIFEST.json")).runtime.devspacePortable, "1.1.27");
+  assert.equal(waitFor(() => !processExists(directUiPid), 3_000), true,
+    `direct Apply should close the exact-path Control Center PID ${directUiPid}`);
+
+  const residualWorkerPath = join(residualWorkerFixture.root, "Portable-Test-Worker.exe");
+  copyFileSync(LONG_RUNNING_EXE, residualWorkerPath);
+  residualWorkerProcess = startLongRunningImage(residualWorkerPath);
+  const residualWorkerPid = residualWorkerProcess.pid;
+  const residualWorker = runApply(residualWorkerFixture);
+  assert.notEqual(residualWorker.status, 0,
+    "an unrelated Portable-root executable must block the transaction before file moves");
+  assert.equal(readJson(join(residualWorkerFixture.root, "VERSION-MANIFEST.json")).runtime.devspacePortable, "1.1.26");
+  assert.deepEqual(updateBackups(residualWorkerFixture.root), []);
+  assert.match(`${residualWorker.stdout}\n${residualWorker.stderr}`, /Portable executable images are still running/i);
+  assert.match(`${residualWorker.stdout}\n${residualWorker.stderr}`, /No program files were changed/i);
+  assert.match(`${residualWorker.stdout}\n${residualWorker.stderr}`, /Portable-Test-Worker\.exe/i);
+  assert.equal(processExists(residualWorkerPid), true,
+    "preflight must not terminate unrelated Portable-root executable images");
+
   console.log(JSON.stringify({
     missingTasksReinstalledBeforeStart: true,
     updatedServicesStartedAfterTaskRepair: true,
@@ -192,13 +321,23 @@ try {
     rollbackRecoversPreviousServices: true,
     failedPreUpdateStopDoesNotTouchProgramFiles: true,
     conciseBackendFailurePreservedForOlderUpdaterUi: true,
+    lockedRuntimeNodeUsesDeferredCleanup: true,
+    cleanupResultReflectsActualFilesystemState: true,
+    directApplyClosesExactPortableControlCenter: true,
+    unrelatedPortableRootExecutableFailsBeforeTransaction: true,
   }));
 } finally {
+  try { directUiProcess?.kill(); } catch { }
+  try { residualWorkerProcess?.kill(); } catch { }
   // The no-op control-center stand-in exits immediately, but give Windows a
   // brief opportunity to release its image section before removing fixtures.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
-  rmSync(successFixture.root, { recursive: true, force: true });
-  rmSync(serviceRecoveryFixture.root, { recursive: true, force: true });
-  rmSync(rollbackFixture.root, { recursive: true, force: true });
-  rmSync(stopFailureFixture.root, { recursive: true, force: true });
+  const cleanupOptions = { recursive: true, force: true, maxRetries: 30, retryDelay: 100 };
+  rmSync(successFixture.root, cleanupOptions);
+  rmSync(serviceRecoveryFixture.root, cleanupOptions);
+  rmSync(rollbackFixture.root, cleanupOptions);
+  rmSync(stopFailureFixture.root, cleanupOptions);
+  rmSync(lockedRuntimeFixture.root, cleanupOptions);
+  rmSync(directUiFixture.root, cleanupOptions);
+  rmSync(residualWorkerFixture.root, cleanupOptions);
 }

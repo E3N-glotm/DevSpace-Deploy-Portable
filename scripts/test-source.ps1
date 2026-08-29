@@ -9,6 +9,13 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 $env:DEVSPACE_WINDOWS_TEXT_ENCODING = "utf-8"
+$ProgressLog = [string]$env:DEVSPACE_TEST_PROGRESS_LOG
+
+function Write-TestProgress([string]$Message) {
+    if ([string]::IsNullOrWhiteSpace($ProgressLog)) { return }
+    $line = "[{0}] {1}" -f ([DateTime]::UtcNow.ToString("o")), $Message
+    [IO.File]::AppendAllText($ProgressLog, $line + [Environment]::NewLine, [Text.Encoding]::UTF8)
+}
 
 $Node = Join-Path $Root "runtime\node\node.exe"
 if (-not (Test-Path $Node)) {
@@ -19,43 +26,63 @@ if (-not (Test-Path $Npm)) {
     $Npm = (Get-Command npm.cmd -ErrorAction Stop).Source
 }
 
-& $Node scripts\verify-source-tree.mjs
-if ($LASTEXITCODE -ne 0) { throw "Source-tree verification failed." }
-& $Node scripts\pack-devspace-core.mjs
-if ($LASTEXITCODE -ne 0) { throw "Portable core packaging failed." }
+function Invoke-NativeChecked {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [Parameter(Mandatory = $true)]
+        [string]$FailureMessage
+    )
 
-if (-not $SkipInstall) {
-    & $Npm ci --prefix app
-    if ($LASTEXITCODE -ne 0) { throw "npm ci failed." }
+    # Windows PowerShell 5.1 may surface a native process' stderr as a
+    # NativeCommandError when ErrorActionPreference=Stop even when that
+    # process exits successfully. Treat the real process exit code as the
+    # authoritative result for every native gate while keeping stderr visible.
+    Write-TestProgress "BEGIN $FailureMessage :: $FilePath $($ArgumentList -join ' ')"
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $NativeExitCode = 0
+    try {
+        $ErrorActionPreference = "Continue"
+        & $FilePath @ArgumentList
+        $NativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($NativeExitCode -ne 0) {
+        Write-TestProgress "FAIL exit=$NativeExitCode :: $FailureMessage"
+        throw "$FailureMessage (exit $NativeExitCode)"
+    }
+    Write-TestProgress "PASS exit=0 :: $FailureMessage"
 }
 
-& $Node setup\harden-nested-dependencies.mjs
-if ($LASTEXITCODE -ne 0) { throw "Dependency hardening failed." }
+Invoke-NativeChecked -FilePath $Node -ArgumentList @("scripts\verify-source-tree.mjs") -FailureMessage "Source-tree verification failed."
+Invoke-NativeChecked -FilePath $Node -ArgumentList @("scripts\pack-devspace-core.mjs") -FailureMessage "Portable core packaging failed."
+
+if (-not $SkipInstall) {
+    Invoke-NativeChecked -FilePath $Npm -ArgumentList @("ci", "--prefix", "app") -FailureMessage "npm ci failed."
+}
+
+Invoke-NativeChecked -FilePath $Node -ArgumentList @("setup\harden-nested-dependencies.mjs") -FailureMessage "Dependency hardening failed."
 
 if (-not $SkipNativeBuild) {
-    & $Node setup\build-native-ui.cjs
-    if ($LASTEXITCODE -ne 0) { throw "Native UI build failed." }
+    Invoke-NativeChecked -FilePath $Node -ArgumentList @("setup\build-native-ui.cjs") -FailureMessage "Native UI build failed."
 }
 
 Write-Host "==> setup/test-incremental-update.py"
-& python setup\test-incremental-update.py
-if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-incremental-update.py" }
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-incremental-update.py") -FailureMessage "Test failed: setup/test-incremental-update.py"
 
 Write-Host "==> setup/test-incremental-chain.py"
-& python setup\test-incremental-chain.py
-if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-incremental-chain.py" }
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-incremental-chain.py") -FailureMessage "Test failed: setup/test-incremental-chain.py"
 
 Write-Host "==> setup/test-update-manifest-graph.py"
-& python setup\test-update-manifest-graph.py
-if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-update-manifest-graph.py" }
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-update-manifest-graph.py") -FailureMessage "Test failed: setup/test-update-manifest-graph.py"
 
 Write-Host "==> setup/test-rescue-overlay.py"
-& python setup\test-rescue-overlay.py
-if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-rescue-overlay.py" }
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-rescue-overlay.py") -FailureMessage "Test failed: setup/test-rescue-overlay.py"
 
 Write-Host "==> setup/test-release-plugin-layout.py"
-& python setup\test-release-plugin-layout.py
-if ($LASTEXITCODE -ne 0) { throw "Test failed: setup/test-release-plugin-layout.py" }
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-release-plugin-layout.py") -FailureMessage "Test failed: setup/test-release-plugin-layout.py"
 
 $Tests = @(
     "setup/test-runtime-cards.mjs",
@@ -91,27 +118,14 @@ $Tests = @(
 )
 foreach ($Test in $Tests) {
     Write-Host "==> $Test"
-    # Windows PowerShell 5.1 can surface a native program's stderr as a
-    # NativeCommandError when ErrorActionPreference=Stop even if that program
-    # exits successfully. Git in particular emits harmless line-ending
-    # warnings from some regression fixtures. Let native stderr remain visible
-    # and use the process exit code as the authoritative test result.
-    $PreviousErrorActionPreference = $ErrorActionPreference
-    $NativeExitCode = 0
-    try {
-        $ErrorActionPreference = "Continue"
-        & $Node $Test
-        $NativeExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $PreviousErrorActionPreference
-    }
-    if ($NativeExitCode -ne 0) { throw "Test failed: $Test" }
+    Invoke-NativeChecked -FilePath $Node -ArgumentList @($Test) -FailureMessage "Test failed: $Test"
 }
 
 if (-not $SkipAudit) {
-    & $Npm audit --omit=dev --prefix app
-    if ($LASTEXITCODE -ne 0) { throw "Production dependency audit failed." }
+    Invoke-NativeChecked -FilePath $Npm -ArgumentList @("audit", "--omit=dev", "--prefix", "app") -FailureMessage "Production dependency audit failed."
 }
 
 Write-Host "All source and Portable regression tests passed."
+Write-TestProgress "PASS ALL source and Portable regression tests"
+exit 0
 

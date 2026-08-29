@@ -43,6 +43,8 @@ assert.match(nativeSource, /BuildRemoteAgentsTab\(\)/);
 assert.doesNotMatch(nativeSource, /ActionButton\("远程服务器 \/ Linux Agent", delegate \{ OpenRemoteAgentsDialog\(\); \}\)/);
 assert.match(nativeSource, /Name = "RemoteAgentScrollViewport"/);
 assert.match(nativeSource, /Name = "RemoteAgentScrollableContent"/);
+assert.match(nativeSource, /Name = "RemoteAgentTiles"/);
+assert.match(nativeSource, /AutoSizeMode = AutoSizeMode\.GrowAndShrink/);
 assert.match(nativeSource, /IsAgentHeartbeatHealthy\("online-recent"\)/);
 assert.match(nativeSource, /AutoScaleMode\s*=\s*AutoScaleMode\.Dpi/);
 assert.doesNotMatch(nativeSource, /SplitterDistance\s*=\s*610/);
@@ -73,6 +75,8 @@ try {
   assert.ok(report.splitterLayout?.remoteAgentCardCount >= 2);
   assert.ok(report.splitterLayout?.remoteAgentButtonMinHeight >= 44);
   assert.equal(report.splitterLayout?.remoteAgentButtonsUnclipped, true);
+  assert.equal(report.splitterLayout?.remoteAgentHeaderButtonsUnclipped, true);
+  assert.equal(report.splitterLayout?.remoteAgentTilesUnclipped, true);
   assert.equal(report.splitterLayout?.remoteAgentHintsUnclipped, true, JSON.stringify({
     ssh: [report.splitterLayout?.remoteAgentSshHintPreferredHeight, report.splitterLayout?.remoteAgentSshHintHeight],
     privilege: [report.splitterLayout?.remoteAgentPrivilegeHintPreferredHeight, report.splitterLayout?.remoteAgentPrivilegeHintHeight],

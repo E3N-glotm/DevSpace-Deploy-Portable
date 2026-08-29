@@ -84,6 +84,7 @@ export function registerFeatureTools(server, services) {
         reviewCheckpoints,
         uiLease,
         toolMeta,
+        appToolMeta,
     } = services;
 
     registerAppTool(server, "memory_list", {
@@ -242,7 +243,7 @@ export function registerFeatureTools(server, services) {
         // session_changes is a structured read API used by rollback/review
         // workflows. Keep it headless in the default `changes` mode; only the
         // explicit show_changes tool owns the consolidated review App card.
-        ...toolMeta("review"),
+        ...appToolMeta("review"),
         annotations: READ_ONLY_ANNOTATIONS,
     }, async ({ workspaceId }) => {
         requireFeature(config, "uiSessionReview", "UI session review");
@@ -281,7 +282,7 @@ export function registerFeatureTools(server, services) {
             forcePartial: z.boolean().optional(),
         },
         outputSchema: { result: z.string(), rollback: z.unknown() },
-        ...toolMeta("write"),
+        ...appToolMeta("write"),
         annotations: WRITE_ANNOTATIONS,
     }, async ({ workspaceId, confirmation, forcePartial }) => {
         requireFeature(config, "uiSessionReview", "UI session review");

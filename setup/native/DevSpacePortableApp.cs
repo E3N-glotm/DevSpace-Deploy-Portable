@@ -1407,7 +1407,7 @@ namespace DevSpacePortable.NativeUI
                     && scrollContent.RowStyles.Count >= 4
                     && scrollContent.RowStyles[2].Height <= 0.1F
                     && scrollContent.RowStyles[3].Height <= 0.1F
-                    && scrollContent.Height <= 400;
+                    && scrollContent.Height <= 420;
                 System.Reflection.MethodInfo beginNewAgentEditor = typeof(RemoteAgentsDialog).GetMethod("BeginNewAgentEditor", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                 if (beginNewAgentEditor == null) throw new InvalidOperationException("Remote Agent new-server editor entry point is missing.");
                 beginNewAgentEditor.Invoke(agents, null);
@@ -1416,7 +1416,7 @@ namespace DevSpacePortable.NativeUI
                     && scrollContent.RowStyles.Count >= 4
                     && scrollContent.RowStyles[2].Height >= 219F
                     && scrollContent.RowStyles[3].Height >= 423F
-                    && scrollContent.Height >= 1000;
+                    && scrollContent.Height >= 1040;
                 Size[] remoteSizes = new[]
                 {
                     new Size(1040, 760),
@@ -1446,11 +1446,21 @@ namespace DevSpacePortable.NativeUI
                     && scrollContent.Height > scrollViewport.ClientSize.Height
                     && scrollViewport.DisplayRectangle.Height >= scrollContent.Bottom;
                 bool remoteButtonsUnclipped = FindControls<ModernButton>(agents).All(button => button.Parent == null
-                    || (button.Top >= -1 && button.Bottom <= button.Parent.ClientSize.Height + 1));
+                    || (button.Left >= -1 && button.Right <= button.Parent.ClientSize.Width + 1
+                        && button.Top >= -1 && button.Bottom <= button.Parent.ClientSize.Height + 1));
                 FlowLayoutPanel remoteHeaderActions = FindControls<FlowLayoutPanel>(agents).FirstOrDefault(panel => panel.Name == "RemoteAgentHeaderActions");
                 bool remoteHeaderButtonsUnclipped = remoteHeaderActions != null
                     && remoteHeaderActions.ClientSize.Height >= 68
-                    && FindControls<ModernButton>(remoteHeaderActions).All(button => button.Top >= 0 && button.Bottom <= remoteHeaderActions.ClientSize.Height);
+                    && FindControls<ModernButton>(remoteHeaderActions).Where(button => button.Visible).All(button =>
+                        button.Left >= 0 && button.Right <= remoteHeaderActions.ClientSize.Width
+                        && button.Top >= 0 && button.Bottom <= remoteHeaderActions.ClientSize.Height);
+                FlowLayoutPanel remoteTiles = FindControls<FlowLayoutPanel>(agents).FirstOrDefault(panel => panel.Name == "RemoteAgentTiles");
+                bool remoteAgentTilesUnclipped = remoteTiles != null
+                    && FindControls<RemoteAgentTile>(remoteTiles).All(tile =>
+                        tile.Left >= remoteTiles.Padding.Left - 1
+                        && tile.Right <= remoteTiles.ClientSize.Width - remoteTiles.Padding.Right + 1
+                        && tile.Top >= remoteTiles.Padding.Top - 1
+                        && tile.Bottom + tile.Margin.Bottom <= remoteTiles.ClientSize.Height - remoteTiles.Padding.Bottom + 1);
                 Label sshHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("优先通过现有 Agent", StringComparison.Ordinal));
                 Label privilegeHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("无管理员权限", StringComparison.Ordinal));
                 bool remoteHintsUnclipped = new[] { sshHint, privilegeHint }.All(label =>
@@ -1475,6 +1485,7 @@ namespace DevSpacePortable.NativeUI
                     && remoteButtonMinHeight >= 44
                     && remoteButtonsUnclipped
                     && remoteHeaderButtonsUnclipped
+                    && remoteAgentTilesUnclipped
                     && remoteHintsUnclipped
                     && remoteScrollableLayout
                     && commandBox != null
@@ -1486,6 +1497,7 @@ namespace DevSpacePortable.NativeUI
                 report["remoteAgentButtonMinHeight"] = remoteButtonMinHeight;
                 report["remoteAgentButtonsUnclipped"] = remoteButtonsUnclipped;
                 report["remoteAgentHeaderButtonsUnclipped"] = remoteHeaderButtonsUnclipped;
+                report["remoteAgentTilesUnclipped"] = remoteAgentTilesUnclipped;
                 report["remoteAgentHintsUnclipped"] = remoteHintsUnclipped;
                 report["remoteAgentScrollableLayout"] = remoteScrollableLayout;
                 report["remoteAgentDefaultEditorCollapsed"] = remoteAgentDefaultEditorCollapsed;
@@ -2556,7 +2568,11 @@ namespace DevSpacePortable.NativeUI
             // under-report its final row when this Form is embedded as a
             // top-level tab; the scrollbar then reaches its maximum while the
             // last rows are still hidden behind the main-window footer.
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 226));
+            // One RemoteAgentTile consumes 118px plus 12px vertical margin.
+            // The card itself adds 32px padding and the header reserves 72px.
+            // 226px left the FlowLayout viewport shorter than one complete tile,
+            // which visibly clipped the last metadata line even with one tile row.
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 254));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 220));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 424));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
@@ -2637,13 +2653,14 @@ namespace DevSpacePortable.NativeUI
             FlowLayoutPanel agentHeaderActions = new FlowLayoutPanel
             {
                 Name = "RemoteAgentHeaderActions",
-                AutoSize = false,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 WrapContents = false,
                 FlowDirection = FlowDirection.LeftToRight,
                 BackColor = UiPalette.Surface,
                 Margin = new Padding(6, 0, 0, 0),
                 Padding = new Padding(0, 10, 0, 10),
-                Dock = DockStyle.Fill,
+                Anchor = AnchorStyles.Right,
                 MinimumSize = new Size(0, 68),
             };
             _newAgentButton = ActionButton("添加服务器", delegate { BeginNewAgentEditor(); }, true, false, 126);
@@ -2657,6 +2674,7 @@ namespace DevSpacePortable.NativeUI
             agentHeaderActions.Controls.Add(_closeAgentEditorButton);
             agentHeaderActions.Controls.Add(refreshAgentButton);
             agentHeader.Controls.Add(agentHeaderActions, 2, 0);
+            _agentTiles.Name = "RemoteAgentTiles";
             _agentTiles.Dock = DockStyle.Fill;
             _agentTiles.AutoScroll = true;
             _agentTiles.WrapContents = true;
@@ -2879,7 +2897,7 @@ namespace DevSpacePortable.NativeUI
                 _remoteRoot.RowStyles[2].Height = visible ? 220 : 0;
                 _remoteRoot.RowStyles[3].SizeType = SizeType.Absolute;
                 _remoteRoot.RowStyles[3].Height = visible ? 424 : 0;
-                _remoteRoot.Height = visible ? 1024 : 380;
+                _remoteRoot.Height = visible ? 1052 : 408;
                 _remoteRoot.PerformLayout();
             }
         }

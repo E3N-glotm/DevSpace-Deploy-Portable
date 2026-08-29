@@ -8,9 +8,10 @@ const RUNTIME_TOOLS = new Set([
   "bash",
 ]);
 const REVIEW_TOOLS = new Set(["apply_patch", "show_changes", "session_changes", "write", "edit"]);
-// open_workspace mounts the first conversation Task Contract in 1.1.50, so the
-// same compact milestone card is useful there as for an explicit re-anchor.
-const CONTINUATION_TOOLS = new Set(["continuation_anchor", "open_workspace"]);
+// Keep the conversation milestone surface single-entry. Ordinary tools,
+// including open_workspace, stay headless so repeated calls cannot create a
+// second ChatGPT card for the same conversation.
+const CONTINUATION_TOOLS = new Set(["continuation_anchor"]);
 const ZH = String(navigator.language || "").toLowerCase().startsWith("zh");
 
 const state = {
@@ -24,6 +25,7 @@ const state = {
 
 const pendingServerCalls = new Map();
 let nextServerCallId = 1;
+let reviewLoadTimer;
 
 let renderScheduled = false;
 let rendering = false;
@@ -37,6 +39,10 @@ function element(tag, options = {}) {
 }
 
 function callServerTool(name, args) {
+  const app = window.__DEVSPACE_MCP_APP__;
+  if (app && typeof app.callServerTool === "function") {
+    return app.callServerTool({ name, arguments: args });
+  }
   return new Promise((resolve, reject) => {
     const id = `devspace-ui-${nextServerCallId++}`;
     const timeout = window.setTimeout(() => {
@@ -563,13 +569,30 @@ function buildSessionReview(card) {
   });
   rollback.type = "button";
   rollback.disabled = !review.canRollback;
+  let rollbackConfirmationArmed = false;
+  let rollbackConfirmationTimer;
   rollback.addEventListener("click", async () => {
     if (!review.canRollback || !review.confirmationToken || !card.workspaceId) return;
-    const question = ZH
-      ? `将工作区文件恢复到本地 UI 打开时的基线。\n\n确认令牌：${review.confirmationToken}\n\nGit 工作区只恢复工作树，不改暂存区。确定继续吗？`
-      : `Restore workspace files to the baseline captured when the local UI opened.\n\nConfirmation: ${review.confirmationToken}\n\nGit workspaces restore only the working tree and preserve the index. Continue?`;
-    if (!window.confirm(question)) return;
+    if (!rollbackConfirmationArmed) {
+      rollbackConfirmationArmed = true;
+      rollback.classList.add("session-review-confirm-pending");
+      rollback.textContent = ZH ? "确认回退本次修改" : "Confirm rollback";
+      status.textContent = ZH
+        ? "再次点击确认；将恢复到本次 UI 会话开始时的基线，Git 暂存区保持不变。"
+        : "Click again to confirm. The working tree returns to the UI-session baseline; the Git index is preserved.";
+      window.clearTimeout(rollbackConfirmationTimer);
+      rollbackConfirmationTimer = window.setTimeout(() => {
+        rollbackConfirmationArmed = false;
+        rollback.classList.remove("session-review-confirm-pending");
+        rollback.textContent = ZH ? "回退本次 UI 会话修改" : "Rollback UI session";
+        status.textContent = "";
+      }, 15_000);
+      return;
+    }
+    window.clearTimeout(rollbackConfirmationTimer);
+    rollbackConfirmationArmed = false;
     rollback.disabled = true;
+    rollback.classList.remove("session-review-confirm-pending");
     status.textContent = ZH ? "正在回退…" : "Rolling back…";
     try {
       const response = await callServerTool("session_rollback", {
@@ -577,16 +600,20 @@ function buildSessionReview(card) {
         confirmation: review.confirmationToken,
       });
       if (response?.isError) throw new Error(textContent(response.content) || "Rollback failed.");
-      status.textContent = ZH ? "回退完成。" : "Rollback completed.";
+      status.textContent = ZH ? "回退完成，正在刷新会话修改…" : "Rollback completed; refreshing session changes…";
       const refreshed = await callServerTool("session_changes", { workspaceId: card.workspaceId });
+      if (refreshed?.isError) throw new Error(textContent(refreshed.content) || "Session refresh failed after rollback.");
       const refreshedCard = toolResultCard(refreshed);
       const nextReview = refreshedCard?.sessionReview ?? refreshed?.structuredContent?.sessionReview;
       if (nextReview) {
         const replacement = buildSessionReview({ ...card, sessionReview: nextReview });
         if (replacement) section.replaceWith(replacement);
+      } else {
+        status.textContent = ZH ? "回退完成。" : "Rollback completed.";
       }
     } catch (error) {
       rollback.disabled = false;
+      rollback.textContent = ZH ? "回退本次 UI 会话修改" : "Rollback UI session";
       status.textContent = error instanceof Error ? error.message : String(error);
     }
   });
@@ -643,7 +670,19 @@ function injectReviewEnhancements() {
   const card = toolResultCard(state.result);
   const reviewSummary = root.querySelector(".review-summary");
   const toolBody = root.querySelector(".tool-body");
-  const target = reviewSummary ?? toolBody ?? root.querySelector(".tool-card");
+  const reviewCard = root.querySelector(".tool-card.review") ?? root.querySelector(".tool-card");
+  const target = reviewSummary ?? toolBody;
+  if (!target) {
+    window.clearTimeout(reviewLoadTimer);
+    reviewLoadTimer = undefined;
+    reviewCard?.classList.add("devspace-review-collapsed");
+    root.querySelectorAll("[data-devspace-preview='true'], [data-devspace-operations='true'], [data-devspace-session-review='true']")
+      .forEach((node) => node.remove());
+    ensureVersionFooter();
+    return;
+  }
+  reviewCard?.classList.remove("devspace-review-collapsed");
+  stabilizeReviewLoadingState();
   if (target) {
     if (!root.querySelector("[data-devspace-preview='true']")) {
       const gallery = buildPreviewGallery(card);
@@ -659,6 +698,43 @@ function injectReviewEnhancements() {
     }
   }
   ensureVersionFooter();
+}
+
+function stabilizeReviewLoadingState() {
+  const status = root?.querySelector(".review-payload .status");
+  const loading = status && /^Loading (?:review|diff)\.\.\.$/i.test(String(status.textContent || "").trim());
+  if (!loading) {
+    window.clearTimeout(reviewLoadTimer);
+    reviewLoadTimer = undefined;
+    return;
+  }
+  status.classList.add("review-loading-state");
+  if (reviewLoadTimer) return;
+  reviewLoadTimer = window.setTimeout(() => {
+    reviewLoadTimer = undefined;
+    const current = root?.querySelector(".review-payload .status");
+    if (!current || !/^Loading (?:review|diff)\.\.\.$/i.test(String(current.textContent || "").trim())) return;
+    current.classList.remove("muted", "review-loading-state");
+    current.classList.add("error", "review-error-state");
+    const message = document.createElement("span");
+    message.textContent = ZH
+      ? "详细 diff 加载失败或超时。折叠后重新展开即可重试；上方会话修改摘要仍可正常使用。"
+      : "Detailed diff failed to load or timed out. Collapse and expand to retry; the session-change summary above remains usable.";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "review-retry-button";
+    retry.textContent = ZH ? "重新加载详细 diff" : "Retry detailed diff";
+    retry.addEventListener("click", () => {
+      const header = root?.querySelector(".review-header");
+      if (!(header instanceof HTMLButtonElement) || header.disabled) return;
+      header.click();
+      window.setTimeout(() => {
+        const reopenedHeader = root?.querySelector(".review-header");
+        if (reopenedHeader instanceof HTMLButtonElement && !reopenedHeader.disabled) reopenedHeader.click();
+      }, 0);
+    });
+    current.replaceChildren(message, retry);
+  }, 8_000);
 }
 
 function scheduleRender() {

@@ -67,6 +67,17 @@ function taskFromResult(params) {
   return nested?.task && typeof nested.task === "object" ? nested.task : undefined;
 }
 
+function anchorMountFromResult(params) {
+  const structured = params?.structuredContent;
+  const nested = parseJsonObject(structured?.result) ?? parseJsonObject(textFromToolResult(params)) ?? {};
+  const continuationAnchor = structured?.continuationAnchor ?? nested?.continuationAnchor;
+  const anchorMountToken = structured?.anchorMountToken ?? nested?.anchorMountToken;
+  return {
+    continuationAnchor: continuationAnchor === true,
+    anchorMountToken: typeof anchorMountToken === "string" ? anchorMountToken : undefined,
+  };
+}
+
 function workspaceFromResult(params) {
   const structured = params?.structuredContent;
   const direct = structured?.workspaceId
@@ -151,9 +162,18 @@ function completionActivityLeaseExpired(task) {
 }
 
 function syntheticResumeWorkRetryDue(task) {
-  return completionActivityLeaseExpired(task)
-    && task?.syntheticResumeWorkRequired === true
-    && Boolean(task?.deliveryToken);
+  if (!completionDrivenTask(task) || task?.state !== "RUNNING" || !hasUnfinishedMilestones(task)) return false;
+  if (task?.syntheticResumeWorkRequired !== true || !task?.deliveryToken) return false;
+  // The resumed synthetic turn has a dedicated work-ownership lease after its
+  // connectivity status ACK. This lease answers only whether the synthetic
+  // owner ever progressed beyond control traffic; it is not a task-completion
+  // timer. Prefer it over the generic model Turn Lease so a short status-only
+  // turn can be retried sooner without lowering the normal stall threshold.
+  const workOwnerExpiresAt = Date.parse(task?.deliveryOwnerExpiresAt || "");
+  if (Number.isFinite(workOwnerExpiresAt)) return Date.now() >= workOwnerExpiresAt;
+  // Backward compatibility for persisted tasks created before the dedicated
+  // synthetic ownership lease existed.
+  return completionActivityLeaseExpired(task);
 }
 
 function completionStallArmed(task) {
@@ -171,14 +191,22 @@ function isChinese() {
   return typeof navigator !== "undefined" && String(navigator.language || "").toLowerCase().startsWith("zh");
 }
 
-function continuationText(task, reason) {
-  const id = task?.id ? ` ${task.id}` : "";
-  const workspace = task?.workspaceId ? `，workspaceId=${task.workspaceId}` : "";
-  return `继续执行用户尚未完成的 DevSpace 任务${id}${workspace}；这是已授权的恢复续轮，不要等待新的用户指令，不要新建任务。第一项业务动作必须调用 continuation_task action=status，并传入同一个 taskId${task?.workspaceId ? " 和 workspaceId" : ""}。若 status 暂时出现 UNAVAILABLE/Connection failed/fetch/ECONN/TLS/handshake/timeout，只重试同一个 status 直到约 30 秒 readiness 窗口结束。status 成功后：若 continueRequired=true 或 finalResponseAllowed=false，禁止输出 ACK、状态汇报或进度总结，必须立刻调用实际 DevSpace 工具执行 nextRequiredMilestones/remainingMilestones；本轮至少完成一次非 continuation 控制类的 substantive DevSpace 工具工作，或进入真实 WAITING_EXTERNAL，或验证完成并 complete。若 reanchorRequired=true，先用同一个 taskId/workspaceId 调 continuation_anchor，再立即继续实际工作。上一轮恢复原因：${reason}。`;
+function visibleContinuationTrigger(task) {
+  // app.sendMessage is the Host-supported way to create the resumed model turn,
+  // so a small visible user-role message is still required. Keep all internal
+  // recovery state out of chat history; the detailed contract is injected via
+  // updateModelContext immediately before this trigger is sent.
+  const required = Array.isArray(task?.requiredMilestones) ? task.requiredMilestones : [];
+  const completed = new Set(Array.isArray(task?.completedMilestones) ? task.completedMilestones : []);
+  const next = required.find((milestone) => !completed.has(milestone));
+  if (isChinese()) {
+    return `继续当前 DevSpace 任务。不要回复确认、计划、状态说明或“我会继续”；立即调用 DevSpace MCP 执行未完成工作${next ? `：${next}` : ""}。本轮至少产生一次非控制 DevSpace 工具调用并取得实际进展后再回复。`;
+  }
+  return `Continue the current DevSpace task. Do not reply with an acknowledgement, plan, status summary, or promise to continue; immediately use DevSpace MCP to execute unfinished work${next ? `: ${next}` : ""}. Perform at least one non-control DevSpace tool operation and make real progress before replying.`;
 }
 
-function continuationContext(task, workspaceId, reason) {
-  return [
+function continuationContext(task, workspaceId, reason, deliveryToken) {
+  const lines = [
     "DevSpace durable continuation state:",
     `taskId: ${task?.id ?? "unknown"}`,
     `workspaceId: ${workspaceId ?? task?.workspaceId ?? "unknown"}`,
@@ -187,8 +215,15 @@ function continuationContext(task, workspaceId, reason) {
     `completedMilestones: ${(task?.completedMilestones ?? []).join(" | ") || "none recorded"}`,
     `requiredMilestones: ${(task?.requiredMilestones ?? []).join(" | ") || "none recorded"}`,
     `continuationReason: ${reason}`,
-    "This is an authorized recovery of the user's already-active unfinished Task Contract. Do not wait for a new user instruction and do not treat the synthetic Workspace App message as non-actionable. completion-driven mode is an explicit Task Contract completion guard. Model-side DevSpace activity renews an activity lease, but lease expiry is only a weak SUSPECTED_STALL signal and never creates a new turn by itself. A continuation requires independent Host/lifecycle evidence that arms CONTINUATION_ARMED. timeout-recovery remains fail-closed before a proven Host cutoff, and resident additionally permits explicit stage/process wakes. Learned budgets and ordinary process completion never trigger completion-driven/timeout-recovery tasks. The resumed turn must prove MCP readiness with continuation_task status before side-effecting work. Transient UNAVAILABLE/Connection failed/TLS/fetch errors immediately after app.sendMessage are a connector-readiness race: retry the same status across an increasing-backoff readiness window instead of concluding the service is down or asking the user to continue manually. If status returns continueRequired=true or finalResponseAllowed=false, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and checkpoint progress. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first. Resume existing process handles and workspace state. Do not restart completed work.",
-  ].join("\n");
+    "This is an authorized recovery of the user's already-active unfinished Task Contract. Do not wait for a new user instruction and do not treat the synthetic Workspace App message as non-actionable. A text-only acknowledgement, plan, status summary, or promise to continue is a FAILED recovery and must not end the assistant turn. continuation_task, continuation_anchor, heartbeat/status/checkpoint control traffic, and open_workspace are control/setup operations and do NOT prove substantive resumed work. After readiness ACK, perform at least one real non-control DevSpace operation (for example read/search/process_attach/process_list/doctor/review/apply_patch/exec_command as appropriate to the task) and continue the unfinished milestone in the same assistant turn. completion-driven mode is an explicit Task Contract completion guard. Model-side DevSpace activity renews an activity lease, but lease expiry is only a weak SUSPECTED_STALL signal and never creates a new turn by itself. A continuation requires independent Host/lifecycle evidence that arms CONTINUATION_ARMED. timeout-recovery remains fail-closed before a proven Host cutoff, and resident additionally permits explicit stage/process wakes. Learned budgets and ordinary process completion never trigger completion-driven/timeout-recovery tasks. The resumed turn must prove MCP readiness with continuation_task status before side-effecting work. Transient UNAVAILABLE/Connection failed/TLS/fetch errors immediately after app.sendMessage are a connector-readiness race: retry the same status across an increasing-backoff readiness window instead of concluding the service is down or asking the user to continue manually. If status returns continueRequired=true or finalResponseAllowed=false, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and checkpoint progress. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first. Resume existing process handles and workspace state. Do not restart completed work.",
+  ];
+  if (deliveryToken) {
+    lines.push(
+      `syntheticDeliveryToken: ${deliveryToken}`,
+      "The FIRST continuation_task status call in this synthetic resumed turn MUST include exactly syntheticDeliveryToken as deliveryToken, together with the same taskId/workspaceId. If that status returns reason=synthetic-continuation-superseded or superseded=true, a newer manual/user turn owns the task: stop this synthetic turn immediately, execute no side effects, and produce NO user-visible response. Do not explain the supersession in chat. If status succeeds and the task is unfinished, continue directly with substantive DevSpace work in the same turn.",
+    );
+  }
+  return lines.join("\n");
 }
 
 function renderRecoveryStatus(controller, message, tone = "info", allowManual = false) {
@@ -244,6 +279,9 @@ export function installContinuationCoordinator(app, options = {}) {
     currentInput: {},
     workspaceId: undefined,
     task: undefined,
+    anchorSurface: false,
+    anchorMountToken: undefined,
+    anchorMountAcked: false,
     ensuringTask: undefined,
     supervisorTimer: undefined,
     lastHeartbeatAt: 0,
@@ -299,7 +337,7 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   async function heartbeat(note = "workspace-app") {
-    if (!state.task?.id || terminal(state.task)) return;
+    if (!state.anchorSurface || !state.task?.anchorMountVerifiedAt || !state.task?.id || terminal(state.task)) return;
     state.lastHeartbeatAt = Date.now();
     await callTask("heartbeat", { note }).catch(() => undefined);
   }
@@ -320,7 +358,7 @@ export function installContinuationCoordinator(app, options = {}) {
     if (state.disposed) return false;
     try {
       await ensureTask();
-      if (!state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
+      if (!state.anchorSurface || !state.task?.anchorMountVerifiedAt || !state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
       const status = await callTask("status");
       if (status?.task) state.task = status.task;
       if (!state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
@@ -385,10 +423,34 @@ export function installContinuationCoordinator(app, options = {}) {
       if (claim.task) state.task = claim.task;
       const deliveryToken = claim.deliveryToken ?? claim.task?.deliveryToken;
       try {
-        const tokenInstruction = deliveryToken
-          ? `\n\nDevSpace continuation deliveryToken=${deliveryToken}. The first continuation_task status call in this synthetic resumed turn MUST include exactly this deliveryToken. If status returns synthetic-continuation-superseded, a newer manual/user turn took ownership: stop this synthetic turn immediately and do not execute or replay side effects.`
-          : "";
-        const delivery = await sendFollowUp(continuationText(state.task, reason) + tokenInstruction);
+        // Keep task ids, workspace ids, delivery tokens, recovery reasons, and
+        // execution policy in model context rather than leaking the synthetic
+        // recovery envelope into the visible conversation history.
+        if (typeof app.updateModelContext === "function") {
+          await app.updateModelContext({
+            content: [{ type: "text", text: continuationContext(state.task, state.workspaceId, reason, deliveryToken) }],
+          }).catch(() => undefined);
+        }
+
+        // Manual/user turns always win. Re-read authoritative ownership after
+        // the claim and context update, immediately before app.sendMessage. If
+        // a manual turn has already superseded this synthetic generation, skip
+        // the Host message entirely so no stale continuation bubble is added.
+        const ownership = await callTask("status").catch(() => undefined);
+        if (ownership?.task) state.task = ownership.task;
+        const stillSyntheticOwner = state.task?.deliveryOwner === "synthetic-pending"
+          && (!deliveryToken || state.task?.deliveryToken === deliveryToken);
+        if (!stillSyntheticOwner) {
+          renderRecoveryStatus(
+            controller,
+            isChinese() ? "已检测到新的手动会话，旧自动续轮已静默取消。" : "A newer manual turn was detected; the stale automatic continuation was cancelled silently.",
+            "info",
+            false,
+          );
+          return false;
+        }
+
+        const delivery = await sendFollowUp(visibleContinuationTrigger(state.task));
         const recorded = await callTask("delivery-result", {
           deliveryResult: delivery.result,
           deliveryMethod: delivery.method,
@@ -436,7 +498,7 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   async function supervisorTickImpl() {
-    if (state.disposed || !state.task || terminal(state.task)) return;
+    if (state.disposed || !state.anchorSurface || !state.task?.anchorMountVerifiedAt || !state.task || terminal(state.task)) return;
 
     // The assistant registers watch-process through a headless continuation_task
     // call after the continuation_anchor has already rendered. That later tool
@@ -471,12 +533,13 @@ export function installContinuationCoordinator(app, options = {}) {
     }
 
     // A synthetic resumed turn is not healthy merely because its first status
-    // call reached DevSpace.  Keep the already-authorized continuation
+    // call reached DevSpace. Keep the already-authorized continuation
     // obligation durable until the model performs a real non-control DevSpace
-    // operation.  If that obligation survives the normal model Turn Lease,
-    // retry it as a failed resumed turn rather than inventing a new Host cutoff.
+    // operation. Prefer its dedicated work-ownership lease; the generic model
+    // Turn Lease remains only a compatibility fallback. Elapsed time never
+    // marks the task complete: milestones and substantive work still do.
     if (syntheticResumeWorkRetryDue(state.task)) {
-      await attemptContinuation("synthetic resume work lease expired", { force: true });
+      await attemptContinuation("synthetic resume work ownership lease expired", { force: true });
       return;
     }
 
@@ -548,14 +611,13 @@ export function installContinuationCoordinator(app, options = {}) {
     // Keep a lightweight supervisor alive for non-terminal waiting tasks too. A
     // watch-process registration may arrive after the anchor is mounted, and a
     // stopped timer would otherwise never discover that new server-side watch.
-    if (!timersEnabled || state.supervisorTimer || !state.task || terminal(state.task)) return;
+    if (!timersEnabled || !state.anchorSurface || !state.task?.anchorMountVerifiedAt || state.supervisorTimer || !state.task || terminal(state.task)) return;
     state.supervisorTimer = setInterval(() => void supervisorTick(), supervisorTickMs);
     void supervisorTick();
   }
 
   async function ensureTask() {
-    if (!state.connected || !state.workspaceId) return state.task;
-    if (state.currentTool && state.currentTool !== "continuation_anchor" && !state.task?.id) return state.task;
+    if (!state.connected || !state.anchorSurface || state.currentTool !== "continuation_anchor") return state.task;
     if (state.ensuringTask) return state.ensuringTask;
     state.ensuringTask = (async () => {
       try {
@@ -581,6 +643,21 @@ export function installContinuationCoordinator(app, options = {}) {
           });
           if (outcome?.task) state.task = outcome.task;
         }
+        if (!state.task?.anchorMountVerifiedAt) {
+          if (!state.anchorMountToken) return state.task;
+          const mountToken = state.anchorMountToken;
+          let mounted = await callTask("heartbeat", { note: `anchor-mount-ack:${mountToken}` }).catch(() => undefined);
+          if (mounted?.task) state.task = mounted.task;
+          if (!state.task?.anchorMountVerifiedAt) {
+            mounted = await callTask("anchor-mounted", { anchorMountToken: mountToken }).catch(() => undefined);
+            if (mounted?.task) state.task = mounted.task;
+          }
+          if (!state.task?.anchorMountVerifiedAt) return state.task;
+          state.anchorMountToken = undefined;
+          state.anchorMountAcked = true;
+        } else {
+          state.anchorMountAcked = true;
+        }
         if ((state.task?.continuationPending && !state.task?.continuationWakePending) || state.task?.state === "FAILED_RETRYABLE") {
           const resumed = await callTask("resume");
           if (resumed?.task) state.task = resumed.task;
@@ -599,13 +676,18 @@ export function installContinuationCoordinator(app, options = {}) {
 
   function mergeContext(context) {
     const tool = toolFromContext(context);
-    if (tool) state.currentTool = tool;
+    if (tool) {
+      state.currentTool = tool;
+      if (tool === "continuation_anchor") state.anchorSurface = true;
+    }
   }
 
   function onToolInput(params) {
+    if (typeof params?.name === "string") state.currentTool = params.name;
     const previousTaskId = state.currentInput?.taskId ? String(state.currentInput.taskId) : undefined;
     state.currentInput = { ...state.currentInput, ...(params?.arguments ?? {}) };
     if (state.currentInput.workspaceId) state.workspaceId = String(state.currentInput.workspaceId);
+    if (state.currentTool === "continuation_anchor" || params?.name === "continuation_anchor") state.anchorSurface = true;
     const nextTaskId = state.currentInput?.taskId ? String(state.currentInput.taskId) : undefined;
     if (nextTaskId && previousTaskId && nextTaskId !== previousTaskId) {
       stopSupervisor();
@@ -616,8 +698,11 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   function onToolResult(params) {
-    state.currentTool = params?._meta?.tool ?? state.currentTool;
+    state.currentTool = params?.name ?? params?._meta?.tool ?? state.currentTool;
     state.workspaceId = workspaceFromResult(params) || state.workspaceId;
+    const mount = anchorMountFromResult(params);
+    if (mount.continuationAnchor || state.currentTool === "continuation_anchor") state.anchorSurface = true;
+    if (mount.anchorMountToken) state.anchorMountToken = mount.anchorMountToken;
     const resultTask = taskFromResult(params);
     if (resultTask) {
       state.task = resultTask;
