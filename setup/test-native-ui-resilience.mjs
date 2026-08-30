@@ -173,10 +173,18 @@ try {
   assert.equal(stoppedTask.task.state, "CANCELLED_BY_USER");
   assert.equal(stoppedTask.task.terminalReason, "owner-stopped");
   assert.equal(stoppedTask.task.continuationWakePending, false);
+  const defaultVisibleTasks = manager("continuation-list", {});
+  assert.equal(defaultVisibleTasks.tasks.some((task) => task.id === ownerTask.task.id), false,
+    "terminal continuation tasks must be hidden by default instead of lingering in the owner UI");
+  assert.equal(manager("continuation-list", { includeTerminal: true }).tasks.some((task) => task.id === ownerTask.task.id), true,
+    "explicit terminal-history mode must still expose completed/stopped task records");
   const deletedTask = manager("continuation-delete", { taskIds: [secondOwnerTask.task.id] });
   assert.deepEqual(deletedTask.deletedIds, [secondOwnerTask.task.id]);
   assert.equal(manager("continuation-list", { includeTerminal: true }).tasks.some((task) => task.id === secondOwnerTask.task.id), false);
   assert.match(nativeSource, /_continuationGrid\.MultiSelect = true/);
+  assert.match(nativeSource, /ActionButton\("全选当前", delegate \{ SelectAllContinuations\(\); \}\)/);
+  assert.match(nativeSource, /private void SelectAllContinuations\(\)[\s\S]*?_continuationGrid\.ClearSelection\(\)[\s\S]*?row\.Selected = true/);
+  assert.match(nativeSource, /Text = "显示已结束任务"[\s\S]{0,120}?Checked = false/);
   assert.match(nativeSource, /Dictionary<string, object> value = await _manager\.RunJsonAsync\("continuation-list"[\s\S]*?HashSet<string> selectedIds = new HashSet<string>\(SelectedContinuationIds\(\), StringComparer\.OrdinalIgnoreCase\)/);
   assert.doesNotMatch(nativeSource, /HashSet<string> selectedIds = new HashSet<string>\(SelectedContinuationIds\(\), StringComparer\.OrdinalIgnoreCase\);[\s\S]{0,300}?Dictionary<string, object> value = await _manager\.RunJsonAsync\("continuation-list"/);
   assert.match(nativeSource, /Name = "continuationCountdown"[\s\S]*?HeaderText = "恢复状态"/);

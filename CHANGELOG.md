@@ -2,14 +2,29 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.54
+
+- 修复 1.1.53 的两类相反 P0：长命令/连接抖动期间不能再由“35 秒静默 + 第二次 iframe heartbeat”误判 assistant turn 已结束；同时 assistant 真正停止且 Host 不提供 timeout/teardown 时，也不能因为旧 anchor iframe 被虚拟化而永久失去自动续轮。
+- activity lease 到期现在只能进入 `SUSPECTED_STALL`。重复 Workspace App heartbeat 只证明 UI surface 存活，永远不能单独升级 `CONTINUATION_ARMED`。服务端新增 model-originated DevSpace request in-flight 记账，真实 `exec_command` / `write_stdin` 等请求执行期间禁止 quiet recovery。
+- conversation-lifetime **唯一可见里程碑卡**与**当前 sender transport**彻底拆分。`continuation_anchor` 仍只允许一张；后续 UI-bearing DevSpace App（如聚合 `show_changes` surface）可通过仅放在 tool-result `_meta` 的隐藏 capability 继承 sender 权限，不会产生第二张里程碑卡，也不会改写 anchor identity。
+- 对没有 Host timeout/teardown、且旧 iframe 已失活的场景新增保守 server quiet backstop：里程碑未完成、没有 model request in-flight、模型活动持续静默至少 120 秒时才允许生成 READY continuation。该路径替代 1.1.53 的短 heartbeat 猜测器。
+- 修复 `continuationSupervisorSweep()` quiet recovery 分支引用未定义 `normalizedMode` 导致 watchdog `ReferenceError` 的生产级错误；新增顶层 continuation mode normalizer 并由架构回归直接执行该分支。
+- continuation 自动化新增真实长请求语义：10 分钟静默但 request in-flight 时 supervisor 必须保持 0 个 READY generation；请求结束且 quiet backstop 满足后才允许 READY。taskId-only 恢复可以绑定 lifetime task，但缺失 sender token 时必须 fail closed，禁止伪造发送权限。
+- UI 渲染回归不再依赖某个用户浏览器。系统 headless browser 仅作为可选 smoke probe；没有可用浏览器或 CLI 异常时使用确定性的 UI source contract 检查。正式 DevSpace 继续运行于 MCP Apps / ChatGPT Host iframe/WebView，不依赖 Edge、Chrome 或其他独立浏览器。
+- 完整 `scripts/test-source.ps1 -SkipInstall` 已在实际安装后的 packed core 上通过，包括 updater recovery、update launch ACK、core-memory-bounds、Remote Workspace、continuation guard/architecture、插件、Computer Use 与 production dependency audit。Protocol 保持 1.5。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.54.md)
+
 ## 1.1.53
 
-- 修复 continuation 里程碑卡“已经请求生成，但 iframe 实际从未挂载”的 ghost-anchor 漏卡。`anchor_mount_requested_at` 不再永久等价于“卡片存在”；只有 Workspace App iframe 使用当前 mount token 完成 ACK 后才写入 `anchor_mount_verified_at`。
-- 未验证的 anchor 增加 generation + 不透明 Host-turn fingerprint。若后续 Host turn 到来而旧 iframe 仍未 ACK，会轮换 mount token/generation 并允许重新挂载；同一轮内则保持 provisional，避免一次 MCP 工作流产生重复卡片。Host 不提供 turn hint 时使用有界 provisional timeout 作为安全回退，避免永久自锁。
-- 老 generation 的 iframe 即使被 ChatGPT 延迟懒加载，也会在发现 authoritative generation 已推进后自我 supersede，不再发送 heartbeat、ACK 或 continuation，避免恢复后出现两张同时工作的卡片。
-- 已 verified 的 anchor 仍然是 conversation 生命周期单例：一旦真实挂载成功，后续 heartbeat/lease/resource 重建都不会触发第二张卡。普通 `open_workspace` 继续 headless；只有首个真实 anchor 或已证明 ghost 的恢复 generation 才带可见 Workspace App。
-- 修复 pre-workspace 引导与工具 schema 的矛盾：`continuation_anchor.workspaceId` 改为可选，因此自动创建的 conversation Task Contract 可以在 workspace 尚未绑定时先挂载唯一可见卡；之后 `open_workspace` 只绑定执行上下文，不创建第二个 task/card。Protocol 保持 1.5。
-- 收紧发行包安全边界：本地 `workspace-archives`/live backup 永久排除，构建器在 checksum/ZIP 前额外 fail-closed 拒绝任何 `auth.json`、`.sqlite`、`.sqlite3` 运行状态文件。该防线由发行布局回归覆盖，避免本地回滚快照被误打进公开 ZIP。
+- P0：Task Contract 与可见里程碑卡统一为 **conversation-lifetime singleton**。一个真实 ChatGPT conversation 第一次 substantive DevSpace 工作必须挂载一张卡；一旦 iframe 用 mount token ACK 为 verified，后续 assistant turn、自动续轮、页面刷新、MCP reconnect、DevSpace 重启、workspace 切换都只复用同一 taskId/同一张卡，永久禁止第二张。generation 只保留给首次未 verified ghost recovery，Host trace/transport request id 不再影响已验证卡。
+- completion-driven ordinary stall 改为 **35 秒 activity suspicion + 8 秒第二阶段确认**；第一次 verified probe 只进入 `SUSPECTED_STALL`，第二次确认仍无 substantive activity 才 `CONTINUATION_ARMED`。配合约 5 秒 supervisor tick，普通无 Host cutoff 路径设计为约 43～48 秒恢复，目标严格低于 60 秒；status/heartbeat/control 流量不续租模型 activity lease。
+- synthetic continuation 继续通过 Workspace App `app.sendMessage()` 进入与普通人工消息相同的 Host user-role conversation 路径。`deliveryToken + deliveryGeneration` 证明 synthetic ownership；status/ACK/摘要不算实际推进，恢复轮必须执行真实非 control DevSpace 工作并 checkpoint，里程碑未完成则继续自动续轮。
+- 人工输入优先：manual turn 会原子清空 pending synthetic、推进 generation、废弃旧 deliveryToken 并取得 owner；迟到 synthetic token 返回 `synthetic-continuation-superseded` 并静默结束。Coordinator 在 claim/send 前再次读 authoritative status，避免人工消息与自动续轮并发重复副作用。
+- 卡片使用 authoritative lifecycle refresh 追平 checkpoint/complete；旧/过期 iframe 一旦发现 authoritative generation 更高即 self-supersede，并失去 supervisor/heartbeat/claim/send 权限。
+- Portable continuation 页面默认隐藏全部终态任务，显式开关仍可查看历史；新增“全选当前”和批量删除，`continuation-delete` 从 SQLite 账本真实删除所选任务，解决莫名其妙的历史/已结束任务长期残留。
+- 历史 UI/MCP 回归同步锁定：长 operation / `show_changes` 可折叠、Review / Apply Patch loading 有界；MCP reconnect/session、Remote Workspace、插件、Computer Use、Updater transaction、native close/tray 均继续通过专项门。
+- 发行包继续 fail-closed 排除 live state/credential/database 文件；Protocol 保持 1.5。1.1.53 在真实 ChatGPT 单卡、<=60 秒 unattended continuation、resumed substantive work 与 manual takeover live 验收通过前保持未发布。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.53.md)
 

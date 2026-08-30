@@ -1,6 +1,8 @@
 const TASK_TOOL = "continuation_task";
-const DEFAULT_SUPERVISOR_TICK_MS = 15_000;
+const SENDER_TOOL = "continuation_sender";
+const DEFAULT_SUPERVISOR_TICK_MS = 5_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
+const DEFAULT_TERMINAL_REFRESH_MS = 60_000;
 const CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS = 5_000;
 const CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS = 20_000;
 const CONFIRMED_TURN_LIMIT_MODEL_QUIET_MS = 30_000;
@@ -80,6 +82,20 @@ function anchorMountFromResult(params) {
     anchorMountGeneration: Number.isFinite(anchorMountGeneration) && anchorMountGeneration > 0
       ? Math.floor(anchorMountGeneration)
       : undefined,
+  };
+}
+
+function senderCapabilityFromResult(params) {
+  const raw = params?._meta?.["devspace/continuation-sender"];
+  if (!raw || typeof raw !== "object") return undefined;
+  const generation = Number(raw.anchorMountGeneration || 0);
+  if (!raw.taskId || !raw.conversationScopeId || !raw.anchorMountToken || !Number.isInteger(generation) || generation <= 0) return undefined;
+  return {
+    taskId: String(raw.taskId),
+    conversationScopeId: String(raw.conversationScopeId),
+    workspaceId: raw.workspaceId ? String(raw.workspaceId) : undefined,
+    anchorMountToken: String(raw.anchorMountToken),
+    anchorMountGeneration: generation,
   };
 }
 
@@ -196,7 +212,7 @@ function isChinese() {
   return typeof navigator !== "undefined" && String(navigator.language || "").toLowerCase().startsWith("zh");
 }
 
-function visibleContinuationTrigger(task) {
+function visibleContinuationTrigger(task, deliveryToken) {
   // app.sendMessage is the Host-supported way to create the resumed model turn,
   // so a small visible user-role message is still required. Keep all internal
   // recovery state out of chat history; the detailed contract is injected via
@@ -204,10 +220,11 @@ function visibleContinuationTrigger(task) {
   const required = Array.isArray(task?.requiredMilestones) ? task.requiredMilestones : [];
   const completed = new Set(Array.isArray(task?.completedMilestones) ? task.completedMilestones : []);
   const next = required.find((milestone) => !completed.has(milestone));
+  const tokenLine = deliveryToken ? `\n[DevSpace resume token: ${deliveryToken}]` : "";
   if (isChinese()) {
-    return `继续当前 DevSpace 任务。不要回复确认、计划、状态说明或“我会继续”；立即调用 DevSpace MCP 执行未完成工作${next ? `：${next}` : ""}。本轮至少产生一次非控制 DevSpace 工具调用并取得实际进展后再回复。`;
+    return `继续当前 DevSpace 任务。不要回复确认、计划、状态说明或“我会继续”；立即调用 DevSpace MCP 执行未完成工作${next ? `：${next}` : ""}。先用下面的 resume token 调用 continuation_task status，然后至少产生一次真正推进该里程碑的非控制 DevSpace 工具调用，并用 checkpoint 写入新的进度指纹、证据或已完成里程碑；未完成这三步不得结束本轮。${tokenLine}`;
   }
-  return `Continue the current DevSpace task. Do not reply with an acknowledgement, plan, status summary, or promise to continue; immediately use DevSpace MCP to execute unfinished work${next ? `: ${next}` : ""}. Perform at least one non-control DevSpace tool operation and make real progress before replying.`;
+  return `Continue the current DevSpace task. Do not reply with an acknowledgement, plan, status summary, or promise to continue; immediately use DevSpace MCP to execute unfinished work${next ? `: ${next}` : ""}. First call continuation_task status with the resume token below, then perform at least one non-control DevSpace tool operation that genuinely advances the milestone and checkpoint a new progress fingerprint, evidence item, or completed milestone. Do not end this turn before all three steps are complete.${tokenLine}`;
 }
 
 function continuationContext(task, workspaceId, reason, deliveryToken) {
@@ -220,7 +237,7 @@ function continuationContext(task, workspaceId, reason, deliveryToken) {
     `completedMilestones: ${(task?.completedMilestones ?? []).join(" | ") || "none recorded"}`,
     `requiredMilestones: ${(task?.requiredMilestones ?? []).join(" | ") || "none recorded"}`,
     `continuationReason: ${reason}`,
-    "This is an authorized recovery of the user's already-active unfinished Task Contract. Do not wait for a new user instruction and do not treat the synthetic Workspace App message as non-actionable. A text-only acknowledgement, plan, status summary, or promise to continue is a FAILED recovery and must not end the assistant turn. continuation_task, continuation_anchor, heartbeat/status/checkpoint control traffic, and open_workspace are control/setup operations and do NOT prove substantive resumed work. After readiness ACK, perform at least one real non-control DevSpace operation (for example read/search/process_attach/process_list/doctor/review/apply_patch/exec_command as appropriate to the task) and continue the unfinished milestone in the same assistant turn. completion-driven mode is an explicit Task Contract completion guard. Model-side DevSpace activity renews an activity lease, but lease expiry is only a weak SUSPECTED_STALL signal and never creates a new turn by itself. A continuation requires independent Host/lifecycle evidence that arms CONTINUATION_ARMED. timeout-recovery remains fail-closed before a proven Host cutoff, and resident additionally permits explicit stage/process wakes. Learned budgets and ordinary process completion never trigger completion-driven/timeout-recovery tasks. The resumed turn must prove MCP readiness with continuation_task status before side-effecting work. Transient UNAVAILABLE/Connection failed/TLS/fetch errors immediately after app.sendMessage are a connector-readiness race: retry the same status across an increasing-backoff readiness window instead of concluding the service is down or asking the user to continue manually. If status returns continueRequired=true or finalResponseAllowed=false, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and checkpoint progress. If reanchorRequired=true, re-mount continuation_anchor with the same taskId/workspaceId first. Resume existing process handles and workspace state. Do not restart completed work.",
+    "This is an authorized recovery of the user's already-active unfinished Task Contract. Do not wait for a new user instruction and do not treat the synthetic Workspace App message as non-actionable. A text-only acknowledgement, plan, status summary, or promise to continue is a FAILED recovery and must not end the assistant turn. continuation_task, continuation_anchor, heartbeat/status/checkpoint control traffic, and open_workspace are control/setup operations and do NOT prove substantive resumed work. After readiness ACK, perform at least one real non-control DevSpace operation (for example read/search/process_attach/process_list/doctor/review/apply_patch/exec_command as appropriate to the task) and continue the unfinished milestone in the same assistant turn. completion-driven mode is an explicit Task Contract completion guard. Model-side DevSpace activity renews an activity lease, but lease expiry is only a weak SUSPECTED_STALL signal and never creates a new turn by itself. That ordinary stall path still requires independent Host/lifecycle evidence that arms CONTINUATION_ARMED. Separately, an Owner-confirmed real Host cutoff lower bound may authorize recovery after that bound plus the safety grace and model-quiet window, even if the App was frozen before it could persist a stall heartbeat. timeout-recovery remains fail-closed before a proven Host cutoff, and resident additionally permits explicit stage/process wakes. Learned budgets and ordinary process completion never trigger completion-driven/timeout-recovery tasks. The resumed turn must prove MCP readiness with continuation_task status before side-effecting work. Transient UNAVAILABLE/Connection failed/TLS/fetch errors immediately after app.sendMessage are a connector-readiness race: retry the same status across an increasing-backoff readiness window instead of concluding the service is down or asking the user to continue manually. If status returns continueRequired=true or finalResponseAllowed=false, do not stop after ACK, re-anchor, or a status summary. Continue real tool work in the same assistant turn and checkpoint progress. The visible milestone card is conversation-lifetime: when anchorMountVerifiedAt already exists, synthetic resumed turns stay headless and MUST NOT call continuation_anchor again. Only if status explicitly reports reanchorRequired=true because no verified conversation card exists may continuation_anchor be used for initial/ghost recovery. Resume existing process handles and workspace state. Do not restart completed work.",
   ];
   if (deliveryToken) {
     lines.push(
@@ -289,16 +306,42 @@ export function installContinuationCoordinator(app, options = {}) {
     anchorMountGeneration: undefined,
     anchorMountAcked: false,
     anchorSuperseded: false,
+    senderCapability: undefined,
     ensuringTask: undefined,
     supervisorTimer: undefined,
+    lifecycleRefreshTimer: undefined,
+    lifecycleCleanup: undefined,
     lastHeartbeatAt: 0,
+    lastTerminalRefreshAt: 0,
     deliveryInFlight: false,
     supervisorTickInFlight: false,
     hostProfileId: undefined,
   };
   const supervisorTickMs = Math.max(250, Number(options.supervisorTickMs ?? DEFAULT_SUPERVISOR_TICK_MS));
   const heartbeatIntervalMs = Math.max(supervisorTickMs, Number(options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS));
+  const terminalRefreshMs = Math.max(supervisorTickMs, Number(options.terminalRefreshMs ?? DEFAULT_TERMINAL_REFRESH_MS));
   const timersEnabled = options.timers !== false;
+
+  function activeSenderCapability() {
+    if (state.senderCapability?.taskId === state.task?.id
+      && state.senderCapability?.conversationScopeId === state.task?.conversationScopeId) {
+      return state.senderCapability;
+    }
+    if (state.anchorSurface && state.task?.id && state.task?.conversationScopeId && state.anchorMountToken && state.anchorMountGeneration) {
+      return {
+        taskId: state.task.id,
+        conversationScopeId: state.task.conversationScopeId,
+        workspaceId: state.workspaceId,
+        anchorMountToken: state.anchorMountToken,
+        anchorMountGeneration: state.anchorMountGeneration,
+      };
+    }
+    return undefined;
+  }
+
+  function senderTransportAvailable() {
+    return Boolean(state.connected && state.task?.anchorMountVerifiedAt && activeSenderCapability());
+  }
 
   function buildHostProfileId() {
     const info = app.getHostVersion?.() ?? {};
@@ -328,6 +371,9 @@ export function installContinuationCoordinator(app, options = {}) {
         if (outcome?.task) {
           state.task = outcome.task;
           publishTaskForCard(state.task);
+          const authoritativeGeneration = Math.max(0, Number(state.task?.anchorMountGeneration || 0));
+          const surfaceGeneration = Math.max(0, Number(state.anchorMountGeneration || 0));
+          if (surfaceGeneration > 0 && authoritativeGeneration > surfaceGeneration) markAnchorSuperseded();
         }
         return outcome;
       } catch (error) {
@@ -338,9 +384,88 @@ export function installContinuationCoordinator(app, options = {}) {
     throw lastError ?? new Error("DevSpace continuation transport retry exhausted.");
   }
 
+  async function callSender(action, extra = {}) {
+    if (!state.connected) throw new Error("DevSpace Workspace App is not connected to the host yet.");
+    const capability = activeSenderCapability();
+    if (!capability) {
+      return { accepted: false, reason: "sender-capability-unavailable" };
+    }
+    let lastError;
+    for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
+      if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
+      try {
+        const result = await app.callServerTool({
+          name: SENDER_TOOL,
+          arguments: {
+            action,
+            taskId: capability.taskId,
+            conversationScopeId: capability.conversationScopeId,
+            senderInstanceId: state.instanceId,
+            anchorMountToken: capability.anchorMountToken,
+            anchorMountGeneration: capability.anchorMountGeneration,
+            ...extra,
+          },
+        });
+        if (result?.isError && transientTransportFailure(textFromToolResult(result))) {
+          throw new Error(textFromToolResult(result) || "Transient MCP transport failure");
+        }
+        return normalizeTaskOutcome(result);
+      } catch (error) {
+        lastError = error;
+        if (!transientTransportFailure(error) || attempt === TRANSIENT_RETRY_DELAYS_MS.length - 1) throw error;
+      }
+    }
+    throw lastError ?? new Error("DevSpace continuation sender retry exhausted.");
+  }
+
   function stopSupervisor() {
     if (state.supervisorTimer) clearInterval(state.supervisorTimer);
     state.supervisorTimer = undefined;
+  }
+
+  function stopLifecycleRefresh() {
+    if (state.lifecycleRefreshTimer) clearTimeout(state.lifecycleRefreshTimer);
+    state.lifecycleRefreshTimer = undefined;
+    state.lifecycleCleanup?.();
+    state.lifecycleCleanup = undefined;
+  }
+
+  function scheduleAuthoritativeRefresh(reason = "app lifecycle resume") {
+    if (state.disposed || state.anchorSuperseded || !state.connected || !state.anchorSurface || !state.task?.id) return;
+    if (state.lifecycleRefreshTimer) return;
+    state.lifecycleRefreshTimer = setTimeout(() => {
+      state.lifecycleRefreshTimer = undefined;
+      void supervisorTick({ forceAuthoritative: true }).catch(() => undefined);
+    }, 0);
+  }
+
+  function startLifecycleRefresh() {
+    if (state.lifecycleCleanup || typeof window === "undefined") return;
+    const listeners = [];
+    const add = (target, name, handler, options) => {
+      target?.addEventListener?.(name, handler, options);
+      listeners.push(() => target?.removeEventListener?.(name, handler, options));
+    };
+    const refresh = () => scheduleAuthoritativeRefresh("app lifecycle resume");
+    const visibility = () => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") refresh();
+    };
+    add(window, "pageshow", refresh);
+    add(window, "focus", refresh);
+    add(window, "online", refresh);
+    add(window, "pointerdown", refresh, { passive: true });
+    if (typeof document !== "undefined") add(document, "visibilitychange", visibility);
+    let observer;
+    if (typeof IntersectionObserver !== "undefined" && typeof document !== "undefined" && document.documentElement) {
+      observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) refresh();
+      });
+      observer.observe(document.documentElement);
+    }
+    state.lifecycleCleanup = () => {
+      for (const remove of listeners) remove();
+      observer?.disconnect?.();
+    };
   }
 
   function markAnchorSuperseded() {
@@ -348,6 +473,7 @@ export function installContinuationCoordinator(app, options = {}) {
     state.anchorMountToken = undefined;
     state.anchorMountAcked = false;
     stopSupervisor();
+    stopLifecycleRefresh();
     if (typeof document !== "undefined") {
       document.documentElement?.setAttribute?.("data-devspace-anchor-superseded", "true");
       if (document.body) {
@@ -358,9 +484,13 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   async function heartbeat(note = "workspace-app") {
-    if (!state.anchorSurface || !state.task?.anchorMountVerifiedAt || !state.task?.id || terminal(state.task)) return;
+    if (!senderTransportAvailable() || !state.task?.id || terminal(state.task)) return;
     state.lastHeartbeatAt = Date.now();
-    await callTask("heartbeat", { note }).catch(() => undefined);
+    if (state.anchorSurface) {
+      await callTask("heartbeat", { note }).catch(() => undefined);
+    } else {
+      await callSender("heartbeat", { note }).catch(() => undefined);
+    }
   }
 
   async function recordHostSignal(hostSignal, note) {
@@ -379,9 +509,10 @@ export function installContinuationCoordinator(app, options = {}) {
     if (state.disposed) return false;
     try {
       await ensureTask();
-      if (!state.anchorSurface || !state.task?.anchorMountVerifiedAt || !state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
+      if (!senderTransportAvailable() || !state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
       const status = await callTask("status");
       if (status?.task) state.task = status.task;
+      if (state.anchorSuperseded) return false;
       if (!state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
       await heartbeat(reason);
       if (typeof app.updateModelContext === "function") {
@@ -439,10 +570,13 @@ export function installContinuationCoordinator(app, options = {}) {
         if (!wakeRetry || !state.task || terminal(state.task)) stopSupervisor();
         return false;
       }
-      const claim = await callTask("claim-continuation", { note: reason });
+      const preClaim = await callTask("status").catch(() => undefined);
+      if (preClaim?.task) state.task = preClaim.task;
+      if (state.anchorSuperseded) return false;
+      const claim = await callSender("claim", { note: reason });
       if (!claim?.accepted) return false;
-      if (claim.task) state.task = claim.task;
-      const deliveryToken = claim.deliveryToken ?? claim.task?.deliveryToken;
+      const deliveryToken = claim.deliveryToken;
+      if (!deliveryToken) return false;
       try {
         // Keep task ids, workspace ids, delivery tokens, recovery reasons, and
         // execution policy in model context rather than leaking the synthetic
@@ -453,55 +587,43 @@ export function installContinuationCoordinator(app, options = {}) {
           }).catch(() => undefined);
         }
 
-        // Manual/user turns always win. Re-read authoritative ownership after
-        // the claim and context update, immediately before app.sendMessage. If
-        // a manual turn has already superseded this synthetic generation, skip
-        // the Host message entirely so no stale continuation bubble is added.
-        const ownership = await callTask("status").catch(() => undefined);
-        if (ownership?.task) state.task = ownership.task;
-        const stillSyntheticOwner = state.task?.deliveryOwner === "synthetic-pending"
-          && (!deliveryToken || state.task?.deliveryToken === deliveryToken);
-        if (!stillSyntheticOwner) {
-          renderRecoveryStatus(
-            controller,
-            isChinese() ? "已检测到新的手动会话，旧自动续轮已静默取消。" : "A newer manual turn was detected; the stale automatic continuation was cancelled silently.",
-            "info",
-            false,
-          );
-          return false;
-        }
+        // A manual user turn may revoke this synthetic owner while the Host
+        // context update above is in flight. Re-check the exact sender
+        // capability/token immediately before the irreversible user-role send.
+        // If ownership was superseded, do not enqueue a stale continuation.
+        const authorized = await callSender("authorize-delivery", { deliveryToken, note: reason }).catch(() => undefined);
+        if (!authorized?.accepted) return false;
 
-        const delivery = await sendFollowUp(visibleContinuationTrigger(state.task));
-        const recorded = await callTask("delivery-result", {
-          deliveryResult: delivery.result,
-          deliveryMethod: delivery.method,
+        const delivery = await sendFollowUp(visibleContinuationTrigger(state.task, deliveryToken));
+        const recorded = await callSender("delivery-result", {
+          deliveryToken,
+          result: delivery.result,
+          method: delivery.method,
           note: reason,
         }).catch(() => undefined);
         if (recorded?.task) state.task = recorded.task;
-        if (state.task?.continuationDeliveryAwaitingAck) {
+        if (recorded?.accepted) {
           renderRecoveryStatus(
             controller,
             isChinese() ? "DevSpace 已请求自动续轮，正在等待新一轮确认连接；若公网连接失败会自动重试。" : "DevSpace requested an automatic continuation and is waiting for the resumed turn to acknowledge connectivity; transport failures will be retried.",
             "success",
             false,
           );
-          // Do not stop the supervisor yet. State 4 keeps the durable wake alive
-          // until the resumed model performs its first continuation_task status
-          // ACK. If that new turn dies on an MCP UNAVAILABLE error, the claim
-          // lease expires and this surviving App can resend automatically.
+          // The server-resident Generation FSM owns retries from this point.
+          // Keep the App supervisor alive so this verified card can act as the
+          // Host ui/message transport whenever the server exposes a new READY
+          // generation.
           return true;
         }
-        renderRecoveryStatus(controller, isChinese() ? "DevSpace 已请求自动续轮。" : "DevSpace requested an automatic continuation.", "success", false);
-        stopSupervisor();
-        return true;
+        return false;
       } catch (error) {
         const note = String(error?.message || error);
-        await callTask("delivery-result", {
-          deliveryResult: /reject/i.test(note) ? "rejected" : "failed",
-          deliveryMethod: "app.sendMessage",
+        await callSender("delivery-result", {
+          deliveryToken,
+          result: /reject/i.test(note) ? "rejected" : "failed",
+          method: "app.sendMessage",
           note,
         }).catch(() => undefined);
-        await callTask("release-continuation", { note }).catch(() => undefined);
         renderRecoveryStatus(
           controller,
           isChinese() ? "自动续轮被宿主拒绝或未送达，可手动继续。" : "Automatic continuation was rejected or not delivered; manual recovery is available.",
@@ -518,8 +640,17 @@ export function installContinuationCoordinator(app, options = {}) {
     }
   }
 
-  async function supervisorTickImpl() {
-    if (state.disposed || !state.anchorSurface || !state.task?.anchorMountVerifiedAt || !state.task || terminal(state.task)) return;
+  async function supervisorTickImpl({ forceAuthoritative = false } = {}) {
+    if (state.disposed || !senderTransportAvailable() || !state.task?.id) return;
+    const cachedTerminal = terminal(state.task);
+    if (!forceAuthoritative && cachedTerminal && Date.now() - state.lastTerminalRefreshAt < terminalRefreshMs) return;
+
+    // Always begin from authoritative server state, even when the locally
+    // rendered card is terminal. The same conversation-lifetime task can be
+    // reactivated for later user work, and checkpoint/complete calls are
+    // headless, so the card must not become a permanently frozen snapshot.
+    // Terminal cards use a slower cadence to avoid needless steady-state load.
+    if (cachedTerminal) state.lastTerminalRefreshAt = Date.now();
 
     // The assistant registers watch-process through a headless continuation_task
     // call after the continuation_anchor has already rendered. That later tool
@@ -529,7 +660,12 @@ export function installContinuationCoordinator(app, options = {}) {
     // forever even though the server has a durable process handle registered.
     const current = await callTask("status").catch(() => undefined);
     if (current?.task) state.task = current.task;
-    if (!state.task || terminal(state.task)) return;
+    if (state.anchorSuperseded) return;
+    if (!state.task || terminal(state.task)) {
+      state.lastTerminalRefreshAt = Date.now();
+      return;
+    }
+    state.lastTerminalRefreshAt = 0;
     if (state.task.state === "PAUSED_BY_USER") return;
 
     // app.sendMessage acceptance is not proof that a resumed assistant turn
@@ -592,9 +728,10 @@ export function installContinuationCoordinator(app, options = {}) {
 
     if (automationSuppressed(state.task)) return;
     if (completionActivityLeaseExpired(state.task) && state.task?.stallState === "ACTIVE") {
-      // P0 two-phase guard: model inactivity alone is not proof that ChatGPT
+      // P0 fail-closed guard: model inactivity alone is not proof that ChatGPT
       // ended the assistant turn. Ask the server to persist SUSPECTED_STALL;
-      // this heartbeat is only a liveness probe and cannot authorize delivery.
+      // this verified-card heartbeat is only a liveness probe and can never
+      // authorize delivery, no matter how many times it repeats.
       const probed = await callTask("heartbeat", {
         note: "activity lease expired; mark suspected stall only",
       }).catch(() => undefined);
@@ -605,7 +742,7 @@ export function installContinuationCoordinator(app, options = {}) {
       await attemptContinuation("task contract stall corroborated", { force: true });
       return;
     }
-    if (state.task?.continuationMode !== "completion-driven" && confirmedCutoffRecoveryReady(state.task)) {
+    if (confirmedCutoffRecoveryReady(state.task)) {
       // This is deliberately NOT a generic silence/learned-budget watchdog. It
       // is available only after a user/Owner-confirmed real Host cutoff lower
       // bound has already elapsed, plus a grace period and model quiet window.
@@ -618,11 +755,11 @@ export function installContinuationCoordinator(app, options = {}) {
     // Generic inactivity remains disabled outside explicit completion-driven mode.
   }
 
-  async function supervisorTick() {
+  async function supervisorTick(options = {}) {
     if (state.supervisorTickInFlight) return;
     state.supervisorTickInFlight = true;
     try {
-      await supervisorTickImpl();
+      await supervisorTickImpl(options);
     } finally {
       state.supervisorTickInFlight = false;
     }
@@ -632,7 +769,7 @@ export function installContinuationCoordinator(app, options = {}) {
     // Keep a lightweight supervisor alive for non-terminal waiting tasks too. A
     // watch-process registration may arrive after the anchor is mounted, and a
     // stopped timer would otherwise never discover that new server-side watch.
-    if (!timersEnabled || !state.anchorSurface || !state.task?.anchorMountVerifiedAt || state.supervisorTimer || !state.task || terminal(state.task)) return;
+    if (!timersEnabled || !senderTransportAvailable() || state.supervisorTimer || !state.task?.id) return;
     state.supervisorTimer = setInterval(() => void supervisorTick(), supervisorTickMs);
     void supervisorTick();
   }
@@ -676,13 +813,29 @@ export function installContinuationCoordinator(app, options = {}) {
           let mounted = await callTask("heartbeat", { note: `anchor-mount-ack:${mountToken}` }).catch(() => undefined);
           if (mounted?.task) state.task = mounted.task;
           if (!state.task?.anchorMountVerifiedAt) {
-            mounted = await callTask("anchor-mounted", { anchorMountToken: mountToken }).catch(() => undefined);
+            mounted = await callTask("anchor-mounted", {
+              anchorMountToken: mountToken,
+              anchorMountGeneration: state.anchorMountGeneration,
+            }).catch(() => undefined);
             if (mounted?.task) state.task = mounted.task;
           }
           if (!state.task?.anchorMountVerifiedAt) return state.task;
-          state.anchorMountToken = undefined;
           state.anchorMountAcked = true;
         } else {
+          // A transcript/page/service rehydrate creates a fresh App instance for
+          // the same immutable card. Rebind coordinator ownership using the same
+          // generation capability instead of issuing another continuation_anchor.
+          if (state.anchorMountToken && state.anchorMountGeneration) {
+            const rebound = await callTask("anchor-mounted", {
+              anchorMountToken: state.anchorMountToken,
+              anchorMountGeneration: state.anchorMountGeneration,
+            }).catch(() => undefined);
+            if (rebound?.task) state.task = rebound.task;
+            if (rebound && rebound.accepted === false) {
+              if (rebound.reason === "stale-anchor-generation") markAnchorSuperseded();
+              return state.task;
+            }
+          }
           state.anchorMountAcked = true;
         }
         if ((state.task?.continuationPending && !state.task?.continuationWakePending) || state.task?.state === "FAILED_RETRYABLE") {
@@ -693,6 +846,7 @@ export function installContinuationCoordinator(app, options = {}) {
         await recordHostSignal("connected", "workspace-app connected");
         await heartbeat("anchor activity");
         startSupervisor();
+        startLifecycleRefresh();
         return state.task;
       } finally {
         state.ensuringTask = undefined;
@@ -731,12 +885,20 @@ export function installContinuationCoordinator(app, options = {}) {
     if (mount.continuationAnchor || state.currentTool === "continuation_anchor") state.anchorSurface = true;
     if (mount.anchorMountToken) state.anchorMountToken = mount.anchorMountToken;
     if (mount.anchorMountGeneration) state.anchorMountGeneration = mount.anchorMountGeneration;
+    const senderCapability = senderCapabilityFromResult(params);
+    if (senderCapability) {
+      state.senderCapability = senderCapability;
+      if (senderCapability.workspaceId) state.workspaceId = senderCapability.workspaceId;
+    }
     const resultTask = taskFromResult(params);
     if (resultTask) {
       state.task = resultTask;
       publishTaskForCard(state.task);
     }
     void ensureTask();
+    if (senderCapability) {
+      void heartbeat("sender transport mounted").finally(() => startSupervisor());
+    }
   }
 
   function onToolCancelled(params) {
@@ -758,6 +920,7 @@ export function installContinuationCoordinator(app, options = {}) {
 
   function onHostContextChanged(params) {
     mergeContext(params);
+    scheduleAuthoritativeRefresh("host context changed");
   }
 
   app.addEventListener("toolinput", onToolInput);
@@ -778,27 +941,73 @@ export function installContinuationCoordinator(app, options = {}) {
     ensureTask,
     prepareContinuation,
     attemptContinuation,
+    async refreshNow() {
+      await supervisorTick({ forceAuthoritative: true });
+      return state.task;
+    },
     async onTeardown(params) {
       if (state.disposed) return;
+      if (!state.anchorSurface) {
+        // Ordinary tool-result Apps may act as transport relays, but their UI
+        // teardown says only that this relay iframe is going away. It is not
+        // evidence that the assistant turn ended, so never arm recovery from it.
+        controller.dispose();
+        return;
+      }
       const reason = String(params?.reason ?? "resource teardown");
       const timedOut = /timeout|deadline|budget/i.test(reason);
-      // Resource teardown is not proof that ChatGPT truncated the model turn.
-      // It can happen during ordinary iframe replacement, navigation, UI asset
-      // refresh, or connector lifecycle churn. Fail closed unless the Host
-      // explicitly reports timeout/deadline/budget, or the persisted confirmed
-      // cutoff lower bound + recovery grace + model-quiet gate has elapsed.
-      const confirmedLimitElapsed = !timedOut && confirmedCutoffRecoveryReady(state.task);
-      if ((timedOut || confirmedLimitElapsed)
+      const completionRecoveryCandidate = completionDrivenTask(state.task)
+        && state.task?.state === "RUNNING"
+        && hasUnfinishedMilestones(state.task)
+        && state.anchorSurface
+        && Boolean(state.task?.anchorMountVerifiedAt);
+      // Explicit Host timeout/deadline/budget is authoritative and may recover
+      // immediately. A generic teardown is weaker: persist it, wait a short
+      // grace window, then recover only if no replacement iframe has connected
+      // and no newer model activity has appeared. A replacement App writes a
+      // later "connected" Host signal and therefore cancels the old iframe's
+      // recovery. This covers ordinary assistant completion without confusing
+      // same-conversation iframe replacement with a stopped model turn.
+      const teardown = await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
+      if (timedOut
         && state.task?.continuationMode !== "compat"
         && state.task?.state === "RUNNING"
         && hasUnfinishedMilestones(state.task)) {
-        await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
-        await attemptContinuation(
-          timedOut ? `host teardown: ${reason}` : "confirmed turn-limit teardown",
-          { force: true },
-        );
-      } else {
-        await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
+        await attemptContinuation(`host teardown: ${reason}`, { force: true });
+        controller.dispose();
+        return;
+      }
+      const confirmedLimitElapsed = confirmedCutoffRecoveryReady(state.task);
+      if (confirmedLimitElapsed
+        && state.task?.continuationMode !== "compat"
+        && state.task?.state === "RUNNING"
+        && hasUnfinishedMilestones(state.task)) {
+        await attemptContinuation("confirmed turn-limit teardown", { force: true });
+        controller.dispose();
+        return;
+      }
+      if (completionRecoveryCandidate && teardown?.task?.lastHostSignal === "teardown") {
+        const teardownSignalAt = Date.parse(teardown.task.lastHostSignalAt || "");
+        const modelActivityAtTeardown = Date.parse(teardown.task.lastModelActivityAt || "");
+        await sleep(CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS);
+        const current = await callTask("status").catch(() => undefined);
+        if (current?.task) state.task = current.task;
+        const authoritativeSignalAt = Date.parse(state.task?.lastHostSignalAt || "");
+        const authoritativeModelAt = Date.parse(state.task?.lastModelActivityAt || "");
+        const sameTeardownStillAuthoritative = state.task?.lastHostSignal === "teardown"
+          && Number.isFinite(teardownSignalAt)
+          && Number.isFinite(authoritativeSignalAt)
+          && authoritativeSignalAt === teardownSignalAt;
+        const noNewModelActivity = !Number.isFinite(authoritativeModelAt)
+          || !Number.isFinite(modelActivityAtTeardown)
+          || authoritativeModelAt <= Math.max(modelActivityAtTeardown, teardownSignalAt + 1_000);
+        if (sameTeardownStillAuthoritative
+          && noNewModelActivity
+          && completionDrivenTask(state.task)
+          && state.task?.state === "RUNNING"
+          && hasUnfinishedMilestones(state.task)) {
+          await attemptContinuation("verified surface teardown", { force: true });
+        }
       }
       controller.dispose();
     },
@@ -806,6 +1015,7 @@ export function installContinuationCoordinator(app, options = {}) {
       if (state.disposed) return;
       state.disposed = true;
       stopSupervisor();
+      stopLifecycleRefresh();
       app.removeEventListener?.("toolinput", onToolInput);
       app.removeEventListener?.("toolinputpartial", onToolInput);
       app.removeEventListener?.("toolresult", onToolResult);

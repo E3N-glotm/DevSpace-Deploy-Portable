@@ -66,21 +66,7 @@ function resultWorkspaceId(result) {
         ?? result?._meta?.card?.workspaceId;
     return value ? String(value) : undefined;
 }
-function hostTurnFingerprint(context) {
-    // ChatGPT currently keeps x-datadog-trace-id stable for all MCP calls in
-    // one assistant turn and rotates it on the next turn. Treat it only as an
-    // optional opaque turn hint: never persist or expose the raw header value.
-    // Other Hosts may omit it, in which case runtime-state falls back to its
-    // bounded provisional-time recovery rule.
-    const headers = context?.requestInfo?.headers;
-    if (!headers || typeof headers !== "object")
-        return undefined;
-    const entry = Object.entries(headers).find(([key]) => String(key).toLowerCase() === "x-datadog-trace-id");
-    const raw = String(entry?.[1] ?? "").trim();
-    if (!raw)
-        return undefined;
-    return createHash("sha256").update(raw).digest("hex").slice(0, 24);
-}
+const CONVERSATION_CARD_PRECONDITION = "CONVERSATION-CARD PRECONDITION: this ChatGPT conversation owns at most one visible DevSpace milestone card. Call continuation_anchor only while the existing conversation Task Contract reports initialAnchorRequired/reanchorRequired because no verified card exists yet. Once anchorMountVerifiedAt exists, never call continuation_anchor again in later assistant turns, synthetic resumes, reconnects, service restarts, page refreshes, or workspace switches. Reuse the same taskId and reactivate/append work through continuation_task begin/checkpoint instead.";
 function taskContractText(outcome) {
     const task = outcome?.task;
     if (!task) return undefined;
@@ -98,8 +84,34 @@ function taskContractText(outcome) {
             : "Do not end with an ACK, progress report, status summary, or promise to continue. Keep doing substantive DevSpace work in this same assistant turn and checkpoint completed milestones. Host-enforced truncation remains outside MCP control and will be handled by the recovery lease.",
     ].join("\n");
 }
+function withContinuationSenderCapability(result, taskContractOutcome) {
+    if (!result || !structuredRuntimeState || !taskContractOutcome?.task?.id)
+        return result;
+    const capability = structuredRuntimeState.continuationSenderCapability({
+        taskId: taskContractOutcome.task.id,
+        conversationScopeId: taskContractOutcome.task.conversationScopeId,
+    });
+    if (!capability)
+        return result;
+    return {
+        ...result,
+        _meta: {
+            ...(result._meta ?? {}),
+            "devspace/continuation-sender": capability,
+        },
+    };
+}
 function registerAppTool(server, name, definition, handler) {
-    return registerExtAppTool(server, name, definition, async (input, context = {}) => {
+    const guardedDefinition = continuationTaskContractsEnabled
+        && name !== "continuation_anchor"
+        && name !== "continuation_task"
+        && name !== "continuation_sender"
+        ? {
+            ...definition,
+            description: `${CONVERSATION_CARD_PRECONDITION} ${String(definition?.description ?? "").trim()}`.trim(),
+        }
+        : definition;
+    return registerExtAppTool(server, name, guardedDefinition, async (input, context = {}) => {
         // Keep a model-only activity clock for durable continuation recovery.
         // Workspace App status/heartbeat calls are intentionally excluded so a
         // surviving iframe cannot make a truncated assistant turn look active.
@@ -109,18 +121,16 @@ function registerAppTool(server, name, definition, handler) {
         let supervisorDirective;
         let taskContractOutcome;
         const conversationScopeId = openAiConversationScopeId(context?._meta);
-        const currentHostTurnFingerprint = hostTurnFingerprint(context);
-        const continuationControlCall = name === "continuation_anchor" || name === "continuation_task";
+        const continuationControlCall = name === "continuation_anchor" || name === "continuation_task" || name === "continuation_sender";
         const setupOnlyCall = name === "open_workspace";
         try {
             const coordinatorCall = name === "continuation_task" && Boolean(input?.coordinatorInstanceId);
             const workspaceId = input?.workspaceId ? String(input.workspaceId) : undefined;
-            if (!coordinatorCall && conversationScopeId && structuredRuntimeState) {
-                if (continuationTaskContractsEnabled && !continuationControlCall) {
+            if (!coordinatorCall && !continuationControlCall && conversationScopeId && structuredRuntimeState) {
+                if (continuationTaskContractsEnabled) {
                     taskContractOutcome = structuredRuntimeState.ensureContinuationTaskContract({
                         ...(workspaceId ? { workspaceId } : {}),
                         conversationScopeId,
-                        hostTurnFingerprint: currentHostTurnFingerprint,
                         sourceTool: name,
                         substantive: false,
                     });
@@ -128,9 +138,7 @@ function registerAppTool(server, name, definition, handler) {
                 else {
                     structuredRuntimeState.touchContinuationModelActivity({ ...(workspaceId ? { workspaceId } : {}), conversationScopeId, substantive: false });
                 }
-                if (!continuationControlCall) {
-                    supervisorDirective = structuredRuntimeState.continuationSupervisorDirective({ ...(workspaceId ? { workspaceId } : {}), conversationScopeId, hostTurnFingerprint: currentHostTurnFingerprint });
-                }
+                supervisorDirective = structuredRuntimeState.continuationSupervisorDirective({ ...(workspaceId ? { workspaceId } : {}), conversationScopeId });
             }
         }
         catch {
@@ -147,7 +155,7 @@ function registerAppTool(server, name, definition, handler) {
                     "DevSpace conversation milestone precondition: new milestone required on the existing card.",
                     `This ChatGPT conversation already owns completed taskId=${task?.id ?? "unknown"}; do not create or mount another task/card.`,
                     "Before this new user-requested work starts, call continuation_task action=begin with the same taskId/workspaceId and add concise verifiable requiredMilestones for the new work.",
-                    "If the user only asked to continue an already-unfinished milestone, reuse the existing remainingMilestones instead of adding a duplicate. Do not call continuation_anchor unless the task explicitly reports initialAnchorRequired/reanchorRequired; a verified card never re-anchors, while a stale unverified ghost issuance may require same-task recovery.",
+                    "If the user only asked to continue an already-unfinished milestone, reuse the existing remainingMilestones instead of adding a duplicate. Do not call continuation_anchor unless the task explicitly reports initialAnchorRequired/reanchorRequired because no verified conversation card exists yet. Once verified, the visible milestone card is conversation-lifetime and must never be recreated in later turns.",
                 ].join("\n"))],
             };
         }
@@ -165,24 +173,35 @@ function registerAppTool(server, name, definition, handler) {
                     "DevSpace conversation milestone precondition: initial card required.",
                     `This ChatGPT conversation already owns taskId=${task?.id ?? "unknown"}${task?.workspaceId ? ` and workspaceId=${task.workspaceId}` : " before any workspace has been bound"}.`,
                     `Before any further DevSpace operation, call continuation_anchor ${anchorBinding} and refine its objective/milestones if needed.`,
-                    "A fresh UI-bearing issuance opens a provisional Host-turn window so the same assistant turn does not self-lock while ChatGPT commits/initializes the iframe. If that issuance remains unverified after the provisional window, the same task may explicitly request one recovery issuance with a rotated token. Once the iframe token ACK is verified, re-anchoring is permanently forbidden.",
+                    "Keep one conversation-lifetime Task Contract and one conversation-lifetime visible milestone card. A fresh UI-bearing issuance is allowed only until one generation is actually verified; after anchorMountVerifiedAt exists, all later work stays headless and reuses that card's authoritative task state.",
                     "Keep the same conversation-scoped taskId for all recovery and later work. Never create a second continuation task; append later user tasks as requiredMilestones on this same task.",
                 ].join("\n"))],
             };
         }
-        const result = await handler(input, context);
+        const releaseModelRequest = continuationTaskContractsEnabled
+            && !continuationControlCall
+            && conversationScopeId
+            && structuredRuntimeState
+            ? structuredRuntimeState.beginContinuationModelRequest(conversationScopeId)
+            : undefined;
+        let result;
+        try {
+            result = await handler(input, context);
+        }
+        finally {
+            releaseModelRequest?.();
+        }
         try {
             const workspaceId = resultWorkspaceId(result) ?? (input?.workspaceId ? String(input.workspaceId) : undefined);
             if (continuationTaskContractsEnabled && !continuationControlCall && conversationScopeId && structuredRuntimeState) {
                 taskContractOutcome = structuredRuntimeState.ensureContinuationTaskContract({
                     ...(workspaceId ? { workspaceId } : {}),
                     conversationScopeId,
-                    hostTurnFingerprint: currentHostTurnFingerprint,
                     sourceTool: name,
                     substantive: !setupOnlyCall,
                 });
                 supervisorDirective = supervisorDirective
-                    ?? structuredRuntimeState.continuationSupervisorDirective({ ...(workspaceId ? { workspaceId } : {}), conversationScopeId, hostTurnFingerprint: currentHostTurnFingerprint });
+                    ?? structuredRuntimeState.continuationSupervisorDirective({ ...(workspaceId ? { workspaceId } : {}), conversationScopeId });
             }
         }
         catch {
@@ -196,7 +215,7 @@ function registerAppTool(server, name, definition, handler) {
                 "DevSpace conversation milestone ledger is complete but remains bound to this ChatGPT conversation.",
                 `Reuse taskId=${taskContractOutcome.task?.id ?? "unknown"} and its existing card state for any new work in this conversation.`,
                 "If the current user request introduces new DevSpace work, the next control action must be continuation_task action=begin with the same taskId/workspaceId and new verifiable requiredMilestones before any substantive tool call or user-visible completion.",
-                "If this is only a request to continue an unfinished milestone, do not append a duplicate milestone. Never call continuation_anchor merely because of a new user turn, workspace switch, connector reconnect, page refresh, or iframe rehydrate; only an explicit initialAnchorRequired/reanchorRequired result may authorize same-task issuance/recovery.",
+                "If this is only a request to continue an unfinished milestone, do not append a duplicate milestone. Never create a later-turn milestone card after the conversation already has anchorMountVerifiedAt; workspace switches, reconnects, page refreshes, service restarts, iframe rehydrates, and synthetic resumes must remain headless.",
             ].join("\n")));
         }
         // open_workspace stays statically headless in widgets=changes because
@@ -206,8 +225,9 @@ function registerAppTool(server, name, definition, handler) {
         // workflow and skip the one UI-bearing continuation_anchor entirely.
         // Preserve the successfully opened workspace, but make the never-
         // card state a hard tool precondition until an anchor issuance opens
-        // its provisional Host-turn window. A stale unverified issuance may be
-        // recovered later on the same task; a verified card never re-anchors.
+        // its provisional mount window. A stale unverified issuance may be
+        // recovered later on the same task. Once any generation is verified,
+        // duplicate card issuance is permanently suppressed for the conversation.
         if (continuationTaskContractsEnabled
             && name === "open_workspace"
             && taskContractOutcome?.initialAnchorRequired) {
@@ -216,9 +236,9 @@ function registerAppTool(server, name, definition, handler) {
             const anchorRequiredText = [
                 "DevSpace conversation milestone precondition: initial card required immediately after open_workspace.",
                 `The workspace opened successfully as ${openedWorkspaceId}, but this ChatGPT conversation currently requires a milestone-card issuance/recovery.`,
-                `MANDATORY NEXT TOOL CALL: continuation_anchor with taskId=${task?.id ?? "unknown"} and workspaceId=${openedWorkspaceId}. A fresh issuance opens a provisional Host-turn window; if no token ACK arrives before that window expires, the same task may request a recovery issuance.`,
+                `MANDATORY NEXT TOOL CALL: continuation_anchor with taskId=${task?.id ?? "unknown"} and workspaceId=${openedWorkspaceId}. A fresh issuance opens a provisional mount window; if no token ACK arrives before that window expires, the same task may request a ghost-recovery issuance.`,
                 "Do not answer the user, call another substantive DevSpace tool, or treat open_workspace as a completed workflow before that required anchor call succeeds.",
-                "After a verified mount, this conversation reuses the same task/card permanently; append later work as milestones and never re-anchor a verified card.",
+                "After a verified mount, this conversation permanently reuses the same taskId/Task Contract and the same visible milestone card; append later work as milestones instead of creating shadow tasks or later-turn cards.",
             ].join("\n");
             return {
                 ...result,
@@ -234,29 +254,30 @@ function registerAppTool(server, name, definition, handler) {
                     : result?.structuredContent,
             };
         }
+        const senderCapableResult = withContinuationSenderCapability(result, taskContractOutcome);
         if (!supervisorDirective?.reanchorRequired) {
-            if (extraContent.length === 0) return result;
+            if (extraContent.length === 0) return senderCapableResult;
             return {
-                ...result,
-                content: [...(Array.isArray(result?.content) ? result.content : []), ...extraContent],
-                structuredContent: result?.structuredContent && typeof result.structuredContent === "object"
-                    ? { ...result.structuredContent, task: taskContractOutcome?.task, taskContract: taskContractOutcome }
-                    : result?.structuredContent,
+                ...senderCapableResult,
+                content: [...(Array.isArray(senderCapableResult?.content) ? senderCapableResult.content : []), ...extraContent],
+                structuredContent: senderCapableResult?.structuredContent && typeof senderCapableResult.structuredContent === "object"
+                    ? { ...senderCapableResult.structuredContent, task: taskContractOutcome?.task, taskContract: taskContractOutcome }
+                    : senderCapableResult?.structuredContent,
             };
         }
         const maintenanceText = [
-            "DevSpace conversation milestone card required (same assistant turn; this is NOT a continuation trigger):",
-            `The conversation-scoped task ${supervisorDirective.taskId} either has no milestone-card issuance yet or its previous unverified issuance aged past the provisional Host-turn window and is now treated as a ghost.`,
+            "DevSpace conversation milestone card required (initial/ghost-recovery only; this is NOT a continuation trigger):",
+            `The conversation-scoped task ${supervisorDirective.taskId} either has no milestone-card issuance yet or its previous unverified issuance aged past the provisional mount window and is now treated as a ghost.`,
             `Before the next substantive DevSpace step, call continuation_anchor with the SAME taskId=${supervisorDirective.taskId}${supervisorDirective.workspaceId ? `, workspaceId=${supervisorDirective.workspaceId}` : ""}, continuationMode=${supervisorDirective.continuationMode}. This is recovery of the same Task Contract, not permission to create another task.`,
-            "The new UI-bearing result starts a fresh provisional window and rotates the one-time token when recovering a stale ghost. If its iframe actually initializes, the token ACK establishes verified mount truth. Fresh provisional issuance must not self-lock the same assistant turn.",
-            "Once anchorMountVerifiedAt exists, all later user tasks, reconnects, refreshes, workspace switches, heartbeat/lease aging, and iframe rehydrates stay headless and must never request another milestone card.",
+            "The new UI-bearing result starts a fresh provisional window and rotates the one-time token only when recovering a stale unverified ghost. If its iframe actually initializes, the token ACK establishes verified mount truth.",
+            "Once any card generation is verified, the card is conversation-lifetime: later assistant turns, reconnects, refreshes, service restarts, workspace switches, iframe rehydrates, and synthetic resumes must remain headless and must not rotate another visible generation.",
         ].join("\n");
         return {
-            ...result,
-            content: [...(Array.isArray(result?.content) ? result.content : []), ...extraContent, textBlock(maintenanceText)],
-            structuredContent: result?.structuredContent && typeof result.structuredContent === "object"
-                ? { ...result.structuredContent, task: taskContractOutcome?.task, taskContract: taskContractOutcome }
-                : result?.structuredContent,
+            ...senderCapableResult,
+            content: [...(Array.isArray(senderCapableResult?.content) ? senderCapableResult.content : []), ...extraContent, textBlock(maintenanceText)],
+            structuredContent: senderCapableResult?.structuredContent && typeof senderCapableResult.structuredContent === "object"
+                ? { ...senderCapableResult.structuredContent, task: taskContractOutcome?.task, taskContract: taskContractOutcome }
+                : senderCapableResult?.structuredContent,
         };
     });
 }
@@ -386,6 +407,27 @@ function appCallableToolMeta(config, kind) {
         },
     };
 }
+function appOnlyToolMeta(config, kind) {
+    const securitySchemes = [
+        {
+            type: "oauth2",
+            scopes: [...config.oauth.scopes],
+        },
+    ];
+    const status = toolInvocationStatus(kind);
+    return {
+        securitySchemes,
+        _meta: {
+            securitySchemes,
+            "openai/toolInvocation/invoking": status.invoking,
+            "openai/toolInvocation/invoked": status.invoked,
+            ui: {
+                visibility: ["app"],
+            },
+            "openai/widgetAccessible": true,
+        },
+    };
+}
 const toolNames = {
     openWorkspace: "open_workspace",
     read: "read",
@@ -461,7 +503,7 @@ function serverInstructions(config) {
             ? " show_changes also reports aggregate changes since the persisted workspace session captured its first structured-mutation baseline. Session rollback restores the tracked structured paths, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result. The same bounded sparse-journal model is used for local and remote-agent workspaces; arbitrary shell side effects outside tracked paths are not claimed as rollback-safe."
             : "",
         config.features?.continuationGuard
-        ? " Every real ChatGPT conversation owns one lifetime DevSpace Task Contract and one milestone-card mount truth. The Task Contract is conversation-scoped before any workspace exists. Ordinary DevSpace tools and open_workspace remain headless in widgets=changes. If initialAnchorRequired/reanchorRequired is reported, call continuation_anchor with the SAME taskId and include workspaceId only when one exists. A fresh UI-bearing issuance records anchorMountRequestedAt, returns a one-time mount token, and opens a provisional Host-turn window so the current assistant turn does not self-lock while ChatGPT commits/initializes the iframe. If that provisional issuance remains unverified after the full turn-sized window, it is a ghost: the server may explicitly request same-task recovery, which rotates the token and refreshes the provisional window. If the iframe actually initializes, it ACKs the token through continuation_task action=anchor-mounted (or the schema-compatible heartbeat ACK) and records anchorMountVerifiedAt; generic review/Applied-patch Apps cannot forge that truth. Once anchorMountVerifiedAt exists, never call continuation_anchor again for later tasks, reconnects, page refreshes, workspace switches, iframe rehydrates, heartbeat, or lease refresh. Do not proactively re-anchor fresh provisional issuances; only explicit initialAnchorRequired/reanchorRequired authorizes issuance/recovery. Later new work reactivates the same taskId with continuation_task action=begin and appends concise verifiable requiredMilestones; continue/resume reuses unfinished milestones. completion-driven means required milestones and evidence, not elapsed time, own completion. When finalResponseAllowed=false, do not stop after ACK/status/progress; continue substantive work and checkpoint evidence. Synthetic resumed turns must first call continuation_task status with the same taskId/workspaceId and exact deliveryToken when supplied; retry transient UNAVAILABLE/Connection failed/fetch/ECONN/TLS/handshake/timeout over the configured readiness backoff before declaring transport failure. Before replaying uncertain side effects, inspect durable process/file/task state. Use complete only when mount recovery is not required and all required milestones are verified with evidence."
+        ? " Every real ChatGPT conversation owns one lifetime DevSpace Task Contract/taskId and at most one visible milestone-card surface for that task. CONVERSATION-CARD PRECONDITION: call continuation_anchor only while the task reports initialAnchorRequired/reanchorRequired because no verified card exists yet. Once anchorMountVerifiedAt exists, later manual turns, synthetic resumed turns, reconnects, page refreshes, service restarts, workspace switches, iframe rehydrates, heartbeat, and lease refresh must stay headless and must never create another milestone card. A fresh initial UI-bearing issuance records anchorMountRequestedAt, returns a one-time mount token, and opens a bounded provisional window while ChatGPT commits/initializes the iframe. If that issuance remains unverified past the provisional window, the same task may rotate only as ghost recovery; any stale generation that later wakes must become inert. The iframe ACKs the token through continuation_task action=anchor-mounted (or the schema-compatible heartbeat ACK) and records anchorMountVerifiedAt; generic review/Applied-patch Apps cannot forge that truth. Later new work reactivates the same taskId with continuation_task action=begin and appends concise verifiable requiredMilestones; continue/resume reuses unfinished milestones. completion-driven means required milestones and evidence, not elapsed time, own completion. When finalResponseAllowed=false, do not stop after ACK/status/progress; continue substantive work and checkpoint evidence. Synthetic resumed turns first ACK continuation_task status with the exact deliveryToken and then continue substantive work without re-anchoring if the conversation card is already verified. Retry transient UNAVAILABLE/Connection failed/fetch/ECONN/TLS/handshake/timeout over the configured readiness backoff before declaring transport failure. Before replaying uncertain side effects, inspect durable process/file/task state. Use complete only when mount recovery is not required and all required milestones are verified with evidence."
             : "",
     ].join("");
     const compactActivityInstruction = " Keep tool calls task-driven and minimal because the client may expose every MCP invocation and its JSON arguments in a native activity panel. Do not call capabilities, doctor, session_list, session_resume, or show_changes merely to demonstrate or test the UI. Do not issue no-op diagnostics after the required result is already known. Use show_changes only once after actual file modifications.";
@@ -1693,7 +1735,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
     if (config.features?.continuationGuard) {
         registerAppTool(server, "continuation_anchor", {
             title: "Continuation anchor",
-            description: "Issue or explicitly recover the DevSpace milestone/recovery App result for this real ChatGPT conversation. This tool is the only UI-bearing continuation entry point and always reuses the same conversation-scoped taskId. A fresh issuance records anchorMountRequestedAt, returns a one-time token, and opens a provisional Host-turn window so the current assistant turn is not blocked while ChatGPT commits/initializes the iframe. If no token-authenticated iframe ACK arrives before that window expires, the issuance is considered a ghost and the server may return initialAnchorRequired/reanchorRequired; only then may the same task be re-issued with a rotated token. Once anchorMountVerifiedAt exists, re-anchoring is permanently forbidden. workspaceId is optional so a conversation whose first DevSpace call is global can still issue its card before any workspace exists. Never call this merely for later tasks, workspace switches, reconnects, page refreshes, iframe rehydrates, heartbeat, or lease refresh unless the task explicitly reports mount recovery required.",
+            description: "Issue the single visible DevSpace milestone App surface for this ChatGPT conversation while reusing the same conversation-scoped taskId. Call this tool only when the Task Contract reports initialAnchorRequired/reanchorRequired because no verified card exists yet. Once anchorMountVerifiedAt exists, re-anchoring is permanently forbidden for later assistant turns, synthetic resumes, reconnects, service restarts, page refreshes, workspace switches, or iframe rehydrates. A stale unverified initial issuance may rotate a generation/token only as bounded ghost recovery. workspaceId is optional so the first card can be issued before any workspace exists.",
             inputSchema: {
                 workspaceId: z.string().optional(),
                 taskId: z.string().optional(),
@@ -1726,17 +1768,15 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
             if (input.workspaceId)
                 workspaces.getWorkspace(input.workspaceId);
             const conversationScopeId = openAiConversationScopeId(context?._meta) ?? "host-scope-unavailable";
-            const currentHostTurnFingerprint = hostTurnFingerprint(context);
             const outcome = runtimeState.continuationTask({
                 action: "begin",
                 ...input,
                 conversationScopeId,
-                hostTurnFingerprint: currentHostTurnFingerprint,
                 sourceTool: "continuation_anchor",
                 anchorMounted: false,
             });
             const mount = outcome.task?.id
-                ? runtimeState.prepareContinuationAnchorMount({ taskId: outcome.task.id, conversationScopeId, hostTurnFingerprint: currentHostTurnFingerprint })
+                ? runtimeState.prepareContinuationAnchorMount({ taskId: outcome.task.id, conversationScopeId })
                 : { accepted: false };
             const payload = {
                 ...outcome,
@@ -1754,7 +1794,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
         });
         registerAppTool(server, "continuation_task", {
             title: "Continuation task state",
-            description: "Persist and verify the single conversation-scoped DevSpace lifetime Task Contract across ChatGPT assistant turns, sequential user tasks, and workspace switches. A real ChatGPT conversation always reuses one taskId; workspaceId is current execution context, not task identity. New automatic contracts are completion-driven with non-empty fallback milestones; explicit begin refines or reactivates the same task instead of creating shadow tasks. After a completed milestone set, genuinely new user work uses begin with the same taskId plus new requiredMilestones; plain continue/resume reuses unfinished milestones. During active work, checkpoint may append additional requiredMilestones idempotently and persists evidence. The initial continuation_anchor issuance is provisional for approximately one Host turn: fresh issuance does not self-lock substantive work while ChatGPT commits/initializes the iframe. If that issuance ages past its provisional window without a token-authenticated ACK, status/guard reports initialAnchorRequired/reanchorRequired and the SAME task may issue one recovery App result with a rotated token. A verified anchorMountVerifiedAt permanently suppresses all later re-anchor requests. Heartbeat/lease aging, reconnects, page refreshes, iframe rehydrates, workspace switches, and later task reactivation are headless unless stale-unverified ghost recovery is explicitly required. completion-driven activity-lease expiry records SUSPECTED_STALL only; ordinary resource teardown and ordinary process completion fail closed and never authorize a new model turn. Automatic recovery requires explicit Host timeout/deadline/budget evidence, a confirmed-cutoff + grace + model-quiet gate, or an explicit resident stage/process wake. timeout-recovery remains strict proven-cutoff mode. resident is reserved for explicit monitoring work and stage/process wakes; only resident tasks may use watch-process or stage-complete. complete is rejected while anchor mount recovery is required or milestones/evidence are incomplete.",
+            description: "Persist and verify the single conversation-scoped DevSpace lifetime Task Contract across assistant turns, sequential user tasks, and workspace switches. A real ChatGPT conversation always reuses one taskId and one verified visible continuation_anchor card; workspaceId is execution context, not task identity. Once anchorMountVerifiedAt exists, later work must remain headless and must never create another milestone card. Anchor generations exist only to retire stale unverified ghost issuances before the first verified card. New automatic contracts are completion-driven with non-empty fallback milestones; explicit begin refines or reactivates the same task instead of creating shadow tasks. After a completed milestone set, genuinely new user work uses begin with the same taskId plus new requiredMilestones; plain continue/resume reuses unfinished milestones. During active work, checkpoint may append additional requiredMilestones idempotently and persists evidence. Plain status is read-only control traffic and must never renew model-activity/turn leases; only substantive DevSpace work or an explicit synthetic resumed-turn ACK establishes work ownership. completion-driven activity-lease expiry records SUSPECTED_STALL only; repeated iframe heartbeats never authorize recovery because they prove UI liveness, not assistant-turn completion. Explicit Host timeout/deadline/budget evidence, confirmed-cutoff recovery, verified lifecycle teardown, or a conservative server-quiet backstop with no model-originated DevSpace request in flight may authorize a new model turn. timeout-recovery remains strict proven-cutoff mode. resident is reserved for explicit monitoring work and stage/process wakes; only resident tasks may use watch-process or stage-complete.",
             inputSchema: {
                 action: z.enum(["begin", "begin-auto", "status", "heartbeat", "anchor-mounted", "host-signal", "confirm-turn-limit", "watch-process", "unwatch-process", "watch-status", "stage-complete", "checkpoint", "wait", "resume", "complete", "fail", "cancel", "claim-continuation", "delivery-result", "release-continuation"]),
                 taskId: z.string().optional(),
@@ -1774,7 +1814,8 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 maxSameFailure: z.number().int().min(1).max(20).optional(),
                 wallClockMinutes: z.number().int().min(0).max(1440).optional().describe("Optional wall-clock budget in minutes. 0 or omitted means unlimited for completion-driven tasks."),
                 coordinatorInstanceId: z.string().max(160).optional(),
-                anchorMountToken: z.string().uuid().optional().describe("One-time capability returned only by continuation_anchor. The iframe echoes it through anchor-mounted after it actually initializes."),
+                anchorMountToken: z.string().uuid().optional().describe("Card-generation capability returned only by continuation_anchor. The same immutable card may reuse it after transcript/page/service rehydration; older generations are rejected."),
+                anchorMountGeneration: z.number().int().nonnegative().optional().describe("Immutable visible-card generation. Rehydrated cards must echo the exact current generation when rebinding coordinator ownership."),
                 hostProfileId: z.string().max(160).optional(),
                 hostSignal: z.enum(["connected", "timeout", "teardown", "visibility-loss", "unknown"]).optional(),
                 elapsedMs: z.number().int().min(0).max(86400000).optional(),
@@ -1807,15 +1848,22 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
         }, async (input, context = {}) => {
             if (input.workspaceId)
                 workspaces.getWorkspace(input.workspaceId);
-            const conversationScopeId = openAiConversationScopeId(context?._meta) ?? "host-scope-unavailable";
-            const currentHostTurnFingerprint = input.coordinatorInstanceId ? undefined : hostTurnFingerprint(context);
+            const requestConversationScopeId = openAiConversationScopeId(context?._meta);
+            // App-originated coordinator calls are proxied by the Host and may not
+            // preserve OpenAI's model request metadata. Never fabricate a foreign
+            // conversation scope in that case: the app already carries the exact
+            // taskId/workspaceId, while mount ownership is capability-bound by the
+            // one-time token and coordinator id. Model-originated calls retain the
+            // legacy fallback so they cannot accidentally bind across conversations.
+            const conversationScopeId = input.coordinatorInstanceId
+                ? requestConversationScopeId
+                : requestConversationScopeId ?? "host-scope-unavailable";
             if (input.action === "watch-status") {
                 const status = runtimeState.continuationTask({
                     action: "status",
                     taskId: input.taskId,
                     workspaceId: input.workspaceId,
                     conversationScopeId,
-                    hostTurnFingerprint: currentHostTurnFingerprint,
                     coordinatorInstanceId: input.coordinatorInstanceId,
                 });
                 const task = status.task;
@@ -1877,9 +1925,72 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
             const outcome = runtimeState.continuationTask({
                 ...input,
                 conversationScopeId,
-                hostTurnFingerprint: currentHostTurnFingerprint,
                 ...(input.action === "begin" ? { sourceTool: "continuation_task", anchorMounted: false } : {}),
             });
+            const result = JSON.stringify(outcome, null, 2);
+            return { content: [textBlock(result)], structuredContent: { result, ...outcome } };
+        });
+        registerAppTool(server, "continuation_sender", {
+            title: "Continuation sender",
+            description: "App-only continuation delivery bridge. A verified conversation capability may heartbeat from any currently mounted DevSpace App transport, atomically claim one READY ContinuationGeneration, re-authorize that exact synthetic owner immediately before Host ui/message delivery, then report the delivery result. The visible milestone-card identity remains conversation-singleton; transport ownership may move to a newer ordinary DevSpace App iframe without rendering another milestone card. This tool is intentionally hidden from the model.",
+            inputSchema: {
+                action: z.enum(["heartbeat", "claim", "authorize-delivery", "delivery-result"]),
+                taskId: z.string().optional(),
+                conversationScopeId: z.string().optional(),
+                senderInstanceId: z.string().max(160).optional(),
+                anchorMountToken: z.string().uuid().optional(),
+                anchorMountGeneration: z.number().int().positive().optional(),
+                deliveryToken: z.string().uuid().optional(),
+                result: z.enum(["accepted", "rejected", "failed", "fallback-accepted", "unknown"]).optional(),
+                method: z.string().max(160).optional(),
+                note: z.string().max(1000).optional(),
+            },
+            outputSchema: resultOutputSchema({
+                accepted: z.boolean().optional(),
+                reason: z.string().optional(),
+                retryRequired: z.boolean().optional(),
+                conversationScopeId: z.string().optional(),
+                cardId: z.string().optional(),
+                worksetId: z.string().optional(),
+                legacyTaskId: z.string().optional(),
+                generation: z.union([z.number().int(), z.unknown()]).optional(),
+                deliveryToken: z.string().optional(),
+                claimDueAt: z.string().optional(),
+            }),
+            ...appOnlyToolMeta(config, "shell"),
+            annotations: EDIT_TOOL_ANNOTATIONS,
+        }, async (input) => {
+            const outcome = input.action === "heartbeat"
+                ? runtimeState.heartbeatContinuationSender({
+                    conversationScopeId: input.conversationScopeId,
+                    taskId: input.taskId,
+                    senderInstanceId: input.senderInstanceId,
+                    anchorMountToken: input.anchorMountToken,
+                    anchorMountGeneration: input.anchorMountGeneration,
+                })
+                : input.action === "claim"
+                ? runtimeState.claimReadyContinuationGeneration({
+                    conversationScopeId: input.conversationScopeId,
+                    taskId: input.taskId,
+                    senderInstanceId: input.senderInstanceId,
+                    anchorMountToken: input.anchorMountToken,
+                    anchorMountGeneration: input.anchorMountGeneration,
+                })
+                : input.action === "authorize-delivery"
+                    ? runtimeState.authorizeContinuationGenerationDelivery({
+                        conversationScopeId: input.conversationScopeId,
+                        taskId: input.taskId,
+                        senderInstanceId: input.senderInstanceId,
+                        anchorMountToken: input.anchorMountToken,
+                        anchorMountGeneration: input.anchorMountGeneration,
+                        deliveryToken: input.deliveryToken,
+                    })
+                    : runtimeState.recordContinuationGenerationDelivery({
+                    deliveryToken: input.deliveryToken,
+                    result: input.result,
+                    method: input.method,
+                    note: input.note,
+                });
             const result = JSON.stringify(outcome, null, 2);
             return { content: [textBlock(result)], structuredContent: { result, ...outcome } };
         });
@@ -2108,7 +2219,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         registerDynamicPluginTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);
     registerAppTool(server, "open_workspace", {
         title: "Open workspace",
-        description: `Open a local or enrolled Linux-agent project directory as a coding workspace. Remote Linux paths use devspace://<agent-id-or-name>/absolute/linux/path and then work with the same read/edit/search/process/review tools as local workspaces. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. When continuationGuard is enabled, open_workspace creates/reuses the conversation lifetime Task Contract but stays headless in the default widgets=changes mode. If its returned taskContract says initialAnchorRequired/reanchorRequired, the next model action must be continuation_anchor with that same taskId/workspaceId before any other substantive DevSpace call or user-visible completion. A fresh UI-bearing issuance opens a bounded Host-turn provisional window so the same assistant turn can continue while ChatGPT commits/initializes the iframe. If that issuance remains unverified after the window expires, the same Task Contract may explicitly request a recovery continuation_anchor with a rotated token. Once anchorMountVerifiedAt exists, re-anchoring is permanently forbidden; later user work reactivates the same taskId through continuation_task begin with new requiredMilestones, while continue/resume reuses unfinished milestones. Do not proactively anchor because of refresh/reconnect/workspace switch; only explicit initialAnchorRequired/reanchorRequired authorizes issuance or recovery. By default this opens the actual checkout; set mode="worktree" when the user asks for an isolated or parallel coding session. ${config.permissions.allowExternalPaths ? "For local workspaces the owner enabled full path access, so any path accessible to the current Windows user may be opened. Remote workspaces remain independently confined by each Linux Agent's allowed roots and Linux user permissions." : "Local paths must be inside a configured allowed root; remote paths must be inside the selected Linux Agent's allowed roots."} Returns a workspaceId, backend identity, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.`,
+        description: `Open a local or enrolled Linux-agent project directory as a coding workspace. Remote Linux paths use devspace://<agent-id-or-name>/absolute/linux/path and then work with the same read/edit/search/process/review tools as local workspaces. Call this once per project folder or worktree before reading, editing, searching, writing, showing changes, or running commands. Reuse the returned workspaceId for later calls in the same folder; do not call open_workspace again unless switching folders/worktrees, changing checkout/worktree mode, the workspaceId is rejected as unknown, or the user explicitly asks to reopen. When continuationGuard is enabled, open_workspace creates/reuses the conversation lifetime Task Contract but stays headless in the default widgets=changes mode. If its returned taskContract says initialAnchorRequired/reanchorRequired, the next model action must be continuation_anchor with that same taskId/workspaceId before any other substantive DevSpace call or user-visible completion. A fresh UI-bearing issuance opens a bounded provisional mount window so ChatGPT can commit/initialize the iframe. If that initial issuance remains unverified after the window expires, the same Task Contract may explicitly request a ghost-recovery continuation_anchor with a rotated token. Once anchorMountVerifiedAt exists, re-anchoring is permanently forbidden: later assistant turns, synthetic resumes, reconnects, service restarts, page refreshes, workspace switches, and iframe rehydrates stay headless and reuse the same conversation card. Later user work reactivates the same taskId through continuation_task begin with new requiredMilestones, while continue/resume reuses unfinished milestones. Do not proactively anchor after a verified card exists. By default this opens the actual checkout; set mode="worktree" when the user asks for an isolated or parallel coding session. ${config.permissions.allowExternalPaths ? "For local workspaces the owner enabled full path access, so any path accessible to the current Windows user may be opened. Remote workspaces remain independently confined by each Linux Agent's allowed roots and Linux user permissions." : "Local paths must be inside a configured allowed root; remote paths must be inside the selected Linux Agent's allowed roots."} Returns a workspaceId, backend identity, loaded root project instructions, and nested instruction file paths the model should read before working in those directories.`,
         inputSchema: {
             path: z
                 .string()
@@ -3365,6 +3476,35 @@ export function createServer(config = loadConfig(), options = {}) {
             .then((results) => logSessionCloseResults("idle_timeout", results));
     }, MCP_SESSION_CLEANUP_INTERVAL_MS);
     sessionCleanupTimer.unref();
+    // 1.1.54: continuation deadlines must advance even when no model request is
+    // arriving and the historical Workspace App iframe is frozen/unloaded.
+    // This resident sweep only advances the durable execution FSM to READY; it
+    // intentionally does not pretend the MCP server can call the Host-only
+    // app.sendMessage bridge. An authoritative sender App claims READY through
+    // generation CAS and performs the actual Host user-role delivery.
+    const continuationSupervisorTimer = setInterval(() => {
+        if (!continuationTaskContractsEnabled)
+            return;
+        try {
+            const sweep = runtimeState.continuationSupervisorSweep();
+            if (sweep.ready.length > 0) {
+                logEvent(config.logging, "info", "continuation_generations_ready", {
+                    count: sweep.ready.length,
+                    generations: sweep.ready.map((entry) => ({
+                        conversationScopeId: entry.conversationScopeId,
+                        worksetId: entry.worksetId,
+                        generation: entry.generation,
+                    })),
+                });
+            }
+        }
+        catch (error) {
+            logEvent(config.logging, "warn", "continuation_supervisor_sweep_failed", {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }, 5_000);
+    continuationSupervisorTimer.unref();
     if (config.logging.trustProxy) {
         // The supported deployments terminate TLS at a single local reverse proxy
         // (for example ngrok or Tailscale Funnel). Trusting every proxy allows a
@@ -3567,6 +3707,7 @@ export function createServer(config = loadConfig(), options = {}) {
         close: () => {
             closePromise ??= (async () => {
                 clearInterval(sessionCleanupTimer);
+                clearInterval(continuationSupervisorTimer);
                 const results = await transports.closeAll();
                 logSessionCloseResults("server_shutdown", results);
                 fileWatches.close();

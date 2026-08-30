@@ -139,6 +139,16 @@ const migrations = [
         name: "continuation-anchor-generation-turn-fingerprint",
         up: migrateContinuationAnchorGenerationTurnFingerprint,
     },
+    {
+        version: 29,
+        name: "continuation-synthetic-work-baseline",
+        up: migrateContinuationSyntheticWorkBaseline,
+    },
+    {
+        version: 30,
+        name: "continuation-card-workset-generation-architecture",
+        up: migrateContinuationCardWorksetGenerationArchitecture,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -748,10 +758,10 @@ function migrateContinuationCompletionDrivenUnbounded(sqlite) {
 }
 function migrateContinuationStallDetectorHostRegimes(sqlite) {
     // A model-activity lease is only a weak liveness hint.  Expiry must move an
-    // unfinished completion-driven task into SUSPECTED_STALL first; a later,
-    // independent Workspace App heartbeat can corroborate the suspicion before
-    // the server exposes CONTINUATION_ARMED.  This prevents a long model think
-    // with no MCP calls from being treated as a definitive assistant-turn end.
+    // unfinished completion-driven task into SUSPECTED_STALL only. A Workspace
+    // App heartbeat proves the card is alive, not that the assistant turn ended,
+    // so repeated heartbeats may never arm recovery. CONTINUATION_ARMED requires
+    // independent Host/lifecycle evidence or a previously confirmed Host cutoff.
     addColumnIfMissing(sqlite, "continuation_tasks", "stall_state", "text not null default 'ACTIVE'");
     addColumnIfMissing(sqlite, "continuation_tasks", "stall_suspected_at", "text");
     addColumnIfMissing(sqlite, "continuation_tasks", "stall_probe_count", "integer not null default 0");
@@ -906,6 +916,235 @@ function migrateContinuationManualTakeoverAndSingletonRepair(sqlite) {
 
       create index if not exists continuation_tasks_delivery_owner_idx
         on continuation_tasks(delivery_owner, delivery_owner_expires_at, updated_at desc);
+    `);
+}
+function migrateContinuationSyntheticWorkBaseline(sqlite) {
+    // Millisecond timestamps cannot reliably prove that real tool work happened
+    // after a synthetic resume ACK: both events can share the same timestamp.
+    // Capture the monotonic substantive activity counter at ACK time instead.
+    addColumnIfMissing(sqlite, "continuation_tasks", "delivery_work_baseline_count", "integer not null default 0");
+    sqlite.exec(`
+      update continuation_tasks
+      set delivery_work_baseline_count=case
+            when delivery_owner='synthetic-active' then coalesce(substantive_activity_count,0)
+            else 0
+          end;
+    `);
+}
+function migrateContinuationCardWorksetGenerationArchitecture(sqlite) {
+    // 1.1.54 separates four identities that continuation_tasks historically
+    // mixed together: the conversation-lifetime visible card, a sequential
+    // workset, its milestones, and per-turn execution generations.  The legacy
+    // table remains as a compatibility projection during the transition, but
+    // all transient delivery ownership is revoked at this schema epoch.
+    sqlite.exec(`
+      create table if not exists continuation_runtime_meta (
+        key text primary key,
+        value text not null,
+        updated_at text not null
+      );
+
+      insert into continuation_runtime_meta(key,value,updated_at)
+      values('schema_epoch','2',strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      on conflict(key) do update set
+        value=excluded.value,
+        updated_at=excluded.updated_at;
+
+      create table if not exists continuation_conversation_cards (
+        conversation_scope_id text primary key,
+        card_id text not null unique,
+        schema_epoch integer not null default 2,
+        mount_state text not null default 'UNMOUNTED',
+        mount_token text,
+        mount_requested_at text,
+        mount_verified_at text,
+        mount_generation integer not null default 1,
+        coordinator_instance_id text,
+        sender_instance_id text,
+        active_workset_id text,
+        created_at text not null,
+        updated_at text not null
+      );
+
+      create table if not exists continuation_worksets (
+        id text primary key,
+        conversation_scope_id text not null,
+        legacy_task_id text,
+        sequence integer not null,
+        workspace_id text,
+        objective text not null,
+        state text not null,
+        continuation_due_at text,
+        current_generation integer not null default 0,
+        last_model_activity_at text,
+        created_at text not null,
+        updated_at text not null,
+        completed_at text
+      );
+
+      create index if not exists continuation_worksets_conversation_idx
+        on continuation_worksets(conversation_scope_id, sequence desc);
+
+      create index if not exists continuation_worksets_legacy_task_idx
+        on continuation_worksets(legacy_task_id, sequence desc);
+
+      create unique index if not exists continuation_worksets_one_active_per_conversation
+        on continuation_worksets(conversation_scope_id)
+        where state in ('RUNNING','WAITING_EXTERNAL','SUSPECTED_STALL');
+
+      create table if not exists continuation_milestones (
+        id text primary key,
+        workset_id text not null,
+        stable_key text not null,
+        description text not null,
+        state text not null default 'PENDING',
+        evidence_json text not null default '{}',
+        ordinal integer not null default 0,
+        created_at text not null,
+        updated_at text not null,
+        completed_at text,
+        unique(workset_id, stable_key)
+      );
+
+      create index if not exists continuation_milestones_workset_state_idx
+        on continuation_milestones(workset_id, state, ordinal);
+
+      create table if not exists continuation_generations (
+        id text primary key,
+        workset_id text not null,
+        generation integer not null,
+        owner_type text not null,
+        owner_turn_id text,
+        delivery_token text unique,
+        state text not null,
+        due_at text,
+        claimed_at text,
+        delivered_at text,
+        turn_acked_at text,
+        substantive_baseline_count integer not null default 0,
+        substantive_activity_count integer not null default 0,
+        last_activity_at text,
+        closed_at text,
+        failure_reason text,
+        created_at text not null,
+        updated_at text not null,
+        unique(workset_id, generation)
+      );
+
+      create index if not exists continuation_generations_due_idx
+        on continuation_generations(state, due_at);
+
+      create index if not exists continuation_generations_owner_idx
+        on continuation_generations(workset_id, owner_type, state, generation desc);
+
+      insert or ignore into continuation_conversation_cards(
+        conversation_scope_id, card_id, schema_epoch, mount_state, mount_token,
+        mount_requested_at, mount_verified_at, mount_generation,
+        coordinator_instance_id, active_workset_id, created_at, updated_at
+      )
+      select t.conversation_scope_id,
+        'card:' || t.conversation_scope_id,
+        2,
+        case
+          when t.anchor_mount_verified_at is not null then 'VERIFIED'
+          when t.anchor_mount_requested_at is not null then 'REQUESTED'
+          else 'UNMOUNTED'
+        end,
+        t.anchor_mount_token,
+        t.anchor_mount_requested_at,
+        t.anchor_mount_verified_at,
+        case when coalesce(t.anchor_mount_generation,0) > 0 then t.anchor_mount_generation else 1 end,
+        t.anchor_mount_coordinator_id,
+        case when t.state in ('RUNNING','WAITING_EXTERNAL','PAUSED_BY_USER') then 'workset:' || t.id else null end,
+        t.created_at,
+        t.updated_at
+      from continuation_tasks t
+      where t.conversation_scope_id glob 'v1/*'
+        and t.id=(
+          select t2.id from continuation_tasks t2
+          where t2.conversation_scope_id=t.conversation_scope_id
+          order by t2.updated_at desc, t2.created_at desc, t2.id desc
+          limit 1
+        );
+
+      insert or ignore into continuation_worksets(
+        id, conversation_scope_id, legacy_task_id, sequence, workspace_id,
+        objective, state, continuation_due_at, current_generation,
+        last_model_activity_at, created_at, updated_at, completed_at
+      )
+      select 'workset:' || t.id,
+        t.conversation_scope_id,
+        t.id,
+        1,
+        t.workspace_id,
+        t.objective,
+        case
+          when t.state='RUNNING' then 'RUNNING'
+          when t.state='WAITING_EXTERNAL' then 'WAITING_EXTERNAL'
+          when t.state='PAUSED_BY_USER' then 'PAUSED'
+          when t.state='SUCCEEDED' then 'SUCCEEDED'
+          when t.state='CANCELLED_BY_USER' then 'CANCELLED'
+          else 'ARCHIVED'
+        end,
+        t.turn_lease_expires_at,
+        case when coalesce(t.delivery_generation,0) > 0 then t.delivery_generation else 1 end,
+        t.last_model_activity_at,
+        t.created_at,
+        t.updated_at,
+        case when t.state in ('RUNNING','WAITING_EXTERNAL','PAUSED_BY_USER') then null else t.updated_at end
+      from continuation_tasks t
+      where t.conversation_scope_id glob 'v1/*'
+        and t.id=(
+          select t2.id from continuation_tasks t2
+          where t2.conversation_scope_id=t.conversation_scope_id
+          order by t2.updated_at desc, t2.created_at desc, t2.id desc
+          limit 1
+        );
+
+      insert or ignore into continuation_generations(
+        id, workset_id, generation, owner_type, state, due_at,
+        substantive_baseline_count, substantive_activity_count,
+        last_activity_at, created_at, updated_at
+      )
+      select 'generation:' || t.id || ':' ||
+          cast(case when coalesce(t.delivery_generation,0) > 0 then t.delivery_generation else 1 end as text),
+        'workset:' || t.id,
+        case when coalesce(t.delivery_generation,0) > 0 then t.delivery_generation else 1 end,
+        'manual',
+        case when t.state='RUNNING' then 'WORK_REQUIRED' else 'CLOSED' end,
+        t.turn_lease_expires_at,
+        coalesce(t.substantive_activity_count,0),
+        coalesce(t.substantive_activity_count,0),
+        coalesce(t.last_model_activity_at,t.last_activity_at,t.updated_at),
+        t.created_at,
+        t.updated_at
+      from continuation_tasks t
+      where t.conversation_scope_id glob 'v1/*'
+        and t.id=(
+          select t2.id from continuation_tasks t2
+          where t2.conversation_scope_id=t.conversation_scope_id
+          order by t2.updated_at desc, t2.created_at desc, t2.id desc
+          limit 1
+        );
+
+      update continuation_tasks
+      set superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+          delivery_token=null,
+          delivery_owner=null,
+          delivery_owner_expires_at=null,
+          continuation_pending=0,
+          delivery_ack_started_at=null,
+          delivery_ack_retry_count=0,
+          delivery_ack_retry_after_at=null,
+          coordinator_instance_id=null,
+          stall_state=case when state='RUNNING' then 'ACTIVE' else stall_state end,
+          stall_suspected_at=null,
+          stall_probe_count=0,
+          stall_last_probe_at=null,
+          stall_armed_at=null,
+          stall_evidence=null,
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      where conversation_scope_id glob 'v1/*';
     `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

@@ -4937,7 +4937,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.53 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.54 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5283,6 +5283,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
 
             FlowLayoutPanel actions = NewButtonBar();
             actions.Controls.Add(ActionButton("刷新任务", async delegate { await LoadContinuationsAsync(true); }, true));
+            actions.Controls.Add(ActionButton("全选当前", delegate { SelectAllContinuations(); }));
             actions.Controls.Add(ActionButton("暂停所选", async delegate { await PauseSelectedContinuationsAsync(); }));
             actions.Controls.Add(ActionButton("恢复所选", async delegate { await ResumeSelectedContinuationsAsync(); }));
             actions.Controls.Add(ActionButton("锁定所选", async delegate { await SetSelectedContinuationLockAsync(true); }));
@@ -5292,7 +5293,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _showTerminalContinuations = new CheckBox
             {
                 Text = "显示已结束任务",
-                Checked = true,
+                Checked = false,
                 AutoSize = true,
                 ForeColor = UiPalette.TextMuted,
                 BackColor = Color.Transparent,
@@ -5310,7 +5311,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "1.1.53 修复里程碑卡 requested 但 iframe 从未真实挂载时永久漏卡的问题。只有 Workspace App 使用当前 mount token ACK 后才会写入 verified；未验证 generation 在后续 Host turn 可安全轮换并重新挂载，旧 generation 若被延迟懒加载会自动 supersede。已经 verified 的 conversation 仍永久复用唯一卡片。continuation_anchor 现在允许在 workspace 尚未绑定时先挂载 conversation Task Contract，解决 pre-workspace 引导与工具 schema 互相矛盾的问题。",
+                Text = "1.1.54 将 conversation-lifetime 唯一卡片与当前可用 continuation sender transport 解耦：可见里程碑卡仍只允许一张，但后续存活的 DevSpace Workspace App surface 可继承隐藏 sender capability，在旧 anchor iframe 被 Host 虚拟化后继续承担续轮传输。服务端同时跟踪真实 model request in-flight，长命令不会被静默检测误判为 assistant turn 已结束；无 Host timeout/teardown 时仅在无 in-flight 请求且持续静默后使用保守恢复 backstop。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
@@ -5790,7 +5791,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.53") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.54") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -6231,6 +6232,18 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             if (currentTask != null && currentTask.Count > 0) return currentTask;
             List<Dictionary<string, object>> selected = SelectedContinuations();
             return selected.Count > 0 ? selected[0] : new Dictionary<string, object>();
+        }
+
+        private void SelectAllContinuations()
+        {
+            if (_continuationGrid == null || _continuationGrid.IsDisposed) return;
+            _continuationGrid.ClearSelection();
+            foreach (DataGridViewRow row in _continuationGrid.Rows)
+            {
+                if (!row.IsNewRow) row.Selected = true;
+            }
+            if (_continuationGrid.Rows.Count > 0) _continuationGrid.CurrentCell = _continuationGrid.Rows[0].Cells[0];
+            RenderContinuationSummary();
         }
 
         private string[] SelectedContinuationIds()
