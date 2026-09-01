@@ -217,11 +217,14 @@ function isChinese() {
 
 function visibleContinuationTrigger() {
   // app.sendMessage is the Host-supported way to create the resumed model turn,
-  // so a short visible user-role message is still required. Keep it equivalent
-  // to the owner's normal manual continuation instead of adding urgency or a
-  // "complete directly" bias. Ownership and generation fencing remain
-  // entirely server-side and never enter chat history.
-  return isChinese() ? "继续" : "Continue.";
+  // so the recovery instruction must survive even when updateModelContext is
+  // ignored or not replayed into the resumed model turn. Real Host evidence
+  // showed that a bare "继续" can still produce a status-only assistant final.
+  // Keep protocol/task ids hidden, but make sustained execution explicit in the
+  // actual user-role message that creates the turn.
+  return isChinese()
+    ? "继续执行未完成的 DevSpace 任务；如果仍有可运行里程碑，直接继续调用工具完成，不要只回复状态或“继续处理中”。"
+    : "Continue the unfinished DevSpace task. If runnable milestones remain, keep using the tools to complete them; do not reply with only a status or ‘still working’.";
 }
 
 function nextUnresolvedMilestone(task) {
@@ -246,6 +249,7 @@ function continuationContext(task, workspaceId, reason) {
     "Tool availability is turn-scoped, not conversation authorization. If the resumed turn does not directly expose the DevSpace_MCP tool namespace, do not stop or claim that DevSpace is unavailable. Use the Host's available connector/tool discovery path first; in ChatGPT, call api_tool.list_resources for DevSpace_MCP (query continuation_task is sufficient), then invoke the discovered DevSpace_MCP tools. Only treat DevSpace as unavailable after that discovery path itself actually fails.",
     "Connector discovery and continuation_task status are control-plane setup, not successful resumed work. If status reports continueRequired/taskIncomplete or any runnable milestone remains, do not produce a final response after discovery/status alone. In that same assistant turn, invoke substantive DevSpace tools that actually advance or verify nextUnresolvedMilestone, and keep executing/polling until the runnable milestone set is completed, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A discovery-only/status-only turn is an invalid automatic continuation and must not voluntarily yield.",
     "Call continuation_task status first. The runtime atomically claims any server-owned expected synthetic generation; do not search for, expose, or pass a continuation token to ordinary tools. Then continue substantive work with the same sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes until the current milestones are complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the one conversation-lifetime task/card and existing process/workspace state.",
+    "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. If runnable milestones remain, keep invoking the required tools in this same turn instead of promising future work.",
   ];
   return lines.join("\n");
 }
@@ -503,6 +507,18 @@ export function installContinuationCoordinator(app, options = {}) {
       }
     }
     throw lastError ?? new Error("DevSpace continuation sender bind retry exhausted.");
+  }
+
+  async function consumeReadyAfterSenderBind(outcome, reason = "sender transport rebound with READY generation") {
+    const readyGeneration = Number(outcome?.readyGeneration || 0);
+    if (!outcome?.accepted || !Number.isInteger(readyGeneration) || readyGeneration <= 0) return false;
+    // Do not wait for the old milestone iframe's five-second supervisor tick.
+    // A newly mounted ordinary Workspace App is the recovery transport: once
+    // bind proves the same conversation/card capability and the server reports
+    // a durable READY generation, consume it immediately. Generation claim is
+    // atomic, so concurrent sibling Apps safely lose the claim instead of
+    // sending duplicate visible continuations.
+    return attemptContinuation(reason, { force: true });
   }
 
   function stopSupervisor() {
@@ -1006,6 +1022,10 @@ export function installContinuationCoordinator(app, options = {}) {
     if (resultTask) acceptTask(resultTask);
     void ensureTask()
       .then(() => bindSenderTransport())
+      .then(async (bound) => {
+        await consumeReadyAfterSenderBind(bound);
+        return bound;
+      })
       .then(() => syncPersistentDisplayMode())
       .then(() => heartbeat("sender transport mounted"))
       .catch(() => undefined)
@@ -1052,7 +1072,8 @@ export function installContinuationCoordinator(app, options = {}) {
       state.hostProfileId = buildHostProfileId();
       mergeContext(app.getHostContext?.());
       await ensureTask();
-      await bindSenderTransport().catch(() => undefined);
+      const bound = await bindSenderTransport().catch(() => undefined);
+      await consumeReadyAfterSenderBind(bound, "sender transport connected with READY generation").catch(() => false);
       await syncPersistentDisplayMode();
       await heartbeat("sender transport connected").catch(() => undefined);
       startSupervisor();

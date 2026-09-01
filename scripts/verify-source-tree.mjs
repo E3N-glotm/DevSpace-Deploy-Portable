@@ -152,12 +152,37 @@ if (!String(manifest.release || "").startsWith("DevSpacePortable-Windows-x64-"))
   throw new Error("VERSION-MANIFEST.json contains an invalid release name.");
 }
 
+const packageVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+const manifestVersion = String(manifest.runtime?.devspacePortable || "");
+const releaseVersion = String(manifest.release || "").replace(/^DevSpacePortable-Windows-x64-/, "");
+if (!packageVersion || packageVersion !== manifestVersion || packageVersion !== releaseVersion) {
+  throw new Error(
+    `Portable version identity drift: package.json=${packageVersion || "missing"}, ` +
+    `manifest.runtime.devspacePortable=${manifestVersion || "missing"}, release=${releaseVersion || "missing"}.`,
+  );
+}
+
+const versionIdentitySources = [
+  ["setup/portable-manager.cjs", `const PORTABLE_VERSION = "${packageVersion}";`],
+  ["scripts/start-devspace.sh", `export DEVSPACE_PORTABLE_VERSION="${packageVersion}"`],
+  ["vendor/waishnav-devspace/dist/capabilities.js", `DEVSPACE_SERVER_VERSION = "${packageVersion}"`],
+  ["vendor/waishnav-devspace/dist/ui/assets/runtime-enhancements.js", `DevSpace Portable ${packageVersion} · Protocol 1.5`],
+  ["setup/native/DevSpacePortableApp.cs", `DevSpace Portable ${packageVersion} · Protocol 1.5`],
+];
+for (const [file, expected] of versionIdentitySources) {
+  const source = readFileSync(join(root, file), "utf8");
+  if (!source.includes(expected)) {
+    throw new Error(`Portable version identity drift in ${file}: expected ${JSON.stringify(expected)}.`);
+  }
+}
+
 console.log(JSON.stringify({
   checkedFiles: files.length,
   totalBytes,
   largest,
   release: manifest.release,
-  portableVersion: manifest.runtime?.devspacePortable,
+  portableVersion: packageVersion,
+  versionIdentitySourcesChecked: versionIdentitySources.length,
   forbiddenTrackedPaths: 0,
   sensitiveTrackedFiles: 0,
   explicitEolFilesChecked: eol.checked,

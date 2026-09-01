@@ -13,6 +13,7 @@ CORE_VERSION = json.loads(CORE_PACKAGE_JSON.read_text(encoding="utf-8"))["versio
 PACKAGE_TGZ = ROOT / "packages" / f"waishnav-devspace-{CORE_VERSION}.tgz"
 LOCK_FILE = ROOT / "app" / "package-lock.json"
 MANIFEST_FILE = ROOT / "VERSION-MANIFEST.json"
+ROOT_PACKAGE_JSON = ROOT / "package.json"
 
 
 def sha256_file(path: Path) -> str:
@@ -37,6 +38,28 @@ def update_lock() -> None:
         encoding="utf-8",
         newline="\n",
     )
+
+
+def validate_release_version(version: str) -> None:
+    package_version = json.loads(ROOT_PACKAGE_JSON.read_text(encoding="utf-8"))["version"]
+    if package_version != version:
+        raise SystemExit(
+            f"Portable version identity mismatch: package.json is {package_version}, requested release is {version}"
+        )
+
+    expected_fragments = {
+        ROOT / "setup" / "portable-manager.cjs": f'const PORTABLE_VERSION = "{version}";',
+        ROOT / "scripts" / "start-devspace.sh": f'export DEVSPACE_PORTABLE_VERSION="{version}"',
+        ROOT / "vendor" / "waishnav-devspace" / "dist" / "capabilities.js": f'DEVSPACE_SERVER_VERSION = "{version}"',
+        ROOT / "vendor" / "waishnav-devspace" / "dist" / "ui" / "assets" / "runtime-enhancements.js": f"DevSpace Portable {version} · Protocol 1.5",
+        ROOT / "setup" / "native" / "DevSpacePortableApp.cs": f"DevSpace Portable {version} · Protocol 1.5",
+    }
+    mismatches: list[str] = []
+    for path, expected in expected_fragments.items():
+        if expected not in path.read_text(encoding="utf-8"):
+            mismatches.append(f"{path.relative_to(ROOT).as_posix()}: missing {expected!r}")
+    if mismatches:
+        raise SystemExit("Portable version identity mismatch:\n" + "\n".join(mismatches))
 
 
 def update_manifest(version: str, hotfix: str | None) -> None:
@@ -214,6 +237,7 @@ def main() -> int:
     parser.add_argument("version")
     parser.add_argument("--hotfix")
     args = parser.parse_args()
+    validate_release_version(args.version)
     if not PACKAGE_TGZ.is_file():
         raise SystemExit(f"Missing packed DevSpace package: {PACKAGE_TGZ}")
     update_lock()

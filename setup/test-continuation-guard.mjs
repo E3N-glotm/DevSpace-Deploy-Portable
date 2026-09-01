@@ -14,6 +14,7 @@ const runtimeStateSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace"
 const featureTools = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "feature-tools.js"), "utf8");
 const coordinatorPath = join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js");
 const coordinator = readFileSync(coordinatorPath, "utf8");
+const visibleTriggerSource = coordinator.match(/function visibleContinuationTrigger\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
 const finalizeRelease = readFileSync(join(ROOT, "setup", "finalize-release.py"), "utf8");
 const uiManifest = JSON.parse(readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", ".vite", "manifest.json"), "utf8"));
 const workspaceEntry = uiManifest["workspace-app.html"];
@@ -254,11 +255,13 @@ assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryTo
   "the coordinator must keep generation capabilities inside App/runtime transport instead of exposing them to the model");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
-assert.match(coordinator, /function visibleContinuationTrigger\(\)[\s\S]{0,650}return isChinese\(\) \? "继续" : "Continue\."/,
-  "the visible synthetic continuation trigger must match the owner's normal manual continue message without urgency bias");
+assert.match(coordinator, /function visibleContinuationTrigger\(\)[\s\S]{0,1100}继续执行未完成的 DevSpace 任务[\s\S]{0,300}可运行里程碑[\s\S]{0,300}不要只回复状态[\s\S]{0,240}继续处理中/,
+  "the visible synthetic continuation trigger must carry sustained-work semantics in the actual Host user-role turn instead of relying only on hidden context");
+assert.match(coordinator, /Continue the unfinished DevSpace task[\s\S]{0,300}runnable milestones remain[\s\S]{0,300}do not reply with only a status[\s\S]{0,240}still working/,
+  "the English visible synthetic trigger must also forbid a status-only premature final");
 assert.doesNotMatch(coordinator, /继续。直接完成当前未完成的任务。|Continue\. Directly complete the current unfinished task\./,
   "the visible synthetic continuation trigger must not pressure the model to skip state reconstruction or verification");
-assert.doesNotMatch(coordinator, /return `继续执行用户尚未完成的 DevSpace 任务/,
+assert.doesNotMatch(visibleTriggerSource, /taskId=|workspaceId=|deliveryToken|generation capability/,
   "taskId/workspaceId/recovery policy must not be emitted as a visible user message");
 assert.match(coordinator, /function continuationContext\([\s\S]{0,3000}runtime atomically claims any server-owned expected synthetic generation/,
   "hidden context must direct the first status call while leaving UUID transport to the runtime");
@@ -302,6 +305,16 @@ assert.match(server, /anchorMountVerificationPending[\s\S]{0,900}substantive wor
   "pending iframe verification must be informational after the immutable card issuance, not an execution gate");
 assert.match(runtimeStateSource, /continuationSenderCapability\(input = \{\}\)[\s\S]{0,2200}mount_requested_at[\s\S]{0,1000}anchorMountVerified/,
   "sender capability must exist from the requested card generation even before iframe ACK");
+assert.match(runtimeStateSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0,5200}state='READY'[\s\S]{0,1200}readyGeneration/,
+  "sender bind must surface an already-durable READY generation so a newly mounted ordinary App can consume it immediately");
+assert.match(coordinator, /async function consumeReadyAfterSenderBind\([\s\S]{0,1300}readyGeneration[\s\S]{0,800}attemptContinuation\(reason, \{ force: true \}\)/,
+  "a newly bound sender transport must immediately consume READY instead of waiting for the old milestone iframe or another supervisor tick");
+assert.match(coordinator, /bindSenderTransport\(\)[\s\S]{0,700}consumeReadyAfterSenderBind\(bound/,
+  "ordinary Workspace App bind/rehydrate must wire directly into deterministic READY delivery");
+assert.match(runtimeStateSource, /manual-user-turn-takeover/,
+  "runtime must retain an old-schema-compatible manual takeover CAS marker on the existing note field");
+assert.match(server, /older cached schema without manualTakeover[\s\S]{0,500}manual-user-turn-takeover/,
+  "server guidance must document the manual takeover fallback for already-open Hosts whose continuation_task schema is stale");
 assert.match(coordinator, /function senderTransportAvailable\(\)[\s\S]{0,500}anchorMountRequestedAt[\s\S]{0,240}activeSenderCapability\(\)/,
   "a later trusted Workspace App relay must keep sender transport available while the original iframe ACK is pending");
 assert.match(coordinator, /same sustained execution semantics as a manual 'continue'[\s\S]{0,500}polling owned long-running processes[\s\S]{0,500}Host truncates the turn/,
@@ -322,6 +335,12 @@ assert.match(coordinator, /deliveryOwnerExpiresAt[\s\S]{0,900}completionActivity
   "status-only synthetic recovery must prefer its dedicated ownership lease and keep the generic Turn Lease only as a compatibility fallback");
 assert.match(coordinator, /synthetic resume work ownership lease expired/,
   "status-only resumed turns must have a dedicated recovery path rather than being treated as successfully completed continuations");
+assert.match(coordinator, /Never end an automatically resumed turn with a placeholder\/status-only reply[\s\S]{0,500}There is no background model execution after a final assistant message/,
+  "synthetic recovery context must explicitly forbid placeholder finals such as '继续处理中。'");
+assert.match(runtimeStateSource, /syntheticWorkOwnerExpiresAt[\s\S]{0,800}const abandonedSyntheticWork =[\s\S]{0,1500}synthetic-resume-work-lease-expired/,
+  "the resident supervisor must recover an expired synthetic work owner even after the resumed turn made one substantive call");
+assert.match(runtimeStateSource, /confirmedHostTurnMs[\s\S]{0,300}Math\.max\(COMPLETION_STALL_CONFIRM_MS, confirmedHostTurnMs\)/,
+  "generic completion stall recovery must not outrun a persisted longer observed Host turn cutoff");
 assert.match(coordinator, /deliveryAckRetryDue[\s\S]{0,1500}deliveryAckRetryAfterAt/,
   "delivery ACK retransmission must honor the persisted retry schedule instead of polling new turns every supervisor tick");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 500, 1_500, 3_000, 5_000\]/,
@@ -513,6 +532,7 @@ class FakeApp {
     this.autoEmitAnchorResult = true;
     this.anchorMountToken = "00000000-0000-4000-8000-00000000a001";
     this.anchorMountGeneration = 1;
+    this.bindReadyGeneration = undefined;
   }
   verifyExistingAnchor() {
     if (this.task) {
@@ -585,6 +605,7 @@ class FakeApp {
             workspaceId: this.task?.workspaceId,
             anchorMountToken: this.anchorMountToken,
             anchorMountGeneration: this.anchorMountGeneration,
+            ...(this.bindReadyGeneration ? { readyGeneration: this.bindReadyGeneration } : {}),
             task: this.task,
           },
         };
@@ -705,10 +726,14 @@ assert.equal(await fakeController.attemptContinuation("unit test", { force: true
 assert.equal(fakeApp.messages.length, 1);
 assert.equal(fakeApp.contextUpdates.length >= 1, true);
 const visibleSyntheticText = fakeApp.messages[0]?.content?.[0]?.text ?? "";
-assert.match(visibleSyntheticText, /^(继续|Continue\.)$/,
-  "automatic recovery must create a localized manual-equivalent continuation trigger");
-assert.doesNotMatch(visibleSyntheticText, /直接|Directly|complete the current unfinished task/i,
-  "the visible continuation trigger must not add urgency or shortcut language absent from a manual continue");
+assert.match(visibleSyntheticText, /继续执行未完成的 DevSpace 任务|Continue the unfinished DevSpace task/,
+  "automatic recovery must carry the unfinished DevSpace task intent in the Host-visible user-role turn");
+assert.match(visibleSyntheticText, /可运行里程碑|runnable milestones/i,
+  "the visible continuation trigger must preserve milestone-driven sustained work");
+assert.match(visibleSyntheticText, /不要只回复状态|do not reply with only a status/i,
+  "the visible continuation trigger must explicitly reject status-only premature finals");
+assert.match(visibleSyntheticText, /继续处理中|still working/i,
+  "the visible continuation trigger must name the observed placeholder-final failure mode");
 assert.doesNotMatch(visibleSyntheticText, /token|UUID|continuation_task|checkpoint|task_fake|ws_fake|authorized recovery/i,
   "the visible Host trigger must not expose protocol, task identity, or generation capability details");
 assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery/,
@@ -775,6 +800,7 @@ relayApp.task = {
 };
 const relayController = installContinuationCoordinator(relayApp, { timers: false, instanceId: "ui_transport_relay" });
 await relayController.onConnected();
+relayApp.bindReadyGeneration = 2;
 relayApp.emit("toolresult", {
   name: "show_changes",
   _meta: {
@@ -789,16 +815,17 @@ relayApp.emit("toolresult", {
   },
   structuredContent: { task: relayApp.task },
 });
-await new Promise((resolve) => setImmediate(resolve));
+await new Promise((resolve) => setTimeout(resolve, 20));
 assert.equal(relayController.state.anchorSurface, false,
   "an ordinary show_changes relay must never become a second milestone-card surface");
 assert.equal(relayController.state.senderCapability?.taskId, relayApp.task.id,
   "ordinary App result metadata must bind the verified sender capability");
 assert.ok(relayApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "heartbeat"),
   "the transport relay must prove its own liveness through continuation_sender");
-assert.equal(await relayController.attemptContinuation("transport relay recovery", { force: true }), true);
 assert.equal(relayApp.messages.length, 1,
-  "a transport-only current App must be able to deliver the unfinished task's continuation after the old anchor iframe is gone");
+  "a transport-only current App must immediately consume an already-READY generation after bind instead of waiting for the old anchor iframe or a later tick");
+assert.ok(relayApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "bind"),
+  "the ordinary relay must rebind sender transport before consuming READY");
 assert.ok(relayApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "claim"));
 assert.ok(relayApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "authorize-delivery"));
 relayController.dispose();

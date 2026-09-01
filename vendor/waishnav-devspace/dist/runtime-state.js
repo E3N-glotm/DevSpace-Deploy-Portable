@@ -418,6 +418,16 @@ export class StructuredRuntimeState {
         this.database.sqlite.prepare(`
           update continuation_tasks set last_ui_heartbeat_at=?,updated_at=? where id=?
         `).run(nowIso, nowIso, task.id);
+        const reboundCard = this.database.sqlite.prepare(`
+          select active_workset_id from continuation_conversation_cards where conversation_scope_id=?
+        `).get(conversationScopeId);
+        const readyGeneration = reboundCard?.active_workset_id
+            ? this.database.sqlite.prepare(`
+                select generation from continuation_generations
+                where workset_id=? and owner_type='synthetic' and state='READY'
+                order by generation asc limit 1
+              `).get(reboundCard.active_workset_id)
+            : undefined;
         const refreshedTask = this.continuationTask({
             action: "status",
             taskId: task.id,
@@ -428,6 +438,7 @@ export class StructuredRuntimeState {
             ...capability,
             senderInstanceId,
             lastUiHeartbeatAt: nowIso,
+            readyGeneration: readyGeneration ? Number(readyGeneration.generation) : undefined,
             task: refreshedTask,
         };
     }
@@ -933,18 +944,28 @@ export class StructuredRuntimeState {
                 `).get(current.id);
                 let retryAuthorized = false;
                 if (liveSynthetic) {
+                    const syntheticOwnerTask = current.legacy_task_id
+                        ? this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(current.legacy_task_id)
+                        : undefined;
                     const syntheticDue = liveSynthetic.due_at ? Date.parse(liveSynthetic.due_at) : NaN;
                     const senderClaimExpired = ["CLAIMED", "DELIVERING"].includes(String(liveSynthetic.state))
                         && Number.isFinite(syntheticDue) && syntheticDue <= nowMs;
+                    const syntheticWorkOwnerExpiresAt = syntheticOwnerTask?.delivery_owner_expires_at
+                        ? Date.parse(syntheticOwnerTask.delivery_owner_expires_at) : NaN;
+                    const abandonedSyntheticWork = ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state))
+                        && String(syntheticOwnerTask?.delivery_owner || "") === "synthetic-active"
+                        && Number.isFinite(syntheticWorkOwnerExpiresAt) && syntheticWorkOwnerExpiresAt <= nowMs
+                        && !this.continuationModelRequestInFlight(current.conversation_scope_id);
                     const noWork = ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state))
                         && Number.isFinite(syntheticDue) && syntheticDue <= nowMs
-                        && Number(liveSynthetic.substantive_activity_count || 0) <= Number(liveSynthetic.substantive_baseline_count || 0)
+                        && (Number(liveSynthetic.substantive_activity_count || 0) <= Number(liveSynthetic.substantive_baseline_count || 0)
+                            || abandonedSyntheticWork)
                         && !this.continuationModelRequestInFlight(current.conversation_scope_id);
                     if (!senderClaimExpired && !noWork)
                         return undefined;
                     const failureReason = senderClaimExpired
                         ? (liveSynthetic.state === "DELIVERING" ? "sender-delivery-expired" : "sender-claim-expired")
-                        : "synthetic-no-substantive-work";
+                        : abandonedSyntheticWork ? "synthetic-resume-work-lease-expired" : "synthetic-no-substantive-work";
                     const expectedState = String(liveSynthetic.state);
                     this.database.sqlite.prepare(`
                       update continuation_generations set state='NO_WORK',closed_at=?,failure_reason=?,updated_at=?
@@ -989,6 +1010,10 @@ export class StructuredRuntimeState {
                         const stallSuspectedAt = Date.parse(String(legacy.stall_suspected_at || ""));
                         const quietForMs = Number.isFinite(lastModelActivityAt) ? nowMs - lastModelActivityAt : 0;
                         const leaseExpired = Number.isFinite(turnLeaseExpiresAt) && nowMs >= turnLeaseExpiresAt;
+                        const confirmedHostTurnMs = Math.max(0, Number(legacy.confirmed_turn_limit_ms || 0));
+                        const stallConfirmMs = confirmedHostTurnMs > 0
+                            ? Math.max(COMPLETION_STALL_CONFIRM_MS, confirmedHostTurnMs)
+                            : COMPLETION_STALL_CONFIRM_MS;
                         if (leaseExpired && String(legacy.stall_state || "ACTIVE") === "ACTIVE") {
                             // Stage 1 is deliberately non-authorizing. The resident server
                             // may persist the same weak suspicion that a verified Anchor
@@ -1005,7 +1030,7 @@ export class StructuredRuntimeState {
                         }
                         else if (leaseExpired && String(legacy.stall_state || "ACTIVE") === "SUSPECTED_STALL"
                             && Number.isFinite(stallSuspectedAt)
-                            && nowMs - stallSuspectedAt >= COMPLETION_STALL_CONFIRM_MS) {
+                            && nowMs - stallSuspectedAt >= stallConfirmMs) {
                             const changed = this.database.sqlite.prepare(`
                               update continuation_tasks set
                                 stall_state='CONTINUATION_ARMED',stall_armed_at=?,
@@ -1983,7 +2008,16 @@ export class StructuredRuntimeState {
                 return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id)) };
             }
             const deliveryToken = input.deliveryToken ? String(input.deliveryToken) : "";
-            const manualTakeover = input.manualTakeover === true;
+            // Some already-open ChatGPT conversations keep an older cached
+            // continuation_task schema even after Portable is upgraded. Keep a
+            // narrow compatibility CAS on the long-standing `note` field so a
+            // real manual user turn can still supersede READY/synthetic ownership
+            // without relying on an undeclared input property. Coordinator/App
+            // status calls never send this exact marker, and synthetic resume
+            // context explicitly omits it, so ambiguous tokenless status remains
+            // fail-closed.
+            const manualTakeover = input.manualTakeover === true
+                || String(input.note ?? "").trim() === "manual-user-turn-takeover";
             const expectedGeneration = row?.delivery_token
                 ? this.database.sqlite.prepare(`
                     select state from continuation_generations

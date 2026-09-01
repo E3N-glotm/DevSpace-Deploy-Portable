@@ -1,5 +1,5 @@
 export const DEVSPACE_PROTOCOL_VERSION = "1.5";
-export const DEVSPACE_SERVER_VERSION = "1.1.56";
+export const DEVSPACE_SERVER_VERSION = "1.1.57";
 
 const FEATURE_CATALOG = [
     { id: "permission-profiles", maturity: "stable", since: "1.0.6" },

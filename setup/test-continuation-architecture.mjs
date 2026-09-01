@@ -37,6 +37,10 @@ try {
     "every current Workspace App transport must be able to bind sender authority directly even if Host strips custom tool-result _meta");
   assert.match(runtimeSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0,3600}sender_instance_id/,
     "runtime state must persist the currently bound sender independently of the immutable visible card identity");
+  assert.match(runtimeSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0,5200}state='READY'[\s\S]{0,1200}readyGeneration/,
+    "sender bind must reveal a durable READY generation to the newly bound ordinary App transport");
+  assert.match(coordinatorSource, /async function consumeReadyAfterSenderBind\([\s\S]{0,1300}readyGeneration[\s\S]{0,800}attemptContinuation\(reason, \{ force: true \}\)/,
+    "a current ordinary Workspace App must consume READY immediately after sender rebind instead of waiting for the old milestone iframe");
   assert.match(serverSource, /"devspace\/continuation-sender": capability/,
     "ordinary UI-bearing DevSpace results must be able to inherit a hidden verified sender capability without minting another milestone card");
   assert.match(coordinatorSource, /function senderCapabilityFromResult\(params\)[\s\S]*?devspace\/continuation-sender/,
@@ -59,6 +63,10 @@ try {
     "manual takeover must be an explicit status CAS marker instead of being inferred from a missing synthetic token");
   assert.match(serverSource, /manual user turn that races a READY or active automatic generation sets manualTakeover=true/,
     "the capabilities guidance must teach the same explicit manual takeover handshake as the tool schema");
+  assert.match(runtimeSource, /String\(input\.note \?\? ""\)\.trim\(\) === "manual-user-turn-takeover"/,
+    "already-open Hosts with a cached old continuation_task schema must retain a narrow note-field manual takeover CAS");
+  assert.match(serverSource, /older cached schema without manualTakeover[\s\S]{0,500}manual-user-turn-takeover/,
+    "server guidance must teach the old-schema takeover compatibility marker only for manual turns");
   assert.doesNotMatch(serverSource, /manual user turn omits it so the server atomically supersedes/,
     "stale implicit manual takeover guidance must not survive beside the fail-closed runtime contract");
   assert.match(runtimeSource, /synthetic-generation-lease-authorized[\s\S]{0,500}deliveryGeneration[\s\S]{0,300}turnLeaseId/,
@@ -611,6 +619,70 @@ try {
   assert.equal(rejectedRetrySweep.ready.length, 1,
     "a Host delivery rejection must remain retryable without requiring a fresh model request");
 
+  const partialScope = "v1/synthetic-placeholder-after-one-tool";
+  const partialTask = runtime.continuationTask({
+    action: "begin", conversationScopeId: partialScope, workspaceId: "ws_architecture",
+    continuationMode: "completion-driven", objective: "recover placeholder after one tool",
+    requiredMilestones: ["keep working after the first tool"],
+  });
+  const partialMount = runtime.prepareContinuationAnchorMount({
+    taskId: partialTask.task.id, conversationScopeId: partialScope,
+  });
+  runtime.continuationTask({
+    action: "anchor-mounted", taskId: partialTask.task.id, conversationScopeId: partialScope,
+    coordinatorInstanceId: "ui_partial_tool", anchorMountToken: partialMount.anchorMountToken,
+  });
+  const partialWorksetId = runtime.continuationArchitectureSnapshot(partialScope).card.active_workset_id;
+  const partialNow = new Date().toISOString();
+  const partialGenerationId = `generation:${partialWorksetId}:2`;
+  db.prepare("update continuation_generations set state='SUPERSEDED',closed_at=?,updated_at=? where workset_id=? and owner_type='manual'")
+    .run(partialNow, partialNow, partialWorksetId);
+  db.prepare(`
+    insert into continuation_generations(
+      id,workset_id,generation,owner_type,state,due_at,delivery_token,
+      substantive_baseline_count,substantive_activity_count,last_activity_at,created_at,updated_at
+    ) values(?,?,2,'synthetic','WORK_REQUIRED',?,'partial-token',77,78,?,?,?)
+  `).run(partialGenerationId, partialWorksetId, past, partialNow, partialNow, partialNow);
+  db.prepare("update continuation_worksets set current_generation=2,continuation_due_at=?,updated_at=? where id=?")
+    .run(past, partialNow, partialWorksetId);
+  db.prepare(`
+    update continuation_tasks set delivery_owner='synthetic-active',delivery_owner_expires_at=?,
+      turn_lease_expires_at=?,delivery_work_baseline_count=77,updated_at=? where id=?
+  `).run(past, past, partialNow, partialTask.task.id);
+  const partialRecoverySweep = runtime.continuationSupervisorSweep();
+  assert.ok(partialRecoverySweep.ready.some((entry) => entry.conversationScopeId === partialScope),
+    "a synthetic turn that made one real tool call but abandoned pending milestones must get another READY generation after its dedicated work lease expires");
+  const abandonedPartialGeneration = db.prepare("select state,failure_reason from continuation_generations where id=?").get(partialGenerationId);
+  assert.equal(abandonedPartialGeneration.state, "NO_WORK");
+  assert.equal(abandonedPartialGeneration.failure_reason, "synthetic-resume-work-lease-expired");
+
+  const cutoffScope = "v1/confirmed-cutoff-stall-guard";
+  const cutoffTask = runtime.continuationTask({
+    action: "begin", conversationScopeId: cutoffScope, workspaceId: "ws_architecture",
+    continuationMode: "completion-driven", objective: "respect confirmed Host cutoff",
+    requiredMilestones: ["do not duplicate a long legitimate turn"],
+  });
+  const cutoffMount = runtime.prepareContinuationAnchorMount({ taskId: cutoffTask.task.id, conversationScopeId: cutoffScope });
+  runtime.continuationTask({
+    action: "anchor-mounted", taskId: cutoffTask.task.id, conversationScopeId: cutoffScope,
+    coordinatorInstanceId: "ui_cutoff_guard", anchorMountToken: cutoffMount.anchorMountToken,
+  });
+  const cutoffWorksetId = runtime.continuationArchitectureSnapshot(cutoffScope).card.active_workset_id;
+  db.prepare("update continuation_worksets set continuation_due_at=? where id=?").run(past, cutoffWorksetId);
+  db.prepare(`
+    update continuation_tasks set turn_lease_expires_at=?,confirmed_turn_limit_ms=1552000,
+      stall_state='ACTIVE',stall_suspected_at=null where id=?
+  `).run(past, cutoffTask.task.id);
+  assert.equal(runtime.continuationSupervisorSweep().ready.some((entry) => entry.conversationScopeId === cutoffScope), false);
+  db.prepare("update continuation_tasks set stall_state='SUSPECTED_STALL',stall_suspected_at=? where id=?")
+    .run(new Date(Date.now() - 30_000).toISOString(), cutoffTask.task.id);
+  assert.equal(runtime.continuationSupervisorSweep().ready.some((entry) => entry.conversationScopeId === cutoffScope), false,
+    "a short activity-lease confirmation must not create a duplicate turn before the persisted ~25m52s Host cutoff");
+  db.prepare("update continuation_tasks set stall_suspected_at=? where id=?")
+    .run(new Date(Date.now() - 1_552_001).toISOString(), cutoffTask.task.id);
+  assert.equal(runtime.continuationSupervisorSweep().ready.some((entry) => entry.conversationScopeId === cutoffScope), true,
+    "the conservative generic recovery may arm only after the persisted confirmed Host cutoff has elapsed");
+
   const readyBeforeManualStatus = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
   assert.equal(readyBeforeManualStatus.accepted, false);
   assert.equal(readyBeforeManualStatus.reason, "turn-origin-handshake-required",
@@ -623,6 +695,14 @@ try {
   `).get(scope);
   assert.ok(readyGenerationBeforeManualStatus,
     "the pre-claim race fixture must contain one READY synthetic generation");
+  const readyRelayBind = runtime.bindContinuationSender({
+    conversationScopeId: scope,
+    taskId: first.task.id,
+    senderInstanceId: "ui_ready_relay",
+  });
+  assert.equal(readyRelayBind.accepted, true);
+  assert.equal(readyRelayBind.readyGeneration, Number(readyGenerationBeforeManualStatus.generation),
+    "a newly bound ordinary App must learn the already-READY generation immediately without consuming or rotating it");
   const ambiguousReadyStatus = runtime.continuationTask({
     action: "status",
     taskId: first.task.id,
@@ -642,11 +722,11 @@ try {
     taskId: first.task.id,
     conversationScopeId: scope,
     workspaceId: "ws_architecture",
-    manualTakeover: true,
+    note: "manual-user-turn-takeover",
   });
   assert.equal(readyManualTakeover.accepted, true);
   assert.equal(readyManualTakeover.reason, "manual-turn-took-over-ready-generation",
-    "manual status must atomically win even before any sender has claimed the READY generation");
+    "the old-schema-compatible manual status marker must atomically win even before any sender has claimed the READY generation");
   const supersededReady = db.prepare("select state,failure_reason from continuation_generations where id=?")
     .get(readyGenerationBeforeManualStatus.id);
   assert.equal(supersededReady.state, "SUPERSEDED");

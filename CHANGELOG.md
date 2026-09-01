@@ -2,6 +2,19 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.57
+
+- 修复 1.1.56 的 P0-A sender transport 空窗：`continuation_sender bind` 现在返回当前 active Workset 已持久化的 `READY` generation；任意后续普通 DevSpace Workspace App 只要携带同一 conversation Card 的隐藏 capability 完成 sender rebind，就会立即进入唯一 `claim -> authorize -> app.sendMessage`，不再等待已经死亡的旧 milestone iframe 下一次 supervisor tick。若 Host 上完全没有任何 App iframe 存活，MCP server 仍不能越过 MCP Apps 边界自行注入 ChatGPT 消息；1.1.57 保证的是**首个可信 App transport 一恢复就立即消费既有 READY**，而不是把这个不可用的 server-only 能力伪装成已实现。
+- 修复 1.1.56 的 P0-B status-only premature final：自动续轮真正写入 Host user-role conversation 的可见触发文本不再只是裸 `继续` / `Continue.`，而是明确要求 runnable milestone 存在时持续调用工具完成任务，禁止只回状态或“继续处理中 / still working”。这是对真实 Host 证明 `updateModelContext` 隐藏恢复约束可能未被续轮完整执行后的强化；协议 token、taskId、workspaceId 仍不会写进聊天记录。
+- 修复 1.1.56 的 synthetic `WORK_REQUIRED` 漏恢复：自动续轮即使已经执行过一次或多次真实工具调用，只要 resumed-turn 的专属 work-owner lease 已到期、模型请求不再 in-flight 且 required milestone 仍未完成，resident supervisor 就会关闭旧 generation 为 `NO_WORK / synthetic-resume-work-lease-expired` 并生成新的唯一 READY generation，不再因 `substantive_activity_count > baseline` 永久卡死。
+- resumed synthetic 上下文明确禁止以“继续处理中。”、“继续处理。”、`still working`、`I will continue` 等占位/状态 final 结束；有 runnable milestone 时必须在同一 assistant turn 持续执行真实工具工作，直到完成、真实外部阻塞、显式暂停/取消或 Host 截断。
+- 兼容已打开且仍缓存旧 `continuation_task` schema 的 ChatGPT 会话：如果 Host 尚未暴露新增的 `manualTakeover` 字段，真实人工 turn 可通过既有 `note=manual-user-turn-takeover` 执行同一个原子 CAS；synthetic/App coordinator 永远不发送该 marker，因此不会把自动轮误判成人工抢占。
+- completion-driven 的 generic activity-lease recovery 不再抢跑已学习到的更长 Host cutoff。若当前 Host profile 已持久化真实 cutoff 观测，则二阶段 quiet confirmation 至少等待该动态 cutoff；本次真实观测约为 1,552,000 ms（25 分 52 秒），没有新增 7 分钟或其他固定 turn 上限。
+- 修复发布版本身份可能与 live runtime 漂移的问题：`package.json`、`VERSION-MANIFEST.json`、portable manager、Linux launcher、server capabilities、Workspace App UI 和原生控制中心必须声明同一个 Portable 版本；`verify-source-tree.mjs` 与 `finalize-release.py` 均新增 fail-closed 门禁，禁止再次生成“ZIP/manifest 已是新版本但实际服务仍自报旧版本”的发行包。
+- 新增 `77 -> 78`“只做一次真实工具调用后提前 final”的 production-equivalent generation 回归、普通 App `bind -> READY -> 自动 claim/send` 回归、旧 schema 人工 takeover 回归，以及已确认长 Host cutoff 下禁止短 lease 产生重复 turn 的回归；正式发布前继续以 targeted continuation tests、runtime-card/source-tree 检查和完整 `npm test` 为门禁。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.57.md)
+
 ## 1.1.56
 
 - 修复 1.1.55 真实验收中的确定性漏卡：Portable 服务端不再依赖上游 Vite bundle 的精确两工具字节串，而是按语义适配最终最小化 whitelist；最终自包含 Workspace App HTML 必须实际包含 `continuation_anchor` 可见渲染入口。
