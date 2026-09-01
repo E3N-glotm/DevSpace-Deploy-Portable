@@ -891,6 +891,54 @@ try {
     "the recovered lifetime task must own the only active workset");
   assert.equal(recoverySnapshot.worksets.filter((row) => ["RUNNING","WAITING_EXTERNAL","SUSPECTED_STALL"].includes(row.state)).length, 1);
 
+  // Regression: the canonical legacy projection can be terminal while a newer
+  // canonical Workset is still active. A read-only status/recovery call has no
+  // forceRunning hint and no shadow task to rescue it, so recovery itself must
+  // prefer the newest active unfinished Workset over the historical completed
+  // Workset and reactivate the lifetime projection.
+  const activePriorityScope = "v1/recover-active-workset-priority";
+  const activePriorityFirst = runtime.continuationTask({
+    action: "begin", conversationScopeId: activePriorityScope, workspaceId: "ws_architecture",
+    continuationMode: "completion-driven", objective: "historical completed objective",
+    requiredMilestones: ["historical-done"],
+  });
+  const activePriorityMount = runtime.prepareContinuationAnchorMount({
+    taskId: activePriorityFirst.task.id, conversationScopeId: activePriorityScope,
+  });
+  runtime.continuationTask({
+    action: "anchor-mounted", taskId: activePriorityFirst.task.id, conversationScopeId: activePriorityScope,
+    coordinatorInstanceId: "ui_active_priority", anchorMountToken: activePriorityMount.anchorMountToken,
+  });
+  runtime.continuationTask({
+    action: "complete", taskId: activePriorityFirst.task.id, conversationScopeId: activePriorityScope,
+    workspaceId: "ws_architecture", completedMilestones: ["historical-done"],
+  });
+  const priorityNow = new Date().toISOString();
+  const priorityWorksetId = "workset_active_priority_new";
+  db.prepare(`
+    insert into continuation_worksets(
+      id,conversation_scope_id,legacy_task_id,sequence,workspace_id,objective,state,current_generation,created_at,updated_at
+    ) values(?,?,?,?,?,?, 'RUNNING',1,?,?)
+  `).run(priorityWorksetId, activePriorityScope, activePriorityFirst.task.id, 2,
+    "ws_architecture", "new active unfinished objective", priorityNow, priorityNow);
+  db.prepare(`
+    insert into continuation_milestones(
+      id,workset_id,stable_key,description,state,evidence_json,ordinal,created_at,updated_at
+    ) values(?,?,?,?, 'PENDING','{}',1,?,?)
+  `).run("milestone_active_priority_new", priorityWorksetId, "active-priority-new", "new-active-pending", priorityNow, priorityNow);
+  db.prepare(`update continuation_conversation_cards set active_workset_id=?,updated_at=? where conversation_scope_id=?`)
+    .run(priorityWorksetId, priorityNow, activePriorityScope);
+  const activePriorityRecovered = runtime.recoverCanonicalConversationTaskProjection({
+    taskId: activePriorityFirst.task.id, conversationScopeId: activePriorityScope,
+  });
+  assert.equal(activePriorityRecovered.state, "RUNNING",
+    "a newer active unfinished Workset must reactivate a stale terminal canonical projection without forceRunning or a shadow task");
+  assert.equal(activePriorityRecovered.objective, "new active unfinished objective",
+    "recovery must take objective/workspace context from the authoritative active unfinished Workset before historical canonical fields");
+  assert.ok(JSON.parse(activePriorityRecovered.required_milestones_json).includes("new-active-pending"));
+  assert.ok(!JSON.parse(activePriorityRecovered.completed_milestones_json).includes("new-active-pending"));
+  assert.equal(runtime.continuationArchitectureSnapshot(activePriorityScope).card.active_workset_id, priorityWorksetId);
+
   const cardInvariantRows = db.prepare(`
     select conversation_scope_id,count(*) as count
     from continuation_conversation_cards

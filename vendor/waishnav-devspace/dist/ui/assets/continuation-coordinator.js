@@ -224,7 +224,14 @@ function visibleContinuationTrigger() {
   return isChinese() ? "继续" : "Continue.";
 }
 
+function nextUnresolvedMilestone(task) {
+  const required = Array.isArray(task?.requiredMilestones) ? task.requiredMilestones : [];
+  const completed = new Set(Array.isArray(task?.completedMilestones) ? task.completedMilestones : []);
+  return required.find((milestone) => !completed.has(milestone));
+}
+
 function continuationContext(task, workspaceId, reason) {
+  const nextMilestone = nextUnresolvedMilestone(task);
   const lines = [
     "DevSpace durable continuation state:",
     `taskId: ${task?.id ?? "unknown"}`,
@@ -233,8 +240,11 @@ function continuationContext(task, workspaceId, reason) {
     `objective: ${task?.objective ?? "Continue the original DevSpace request."}`,
     `completedMilestones: ${(task?.completedMilestones ?? []).join(" | ") || "none recorded"}`,
     `requiredMilestones: ${(task?.requiredMilestones ?? []).join(" | ") || "none recorded"}`,
+    `nextUnresolvedMilestone: ${nextMilestone ?? "none"}`,
     `continuationReason: ${reason}`,
     "Before acting, reconstruct the current durable state from this Task Contract and the latest available DevSpace evidence. Verify which milestones are actually complete, identify the next unresolved runnable milestone, and check relevant failure, race, or regression risks before choosing the next action. Keep that evaluation internal: do not emit a chain-of-thought transcript, and do not substitute a plan/status-only response for execution.",
+    "Tool availability is turn-scoped, not conversation authorization. If the resumed turn does not directly expose the DevSpace_MCP tool namespace, do not stop or claim that DevSpace is unavailable. Use the Host's available connector/tool discovery path first; in ChatGPT, call api_tool.list_resources for DevSpace_MCP (query continuation_task is sufficient), then invoke the discovered DevSpace_MCP tools. Only treat DevSpace as unavailable after that discovery path itself actually fails.",
+    "Connector discovery and continuation_task status are control-plane setup, not successful resumed work. If status reports continueRequired/taskIncomplete or any runnable milestone remains, do not produce a final response after discovery/status alone. In that same assistant turn, invoke substantive DevSpace tools that actually advance or verify nextUnresolvedMilestone, and keep executing/polling until the runnable milestone set is completed, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A discovery-only/status-only turn is an invalid automatic continuation and must not voluntarily yield.",
     "Call continuation_task status first. The runtime atomically claims any server-owned expected synthetic generation; do not search for, expose, or pass a continuation token to ordinary tools. Then continue substantive work with the same sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes until the current milestones are complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the one conversation-lifetime task/card and existing process/workspace state.",
   ];
   return lines.join("\n");

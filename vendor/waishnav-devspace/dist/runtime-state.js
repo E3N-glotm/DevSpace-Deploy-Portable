@@ -467,6 +467,22 @@ export class StructuredRuntimeState {
         const forceRunning = input.forceRunning === true;
         const nowIso = new Date().toISOString();
         const transaction = this.database.sqlite.transaction(() => {
+            // Prefer the newest unfinished active Workset as the authoritative
+            // execution projection. A compatibility/shadow task may have
+            // created that Workset after the canonical legacy row was already
+            // terminal. Retiring the shadow before adopting its active Workset
+            // loses the newest objective/milestones and can resurrect an older
+            // SUCCEEDED projection on the next status call.
+            const preferredActiveWorkset = this.database.sqlite.prepare(`
+              select w.* from continuation_worksets w
+              where w.conversation_scope_id=?
+                and w.state in ('RUNNING','WAITING_EXTERNAL','SUSPECTED_STALL','PAUSED')
+                and exists (
+                  select 1 from continuation_milestones m
+                  where m.workset_id=w.id and m.state='PENDING'
+                )
+              order by w.sequence desc,w.updated_at desc,w.created_at desc limit 1
+            `).get(conversationScopeId);
             const activeShadowTasks = this.database.sqlite.prepare(`
               select * from continuation_tasks
               where conversation_scope_id=? and id<>?
@@ -479,6 +495,12 @@ export class StructuredRuntimeState {
               where conversation_scope_id=? and state in ('RUNNING','WAITING_EXTERNAL','SUSPECTED_STALL')
                 and coalesce(legacy_task_id,'')<>?
             `).all(conversationScopeId, canonicalTaskId);
+            if (preferredActiveWorkset
+                && String(preferredActiveWorkset.legacy_task_id ?? '') !== canonicalTaskId) {
+                this.database.sqlite.prepare(`
+                  update continuation_worksets set legacy_task_id=?,updated_at=? where id=?
+                `).run(canonicalTaskId, nowIso, preferredActiveWorkset.id);
+            }
             if (activeShadowTasks.length > 0) {
                 this.database.sqlite.prepare(`
                   update continuation_tasks set state='ABANDONED_AUTO_TASK',
@@ -490,6 +512,7 @@ export class StructuredRuntimeState {
                 `).run(nowIso, conversationScopeId, canonicalTaskId);
             }
             for (const shadowWorkset of activeShadowWorksets) {
+                if (preferredActiveWorkset?.id === shadowWorkset.id) continue;
                 this.database.sqlite.prepare(`
                   update continuation_worksets set state='SUPERSEDED',continuation_due_at=null,
                     completed_at=coalesce(completed_at,?),updated_at=? where id=?
@@ -518,15 +541,28 @@ export class StructuredRuntimeState {
             let canonical = this.database.sqlite.prepare('select * from continuation_tasks where id=? and conversation_scope_id=?')
                 .get(canonicalTaskId, conversationScopeId);
             const latestWorkset = this.database.sqlite.prepare(`
-              select * from continuation_worksets
-              where conversation_scope_id=? and legacy_task_id=?
-              order by sequence desc,created_at desc limit 1
+              select w.* from continuation_worksets w
+              where w.conversation_scope_id=? and w.legacy_task_id=?
+              order by
+                case when w.state in ('RUNNING','WAITING_EXTERNAL','SUSPECTED_STALL','PAUSED')
+                  and exists (
+                    select 1 from continuation_milestones m
+                    where m.workset_id=w.id and m.state='PENDING'
+                  ) then 0 else 1 end,
+                w.sequence desc,w.updated_at desc,w.created_at desc
+              limit 1
             `).get(conversationScopeId, canonicalTaskId) ?? lineage;
             const milestoneRows = latestWorkset?.id ? this.database.sqlite.prepare(`
               select * from continuation_milestones
               where workset_id=? and state<>'ARCHIVED'
               order by ordinal asc,created_at asc
             `).all(latestWorkset.id) : [];
+            const lifetimeMilestoneRows = this.database.sqlite.prepare(`
+              select m.* from continuation_milestones m
+              join continuation_worksets w on w.id=m.workset_id
+              where w.conversation_scope_id=? and w.legacy_task_id=? and m.state<>'ARCHIVED'
+              order by w.sequence asc,m.ordinal asc,m.created_at asc
+            `).all(conversationScopeId, canonicalTaskId);
             const canonicalRequired = parseJson(canonical?.required_milestones_json, [])
                 .map((value) => String(value ?? '').trim()).filter(Boolean);
             const canonicalCompleted = parseJson(canonical?.completed_milestones_json, [])
@@ -537,14 +573,14 @@ export class StructuredRuntimeState {
                 .map((value) => String(value ?? '').trim()).filter(Boolean);
             const requiredMilestones = [...new Set([
                 ...canonicalRequired,
-                ...milestoneRows.map((row) => String(row.description ?? '').trim()).filter(Boolean),
+                ...lifetimeMilestoneRows.map((row) => String(row.description ?? '').trim()).filter(Boolean),
                 ...shadowRequired,
                 ...hintedRequired,
             ])].slice(0, 64);
             const completedSet = new Set([
                 ...canonicalCompleted,
                 ...shadowCompleted,
-                ...milestoneRows.filter((row) => String(row.state) === 'COMPLETED')
+                ...lifetimeMilestoneRows.filter((row) => String(row.state) === 'COMPLETED')
                     .map((row) => String(row.description ?? '').trim()).filter(Boolean),
                 ...hintedCompleted,
             ]);
@@ -560,10 +596,10 @@ export class StructuredRuntimeState {
                         : String(latestWorkset?.state ?? '') === 'PAUSED' ? 'PAUSED_BY_USER'
                             : 'RUNNING')
                 : (stateMap[String(latestWorkset?.state ?? '')] ?? 'SUCCEEDED');
-            const objective = String(input.objective ?? activeShadowTask?.objective ?? canonical?.objective
-                ?? latestWorkset?.objective ?? 'Recovered conversation-lifetime DevSpace task.').trim();
-            const workspaceId = String(input.workspaceId ?? activeShadowTask?.workspace_id ?? canonical?.workspace_id
-                ?? latestWorkset?.workspace_id ?? '').trim() || null;
+            const objective = String(input.objective ?? activeShadowTask?.objective ?? latestWorkset?.objective
+                ?? canonical?.objective ?? 'Recovered conversation-lifetime DevSpace task.').trim();
+            const workspaceId = String(input.workspaceId ?? activeShadowTask?.workspace_id ?? latestWorkset?.workspace_id
+                ?? canonical?.workspace_id ?? '').trim() || null;
             const recoveredEvidence = {
                 ...parseJson(canonical?.evidence_json, {}),
                 ...parseJson(activeShadowTask?.evidence_json, {}),
@@ -575,9 +611,11 @@ export class StructuredRuntimeState {
                 migratedShadowTaskId: activeShadowTask?.id ?? undefined,
             };
             if (canonical) {
+                const authoritativeActiveWorkset = Boolean(latestWorkset
+                    && ['RUNNING','WAITING_EXTERNAL','SUSPECTED_STALL','PAUSED'].includes(String(latestWorkset.state ?? ''))
+                    && milestoneRows.some((row) => String(row.state) === 'PENDING'));
                 if (hasUnfinishedMilestones
-                    && (forceRunning || activeShadowTask)
-                    && TERMINAL_CONTINUATION_STATES.has(String(canonical.state ?? ''))) {
+                    && (forceRunning || activeShadowTask || authoritativeActiveWorkset)) {
                     this.database.sqlite.prepare(`
                       update continuation_tasks set objective=?,workspace_id=coalesce(?,workspace_id),state=?,
                         required_milestones_json=?,completed_milestones_json=?,evidence_json=?,

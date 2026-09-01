@@ -12,6 +12,9 @@
 - completion-driven 无 Host lifecycle 信号时改为服务端 **25 秒 activity lease + 10 秒二次 quiet confirmation**；旧数据缺少可用 turn lease 时使用 40 秒兼容 backstop。两条路径都要求无 model request in-flight 且无 durable process guard，并继续保留 synthetic substantive-work obligation、manual takeover CAS 和单 active workset 数据库约束；timeout-recovery 仍严格要求真实 Host cutoff/timeout 证据。Protocol 保持 1.5。
 - 修复 live 自动续轮“只思考十几秒、只碰控制工具然后静默结束”的 turn-origin 竞态：synthetic turn 首次 `continuation_task status` 由 runtime 原子 claim server-owned expected generation，普通 DevSpace 工具随后只依赖持久 generation lease，不再要求模型搬运 `continuationDeliveryToken`。真正的人工抢占使用显式 `manualTakeover=true` CAS；迟到/冲突 generation fail closed。
 - 新增 terminal cancellation barrier：`SUCCEEDED` / terminal fail / cancel / budget terminal 会原子清空 pending/wake/ACK retry、delivery owner/token/lease、quiet-recovery latch 和 process watch，并把尚存 synthetic generation 关闭为 `NO_WORK`。Coordinator 在每次不可逆 `app.sendMessage` 前重新读取 authoritative terminal state，terminal 后立即停止 supervisor/lifecycle timer；已经被 Host accepted、无法撤回的迟到 generation 只会消费为 no-op，不能重新激活任务或排出下一条“继续”。
+- 修复 resumed synthetic turn 的工具 schema 预加载假设：自动续轮隐藏上下文明确区分“conversation 已授权”和“本轮工具 namespace 已展开”；若本轮未直接暴露 `DevSpace_MCP`，必须先通过 Host connector discovery（ChatGPT 为 `api_tool.list_resources`）恢复 `DevSpace_MCP`，禁止直接回复“拿不到工具”并提前结束。
+- 修复 canonical projection recovery 被历史 completed Workset 反向覆盖：恢复时优先选择最新且仍含 PENDING milestone 的 active Workset；若该 Workset 暂时挂在 compatibility/shadow task 上，先原子迁回 canonical lifetime task，再退役 shadow。即使 canonical legacy row 已是 `SUCCEEDED`，只要 authoritative active Workset 仍未完成就必须恢复为 RUNNING，不能返回 `task-terminal-no-work`。
+- `VERSION-MANIFEST.json` 的关键文件指纹新增 `continuation-coordinator.js`，避免同为 1.1.56 时 E 盘源码/发行包已更新、D 盘 live coordinator 仍旧却只凭版本号误判为“已同步”。
 
 [完整更新说明](docs/releases/HOTFIX-1.1.56.md)
 

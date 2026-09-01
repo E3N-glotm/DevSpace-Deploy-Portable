@@ -173,6 +173,7 @@ def update_manifest(version: str, hotfix: str | None) -> None:
             "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js",
             "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.css",
             "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-guard.js",
+            "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-coordinator.js",
             "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-timeline.css",
             "app/node_modules/@waishnav/devspace/dist/ui/assets/session-review.css",
             "app/plugin-dispatcher.mjs",

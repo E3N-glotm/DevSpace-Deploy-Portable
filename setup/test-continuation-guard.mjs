@@ -14,10 +14,14 @@ const runtimeStateSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace"
 const featureTools = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "feature-tools.js"), "utf8");
 const coordinatorPath = join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js");
 const coordinator = readFileSync(coordinatorPath, "utf8");
+const finalizeRelease = readFileSync(join(ROOT, "setup", "finalize-release.py"), "utf8");
 const uiManifest = JSON.parse(readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", ".vite", "manifest.json"), "utf8"));
 const workspaceEntry = uiManifest["workspace-app.html"];
 assert.ok(workspaceEntry?.file, "workspace-app.html must exist in the Vite manifest");
 const workspaceBundle = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", workspaceEntry.file), "utf8");
+assert.match(finalizeRelease,
+  /app\/node_modules\/@waishnav\/devspace\/dist\/ui\/assets\/continuation-coordinator\.js/,
+  "release metadata must fingerprint the continuation coordinator so same-version live/source drift is detectable");
 
 for (const pattern of [
   /version: 13/,
@@ -256,10 +260,18 @@ assert.doesNotMatch(coordinator, /继续。直接完成当前未完成的任务�
   "the visible synthetic continuation trigger must not pressure the model to skip state reconstruction or verification");
 assert.doesNotMatch(coordinator, /return `继续执行用户尚未完成的 DevSpace 任务/,
   "taskId/workspaceId/recovery policy must not be emitted as a visible user message");
-assert.match(coordinator, /function continuationContext\([\s\S]{0,1800}runtime atomically claims any server-owned expected synthetic generation/,
+assert.match(coordinator, /function continuationContext\([\s\S]{0,3000}runtime atomically claims any server-owned expected synthetic generation/,
   "hidden context must direct the first status call while leaving UUID transport to the runtime");
+assert.match(coordinator, /Tool availability is turn-scoped[\s\S]{0,900}api_tool\.list_resources[\s\S]{0,300}DevSpace_MCP[\s\S]{0,300}continuation_task/,
+  "synthetic continuation hidden context must discover DevSpace_MCP through the Host connector path when tool schemas were not preloaded for the resumed turn");
+assert.match(coordinator, /do not stop or claim that DevSpace is unavailable/,
+  "missing preloaded DevSpace schemas must not be treated as lost conversation authorization");
 assert.match(coordinator, /reconstruct the current durable state[\s\S]{0,500}latest available DevSpace evidence[\s\S]{0,500}failure, race, or regression risks[\s\S]{0,500}do not emit a chain-of-thought transcript/,
   "hidden recovery context must require evidence-backed state reconstruction and risk checks before action without exposing private reasoning");
+assert.match(coordinator, /function nextUnresolvedMilestone\([\s\S]{0,900}required\.find\(\(milestone\) => !completed\.has\(milestone\)\)/,
+  "automatic continuation context must identify the first unresolved milestone instead of forcing the resumed model to rediscover it from a long lifetime history");
+assert.match(coordinator, /nextUnresolvedMilestone:[\s\S]{0,1800}Connector discovery and continuation_task status are control-plane setup, not successful resumed work[\s\S]{0,900}do not produce a final response after discovery\/status alone[\s\S]{0,1100}discovery-only\/status-only turn is an invalid automatic continuation/,
+  "hidden recovery context must make substantive post-status work mandatory whenever runnable milestones remain");
 assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(\),\s*async \(\) =>/,
   "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
 assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(state\.task\)/,

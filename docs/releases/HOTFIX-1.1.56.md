@@ -40,6 +40,14 @@
 - `claim`、`authorize-delivery`、`delivery-result` 都增加 terminal gate。即使 Host 已经接受一条无法撤回的 synthetic user-role 消息，迟到 delivery result/status 也只能得到 `task-terminal-no-work`，不能重新写回 pending/owner/stall，也不能生成下一代 continuation。
 - Coordinator 在 sender authorization 之后、每一次实际 `app.sendMessage` / fallback 之前再次读取 authoritative `continuation_task status`，消除 `arm -> complete -> send` 的主要 TOCTOU 窗口；一旦观察到 terminal，立即停止 supervisor interval、lifecycle refresh、delivery retry 和 quiet-probe timer。
 
+### 6. resumed turn 工具发现与 active Workset 优先恢复
+
+- ChatGPT 的工具 schema 是 turn-scoped surface，不等价于 conversation authorization。synthetic `app.sendMessage()` 进入的新模型轮次如果没有直接展开 `DevSpace_MCP` namespace，隐藏恢复上下文要求先走 Host connector/tool discovery；在 ChatGPT 中使用 `api_tool.list_resources` 加载 `DevSpace_MCP` 后继续原任务，禁止把“本轮 schema 未预加载”误报成“会话没有 DevSpace 权限”。
+- `recoverCanonicalConversationTaskProjection()` 不再仅按历史 sequence 取最后一个 canonical Workset。恢复时首先寻找最新、active、且仍有 PENDING milestone 的 Workset，并把它视为 authoritative execution projection。
+- 若最新 unfinished Workset 暂时属于 compatibility/shadow task，恢复事务会先把该 Workset 的 `legacy_task_id` 迁回 conversation lifetime canonical task，再退役其余 shadow task/workset；因此不会在捕获当前 objective/milestone 之前把真正未完成的工作一起 supersede。
+- canonical legacy row 即使已经因为历史 Workset 完成而处于 `SUCCEEDED`，只要 authoritative active Workset 仍有 PENDING milestone，就必须重新投影为 `RUNNING` / `WAITING_EXTERNAL` / `PAUSED_BY_USER`，并优先继承 active Workset 的 objective/workspace。普通 `status` 无需 `forceRunning` 或 shadow task 才能自愈。
+- release metadata 现在把 `continuation-coordinator.js` 纳入 `VERSION-MANIFEST.json` 的 keyFiles 哈希；以后同版本 live/source 漂移不再只靠版本字符串判断，D/E 半同步可以直接从关键文件指纹发现。
+
 ## 验收矩阵
 
 1. 新 conversation 第一次 substantive DevSpace 调用显示恰好一张 milestone Card；同轮连续工具调用、用户继续、workspace 切换、MCP reconnect、页面刷新均不增加第二张。
@@ -52,5 +60,7 @@
 8. milestone Card 不主动请求 PiP；Host 已处于 PiP 时会退回 inline，内部状态提示不得使用 fixed/floating overlay。
 9. migration 后不存在 `host-scope-unavailable` active task、旧 READY delivery 或同 conversation 多 active workset。
 10. generation 已进入 CLAIMED/DELIVERING 后若 task 在 Host send 前完成，terminal barrier 必须把 generation 置为 `NO_WORK`、清空所有 delivery/retry/stall latch；迟到 accepted delivery/status 不得重启 task，后续 supervisor sweep 必须保持 0 个 READY。
+11. synthetic resume 即使本轮未预加载 `DevSpace_MCP` schema，也必须先通过 Host connector discovery 恢复工具并继续执行；不得以“工具入口不可用”为由结束仍有 runnable milestone 的任务。
+12. 历史 Workset 已 SUCCEEDED、但同 conversation 存在更新的 active + PENDING Workset 时，projection recovery 必须选择后者并把 lifetime task 恢复为非 terminal；不得返回 `task-terminal-no-work`。
 
 Protocol 继续为 1.5。
