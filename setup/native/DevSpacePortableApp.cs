@@ -4937,7 +4937,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.54 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.56 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5311,7 +5311,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "1.1.54 将 conversation-lifetime 唯一卡片与当前可用 continuation sender transport 解耦：可见里程碑卡仍只允许一张，但后续存活的 DevSpace Workspace App surface 可继承隐藏 sender capability，在旧 anchor iframe 被 Host 虚拟化后继续承担续轮传输。服务端同时跟踪真实 model request in-flight，长命令不会被静默检测误判为 assistant turn 已结束；无 Host timeout/teardown 时仅在无 in-flight 请求且持续静默后使用保守恢复 backstop。",
+                Text = "1.1.56 修复真实 Host 中锚点已 ACK 但里程碑卡不可见、sender 无法绑定的问题：最终 Workspace App 产物明确渲染 continuation_anchor；Host 丢失 App 调用 scope/_meta 时以 verified task/card generation 恢复 sender，且已验证卡永久禁止再次创建。升级会撤销旧 delivery 并清理非规范 shadow task。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
@@ -5791,7 +5791,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.54") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.56") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }

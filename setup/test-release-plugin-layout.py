@@ -50,6 +50,10 @@ def main() -> int:
         for item in packaged_files
     ), "root-local temporary diagnostics leaked into release payload"
     assert not any(
+        item.parent == Path(".") and item.suffix.lower() == ".log"
+        for item in packaged_files
+    ), "root-local regression logs leaked into release payload"
+    assert not any(
         item.parent == Path(".") and item.suffix.lower() == ".blockmap"
         for item in packaged_files
     ), "source-local blockmap artifact leaked into release payload"
@@ -95,6 +99,7 @@ def main() -> int:
                 "virtualMappingKeepsLocalDataUntouched": True,
                 "sourceLocalTestOutputExcluded": True,
                 "rootTemporaryDiagnosticsExcluded": True,
+                "rootRegressionLogsExcluded": True,
                 "sourceLocalBlockmapExcluded": True,
                 "sourceLocalBuildCachesExcluded": True,
                 "liveBackupArchivesExcluded": True,

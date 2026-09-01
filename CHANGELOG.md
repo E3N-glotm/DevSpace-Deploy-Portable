@@ -2,6 +2,30 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.56
+
+- 修复 1.1.55 真实验收中的确定性漏卡：Portable 服务端不再依赖上游 Vite bundle 的精确两工具字节串，而是按语义适配最终最小化 whitelist；最终自包含 Workspace App HTML 必须实际包含 `continuation_anchor` 可见渲染入口。
+- 已 verified 的 conversation Card 永久禁止再次调用 `continuation_anchor`，避免用 surface rehydrate 重新制造第二个 transcript card；milestone Card 固定保留在 ChatGPT transcript 的 inline surface，不再主动请求 Host PiP，旧 build 已进入 PiP 时会请求恢复 inline；发送传输继续与可见卡身份解耦。
+- `continuation_sender bind` 新增双路径：优先认证的 Host conversation scope；Host 丢失 App 调用 scope 或一次性 tool-result `_meta` 时，使用精确 `taskId + conversationScopeId + verified mount generation` 恢复当前 sender。修复 bind 成功路径调用作用域外 `rowToTask` 的运行时异常。
+- continuation control 在 Host metadata 缺失时复用已有 task 的 canonical scope；没有真实 scope 或已有 task 时 fail closed，不再创建共享的 `host-scope-unavailable` shadow task。
+- migration 31 一次性撤销 1.1.55 以前的 READY/CLAIMED/delivery ownership、归档未完成旧 workset、清除非 canonical shadow tasks，同时保留 ConversationCard identity/mount truth，避免升级生成第二张卡。
+- completion-driven 无 Host lifecycle 信号时改为服务端 **25 秒 activity lease + 10 秒二次 quiet confirmation**；旧数据缺少可用 turn lease 时使用 40 秒兼容 backstop。两条路径都要求无 model request in-flight 且无 durable process guard，并继续保留 synthetic substantive-work obligation、manual takeover CAS 和单 active workset 数据库约束；timeout-recovery 仍严格要求真实 Host cutoff/timeout 证据。Protocol 保持 1.5。
+- 修复 live 自动续轮“只思考十几秒、只碰控制工具然后静默结束”的 turn-origin 竞态：synthetic turn 首次 `continuation_task status` 由 runtime 原子 claim server-owned expected generation，普通 DevSpace 工具随后只依赖持久 generation lease，不再要求模型搬运 `continuationDeliveryToken`。真正的人工抢占使用显式 `manualTakeover=true` CAS；迟到/冲突 generation fail closed。
+- 新增 terminal cancellation barrier：`SUCCEEDED` / terminal fail / cancel / budget terminal 会原子清空 pending/wake/ACK retry、delivery owner/token/lease、quiet-recovery latch 和 process watch，并把尚存 synthetic generation 关闭为 `NO_WORK`。Coordinator 在每次不可逆 `app.sendMessage` 前重新读取 authoritative terminal state，terminal 后立即停止 supervisor/lifecycle timer；已经被 Host accepted、无法撤回的迟到 generation 只会消费为 no-op，不能重新激活任务或排出下一条“继续”。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.56.md)
+
+## 1.1.55
+
+- 修复 1.1.54 在真实 ChatGPT Host 中仍可能出现“里程碑未完成但不自动续轮”的问题：completion-driven stall detection 不再依赖最初 `continuation_anchor` iframe 继续存活。服务端在 activity lease 过期后独立执行 `ACTIVE -> SUSPECTED_STALL -> CONTINUATION_ARMED` 二阶段确认，默认约为 35 秒 lease + 20 秒 confirmation。
+- 二阶段 server recovery 继续由真实 model-originated request in-flight guard 保护；任意新的 substantive DevSpace 模型活动都会把 stall 状态恢复为 ACTIVE，避免把长工具调用或正常工作间隙误判成 assistant turn 已结束。
+- completion-driven durable process 新增持久 activity guard。`exec_command` / `write_stdin` / `process_attach` 等返回仍在运行的 processHandle 时自动登记；resident supervisor 使用非破坏性的 `process.list` 只读 registry，运行中禁止自动续轮，不通过 `process.attach` 消费 stdout。进程退出后 guard 自动释放并重新进入正常 activity lease。
+- 唯一 conversation milestone Card 在 Host 明确支持 MCP Apps `pip` display mode 时请求 PiP 持久模式，以提高 sender iframe 在用户继续聊天/滚动 transcript 时的存活率；普通 relay surface 不请求 PiP，也不会创建第二张 milestone Card。Host 不支持或拒绝时自动回退 inline。
+- continuation architecture / guard 回归新增 anchor-independent server recovery、PiP 单卡保活、durable process guard 以及 process-list non-destructive polling 断言；1.1.55 在正式发布前仍要求真实 ChatGPT live unattended continuation、人工抢占、单卡和 terminal-state 四项验收。
+- Protocol 保持 1.5；不改变 Linux Remote Agent 协议或现有更新格式。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.55.md)
+
 ## 1.1.54
 
 - 修复 1.1.53 的两类相反 P0：长命令/连接抖动期间不能再由“35 秒静默 + 第二次 iframe heartbeat”误判 assistant turn 已结束；同时 assistant 真正停止且 Host 不提供 timeout/teardown 时，也不能因为旧 anchor iframe 被虚拟化而永久失去自动续轮。
@@ -17,7 +41,9 @@
 
 ## 1.1.53
 
-- P0：Task Contract 与可见里程碑卡统一为 **conversation-lifetime singleton**。一个真实 ChatGPT conversation 第一次 substantive DevSpace 工作必须挂载一张卡；一旦 iframe 用 mount token ACK 为 verified，后续 assistant turn、自动续轮、页面刷新、MCP reconnect、DevSpace 重启、workspace 切换都只复用同一 taskId/同一张卡，永久禁止第二张。generation 只保留给首次未 verified ghost recovery，Host trace/transport request id 不再影响已验证卡。
+- P0：Task Contract 与可见里程碑卡统一为 **conversation-lifetime singleton**。一个真实 ChatGPT conversation 只允许首次签发一个 UI-bearing `continuation_anchor`；未 ACK 时所有实质工作 fail-closed，绝不通过 ghost recovery 补发第二张。iframe 用 mount token ACK 为 verified 后，后续 assistant turn、自动续轮、页面刷新、MCP reconnect、DevSpace 重启、workspace 切换都只复用同一 taskId/同一张卡。
+- P0：自动续轮的无 Host 信号兜底改为 25 秒怀疑 + 10 秒确认，旧数据静默兜底 40 秒，delivery ACK 最大退避 45 秒，前端瞬态重试窗口 10 秒；所有 DevSpace 自有等待路径均保持在一分钟内。
+- P0：每个使用 DevSpace 的 assistant turn 首次调用必须是 `continuation_task status`；自动轮次携带 delivery token，手动轮次不带 token 并在任何副作用前原子抢占旧自动 generation。
 - completion-driven ordinary stall 改为 **35 秒 activity suspicion + 8 秒第二阶段确认**；第一次 verified probe 只进入 `SUSPECTED_STALL`，第二次确认仍无 substantive activity 才 `CONTINUATION_ARMED`。配合约 5 秒 supervisor tick，普通无 Host cutoff 路径设计为约 43～48 秒恢复，目标严格低于 60 秒；status/heartbeat/control 流量不续租模型 activity lease。
 - synthetic continuation 继续通过 Workspace App `app.sendMessage()` 进入与普通人工消息相同的 Host user-role conversation 路径。`deliveryToken + deliveryGeneration` 证明 synthetic ownership；status/ACK/摘要不算实际推进，恢复轮必须执行真实非 control DevSpace 工作并 checkpoint，里程碑未完成则继续自动续轮。
 - 人工输入优先：manual turn 会原子清空 pending synthetic、推进 generation、废弃旧 deliveryToken 并取得 owner；迟到 synthetic token 返回 `synthetic-continuation-superseded` 并静默结束。Coordinator 在 claim/send 前再次读 authoritative status，避免人工消息与自动续轮并发重复副作用。

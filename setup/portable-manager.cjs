@@ -56,6 +56,7 @@ const CLI_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace",
 const PLUGIN_ADMIN_FILE = path.join(ROOT, "app", "plugin-admin.mjs");
 const REVIEW_MANAGER_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "review-checkpoints.js");
 const DATABASE_CLIENT_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "db", "client.js");
+const RUNTIME_STATE_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "runtime-state.js");
 const MEMORY_STORE_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "memory-store.js");
 const REMOTE_AGENT_STORE_FILE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "remote-agent-store.js");
 const PORTABLE_UPDATER_FILE = path.join(ROOT, "setup", "portable-updater.ps1");
@@ -66,7 +67,7 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
-const PORTABLE_VERSION = "1.1.54";
+const PORTABLE_VERSION = "1.1.56";
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -1562,7 +1563,10 @@ async function runContinuationAdmin(action, payload = {}) {
           }
           database.sqlite.prepare(`
             update continuation_tasks set state='PAUSED_BY_USER', waiting_reason='Paused by Portable owner UI.',
-              continuation_pending=0, turn_lease_expires_at=null,
+              continuation_pending=0, superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+              delivery_token=null, delivery_owner=null, delivery_owner_expires_at=null,
+              delivery_ack_started_at=null, delivery_ack_retry_count=0, delivery_ack_retry_after_at=null,
+              turn_lease_expires_at=null,
               owner_control_note='Paused explicitly by Portable owner UI.', updated_at=? where id=?
           `).run(now, taskId);
         }
@@ -1574,6 +1578,9 @@ async function runContinuationAdmin(action, payload = {}) {
           database.sqlite.prepare(`
             update continuation_tasks set state='CANCELLED_BY_USER', terminal_reason='owner-stopped',
               continuation_pending=0, watch_process_handles_json='[]', waiting_reason=null,
+              superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+              delivery_token=null, delivery_owner=null, delivery_owner_expires_at=null,
+              delivery_ack_started_at=null, delivery_ack_retry_count=0, delivery_ack_retry_after_at=null,
               turn_lease_expires_at=null, anchor_lease_expires_at=null,
               owner_control_note='Stopped explicitly by Portable owner UI.', updated_at=? where id=?
           `).run(now, taskId);
@@ -1588,11 +1595,16 @@ async function runContinuationAdmin(action, payload = {}) {
             : row.turn_lease_expires_at;
           database.sqlite.prepare(`
             update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
-              continuation_pending=0, turn_started_at=?, last_model_activity_at=?, turn_lease_expires_at=?,
+              continuation_pending=0, delivery_generation=coalesce(delivery_generation,0)+1,
+              superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+              delivery_token=null, delivery_owner='manual', delivery_owner_expires_at=null,
+              delivery_ack_started_at=null, delivery_ack_retry_count=0, delivery_ack_retry_after_at=null,
+              delivery_work_baseline_count=0, manual_takeover_at=?,
+              turn_started_at=?, last_model_activity_at=?, turn_lease_expires_at=?,
               stall_state='ACTIVE', stall_suspected_at=null, stall_probe_count=0,
               stall_last_probe_at=null, stall_armed_at=null, stall_evidence=null,
               owner_control_note='Resumed explicitly by Portable owner UI.', updated_at=? where id=?
-          `).run(now, now, turnLeaseExpiresAt, now, taskId);
+          `).run(now, now, now, turnLeaseExpiresAt, now, taskId);
         }
         else if (action === "delete") {
           database.sqlite.prepare("delete from continuation_tasks where id=?").run(taskId);
@@ -1604,6 +1616,21 @@ async function runContinuationAdmin(action, payload = {}) {
       }
     });
     transaction();
+    if (action !== "delete") {
+      if (!fs.existsSync(RUNTIME_STATE_FILE)) {
+        throw new Error("Continuation architecture runtime is missing from the bundled DevSpace package.");
+      }
+      const runtimeModule = await import(`${pathToFileURL(RUNTIME_STATE_FILE).href}?mtime=${fs.statSync(RUNTIME_STATE_FILE).mtimeMs}`);
+      const runtimeState = new runtimeModule.StructuredRuntimeState(STATE_DIR);
+      try {
+        for (const taskId of taskIds) {
+          if (skipped.some((entry) => entry.taskId === taskId)) continue;
+          runtimeState.syncContinuationArchitectureForLegacyTask(taskId);
+        }
+      } finally {
+        runtimeState.close?.();
+      }
+    }
     const tasks = taskIds
       .filter((taskId) => !deletedIds.includes(taskId))
       .map((taskId) => database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId))

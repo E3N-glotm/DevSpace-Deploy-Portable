@@ -90,7 +90,11 @@ for (const pattern of [
   /delivery_ack_started_at/,
   /delivery_ack_retry_count/,
   /delivery_ack_retry_after_at/,
+  /version: 31/,
+  /continuation-1\.1\.56-runtime-reset/,
 ]) assert.match(migrations, pattern);
+assert.match(migrations, /delete from continuation_tasks[\s\S]{0,120}conversation_scope_id not glob 'v1\/\*'/,
+  "1.1.56 migration must remove non-canonical shadow tasks created by stripped Host metadata");
 assert.match(migrations, /migrated-1\.1\.49/,
   "1.1.50 migration must explicitly identify active legacy 1.1.49 Task Contracts that are upgraded to completion-driven mode");
 assert.match(migrations, /contract_version=0[\s\S]{0,500}task_source='legacy'[\s\S]{0,500}continuation_mode='timeout-recovery'[\s\S]{0,500}required_milestones_json/,
@@ -193,10 +197,28 @@ assert.match(runtimeStateSource, /confirmedCutoffCorroborated[\s\S]{0,1200}CONTI
   "confirmed Host cutoff evidence may still arm completion-driven recovery");
 assert.doesNotMatch(runtimeStateSource, /earlyCompletionCorroborated|short-confirmed-probe/,
   "runtime state must not arm recovery from repeated UI heartbeat probes alone");
-assert.match(runtimeStateSource, /COMPLETION_QUIET_RECOVERY_MS = 120_000/,
-  "unfinished completion-driven work must retain a conservative server-side recovery backstop when Host lifecycle signals are absent");
-assert.match(runtimeStateSource, /continuationModelRequestInFlight\(current\.conversation_scope_id\)[\s\S]{0,1400}server-quiet-no-inflight-model-request/,
-  "the server-quiet backstop must be forbidden while a real model-originated DevSpace request is in flight");
+assert.match(runtimeStateSource, /COMPLETION_QUIET_RECOVERY_MS = 40_000/,
+  "legacy completion-driven rows without a usable turn lease must recover inside the one-minute ceiling");
+assert.match(runtimeStateSource, /COMPLETION_STALL_SUSPECT_MS = 25_000/,
+  "the primary completion-driven inactivity lease must remain below the one-minute ceiling");
+assert.match(runtimeStateSource, /COMPLETION_STALL_CONFIRM_MS = 10_000/,
+  "completion-driven recovery must confirm an expired activity lease through a second resident-server quiet window while remaining below one minute");
+assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_MAX_MS = 45_000/,
+  "delivery ACK retransmission must remain bounded below one minute");
+assert.match(runtimeStateSource, /server-turn-lease-expired-no-inflight-model-request[\s\S]{0,2600}server-turn-lease-confirmed-no-inflight-model-request/,
+  "resident recovery must be able to progress from lease suspicion to authorization without a surviving Anchor iframe");
+assert.match(runtimeStateSource, /!this\.continuationModelRequestInFlight\(current\.conversation_scope_id\)[\s\S]{0,2400}server-turn-lease-expired-no-inflight-model-request/,
+  "the two-stage server lease recovery path must be forbidden while a real model-originated DevSpace request is in flight");
+assert.match(runtimeStateSource, /trackContinuationActivityProcess\(input = \{\}\)[\s\S]{0,2200}watch_process_handles_json/,
+  "completion-driven durable process liveness must be persisted independently of the short MCP handler lifetime");
+assert.match(runtimeStateSource, /parseJson\(legacy\.watch_process_handles_json, \[\]\)\.length === 0/,
+  "completion-driven stall recovery must be suppressed while any durable activity process is still tracked");
+assert.match(server, /continuationActivityProcessGuards\(\)[\s\S]{0,2600}"process\.list"/,
+  "the resident process guard must inspect process registry metadata without consuming process output");
+assert.doesNotMatch(server, /continuationActivityProcessGuards\(\)[\s\S]{0,2600}"process\.attach"/,
+  "the resident completion-driven process guard must never consume stdout through process.attach");
+assert.match(server, /\["exec_command", "write_stdin", "process_attach", "process_kill"\][\s\S]{0,1000}trackContinuationActivityProcess/,
+  "process-bearing model tool results must automatically register or release the completion-driven activity guard");
 assert.match(coordinator, /CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS/);
 assert.match(coordinator, /confirmed turn-limit teardown/);
 assert.match(coordinator, /CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS/);
@@ -213,7 +235,7 @@ assert.match(coordinator, /startSupervisor\(\);\s*startLifecycleRefresh\(\);/,
 assert.match(coordinator, /DEFAULT_SUPERVISOR_TICK_MS = 5_000/,
   "an active visible card should poll authoritative milestone/status state on a short cadence");
 assert.match(coordinator, /DEFAULT_TERMINAL_REFRESH_MS/,
-  "terminal cards must retain a low-frequency refresh cadence");
+  "terminal refresh compatibility metadata may remain, but terminal transition must cancel active timers below");
 assert.match(coordinator, /const cachedTerminal = terminal\(state\.task\)/,
   "the supervisor must distinguish cached terminal state before its authoritative refresh");
 assert.match(coordinator, /Always begin from authoritative server state[\s\S]{0,1200}callTask\("status"\)/,
@@ -224,30 +246,36 @@ assert.match(coordinator, /A generic teardown is weaker[\s\S]{0,700}no replaceme
   "generic teardown recovery must require a short grace plus authoritative no-replacement/no-new-model checks");
 assert.match(coordinator, /attemptContinuation\("verified surface teardown"[\s\S]{0,80}force: true/,
   "a verified current card teardown may request fast completion recovery only after the grace checks pass");
-assert.match(coordinator, /syntheticDeliveryToken:/,
-  "synthetic continuation model context must carry a durable delivery generation token so manual turns can supersede late automatic turns");
+assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryToken|DevSpace resume token/,
+  "the coordinator must keep generation capabilities inside App/runtime transport instead of exposing them to the model");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
-assert.match(coordinator, /visibleContinuationTrigger\(task, deliveryToken\)[\s\S]{0,1600}不要回复确认、计划、状态说明或“我会继续”[\s\S]{0,1200}resume token[\s\S]{0,1200}checkpoint/,
-  "the visible synthetic continuation trigger must carry the delivery token and require status + real work + material checkpoint instead of permitting a text-only acknowledgement turn");
-assert.match(coordinator, /DevSpace resume token:/,
-  "the synthetic delivery token must be present in the actual visible ui\/message so recovery does not depend only on updateModelContext propagation");
+assert.match(coordinator, /function visibleContinuationTrigger\(\)[\s\S]{0,650}return isChinese\(\) \? "继续" : "Continue\."/,
+  "the visible synthetic continuation trigger must match the owner's normal manual continue message without urgency bias");
+assert.doesNotMatch(coordinator, /继续。直接完成当前未完成的任务。|Continue\. Directly complete the current unfinished task\./,
+  "the visible synthetic continuation trigger must not pressure the model to skip state reconstruction or verification");
 assert.doesNotMatch(coordinator, /return `继续执行用户尚未完成的 DevSpace 任务/,
   "taskId/workspaceId/recovery policy must not be emitted as a visible user message");
-assert.match(coordinator, /function continuationContext\(/,
-  "detailed continuation instructions must remain in hidden model context");
-assert.match(coordinator, /syntheticDeliveryToken:/,
-  "hidden model context must carry the synthetic delivery generation token");
-assert.match(coordinator, /NO user-visible response/,
-  "synthetic supersession must remain a hidden no-response path instead of leaking internal recovery chatter");
-assert.match(coordinator, /callSender\("claim"[\s\S]{0,3500}updateModelContext[\s\S]{0,2200}callSender\("authorize-delivery"[\s\S]{0,1600}sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\)\)/,
+assert.match(coordinator, /function continuationContext\([\s\S]{0,1800}runtime atomically claims any server-owned expected synthetic generation/,
+  "hidden context must direct the first status call while leaving UUID transport to the runtime");
+assert.match(coordinator, /reconstruct the current durable state[\s\S]{0,500}latest available DevSpace evidence[\s\S]{0,500}failure, race, or regression risks[\s\S]{0,500}do not emit a chain-of-thought transcript/,
+  "hidden recovery context must require evidence-backed state reconstruction and risk checks before action without exposing private reasoning");
+assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(\),\s*async \(\) =>/,
   "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
+assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(state\.task\)/,
+  "the irreversible Host send must have a final authoritative terminal-state recheck");
+assert.match(coordinator, /function acceptTask\([\s\S]{0,700}terminal\(state\.task\)[\s\S]{0,300}stopSupervisor\(\)[\s\S]{0,200}stopLifecycleRefresh\(\)/,
+  "observing terminal state must synchronously cancel supervisor and lifecycle timers");
+assert.match(runtimeStateSource, /closeTerminalContinuationArtifacts\([\s\S]{0,5200}state='NO_WORK'[\s\S]{0,3400}delivery_token=null[\s\S]{0,2200}stall_armed_at=null/,
+  "terminal task transitions must seal synthetic generations and clear pending delivery/retry/stall state");
 assert.match(server, /if \(!coordinatorCall && !continuationControlCall && conversationScopeId && structuredRuntimeState\)[\s\S]{0,1300}touchContinuationModelActivity\([\s\S]{0,260}substantive: false/,
   "the wrapper may retain non-substantive telemetry for ordinary tools only after excluding all continuation control-plane calls");
 assert.doesNotMatch(server, /if \(!coordinatorCall && conversationScopeId && structuredRuntimeState\)[\s\S]{0,1300}touchContinuationModelActivity/,
   "continuation_anchor/continuation_task must be excluded before the wrapper can touch model activity or renew the Turn Lease");
-assert.match(server, /const requestConversationScopeId = openAiConversationScopeId\(context\?\._meta\)[\s\S]{0,1000}const conversationScopeId = input\.coordinatorInstanceId[\s\S]{0,320}requestConversationScopeId[\s\S]{0,320}requestConversationScopeId \?\? "host-scope-unavailable"/,
-  "App-origin coordinator calls must preserve a missing Host conversation scope instead of fabricating host-scope-unavailable, while model calls retain fail-closed fallback isolation");
+assert.match(server, /const boundTaskConversationScopeId = input\.taskId[\s\S]{0,1200}const conversationScopeId = input\.coordinatorInstanceId[\s\S]{0,500}requestConversationScopeId \?\? boundTaskConversationScopeId/,
+  "model continuation control calls with stripped Host metadata must reuse the exact existing task scope instead of creating host-scope-unavailable shadows");
+assert.doesNotMatch(server, /\?\? "host-scope-unavailable"/,
+  "1.1.56 must never fabricate a shared non-canonical conversation identity");
 assert.match(server, /const setupOnlyCall = name === "open_workspace"/,
   "server wrapper must classify open_workspace as setup-only");
 assert.match(server, /substantive: !setupOnlyCall/,
@@ -255,10 +283,18 @@ assert.match(server, /substantive: !setupOnlyCall/,
 assert.match(server, /beginContinuationModelRequest\(conversationScopeId\)[\s\S]{0,700}finally[\s\S]{0,240}releaseModelRequest\?\.\(\)/,
   "ordinary model-originated DevSpace handlers must hold an explicit in-flight lease for their real execution lifetime");
 assert.match(server, /"devspace\/continuation-sender": capability/,
-  "a verified conversation must be able to pass sender authority privately through result _meta to a newer ordinary Workspace App transport");
-assert.match(coordinator, /text-only acknowledgement[\s\S]{0,500}FAILED recovery[\s\S]{0,900}do NOT prove substantive resumed work/,
-  "hidden recovery context must explicitly distinguish control traffic from real resumed work");
-assert.match(coordinator, /syntheticResumeWorkRetryDue[\s\S]{0,900}syntheticResumeWorkRequired[\s\S]{0,600}deliveryToken/,
+  "an issued conversation card must be able to pass sender authority privately through result _meta to a newer ordinary Workspace App transport");
+assert.doesNotMatch(server, /Substantive DevSpace work remains fail-closed|No substantive workspace operation is permitted while verification is pending|keep substantive work fail-closed until the original iframe ACK/,
+  "a delayed or missing iframe ACK must never indefinitely block read/edit/shell work after the one card was issued");
+assert.match(server, /anchorMountVerificationPending[\s\S]{0,900}substantive work remains enabled/,
+  "pending iframe verification must be informational after the immutable card issuance, not an execution gate");
+assert.match(runtimeStateSource, /continuationSenderCapability\(input = \{\}\)[\s\S]{0,2200}mount_requested_at[\s\S]{0,1000}anchorMountVerified/,
+  "sender capability must exist from the requested card generation even before iframe ACK");
+assert.match(coordinator, /function senderTransportAvailable\(\)[\s\S]{0,500}anchorMountRequestedAt[\s\S]{0,240}activeSenderCapability\(\)/,
+  "a later trusted Workspace App relay must keep sender transport available while the original iframe ACK is pending");
+assert.match(coordinator, /same sustained execution semantics as a manual 'continue'[\s\S]{0,500}polling owned long-running processes[\s\S]{0,500}Host truncates the turn/,
+  "hidden recovery context must keep synthetic turns working until the same natural stopping point as manual continuation");
+assert.match(coordinator, /syntheticResumeWorkRetryDue[\s\S]{0,900}syntheticResumeWorkRequired[\s\S]{0,600}deliveryOwnerExpiresAt/,
   "the coordinator must retain a durable resumed-turn work obligation after the connectivity ACK");
 assert.match(runtimeStateSource, /SYNTHETIC_WORK_OWNER_LEASE_MS = 45_000/,
   "a status-only or no-checkpoint synthetic turn must be retryable quickly instead of occupying the generic multi-minute Turn Lease");
@@ -266,8 +302,8 @@ assert.match(runtimeStateSource, /const materialCheckpoint = gainedCompletedMile
   "synthetic resume completion must require a material checkpoint rather than an arbitrary control checkpoint");
 assert.match(runtimeStateSource, /Number\(row\.substantive_activity_count \|\| 0\) > Number\(row\.delivery_work_baseline_count \|\| 0\)/,
   "synthetic resume completion must prove post-ACK work with a monotonic activity-count baseline rather than timestamp ordering");
-assert.match(runtimeStateSource, /const fulfillsSyntheticResume = realToolAfterSyntheticAck && materialCheckpoint/,
-  "synthetic resume completion must additionally require a real post-ACK tool operation");
+assert.match(runtimeStateSource, /const syntheticTurnMayYield = remainingAfterCheckpoint\.length === 0 \|\| state !== "RUNNING"[\s\S]{0,220}const fulfillsSyntheticResume = realToolAfterSyntheticAck && materialCheckpoint && syntheticTurnMayYield/,
+  "synthetic resume ownership must survive material checkpoints until the runnable milestone set is complete or explicitly blocked");
 assert.match(migrations, /version: 29[\s\S]{0,180}continuation-synthetic-work-baseline[\s\S]{0,240}migrateContinuationSyntheticWorkBaseline/,
   "the synthetic work baseline must be added through a durable SQLite migration");
 assert.match(coordinator, /deliveryOwnerExpiresAt[\s\S]{0,900}completionActivityLeaseExpired/,
@@ -276,14 +312,16 @@ assert.match(coordinator, /synthetic resume work ownership lease expired/,
   "status-only resumed turns must have a dedicated recovery path rather than being treated as successfully completed continuations");
 assert.match(coordinator, /deliveryAckRetryDue[\s\S]{0,1500}deliveryAckRetryAfterAt/,
   "delivery ACK retransmission must honor the persisted retry schedule instead of polling new turns every supervisor tick");
-assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 750, 2_000, 5_000, 8_000, 12_000\]/,
-  "post-sendMessage MCP readiness must retain the roughly 30-second bounded retry window");
-assert.match(server, /conversation milestone precondition: initial card required[\s\S]{0,1400}provisional mount window[\s\S]{0,900}ghost-recovery issuance/,
-  "substantive workspace work must require the one conversation card and support bounded stale-ghost recovery before verification");
+assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 500, 1_500, 3_000, 5_000\]/,
+  "post-sendMessage MCP readiness must stay inside a ten-second bounded retry window");
+assert.match(server, /anchorMountVerificationPending is true[\s\S]{0,500}never call continuation_anchor again[\s\S]{0,900}substantive read\/edit\/shell work continues headless[\s\S]{0,700}trusted App transport/,
+  "after the one permitted card is issued, pending iframe verification must not block substantive work and sender transport may recover asynchronously");
 assert.match(server, /const finalResponseAllowed = outcome\.finalResponseAllowed !== false/,
   "Task Contract rendering must preserve the structured finalResponseAllowed gate");
-assert.match(server, /Do not end with an ACK[\s\S]{0,700}same assistant turn[\s\S]{0,700}checkpoint completed milestones/,
-  "an unfinished Task Contract must forbid a status-only final response and require same-turn work");
+assert.match(server, /Do not end with an ACK[\s\S]{0,260}checkpoint[\s\S]{0,520}same assistant turn[\s\S]{0,700}runnable milestone set/,
+  "an unfinished Task Contract must forbid status/checkpoint-only final responses and require same-turn work through the runnable milestone set");
+assert.match(server, /successful checkpoint persists progress[\s\S]{0,500}does not make a final response legal[\s\S]{0,650}long-running process[\s\S]{0,500}same sustained-work stopping rule as a manual user 'continue'/,
+  "Task Contract rendering must forbid checkpoint-as-yield and require owned long-process completion in synthetic turns");
 assert.match(server, /nextRequiredMilestones/,
   "Task Contract results must expose remaining milestones as structured state instead of relying on a prose ACK convention");
 assert.match(server, /taskIncomplete=\$\{Boolean\(outcome\.taskIncomplete\)\}; finalResponseAllowed=\$\{finalResponseAllowed\}/,
@@ -292,7 +330,7 @@ assert.match(server, /UNAVAILABLE\/Connection failed\/fetch\/ECONN\/TLS\/handsha
   "server guidance must retain bounded transport-readiness retries");
 assert.match(server, /Before replaying uncertain side effects[\s\S]{0,300}durable process\/file\/task state/,
   "transport recovery must remain side-effect aware before replaying uncertain mutations");
-assert.match(server, /CONVERSATION_CARD_PRECONDITION[\s\S]{0,900}at most one visible DevSpace milestone card[\s\S]{0,1000}Once anchorMountVerifiedAt exists[\s\S]{0,1000}never call continuation_anchor again/,
+assert.match(server, /CONVERSATION_CARD_PRECONDITION[\s\S]{0,900}at most one UI-bearing continuation_anchor result[\s\S]{0,1000}anchorMountVerificationPending[\s\S]{0,1000}never call continuation_anchor again/,
   "every ordinary DevSpace tool description must enforce the conversation-lifetime single-card invariant");
 assert.match(server, /sourceTool: "continuation_task", anchorMounted: false/,
   "headless continuation_task begin must never mark the visible continuation anchor as mounted");
@@ -324,20 +362,18 @@ assert.match(coordinator, /senderTransportAvailable\(\)[\s\S]{0,1600}callSender\
   "a generic current Workspace App may run only the sender transport path after receiving a verified private capability");
 assert.match(coordinator, /if \(!state\.anchorSurface\) \{[\s\S]{0,500}never arm recovery from it/,
   "teardown of a transport-only App must not impersonate authoritative milestone-card lifecycle evidence");
-assert.match(server, /one lifetime DevSpace Task Contract\/taskId[\s\S]{0,900}at most one visible milestone-card surface[\s\S]{0,1000}Once anchorMountVerifiedAt exists/,
+assert.match(server, /CONVERSATION-CARD PRECONDITION: this ChatGPT conversation owns exactly one lifetime DevSpace Task Contract[\s\S]{0,300}at most one UI-bearing continuation_anchor result[\s\S]{0,900}Once anchorMountVerifiedAt exists/,
   "server guidance must keep task identity and the visible milestone card conversation-lifetime");
-assert.match(runtimeStateSource, /function anchorMountRecoveryRequired[\s\S]{0,1000}anchor_mount_verified_at[\s\S]{0,1000}anchor_mount_requested_at/,
-  "runtime gating must calculate mount recovery from verified truth plus a bounded provisional issuance window");
-assert.match(runtimeStateSource, /P0 single-card invariant[\s\S]{0,900}if \(row\.anchor_mount_verified_at\)[\s\S]{0,100}return false/,
-  "verified mount truth must permanently suppress later-turn card rotation");
-assert.match(runtimeStateSource, /return nowMs - requestedAtMs >= anchorMountProvisionalMs\(row\)/,
-  "unverified initial issuance must retain the bounded stale-ghost fallback");
+assert.match(runtimeStateSource, /function anchorMountRecoveryRequired[\s\S]{0,1000}return !row\.anchor_mount_verified_at && !row\.anchor_mount_requested_at/,
+  "runtime gating must permit exactly one UI-bearing anchor issuance per conversation");
+assert.match(runtimeStateSource, /P0 single-card invariant[\s\S]{0,900}never authorization to mint another card generation/,
+  "unverified Host history must fail closed instead of rotating a second visible card");
 assert.match(runtimeStateSource, /initialAnchorRequired:\s*anchorMountRecoveryRequired\(existing, now\.getTime\(\), input\.hostTurnFingerprint\)/,
-  "initial hard gating must still delegate to verified-vs-ghost mount truth even when legacy callers pass a turn fingerprint");
+  "initial hard gating must permit only a never-issued anchor even when legacy callers pass a turn fingerprint");
 assert.match(runtimeStateSource, /if \(!anchorMountRecoveryRequired\(row, Date\.now\(\), input\.hostTurnFingerprint\)\)\s*return undefined/,
   "supervisor gating must stay permanently headless after a verified conversation card");
-assert.match(runtimeStateSource, /previousGeneration[\s\S]{0,900}previousGeneration \+ 1[\s\S]{0,900}anchor_mount_generation[\s\S]{0,500}anchor_mount_host_turn_hash/,
-  "ghost recovery may rotate the mount capability generation, but only before the first verified card");
+assert.match(runtimeStateSource, /anchor-mount-verification-pending[\s\S]{0,500}alreadyRequested:\s*true[\s\S]{0,800}const generation = Math\.max\(1, previousGeneration \|\| 1\)/,
+  "duplicate anchor attempts must not rotate or disclose another mount capability");
 assert.doesNotMatch(server, /assistantTurnNonce|rememberExplicitModelTurn|effectiveModelTurnFingerprint|assistant-turn:/,
   "assistant-turn identity must not participate in visible card issuance after restoring conversation-lifetime single-card semantics");
 assert.doesNotMatch(server, /x-datadog-trace-id|allowHostTrace|hostTurnFingerprint\(/,
@@ -360,7 +396,7 @@ assert.match(server, /new milestone required on the existing card[\s\S]{0,1000}c
   "a completed conversation ledger must reactivate the same taskId and only authorize anchor recovery when mount state explicitly requires it");
 assert.match(server, /continue\/resume reuses unfinished milestones/,
   "continue/resume must reuse unfinished milestones instead of manufacturing duplicate work items");
-assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 750, 2_000, 5_000, 8_000, 12_000\]/,
+assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 500, 1_500, 3_000, 5_000\]/,
   "resumed-turn MCP readiness retry must cover roughly 30 seconds instead of the old ~8-second window");
 assert.match(coordinator, /supervisorTickInFlight[\s\S]{0,1200}supervisorTickImpl/,
   "the continuation supervisor must single-flight long retry ticks during network instability");
@@ -398,6 +434,8 @@ assert.equal(fullWorkspaceMeta?._meta?.ui?.resourceUri, anchorUri,
 assert.equal(fullWorkspaceMeta?._meta?.["openai/outputTemplate"], anchorUri);
 assert.notEqual(workspaceAppUri({ ...descriptorConfig, publicBaseUrl: "https://other.example.test" }), anchorUri, "changing the public asset origin must produce a fresh Workspace App URI");
 const renderedWorkspaceApp = workspaceAppHtml(descriptorConfig);
+assert.match(renderedWorkspaceApp, /return\s+[A-Za-z_$][\w$]*===`continuation_anchor`\|\|[A-Za-z_$][\w$]*===`open_workspace`/,
+  "the final self-contained Workspace App resource must really route continuation_anchor into the visible renderer after minification");
 assert.match(renderedWorkspaceApp, /<script type="module">[\s\S]*installContinuationCoordinator/, "Workspace App HTML must embed the continuation coordinator directly in the versioned MCP App resource");
 assert.doesNotMatch(renderedWorkspaceApp, /data:text\/javascript;base64,/, "Workspace App HTML must not depend on a data: module that ChatGPT may block before widget CSP compatibility metadata is applied");
 assert.doesNotMatch(renderedWorkspaceApp, /src="[^"]*continuation-coordinator\.js/, "Workspace App HTML must not depend on an externally cached continuation coordinator script");
@@ -456,6 +494,8 @@ class FakeApp {
     this.callInputs = [];
     this.messages = [];
     this.contextUpdates = [];
+    this.displayModeRequests = [];
+    this.hostDisplayMode = "inline";
     this.task = undefined;
     this.autoVerifyAnchor = true;
     this.autoEmitAnchorResult = true;
@@ -506,7 +546,12 @@ class FakeApp {
     }
   }
   getHostContext() {
-    return { toolInfo: { tool: { name: "continuation_anchor" } } };
+    return {
+      toolInfo: { tool: { name: "continuation_anchor" } },
+      platform: "mobile",
+      displayMode: this.hostDisplayMode,
+      availableDisplayModes: ["inline", "pip"],
+    };
   }
   getHostVersion() {
     return { name: "test-host", version: "1" };
@@ -518,8 +563,21 @@ class FakeApp {
     if (name === "continuation_sender") {
       assert.equal(input.taskId, this.task?.id);
       assert.equal(input.conversationScopeId, this.task?.conversationScopeId);
-      assert.equal(input.anchorMountToken, this.anchorMountToken);
       assert.equal(input.anchorMountGeneration, this.anchorMountGeneration);
+      if (input.action === "bind") {
+        return {
+          structuredContent: {
+            accepted: true,
+            taskId: this.task?.id,
+            conversationScopeId: this.task?.conversationScopeId,
+            workspaceId: this.task?.workspaceId,
+            anchorMountToken: this.anchorMountToken,
+            anchorMountGeneration: this.anchorMountGeneration,
+            task: this.task,
+          },
+        };
+      }
+      assert.equal(input.anchorMountToken, this.anchorMountToken);
       if (input.action === "heartbeat") {
         return { structuredContent: { accepted: true, lastUiHeartbeatAt: new Date().toISOString() } };
       }
@@ -561,6 +619,7 @@ class FakeApp {
         conversationScopeId: "conversation_fake",
         workspaceId: input.workspaceId,
         state: "RUNNING",
+        continuationMode: "completion-driven",
         objective: "finish fake task",
         requiredMilestones: ["done"],
         completedMilestones: [],
@@ -612,6 +671,11 @@ class FakeApp {
     this.contextUpdates.push(value);
     return {};
   }
+  async requestDisplayMode({ mode }) {
+    this.displayModeRequests.push(mode);
+    this.hostDisplayMode = mode;
+    return { mode };
+  }
   async sendMessage(value) {
     this.messages.push(value);
     return {};
@@ -623,33 +687,46 @@ const fakeController = installContinuationCoordinator(fakeApp, { timers: false, 
 fakeApp.emit("toolinput", { arguments: { workspaceId: "ws_fake" } });
 await fakeController.onConnected();
 assert.equal(fakeController.state.task?.id, "task_fake");
+assert.deepEqual(fakeApp.displayModeRequests, [],
+  "an unfinished milestone App must stay inline even when the Host advertises PiP");
 assert.equal(await fakeController.attemptContinuation("unit test", { force: true }), true);
 assert.equal(fakeApp.messages.length, 1);
 assert.equal(fakeApp.contextUpdates.length >= 1, true);
 const visibleSyntheticText = fakeApp.messages[0]?.content?.[0]?.text ?? "";
-assert.match(visibleSyntheticText, /继续当前 DevSpace 任务。|Continue the current DevSpace task\./,
-  "automatic recovery must still create a localized continuation trigger");
-assert.match(visibleSyntheticText, /不要回复确认|Do not reply with an acknowledgement/,
-  "the visible continuation trigger must forbid a text-only acknowledgement turn");
-assert.match(visibleSyntheticText, /非控制 DevSpace 工具调用|non-control DevSpace tool operation/,
-  "the visible continuation trigger must require real non-control DevSpace execution before replying");
-assert.match(visibleSyntheticText, /DevSpace resume token: 00000000-0000-4000-8000-000000000001/,
-  "the visible Host trigger must carry the exact ephemeral delivery token so the resumed model can ACK reliably even if updateModelContext is missed");
-assert.match(visibleSyntheticText, /continuation_task status/,
-  "the visible Host trigger must tell the resumed model exactly how to ACK the synthetic generation");
+assert.match(visibleSyntheticText, /^(继续|Continue\.)$/,
+  "automatic recovery must create a localized manual-equivalent continuation trigger");
+assert.doesNotMatch(visibleSyntheticText, /直接|Directly|complete the current unfinished task/i,
+  "the visible continuation trigger must not add urgency or shortcut language absent from a manual continue");
+assert.doesNotMatch(visibleSyntheticText, /token|UUID|continuation_task|checkpoint|task_fake|ws_fake|authorized recovery/i,
+  "the visible Host trigger must not expose protocol, task identity, or generation capability details");
 assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery/,
   "durable task/workspace internals must remain out of the visible synthetic message even though the ephemeral resume capability is intentionally visible");
 const hiddenSyntheticContext = fakeApp.contextUpdates.at(-1)?.content?.[0]?.text ?? "";
-assert.match(hiddenSyntheticContext, /syntheticDeliveryToken: 00000000-0000-4000-8000-000000000001/,
-  "the delivery token must be carried in hidden model context for the resumed turn");
-assert.match(hiddenSyntheticContext, /NO user-visible response/,
-  "a superseded late synthetic turn must be instructed to terminate silently");
+assert.match(hiddenSyntheticContext, /Call continuation_task status first/,
+  "hidden model context must request the status claim before substantive work");
+assert.match(hiddenSyntheticContext, /server-owned expected synthetic generation/,
+  "hidden model context must explain that generation ownership is runtime-managed");
+assert.match(hiddenSyntheticContext, /reconstruct the current durable state[\s\S]{0,500}latest available DevSpace evidence/,
+  "hidden model context must rebuild task state from durable evidence before choosing the next action");
+assert.match(hiddenSyntheticContext, /failure, race, or regression risks[\s\S]{0,500}do not emit a chain-of-thought transcript/,
+  "hidden model context must check relevant risks while keeping private reasoning private");
+assert.doesNotMatch(hiddenSyntheticContext, /00000000-0000-4000-8000-000000000001|syntheticDeliveryToken|continuationDeliveryToken/,
+  "hidden model context must not expose or require generation UUID transport");
 assert.ok(fakeApp.calls.includes("begin-auto"));
 assert.ok(fakeApp.calls.includes("heartbeat"));
 assert.ok(fakeApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "claim"));
 assert.ok(fakeApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "authorize-delivery"));
 assert.ok(fakeApp.calls.includes("delivery-result"));
 fakeController.dispose();
+
+const legacyPipApp = new FakeApp();
+legacyPipApp.hostDisplayMode = "pip";
+const legacyPipController = installContinuationCoordinator(legacyPipApp, { timers: false, instanceId: "ui_legacy_pip" });
+legacyPipApp.emit("toolinput", { arguments: { workspaceId: "ws_legacy_pip" } });
+await legacyPipController.onConnected();
+assert.deepEqual(legacyPipApp.displayModeRequests, ["inline"],
+  "a milestone card left in PiP by an older build must be returned to the normal inline transcript surface");
+legacyPipController.dispose();
 
 // The immutable milestone card is a conversation identity, not a permanent
 // transport requirement. ChatGPT/mobile may virtualize that old iframe while a
@@ -1867,8 +1944,8 @@ try {
   assert.ok(ghostMountRequest.anchorMountToken);
   assert.equal(ghostMountRequest.recoveryRetry, false,
     "the first UI-bearing issuance is not a recovery retry");
-  assert.ok(ghostMountRequest.anchorMountProvisionalUntil,
-    "a fresh issuance must expose the bounded Host-turn provisional deadline");
+  assert.equal(ghostMountRequest.anchorMountProvisionalUntil, undefined,
+    "a one-shot anchor must not advertise a future duplicate-issuance deadline");
   assert.equal(ghostMountRequest.task.anchorMountVerifiedAt, undefined,
     "issuing the one-time token must not fabricate actual iframe mount telemetry");
   const ghostAfterIssuance = runtime.ensureContinuationTaskContract({
@@ -1878,14 +1955,16 @@ try {
     substantive: true,
   });
   assert.equal(ghostAfterIssuance.initialAnchorRequired, false,
-    "a fresh UI-bearing issuance must not self-lock substantive work in the same Host turn");
+    "an issued UI-bearing result must never authorize another card");
   assert.equal(ghostAfterIssuance.task.anchorMountRecoveryRequired, false,
-    "fresh provisional issuance must not immediately request a duplicate card");
+    "an unverified issuance must not request a duplicate card");
+  assert.equal(ghostAfterIssuance.anchorMountVerificationPending, true,
+    "server wrappers must fail closed substantive work until the card ACKs");
   assert.equal(runtime.continuationSupervisorDirective({
     conversationScopeId: "v1/test-ghost-anchor",
     workspaceId: "ws_ghost_anchor",
   }), undefined,
-    "fresh provisional issuance must suppress immediate duplicate immutable-card requests while Host commits the turn");
+    "an unverified issuance must suppress every duplicate immutable-card request");
 
   runtime.database.sqlite.prepare(
     "update continuation_tasks set anchor_mount_requested_at=? where id=?",
@@ -1896,35 +1975,36 @@ try {
     sourceTool: "read",
     substantive: false,
   });
-  assert.equal(ghostAfterStaleIssuance.initialAnchorRequired, true,
-    "an unverified issuance that outlives the Host-turn provisional window must become a recoverable ghost");
-  assert.equal(ghostAfterStaleIssuance.task.anchorMountRecoveryRequired, true,
-    "stale unverified card state must be machine-readable instead of silently trusting anchorMountRequestedAt forever");
+  assert.equal(ghostAfterStaleIssuance.initialAnchorRequired, false,
+    "an aged unverified issuance must never permit a second transcript card");
+  assert.equal(ghostAfterStaleIssuance.task.anchorMountRecoveryRequired, false);
+  assert.equal(ghostAfterStaleIssuance.anchorMountVerificationPending, true,
+    "stale unverified card state must remain a machine-readable fail-closed condition");
   const ghostStaleDirective = runtime.continuationSupervisorDirective({
     conversationScopeId: "v1/test-ghost-anchor",
     workspaceId: "ws_ghost_anchor",
   });
-  assert.equal(ghostStaleDirective?.reanchorRequired, true,
-    "stale ghost issuance must request same-task recovery instead of leaving DevSpace permanently headless");
+  assert.equal(ghostStaleDirective, undefined,
+    "stale unverified issuance must not request another UI-bearing anchor");
   const staleComplete = runtime.continuationTask({
     action: "complete",
     taskId: ghostAnchor.task.id,
     evidence: { work: "done but the issued card never actually mounted" },
   });
   assert.equal(staleComplete.accepted, false);
-  assert.equal(staleComplete.reason, "continuation-anchor-required",
-    "a stale unverified ghost must not be canonically completed as if the user had a working milestone card");
+  assert.equal(staleComplete.reason, "anchor-mount-verification-pending",
+    "an unverified card must not be canonically completed as if the user had a working milestone card");
 
   const ghostRecoveryRequest = runtime.prepareContinuationAnchorMount({
     taskId: ghostAnchor.task.id,
     conversationScopeId: "v1/test-ghost-anchor",
   });
-  assert.equal(ghostRecoveryRequest.recoveryRetry, true,
-    "stale ghost recovery must be explicitly distinguished from the first issuance");
-  assert.notEqual(ghostRecoveryRequest.anchorMountToken, ghostMountRequest.anchorMountToken,
-    "stale ghost recovery must rotate the one-time mount capability so a delayed old iframe cannot certify the new card");
-  assert.notEqual(ghostRecoveryRequest.task.anchorMountRequestedAt, "2020-01-01T00:00:00.000Z",
-    "recovery issuance must refresh the provisional Host-turn timestamp");
+  assert.equal(ghostRecoveryRequest.accepted, false);
+  assert.equal(ghostRecoveryRequest.reason, "anchor-mount-verification-pending");
+  assert.equal(ghostRecoveryRequest.anchorMountToken, undefined,
+    "a repeated call must not disclose or rotate another mount capability");
+  assert.equal(ghostRecoveryRequest.task.anchorMountRequestedAt, "2020-01-01T00:00:00.000Z",
+    "a repeated call must not rewrite the immutable issuance timestamp");
   const ghostAfterRecoveryIssuance = runtime.ensureContinuationTaskContract({
     conversationScopeId: "v1/test-ghost-anchor",
     workspaceId: "ws_ghost_anchor",
@@ -1932,19 +2012,20 @@ try {
     substantive: false,
   });
   assert.equal(ghostAfterRecoveryIssuance.initialAnchorRequired, false,
-    "the recovery result itself must open a fresh provisional window instead of self-locking its assistant turn");
+    "the original issuance must remain the only anchor generation");
+  assert.equal(ghostAfterRecoveryIssuance.anchorMountVerificationPending, true);
   assert.equal(runtime.continuationSupervisorDirective({
     conversationScopeId: "v1/test-ghost-anchor",
     workspaceId: "ws_ghost_anchor",
   }), undefined,
-    "fresh recovery issuance must remain headless until its provisional window expires");
+    "verification-pending state must remain headless without requesting another card");
 
   const wrongGhostAck = runtime.continuationTask({
     action: "anchor-mounted",
     taskId: ghostAnchor.task.id,
     conversationScopeId: "v1/test-ghost-anchor",
     coordinatorInstanceId: "ui_real_anchor",
-    anchorMountToken: ghostMountRequest.anchorMountToken,
+    anchorMountToken: "00000000-0000-4000-8000-000000000001",
   });
   assert.equal(wrongGhostAck.accepted, false);
   assert.equal(wrongGhostAck.reason, "anchor-mount-token-mismatch");
@@ -1953,13 +2034,13 @@ try {
     taskId: ghostAnchor.task.id,
     conversationScopeId: "v1/test-ghost-anchor",
     coordinatorInstanceId: "ui_real_anchor",
-    anchorMountToken: ghostRecoveryRequest.anchorMountToken,
+    anchorMountToken: ghostMountRequest.anchorMountToken,
   });
   assert.equal(correctGhostAck.accepted, true);
   assert.ok(correctGhostAck.task.anchorMountVerifiedAt);
   assert.equal(correctGhostAck.task.anchorMountCoordinatorId, "ui_real_anchor");
   assert.equal(correctGhostAck.task.anchorMountRecoveryRequired, false,
-    "a token-authenticated iframe ACK must permanently clear ghost recovery state");
+    "a token-authenticated iframe ACK must permanently clear verification-pending state");
   const verifiedAt = correctGhostAck.task.anchorMountVerifiedAt;
   const ghostAfterOtherApp = runtime.continuationTask({ action: "status", taskId: ghostAnchor.task.id });
   assert.equal(ghostAfterOtherApp.task.anchorMountVerifiedAt, verifiedAt);
@@ -2020,10 +2101,13 @@ try {
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     hostTurnFingerprint: "host-turn-a-hash",
   });
-  assert.equal(turnASameTurnRepeat.recoveryRetry, false,
-    "repeated initial issuance calls must stay idempotent instead of minting another card generation");
+  assert.equal(turnASameTurnRepeat.accepted, false,
+    "repeated initial issuance calls must be rejected so the Host cannot create a second UI-bearing transcript node");
+  assert.equal(turnASameTurnRepeat.reason, "anchor-mount-verification-pending");
+  assert.equal(turnASameTurnRepeat.alreadyRequested, true);
   assert.equal(turnASameTurnRepeat.anchorMountGeneration, 1);
-  assert.equal(turnASameTurnRepeat.anchorMountToken, turnAFirstIssuance.anchorMountToken);
+  assert.equal(turnASameTurnRepeat.anchorMountToken, undefined,
+    "a repeated call must never disclose a mount capability that could render another card");
   const turnAWork = runtime.ensureContinuationTaskContract({
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     workspaceId: "ws_turn_aware_ghost",
@@ -2032,7 +2116,9 @@ try {
     hostTurnFingerprint: "host-turn-a-hash",
   });
   assert.equal(turnAWork.initialAnchorRequired, false,
-    "a fresh unverified issuance must keep its provisional window and avoid self-locking");
+    "an already-issued anchor must never authorize another UI-bearing result");
+  assert.equal(turnAWork.anchorMountVerificationPending, true,
+    "substantive work must remain fail-closed until the one permitted card ACKs");
   assert.equal(runtime.continuationSupervisorDirective({
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     workspaceId: "ws_turn_aware_ghost",
@@ -2050,6 +2136,7 @@ try {
   assert.equal(turnBWork.initialAnchorRequired, false,
     "a different assistant-turn fingerprint must not rotate a fresh unverified conversation card");
   assert.equal(turnBWork.task.anchorMountRecoveryRequired, false);
+  assert.equal(turnBWork.anchorMountVerificationPending, true);
   assert.equal(runtime.continuationSupervisorDirective({
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     workspaceId: "ws_turn_aware_ghost",
@@ -2061,10 +2148,12 @@ try {
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     hostTurnFingerprint: "host-turn-b-hash",
   });
-  assert.equal(turnBFreshRepeat.recoveryRetry, false);
+  assert.equal(turnBFreshRepeat.accepted, false);
+  assert.equal(turnBFreshRepeat.reason, "anchor-mount-verification-pending");
+  assert.equal(turnBFreshRepeat.alreadyRequested, true);
   assert.equal(turnBFreshRepeat.anchorMountGeneration, 1);
-  assert.equal(turnBFreshRepeat.anchorMountToken, turnAFirstIssuance.anchorMountToken,
-    "a later turn must reuse the still-provisional initial issuance rather than creating a second card");
+  assert.equal(turnBFreshRepeat.anchorMountToken, undefined,
+    "a later turn must not receive another UI mount capability");
 
   runtime.database.sqlite.prepare(
     "update continuation_tasks set anchor_mount_requested_at=? where id=?",
@@ -2076,34 +2165,36 @@ try {
     substantive: false,
     hostTurnFingerprint: "host-turn-b-hash",
   });
-  assert.equal(staleGhostWork.initialAnchorRequired, true,
-    "only a genuinely stale unverified issuance may request ghost recovery");
-  assert.equal(staleGhostWork.task.anchorMountRecoveryRequired, true);
+  assert.equal(staleGhostWork.initialAnchorRequired, false,
+    "even a very old unverified issuance must not permit a second transcript card");
+  assert.equal(staleGhostWork.task.anchorMountRecoveryRequired, false);
+  assert.equal(staleGhostWork.anchorMountVerificationPending, true);
   assert.equal(runtime.continuationSupervisorDirective({
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     workspaceId: "ws_turn_aware_ghost",
     hostTurnFingerprint: "host-turn-b-hash",
-  })?.reanchorRequired, true,
-    "an aged unverified ghost must request recovery even though later verified cards never do");
+  }), undefined,
+    "an aged unverified issuance must stay fail-closed instead of requesting a duplicate card");
   const turnBRecovery = runtime.prepareContinuationAnchorMount({
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     hostTurnFingerprint: "host-turn-b-hash",
   });
-  assert.equal(turnBRecovery.recoveryRetry, true);
-  assert.equal(turnBRecovery.anchorMountGeneration, 2,
-    "stale unverified ghost recovery must advance the anchor generation exactly once");
-  assert.notEqual(turnBRecovery.anchorMountToken, turnAFirstIssuance.anchorMountToken,
-    "ghost recovery must rotate its token so a delayed old iframe cannot become active");
+  assert.equal(turnBRecovery.accepted, false);
+  assert.equal(turnBRecovery.reason, "anchor-mount-verification-pending");
+  assert.equal(turnBRecovery.anchorMountGeneration, 1,
+    "an unverified issuance must keep generation one permanently");
+  assert.equal(turnBRecovery.anchorMountToken, undefined,
+    "single-card enforcement must not disclose a second mount capability");
   const turnBSameTurnRepeat = runtime.prepareContinuationAnchorMount({
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     hostTurnFingerprint: "host-turn-b-hash",
   });
-  assert.equal(turnBSameTurnRepeat.recoveryRetry, false,
-    "the ghost-recovery issuance must itself be idempotent while still provisional");
-  assert.equal(turnBSameTurnRepeat.anchorMountGeneration, 2);
-  assert.equal(turnBSameTurnRepeat.anchorMountToken, turnBRecovery.anchorMountToken);
+  assert.equal(turnBSameTurnRepeat.accepted, false);
+  assert.equal(turnBSameTurnRepeat.reason, "anchor-mount-verification-pending");
+  assert.equal(turnBSameTurnRepeat.anchorMountGeneration, 1);
+  assert.equal(turnBSameTurnRepeat.anchorMountToken, undefined);
   const turnBWorkAfterRecovery = runtime.ensureContinuationTaskContract({
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
     workspaceId: "ws_turn_aware_ghost",
@@ -2111,41 +2202,33 @@ try {
     substantive: false,
     hostTurnFingerprint: "host-turn-b-hash",
   });
-  assert.equal(turnBWorkAfterRecovery.initialAnchorRequired, false,
-    "the recovered provisional generation must not self-lock before its iframe ACK");
-  const staleTurnAAck = runtime.continuationTask({
-    action: "anchor-mounted",
-    taskId: turnGhostAnchor.task.id,
-    conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_delayed_generation_one",
-    anchorMountToken: turnAFirstIssuance.anchorMountToken,
-  });
-  assert.equal(staleTurnAAck.accepted, false);
-  assert.equal(staleTurnAAck.reason, "anchor-mount-token-mismatch",
-    "a delayed old generation must never certify itself after recovery supersedes it");
+  assert.equal(turnBWorkAfterRecovery.initialAnchorRequired, false);
+  assert.equal(turnBWorkAfterRecovery.anchorMountVerificationPending, true,
+    "the Task Contract must remain blocked until the original card verifies");
   const turnBVerified = runtime.continuationTask({
     action: "anchor-mounted",
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_generation_two",
-    anchorMountToken: turnBRecovery.anchorMountToken,
+    coordinatorInstanceId: "ui_generation_one",
+    anchorMountToken: turnAFirstIssuance.anchorMountToken,
+    anchorMountGeneration: 1,
   });
   assert.equal(turnBVerified.accepted, true);
   assert.ok(turnBVerified.task.anchorMountVerifiedAt);
-  assert.equal(turnBVerified.task.anchorMountGeneration, 2);
+  assert.equal(turnBVerified.task.anchorMountGeneration, 1);
   const persistedGenerationCapability = runtime.database.sqlite.prepare(
     "select anchor_mount_token, anchor_mount_generation from continuation_tasks where id=?",
   ).get(turnGhostAnchor.task.id);
-  assert.equal(persistedGenerationCapability.anchor_mount_token, turnBRecovery.anchorMountToken,
+  assert.equal(persistedGenerationCapability.anchor_mount_token, turnAFirstIssuance.anchorMountToken,
     "the verified immutable card must retain its generation capability so the same transcript card can rehydrate after refresh/restart");
-  assert.equal(Number(persistedGenerationCapability.anchor_mount_generation), 2);
+  assert.equal(Number(persistedGenerationCapability.anchor_mount_generation), 1);
   const wrongRehydrateToken = runtime.continuationTask({
     action: "anchor-mounted",
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_generation_two_wrong_token",
+    coordinatorInstanceId: "ui_generation_one_wrong_token",
     anchorMountToken: "00000000-0000-4000-8000-000000000001",
-    anchorMountGeneration: 2,
+    anchorMountGeneration: 1,
   });
   assert.equal(wrongRehydrateToken.accepted, false);
   assert.equal(wrongRehydrateToken.reason, "anchor-mount-token-mismatch",
@@ -2154,31 +2237,31 @@ try {
     action: "anchor-mounted",
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_generation_one_rehydrate",
-    anchorMountToken: turnBRecovery.anchorMountToken,
-    anchorMountGeneration: 1,
+    coordinatorInstanceId: "ui_generation_two_invalid",
+    anchorMountToken: turnAFirstIssuance.anchorMountToken,
+    anchorMountGeneration: 2,
   });
   assert.equal(staleRehydrateGeneration.accepted, false);
   assert.equal(staleRehydrateGeneration.reason, "stale-anchor-generation",
-    "an older card generation cannot regain supervisor ownership even with a copied current token");
+    "a non-authoritative card generation cannot regain supervisor ownership even with the current token");
   const turnBRehydrated = runtime.continuationTask({
     action: "anchor-mounted",
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_generation_two_rehydrated",
-    anchorMountToken: turnBRecovery.anchorMountToken,
-    anchorMountGeneration: 2,
+    coordinatorInstanceId: "ui_generation_one_rehydrated",
+    anchorMountToken: turnAFirstIssuance.anchorMountToken,
+    anchorMountGeneration: 1,
   });
   assert.equal(turnBRehydrated.accepted, true);
   assert.equal(turnBRehydrated.reason, "anchor-coordinator-rebound");
-  assert.equal(turnBRehydrated.task.anchorMountGeneration, 2,
+  assert.equal(turnBRehydrated.task.anchorMountGeneration, 1,
     "same-card iframe rehydration must never mint a second visible generation");
-  assert.equal(turnBRehydrated.task.anchorMountCoordinatorId, "ui_generation_two_rehydrated");
+  assert.equal(turnBRehydrated.task.anchorMountCoordinatorId, "ui_generation_one_rehydrated");
   const oldCoordinatorSignal = runtime.continuationTask({
     action: "host-signal",
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_generation_two",
+    coordinatorInstanceId: "ui_generation_one",
     hostProfileId: "chatgpt@rehydrate-test",
     hostSignal: "teardown",
     elapsedMs: 1_000,
@@ -2190,7 +2273,7 @@ try {
     action: "host-signal",
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_generation_two_rehydrated",
+    coordinatorInstanceId: "ui_generation_one_rehydrated",
     hostProfileId: "chatgpt@rehydrate-test",
     hostSignal: "connected",
     elapsedMs: 0,
@@ -2221,7 +2304,7 @@ try {
     "even a direct later-turn anchor attempt must be idempotent after verified mount truth");
   assert.equal(turnCAfterVerifiedAnchorAttempt.anchorMountToken, undefined,
     "verified conversation cards must not mint later-turn mount capabilities");
-  assert.equal(turnCAfterVerifiedAnchorAttempt.task.anchorMountGeneration, 2,
+  assert.equal(turnCAfterVerifiedAnchorAttempt.task.anchorMountGeneration, 1,
     "verified conversation cards must keep their generation stable across later turns");
   const turnCAfterServerRestartWithoutExplicitIdentity = runtime.ensureContinuationTaskContract({
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
@@ -2240,7 +2323,7 @@ try {
     action: "claim-continuation",
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_delayed_generation_one",
+    coordinatorInstanceId: "ui_generation_one",
     note: "manual recovery",
   });
   assert.equal(staleGenerationClaim.accepted, false,
@@ -2250,7 +2333,7 @@ try {
     action: "claim-continuation",
     taskId: turnGhostAnchor.task.id,
     conversationScopeId: "v1/test-turn-aware-ghost-anchor",
-    coordinatorInstanceId: "ui_generation_two_rehydrated",
+    coordinatorInstanceId: "ui_generation_one_rehydrated",
     note: "manual recovery",
   });
   assert.equal(currentGenerationClaim.accepted, true,
@@ -2264,7 +2347,7 @@ try {
     "select count(*) as count from continuation_tasks where conversation_scope_id=?",
   ).get("v1/test-turn-aware-ghost-anchor");
   assert.equal(Number(turnAwareRows.count), 1,
-    "ghost recovery and all later turns must remain inside one lifetime task instead of creating shadow tasks");
+    "all anchor attempts and later turns must remain inside one lifetime task instead of creating shadow tasks");
 
   const globalFirst = runtime.ensureContinuationTaskContract({
     conversationScopeId: "v1/test-global-first-card",
@@ -3181,8 +3264,8 @@ try {
   `).get(proactiveAck.task.id);
   assert.equal(afterControlOnlyTouch.delivery_owner, "synthetic-active",
     "control-plane liveness must not fulfill a synthetic resumed-turn work obligation");
-  assert.equal(afterControlOnlyTouch.delivery_token, proactiveClaim.deliveryToken,
-    "control-plane liveness must leave the active synthetic generation intact");
+  assert.equal(afterControlOnlyTouch.delivery_token, null,
+    "the one-time delivery capability must remain consumed after the server-owned synthetic claim");
   assert.equal(Number(afterControlOnlyTouch.substantive_activity_count), controlOnlyCountBefore,
     "control-plane liveness must not increment substantiveActivityCount");
 
@@ -3236,12 +3319,12 @@ try {
   const afterRealToolBeforeCheckpoint = runtime.continuationTask({
     action: "status",
     taskId: proactiveAck.task.id,
-    deliveryToken: fulfilledToken,
   });
   assert.equal(afterRealToolBeforeCheckpoint.task.syntheticResumeWorkRequired, true,
     "a single ordinary tool call must not by itself retire the synthetic resumed-turn obligation");
   assert.equal(afterRealToolBeforeCheckpoint.task.deliveryOwner, "synthetic-active");
-  assert.equal(afterRealToolBeforeCheckpoint.task.deliveryToken, fulfilledToken);
+  assert.equal(afterRealToolBeforeCheckpoint.task.deliveryToken, undefined,
+    "ordinary status/tool traffic after claim must not require the consumed delivery capability");
   const noOpResumeCheckpoint = runtime.continuationTask({
     action: "checkpoint",
     taskId: proactiveAck.task.id,
@@ -3254,9 +3337,20 @@ try {
     progressFingerprint: "synthetic-resume-made-material-progress",
     evidence: { syntheticResumeMaterialWork: true },
   });
-  assert.equal(fulfilledResume.task.syntheticResumeWorkRequired, false,
-    "a real post-ACK tool operation followed by a material checkpoint must fulfill the synthetic resumed-turn obligation");
-  assert.equal(fulfilledResume.task.deliveryOwner, "synthetic-worked");
+  assert.equal(fulfilledResume.task.syntheticResumeWorkRequired, true,
+    "material progress must not let a synthetic turn stop while a runnable milestone still remains");
+  assert.equal(fulfilledResume.task.deliveryOwner, "synthetic-active");
+  assert.equal(fulfilledResume.task.deliveryToken, undefined);
+  const completedResume = runtime.continuationTask({
+    action: "checkpoint",
+    taskId: proactiveAck.task.id,
+    completedMilestones: ["finish after timeout recovery"],
+    progressFingerprint: "synthetic-resume-finished-milestone",
+    evidence: { syntheticResumeMilestoneFinished: true },
+  });
+  assert.equal(completedResume.task.syntheticResumeWorkRequired, false,
+    "real post-ACK work may retire synthetic ownership once the runnable milestone set is actually complete");
+  assert.equal(completedResume.task.deliveryOwner, "synthetic-worked");
   const lateFulfilledSynthetic = runtime.continuationTask({
     action: "status",
     taskId: proactiveAck.task.id,
@@ -3338,8 +3432,19 @@ try {
     progressFingerprint: "direct-synthetic-work-checkpointed",
     evidence: { directSyntheticWork: "verified" },
   });
-  assert.equal(directMaterialCheckpoint.task.deliveryOwner, "synthetic-worked");
-  assert.equal(directMaterialCheckpoint.task.deliveryToken, undefined);
+  assert.equal(directMaterialCheckpoint.task.deliveryOwner, "synthetic-active",
+    "a progress-only checkpoint must preserve synthetic ownership while the direct-work milestone remains runnable");
+  assert.equal(directMaterialCheckpoint.task.deliveryToken, undefined,
+    "the generation remains server-owned after the one-time status claim");
+  const directCompletedCheckpoint = runtime.continuationTask({
+    action: "checkpoint",
+    taskId: directWork.task.id,
+    completedMilestones: ["perform direct resumed work"],
+    progressFingerprint: "direct-synthetic-work-complete",
+    evidence: { directSyntheticWorkComplete: true },
+  });
+  assert.equal(directCompletedCheckpoint.task.deliveryOwner, "synthetic-worked");
+  assert.equal(directCompletedCheckpoint.task.deliveryToken, undefined);
   const lateDirectSynthetic = runtime.continuationTask({
     action: "status",
     taskId: directWork.task.id,
@@ -3369,19 +3474,23 @@ try {
   });
   assert.equal(manualRaceClaim.accepted, true);
   const supersededToken = manualRaceClaim.deliveryToken;
-  runtime.continuationTask({
+  const manualDelivered = runtime.continuationTask({
     action: "delivery-result",
     taskId: manualTakeover.task.id,
     deliveryResult: "accepted",
     deliveryMethod: "app.sendMessage",
   });
+  assert.equal(manualDelivered.task.deliveryToken, supersededToken);
+  assert.equal(manualDelivered.task.deliveryOwner, "synthetic-pending");
+  assert.equal(manualDelivered.task.continuationPending, true);
   const manualOwner = runtime.continuationTask({
     action: "status",
     taskId: manualTakeover.task.id,
+    manualTakeover: true,
   });
   assert.equal(manualOwner.accepted, true);
   assert.equal(manualOwner.reason, "manual-turn-took-over",
-    "a real/manual model turn that reaches DevSpace without the synthetic token must win the race");
+    "a real/manual model turn must explicitly claim takeover before it can revoke synthetic ownership");
   assert.equal(manualOwner.task.deliveryOwner, "manual");
   assert.equal(manualOwner.task.continuationPending, false);
   assert.ok(manualOwner.task.manualTakeoverAt);

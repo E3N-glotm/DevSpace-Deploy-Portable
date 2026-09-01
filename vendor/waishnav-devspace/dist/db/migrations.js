@@ -149,6 +149,11 @@ const migrations = [
         name: "continuation-card-workset-generation-architecture",
         up: migrateContinuationCardWorksetGenerationArchitecture,
     },
+    {
+        version: 31,
+        name: "continuation-1.1.56-runtime-reset",
+        up: migrateContinuation1156RuntimeReset,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -1145,6 +1150,46 @@ function migrateContinuationCardWorksetGenerationArchitecture(sqlite) {
           stall_evidence=null,
           updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
       where conversation_scope_id glob 'v1/*';
+    `);
+}
+function migrateContinuation1156RuntimeReset(sqlite) {
+    // 1.1.55 could leave durable READY generations with no sender and could
+    // create non-canonical host-scope-unavailable shadow tasks when an App call
+    // omitted request metadata. Revoke all pre-1.1.56 execution ownership once,
+    // archive unfinished canonical worksets, and remove non-canonical shadows.
+    // ConversationCard identity/mount truth is deliberately preserved so an
+    // upgrade cannot create a second transcript-visible milestone card.
+    sqlite.exec(`
+      update continuation_generations
+      set state='SUPERSEDED',
+          closed_at=coalesce(closed_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          failure_reason=coalesce(failure_reason,'1.1.56-runtime-reset'),
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      where state in ('READY','CLAIMED','DELIVERING','DELIVERED','WORK_REQUIRED');
+
+      update continuation_worksets
+      set state='ABANDONED',continuation_due_at=null,
+          completed_at=coalesce(completed_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      where state in ('RUNNING','WAITING_EXTERNAL','SUSPECTED_STALL','PAUSED');
+
+      update continuation_conversation_cards
+      set active_workset_id=null,sender_instance_id=null,
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');
+
+      update continuation_tasks
+      set state='ABANDONED_AUTO_TASK',terminal_reason='1.1.56-runtime-reset',
+          continuation_pending=0,delivery_token=null,delivery_owner=null,
+          delivery_owner_expires_at=null,delivery_ack_started_at=null,
+          delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
+          watch_process_handles_json='[]',
+          stall_state='ACTIVE',stall_suspected_at=null,stall_armed_at=null,
+          stall_probe_count=0,stall_last_probe_at=null,stall_evidence=null,
+          turn_lease_expires_at=null,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      where state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK');
+
+      delete from continuation_tasks
+      where conversation_scope_id not glob 'v1/*';
     `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

@@ -25,24 +25,64 @@ try {
     "the verified card App must use the dedicated sender bridge");
   assert.match(coordinatorSource, /callSender\("claim"/,
     "Host delivery must claim a server ContinuationGeneration through the sender bridge");
-  assert.match(serverSource, /z\.enum\(\["heartbeat",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
-    "continuation_sender must expose relay heartbeat plus a final authorize-delivery phase before Host user-role transport");
+  assert.match(serverSource, /z\.enum\(\["bind",\s*"heartbeat",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
+    "continuation_sender must expose context-derived bind, relay heartbeat, and final authorize-delivery before Host user-role transport");
+  assert.match(serverSource, /function enablePortableContinuationAnchorRenderer[\s\S]{0,1200}continuation_anchor[\s\S]{0,800}open_workspace/,
+    "the Portable server must adapt the upstream Workspace App renderer so continuation_anchor is a real visible result card instead of an ACK-only ghost iframe");
+  assert.match(serverSource, /openAiConversationScopeId\(context\?\._meta\)[\s\S]{0,900}input\.action === "bind"[\s\S]{0,700}bindContinuationSender/,
+    "sender bind must derive the real conversation scope from the authenticated App call context rather than trust Host-forwarded result metadata");
+  assert.match(serverSource, /claimedConversationScopeId:\s*input\.conversationScopeId[\s\S]{0,220}anchorMountGeneration:\s*input\.anchorMountGeneration/,
+    "sender bind must forward the verified task/card fallback when the Host strips App call conversation metadata");
+  assert.match(coordinatorSource, /async function bindSenderTransport\([\s\S]{0,900}action:\s*"bind"/,
+    "every current Workspace App transport must be able to bind sender authority directly even if Host strips custom tool-result _meta");
+  assert.match(runtimeSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0,3600}sender_instance_id/,
+    "runtime state must persist the currently bound sender independently of the immutable visible card identity");
   assert.match(serverSource, /"devspace\/continuation-sender": capability/,
     "ordinary UI-bearing DevSpace results must be able to inherit a hidden verified sender capability without minting another milestone card");
   assert.match(coordinatorSource, /function senderCapabilityFromResult\(params\)[\s\S]*?devspace\/continuation-sender/,
     "the Workspace App coordinator must parse hidden inherited sender capability from ordinary UI-bearing tool results");
   assert.match(coordinatorSource, /function activeSenderCapability\(\)[\s\S]*?state\.senderCapability[\s\S]*?state\.anchorSurface[\s\S]*?return undefined;/,
     "sender transport selection must prefer inherited sender capability while retaining the verified anchor surface only as a transport fallback");
-  assert.match(coordinatorSource, /function senderTransportAvailable\(\)\s*\{\s*return Boolean\(state\.connected && state\.task\?\.anchorMountVerifiedAt && activeSenderCapability\(\)\);\s*\}/,
-    "sender availability must depend on a verified conversation card plus an active transport capability, not on visible anchor-card identity");
+  assert.match(coordinatorSource, /function senderTransportAvailable\(\)[\s\S]{0,500}anchorMountRequestedAt[\s\S]{0,240}activeSenderCapability\(\)/,
+    "sender availability must start from the single issued card capability even when iframe verification is delayed");
   assert.match(coordinatorSource, /callSender\("heartbeat"/,
     "a transport-only DevSpace App must renew sender liveness through the app-only bridge rather than pretending to be the anchor coordinator");
   assert.match(runtimeSource, /beginContinuationModelRequest[\s\S]{0,1800}continuationModelRequestInFlight/,
     "the runtime must explicitly track model-originated DevSpace requests so a long command cannot look like an ended assistant turn");
-  assert.match(runtimeSource, /COMPLETION_QUIET_RECOVERY_MS = 120_000/,
-    "silent-turn recovery must use a conservative server-side quiet backstop instead of the old short iframe heuristic");
-  assert.match(coordinatorSource, /callSender\("claim"[\s\S]{0,3500}updateModelContext[\s\S]{0,2200}callSender\("authorize-delivery"[\s\S]{0,1600}sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\)\)/,
+  assert.doesNotMatch(serverSource, /continuationDeliveryToken:\s*z\.string\(\)/,
+    "ordinary DevSpace tool schemas must never expose a synthetic delivery token that their real MCP contracts do not accept");
+  assert.match(serverSource, /continuationModelToolAuthorization\([\s\S]{0,1200}turn-ownership precondition blocked/,
+    "manual/synthetic ownership must be checked before the requested tool handler can run");
+  assert.match(runtimeSource, /continuationModelToolAuthorization\(input = \{\}\)[\s\S]{0,4200}turn-origin-handshake-required/,
+    "runtime ownership authorization must fail closed without guessing whether an ambiguous request is manual or synthetic");
+  assert.match(serverSource, /manualTakeover:\s*z\.boolean\(\)\.optional\(\)/,
+    "manual takeover must be an explicit status CAS marker instead of being inferred from a missing synthetic token");
+  assert.match(serverSource, /manual user turn that races a READY or active automatic generation sets manualTakeover=true/,
+    "the capabilities guidance must teach the same explicit manual takeover handshake as the tool schema");
+  assert.doesNotMatch(serverSource, /manual user turn omits it so the server atomically supersedes/,
+    "stale implicit manual takeover guidance must not survive beside the fail-closed runtime contract");
+  assert.match(runtimeSource, /synthetic-generation-lease-authorized[\s\S]{0,500}deliveryGeneration[\s\S]{0,300}turnLeaseId/,
+    "ordinary tools must inherit a persisted server-owned generation lease after the one-time status claim");
+  assert.doesNotMatch(coordinatorSource, /continuationDeliveryToken|syntheticDeliveryToken|DevSpace resume token/,
+    "neither the visible synthetic message nor hidden context may ask the model to transport generation UUIDs");
+  assert.match(runtimeSource, /COMPLETION_QUIET_RECOVERY_MS = 40_000/,
+    "legacy rows without a usable turn lease must recover inside the one-minute ceiling");
+  assert.match(runtimeSource, /COMPLETION_STALL_SUSPECT_MS = 25_000/,
+    "the primary completion-driven inactivity lease must remain below the one-minute ceiling");
+  assert.match(runtimeSource, /COMPLETION_STALL_CONFIRM_MS = 10_000/,
+    "completion-driven recovery must use a second server-side confirmation window while remaining below one minute");
+  assert.match(runtimeSource, /DELIVERY_ACK_RETRY_MAX_MS = 45_000/,
+    "unacknowledged Host delivery must never back off beyond one minute");
+  assert.match(runtimeSource, /server-turn-lease-expired-no-inflight-model-request[\s\S]{0,2600}server-turn-lease-confirmed-no-inflight-model-request/,
+    "the resident supervisor must recover through a two-stage lease path without requiring a surviving Anchor iframe");
+  assert.match(coordinatorSource, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(\),\s*async \(\) =>/,
     "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
+  assert.match(coordinatorSource, /authorize-delivery[\s\S]{0,1800}sendFollowUp\(visibleContinuationTrigger\(\),\s*async \(\) => \{[\s\S]{0,900}callTask\("status"\)/,
+    "the coordinator must re-read authoritative terminal state inside the final Host-send barrier after delivery authorization");
+  assert.match(coordinatorSource, /function startSupervisor\(\)[\s\S]{0,700}terminal\(state\.task\)/,
+    "terminal tasks must not retain a retry or quiet-probe supervisor timer");
+  assert.match(runtimeSource, /closeTerminalContinuationArtifacts\(taskId[\s\S]{0,4200}state='NO_WORK'[\s\S]{0,2600}delivery_token=null[\s\S]{0,1600}stall_armed_at=null/,
+    "terminal transitions must seal live synthetic generations and clear retry/delivery/quiet-recovery latches");
   assert.match(coordinatorSource, /callSender\("delivery-result"/,
     "Host delivery results must return to the Generation FSM through the sender bridge");
   assert.doesNotMatch(coordinatorSource, /callTask\("claim-continuation"/,
@@ -53,7 +93,7 @@ try {
     "generation delivery must update the canonical continuation_tasks.last_send_result column");
 
   const migration = db.prepare("select max(version) as version from devspace_schema_migrations").get();
-  assert.equal(Number(migration.version), 30, "1.1.54 architecture migration must be applied");
+  assert.equal(Number(migration.version), 31, "1.1.56 continuation runtime reset migration must be applied");
   assert.equal(db.prepare("select value from continuation_runtime_meta where key='schema_epoch'").get().value, "2");
 
   const expectedTables = [
@@ -99,6 +139,80 @@ try {
     conversationScopeId: scope,
   });
   assert.ok(mount.anchorMountToken);
+  snapshot = runtime.continuationArchitectureSnapshot(scope);
+  assert.equal(snapshot.card.mount_state, "REQUESTED",
+    "issuing the single card must persist REQUESTED before any iframe ACK");
+  const pendingStatus = runtime.continuationTask({
+    action: "status",
+    taskId: first.task.id,
+    conversationScopeId: scope,
+  });
+  assert.equal(pendingStatus.task.anchorMountVerificationPending, true);
+  const pendingCapability = runtime.continuationSenderCapability({ taskId: first.task.id });
+  assert.ok(pendingCapability,
+    "the issued card must provide sender capability before iframe ACK so a later App relay can recover transport");
+  assert.equal(pendingCapability.anchorMountToken, mount.anchorMountToken);
+  assert.equal(pendingCapability.anchorMountGeneration, mount.anchorMountGeneration);
+  assert.equal(pendingCapability.anchorMountVerified, false);
+  const pendingBind = runtime.bindContinuationSender({
+    claimedConversationScopeId: scope,
+    taskId: first.task.id,
+    senderInstanceId: "ui_pending_transport",
+    anchorMountGeneration: mount.anchorMountGeneration,
+  });
+  assert.equal(pendingBind.accepted, true,
+    "a trusted App relay must bind the already-issued generation without fabricating an iframe ACK or second card");
+  assert.equal(runtime.continuationModelToolAuthorization({ conversationScopeId: scope }).accepted, true,
+    "pending iframe ACK must not block substantive model tools after the one card has been issued");
+  const pendingHeartbeat = runtime.heartbeatContinuationSender({
+    conversationScopeId: scope,
+    taskId: first.task.id,
+    senderInstanceId: "ui_pending_transport",
+    anchorMountToken: mount.anchorMountToken,
+    anchorMountGeneration: mount.anchorMountGeneration,
+  });
+  assert.equal(pendingHeartbeat.accepted, true,
+    "the requested-but-unverified card must sustain sender heartbeat through a trusted App relay");
+  const pendingArmAt = new Date().toISOString();
+  db.prepare(`
+    update continuation_tasks set stall_state='CONTINUATION_ARMED',stall_armed_at=?,
+      stall_evidence='pending-anchor-transport-test',continuation_pending=0,
+      delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,updated_at=?
+    where id=?
+  `).run(pendingArmAt, pendingArmAt, first.task.id);
+  db.prepare(`
+    update continuation_worksets set state='RUNNING',continuation_due_at=?,updated_at=?
+    where id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+  `).run(pendingArmAt, pendingArmAt, scope);
+  const pendingReady = runtime.continuationSupervisorSweep();
+  assert.equal(pendingReady.ready.length, 1,
+    "the resident supervisor must be able to create a generation while iframe ACK is pending");
+  const pendingClaim = runtime.claimReadyContinuationGeneration({
+    conversationScopeId: scope,
+    taskId: first.task.id,
+    senderInstanceId: "ui_pending_transport",
+    anchorMountToken: mount.anchorMountToken,
+    anchorMountGeneration: mount.anchorMountGeneration,
+  });
+  assert.equal(pendingClaim.accepted, true,
+    "a trusted App relay must claim the server-owned automatic generation before iframe ACK");
+  const pendingDelivery = runtime.authorizeContinuationGenerationDelivery({
+    conversationScopeId: scope,
+    taskId: first.task.id,
+    senderInstanceId: "ui_pending_transport",
+    anchorMountToken: mount.anchorMountToken,
+    anchorMountGeneration: mount.anchorMountGeneration,
+    deliveryToken: pendingClaim.deliveryToken,
+  });
+  assert.equal(pendingDelivery.accepted, true,
+    "missing iframe ACK must not block final automatic delivery authorization for the issued card generation");
+  const pendingRejected = runtime.recordContinuationGenerationDelivery({
+    deliveryToken: pendingClaim.deliveryToken,
+    result: "failed",
+    method: "pending-anchor-test",
+  });
+  assert.equal(pendingRejected.accepted, true,
+    "the pending-anchor delivery fixture must release its synthetic generation before the verified-card tests continue");
   const mounted = runtime.continuationTask({
     action: "anchor-mounted",
     taskId: first.task.id,
@@ -123,6 +237,24 @@ try {
   assert.equal(inheritedSenderCapability.anchorMountToken, senderCapability.anchorMountToken);
   assert.equal(inheritedSenderCapability.anchorMountGeneration, senderCapability.anchorMountGeneration,
     "a newer ordinary App relay must inherit the verified card capability without changing card identity or generation");
+  const wrongFallbackBind = runtime.bindContinuationSender({
+    claimedConversationScopeId: scope,
+    taskId: first.task.id,
+    senderInstanceId: "ui_wrong_generation",
+    anchorMountGeneration: inheritedSenderCapability.anchorMountGeneration + 1,
+  });
+  assert.equal(wrongFallbackBind.accepted, false);
+  assert.equal(wrongFallbackBind.reason, "verified-card-generation-mismatch",
+    "an App call without authenticated Host scope must not bind a stale or fabricated card generation");
+  const fallbackBind = runtime.bindContinuationSender({
+    claimedConversationScopeId: scope,
+    taskId: first.task.id,
+    senderInstanceId: "ui_transport_relay",
+    anchorMountGeneration: inheritedSenderCapability.anchorMountGeneration,
+  });
+  assert.equal(fallbackBind.accepted, true,
+    "a current ordinary DevSpace App must recover sender transport from its exact verified task/card result even when Host call metadata omits conversation scope");
+  assert.equal(fallbackBind.anchorMountToken, inheritedSenderCapability.anchorMountToken);
   const relayHeartbeat = runtime.heartbeatContinuationSender({
     conversationScopeId: scope,
     taskId: first.task.id,
@@ -135,6 +267,8 @@ try {
   assert.equal(snapshot.card.card_id, stableCardId);
   assert.equal(snapshot.card.coordinator_instance_id, "ui_architecture_test",
     "transport relay heartbeat must never steal the unique milestone card's anchor coordinator identity");
+  assert.equal(snapshot.card.sender_instance_id, "ui_transport_relay",
+    "transport relay bind must move only sender ownership, independently of immutable card identity");
 
   const checkpoint = runtime.continuationTask({
     action: "checkpoint",
@@ -195,6 +329,37 @@ try {
   assert.equal(firstSweep.ready.length, 0,
     "an expired short model-activity lease must not independently authorize a new ChatGPT turn");
 
+  const durableProcessGuard = runtime.trackContinuationActivityProcess({
+    conversationScopeId: scope,
+    processHandle: "architecture-long-process",
+    running: true,
+  });
+  assert.equal(durableProcessGuard.accepted, true);
+  assert.deepEqual(durableProcessGuard.handles, ["architecture-long-process"]);
+  db.prepare(`
+    update continuation_tasks set turn_lease_expires_at=?,last_model_activity_at=?,
+      stall_state='SUSPECTED_STALL',stall_suspected_at=?
+    where id=?
+  `).run(
+    new Date(Date.now() - 60_000).toISOString(),
+    new Date(Date.now() - 10 * 60_000).toISOString(),
+    new Date(Date.now() - 60_000).toISOString(),
+    first.task.id,
+  );
+  assert.equal(runtime.continuationSupervisorSweep().ready.length, 0,
+    "a durable completion-driven process guard must suppress READY even after both lease and confirmation windows have expired");
+  assert.equal(runtime.continuationActivityProcessGuards().length, 1,
+    "the resident server must be able to discover persisted completion-driven process guards after the originating tool call returns");
+  const releasedProcessGuard = runtime.trackContinuationActivityProcess({
+    conversationScopeId: scope,
+    processHandle: "architecture-long-process",
+    running: false,
+  });
+  assert.equal(releasedProcessGuard.accepted, true);
+  assert.deepEqual(releasedProcessGuard.handles, []);
+  assert.equal(runtime.continuationActivityProcessGuards().length, 0,
+    "a completed durable process must release the guard so ordinary lease recovery can resume");
+
   db.prepare(`
     update continuation_tasks set turn_lease_expires_at=?,last_model_activity_at=?,
       stall_state='ACTIVE',stall_suspected_at=null,stall_probe_count=0,
@@ -232,10 +397,10 @@ try {
   assert.equal(runtime.continuationModelRequestInFlight(scope), false);
   const quietRecoverySweep = runtime.continuationSupervisorSweep();
   assert.equal(quietRecoverySweep.ready.length, 1,
-    "after the real request ends, a persistently unfinished completion-driven task may recover through the conservative server-quiet backstop");
+    "after the real request ends, a persistently suspected completion-driven task may recover through the server-side lease confirmation path");
   const quietRecoveryLegacy = db.prepare("select stall_state,stall_evidence from continuation_tasks where id=?").get(first.task.id);
   assert.equal(quietRecoveryLegacy.stall_state, "CONTINUATION_ARMED");
-  assert.equal(quietRecoveryLegacy.stall_evidence, "server-quiet-no-inflight-model-request");
+  assert.equal(quietRecoveryLegacy.stall_evidence, "server-turn-lease-confirmed-no-inflight-model-request");
   const quietGeneration = quietRecoverySweep.ready[0].generation;
   assert.ok(quietGeneration > activeGeneration.generation);
   db.prepare(`
@@ -371,16 +536,34 @@ try {
   assert.equal(delivered.accepted, true);
   assert.equal(delivered.generation.state, "WORK_REQUIRED");
 
+  const preAckManualTool = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
+  assert.equal(preAckManualTool.accepted, false,
+    "a manual-looking tool call must be blocked before execution while a synthetic delivery owns the turn");
+  assert.equal(preAckManualTool.reason, "turn-origin-handshake-required");
+  const preAckSyntheticTool = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
+  assert.equal(preAckSyntheticTool.accepted, false,
+    "ordinary work must not bypass the first server-owned status/readiness claim");
+  assert.equal(preAckSyntheticTool.reason, "turn-origin-handshake-required");
+
   const syntheticAck = runtime.continuationTask({
     action: "status",
     taskId: first.task.id,
     conversationScopeId: scope,
     workspaceId: "ws_architecture",
-    deliveryToken: senderDelivered.deliveryToken,
   });
-  assert.equal(syntheticAck.accepted, true);
-  assert.equal(syntheticAck.reason, "continuation-resume-acknowledged");
+  assert.equal(syntheticAck.accepted, true, JSON.stringify(syntheticAck));
+  assert.equal(syntheticAck.reason, "server-owned-expected-generation-claimed");
   assert.equal(syntheticAck.task.deliveryOwner, "synthetic-active");
+  assert.equal(syntheticAck.task.deliveryToken, undefined,
+    "the one-time delivery capability must be consumed from Task state immediately after claim");
+  const claimedGeneration = db.prepare("select state from continuation_generations where delivery_token=?").get(senderDelivered.deliveryToken);
+  assert.equal(claimedGeneration.state, "TURN_ACKED",
+    "the generation FSM must persist the server-owned expected-turn claim");
+  const authorizedSyntheticTool = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
+  assert.equal(authorizedSyntheticTool.accepted, true,
+    "after status claim, an ordinary substantive call must be authorized without a delivery token");
+  assert.equal(authorizedSyntheticTool.owner, "synthetic");
+  assert.equal(authorizedSyntheticTool.deliveryGeneration, senderDelivered.generation);
 
   db.prepare("update continuation_generations set due_at=? where delivery_token=?")
     .run(past, senderDelivered.deliveryToken);
@@ -428,6 +611,64 @@ try {
   assert.equal(rejectedRetrySweep.ready.length, 1,
     "a Host delivery rejection must remain retryable without requiring a fresh model request");
 
+  const readyBeforeManualStatus = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
+  assert.equal(readyBeforeManualStatus.accepted, false);
+  assert.equal(readyBeforeManualStatus.reason, "turn-origin-handshake-required",
+    "a READY-but-unclaimed automatic generation must block manual side effects before execution");
+  const readyGenerationBeforeManualStatus = db.prepare(`
+    select * from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and owner_type='synthetic' and state='READY'
+    order by generation asc limit 1
+  `).get(scope);
+  assert.ok(readyGenerationBeforeManualStatus,
+    "the pre-claim race fixture must contain one READY synthetic generation");
+  const ambiguousReadyStatus = runtime.continuationTask({
+    action: "status",
+    taskId: first.task.id,
+    conversationScopeId: scope,
+    workspaceId: "ws_architecture",
+  });
+  assert.equal(ambiguousReadyStatus.accepted, false,
+    "a tokenless status must not be guessed to be manual while a synthetic READY generation exists");
+  assert.equal(ambiguousReadyStatus.reason, "turn-origin-handshake-required");
+  const stillReadyAfterAmbiguousStatus = db.prepare("select state,failure_reason from continuation_generations where id=?")
+    .get(readyGenerationBeforeManualStatus.id);
+  assert.equal(stillReadyAfterAmbiguousStatus.state, "READY",
+    "an auto-resumed model that forgets deliveryToken must not supersede its own READY generation");
+  assert.equal(stillReadyAfterAmbiguousStatus.failure_reason, null);
+  const readyManualTakeover = runtime.continuationTask({
+    action: "status",
+    taskId: first.task.id,
+    conversationScopeId: scope,
+    workspaceId: "ws_architecture",
+    manualTakeover: true,
+  });
+  assert.equal(readyManualTakeover.accepted, true);
+  assert.equal(readyManualTakeover.reason, "manual-turn-took-over-ready-generation",
+    "manual status must atomically win even before any sender has claimed the READY generation");
+  const supersededReady = db.prepare("select state,failure_reason from continuation_generations where id=?")
+    .get(readyGenerationBeforeManualStatus.id);
+  assert.equal(supersededReady.state, "SUPERSEDED");
+  assert.equal(supersededReady.failure_reason, "manual-turn-took-over-before-sender-claim");
+  assert.equal(runtime.continuationModelToolAuthorization({ conversationScopeId: scope }).accepted, true,
+    "once manual status supersedes the READY generation, untagged substantive calls may execute");
+
+  const raceRearmAt = new Date().toISOString();
+  db.prepare(`
+    update continuation_tasks set stall_state='CONTINUATION_ARMED',stall_armed_at=?,
+      stall_evidence='architecture-manual-race-rearm',continuation_pending=0,
+      delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,updated_at=?
+    where id=?
+  `).run(raceRearmAt, raceRearmAt, first.task.id);
+  db.prepare(`
+    update continuation_worksets set state='RUNNING',continuation_due_at=?,updated_at=?
+    where id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+  `).run(raceRearmAt, raceRearmAt, scope);
+  const raceReadySweep = runtime.continuationSupervisorSweep();
+  assert.equal(raceReadySweep.ready.length, 1,
+    "the claimed-sender race fixture must create one fresh generation after the READY pre-claim takeover test");
+
   const raceSender = runtime.claimReadyContinuationGeneration({
     conversationScopeId: scope,
     senderInstanceId: "sender-manual-race",
@@ -435,11 +676,28 @@ try {
   });
   assert.equal(raceSender.accepted, true);
   assert.ok(raceSender.deliveryToken);
+  const raceBeforeStatus = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
+  assert.equal(raceBeforeStatus.accepted, false);
+  assert.equal(raceBeforeStatus.reason, "turn-origin-handshake-required",
+    "manual side effects must be blocked until status atomically revokes a claimed automatic owner");
+  const ambiguousClaimedStatus = runtime.continuationTask({
+    action: "status",
+    taskId: first.task.id,
+    conversationScopeId: scope,
+    workspaceId: "ws_architecture",
+  });
+  assert.equal(ambiguousClaimedStatus.accepted, false);
+  assert.equal(ambiguousClaimedStatus.reason, "turn-origin-handshake-required",
+    "a claimed synthetic owner must survive a tokenless ambiguous status instead of self-superseding");
+  const claimedAfterAmbiguousStatus = db.prepare("select state,failure_reason from continuation_generations where delivery_token=?")
+    .get(raceSender.deliveryToken);
+  assert.notEqual(claimedAfterAmbiguousStatus.state, "SUPERSEDED");
   const manualTakeover = runtime.continuationTask({
     action: "status",
     taskId: first.task.id,
     conversationScopeId: scope,
     workspaceId: "ws_architecture",
+    manualTakeover: true,
   });
   assert.equal(manualTakeover.accepted, true);
   assert.equal(manualTakeover.reason, "manual-turn-took-over");
@@ -455,6 +713,183 @@ try {
   const supersededRace = db.prepare("select state,failure_reason from continuation_generations where delivery_token=?").get(raceSender.deliveryToken);
   assert.equal(supersededRace.state, "SUPERSEDED");
   assert.equal(supersededRace.failure_reason, "manual-turn-took-over");
+  const staleSyntheticTool = runtime.continuationModelToolAuthorization({
+    conversationScopeId: scope,
+    deliveryToken: raceSender.deliveryToken,
+  });
+  assert.equal(staleSyntheticTool.accepted, true,
+    "ordinary-tool authorization must ignore obsolete caller token fields because generation transport is no longer model-owned");
+  assert.equal(staleSyntheticTool.reason, "manual-owner-authorized");
+  const manualToolAfterTakeover = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
+  assert.equal(manualToolAfterTakeover.accepted, true,
+    "manual status takeover must make later untagged tools safe to execute");
+
+  const terminalRaceScope = "v1/terminal-delivery-race";
+  const terminalRaceTask = runtime.continuationTask({
+    action: "begin", conversationScopeId: terminalRaceScope, workspaceId: "ws_architecture",
+    continuationMode: "completion-driven", objective: "terminal delivery race",
+    requiredMilestones: ["terminal-race-done"],
+  });
+  const terminalRaceMount = runtime.prepareContinuationAnchorMount({
+    taskId: terminalRaceTask.task.id, conversationScopeId: terminalRaceScope,
+  });
+  assert.equal(runtime.continuationTask({
+    action: "anchor-mounted", taskId: terminalRaceTask.task.id, conversationScopeId: terminalRaceScope,
+    coordinatorInstanceId: "ui_terminal_race", anchorMountToken: terminalRaceMount.anchorMountToken,
+  }).accepted, true);
+  const terminalRaceCapability = runtime.continuationSenderCapability({ taskId: terminalRaceTask.task.id });
+  const terminalRaceNow = new Date().toISOString();
+  db.prepare(`update continuation_tasks set stall_state='CONTINUATION_ARMED',stall_armed_at=?,stall_evidence='terminal-race-test',continuation_pending=0,delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,updated_at=? where id=?`)
+    .run(terminalRaceNow, terminalRaceNow, terminalRaceTask.task.id);
+  db.prepare(`update continuation_worksets set state='RUNNING',continuation_due_at=?,updated_at=? where id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)`)
+    .run(terminalRaceNow, terminalRaceNow, terminalRaceScope);
+  assert.equal(runtime.continuationSupervisorSweep().ready.length, 1);
+  const terminalRaceClaim = runtime.claimReadyContinuationGeneration({
+    conversationScopeId: terminalRaceScope, taskId: terminalRaceTask.task.id,
+    senderInstanceId: "ui_terminal_race", anchorMountToken: terminalRaceCapability.anchorMountToken,
+    anchorMountGeneration: terminalRaceCapability.anchorMountGeneration,
+  });
+  assert.equal(terminalRaceClaim.accepted, true);
+  assert.equal(runtime.authorizeContinuationGenerationDelivery({
+    conversationScopeId: terminalRaceScope, taskId: terminalRaceTask.task.id,
+    senderInstanceId: "ui_terminal_race", anchorMountToken: terminalRaceCapability.anchorMountToken,
+    anchorMountGeneration: terminalRaceCapability.anchorMountGeneration, deliveryToken: terminalRaceClaim.deliveryToken,
+  }).accepted, true);
+  assert.equal(db.prepare("select state from continuation_generations where delivery_token=?").get(terminalRaceClaim.deliveryToken).state, "DELIVERING");
+  const terminalRaceCompleted = runtime.continuationTask({
+    action: "complete", taskId: terminalRaceTask.task.id, conversationScopeId: terminalRaceScope,
+    workspaceId: "ws_architecture", completedMilestones: ["terminal-race-done"],
+    evidence: { terminalRace: "completed-before-host-send" },
+  });
+  assert.equal(terminalRaceCompleted.accepted, true);
+  assert.equal(terminalRaceCompleted.task.state, "SUCCEEDED");
+  const terminalLegacy = db.prepare(`select continuation_pending,delivery_token,delivery_owner,delivery_owner_expires_at,delivery_ack_started_at,delivery_ack_retry_count,delivery_ack_retry_after_at,turn_lease_expires_at,stall_armed_at,watch_process_handles_json from continuation_tasks where id=?`).get(terminalRaceTask.task.id);
+  assert.equal(Number(terminalLegacy.continuation_pending), 0);
+  assert.equal(terminalLegacy.delivery_token, null);
+  assert.equal(terminalLegacy.delivery_owner, null);
+  assert.equal(terminalLegacy.delivery_owner_expires_at, null);
+  assert.equal(terminalLegacy.delivery_ack_started_at, null);
+  assert.equal(Number(terminalLegacy.delivery_ack_retry_count), 0);
+  assert.equal(terminalLegacy.delivery_ack_retry_after_at, null);
+  assert.equal(terminalLegacy.turn_lease_expires_at, null);
+  assert.equal(terminalLegacy.stall_armed_at, null);
+  assert.equal(terminalLegacy.watch_process_handles_json, "[]");
+  const terminalGeneration = db.prepare("select state,failure_reason,due_at from continuation_generations where delivery_token=?").get(terminalRaceClaim.deliveryToken);
+  assert.equal(terminalGeneration.state, "NO_WORK",
+    "completion between sender authorization and Host send must cancel the claimed synthetic generation");
+  assert.match(terminalGeneration.failure_reason, /task-terminal:completed/);
+  assert.equal(terminalGeneration.due_at, null);
+  assert.equal(runtime.continuationArchitectureSnapshot(terminalRaceScope).card.active_workset_id, null);
+  const staleAcceptedAfterTerminal = runtime.recordContinuationGenerationDelivery({
+    deliveryToken: terminalRaceClaim.deliveryToken, result: "accepted", method: "app.sendMessage",
+    note: "Host result arrived after terminal transition",
+  });
+  assert.equal(staleAcceptedAfterTerminal.accepted, false);
+  assert.equal(staleAcceptedAfterTerminal.reason, "task-terminal-no-work");
+  assert.equal(staleAcceptedAfterTerminal.generation.state, "NO_WORK");
+  assert.equal(runtime.continuationSupervisorSweep().ready.length, 0,
+    "terminal worksets must never produce another generation after a stale Host delivery result");
+  const terminalStatus = runtime.continuationTask({
+    action: "status", taskId: terminalRaceTask.task.id, conversationScopeId: terminalRaceScope,
+    deliveryToken: terminalRaceClaim.deliveryToken,
+  });
+  assert.equal(terminalStatus.accepted, false);
+  assert.equal(terminalStatus.reason, "task-terminal-no-work");
+  assert.equal(terminalStatus.continueRequired, false);
+  assert.equal(terminalStatus.finalResponseAllowed, true);
+
+  const recoveryScope = "v1/recover-missing-legacy-projection";
+  const recoveryFirst = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: recoveryScope,
+    workspaceId: "ws_architecture",
+    continuationMode: "completion-driven",
+    objective: "recovery first workset",
+    requiredMilestones: ["recover-a"],
+  });
+  const recoveryMount = runtime.prepareContinuationAnchorMount({
+    taskId: recoveryFirst.task.id,
+    conversationScopeId: recoveryScope,
+  });
+  const recoveryMounted = runtime.continuationTask({
+    action: "anchor-mounted",
+    taskId: recoveryFirst.task.id,
+    conversationScopeId: recoveryScope,
+    coordinatorInstanceId: "ui_recovery_test",
+    anchorMountToken: recoveryMount.anchorMountToken,
+  });
+  assert.equal(recoveryMounted.accepted, true);
+  const recoveryCompleted = runtime.continuationTask({
+    action: "complete",
+    taskId: recoveryFirst.task.id,
+    conversationScopeId: recoveryScope,
+    workspaceId: "ws_architecture",
+    completedMilestones: ["recover-a"],
+    evidence: { recovery: "seed-complete" },
+  });
+  assert.equal(recoveryCompleted.accepted, true);
+  let recoverySnapshot = runtime.continuationArchitectureSnapshot(recoveryScope);
+  const recoveryCardId = recoverySnapshot.card.card_id;
+  const recoveryGeneration = Number(recoverySnapshot.card.mount_generation);
+  assert.equal(recoverySnapshot.card.mount_state, "VERIFIED");
+  db.prepare("delete from continuation_tasks where id=?").run(recoveryFirst.task.id);
+  const shadowId = "task_shadow_missing_legacy_projection";
+  const shadowNow = new Date().toISOString();
+  db.prepare(`
+    insert into continuation_tasks(
+      id,conversation_scope_id,workspace_id,objective,state,continuation_mode,required_milestones_json,
+      created_at,updated_at,task_source,contract_version,auto_created
+    ) values(?,?,?,?, 'RUNNING','completion-driven',?,?,?,'auto-conversation',2,1)
+  `).run(shadowId, recoveryScope, "ws_architecture", "shadow fallback", JSON.stringify(["shadow"]), shadowNow, shadowNow);
+  runtime.syncContinuationArchitectureForLegacyTask(shadowId);
+  recoverySnapshot = runtime.continuationArchitectureSnapshot(recoveryScope);
+  assert.equal(recoverySnapshot.card.mount_state, "VERIFIED",
+    "a shadow compatibility projection must never downgrade an already verified conversation card");
+  assert.equal(Number(recoverySnapshot.card.mount_generation), recoveryGeneration);
+  const directRecoveredProjection = runtime.recoverCanonicalConversationTaskProjection({
+    taskId: recoveryFirst.task.id,
+    conversationScopeId: recoveryScope,
+    workspaceId: "ws_architecture",
+    objective: "recovered second workset",
+    requiredMilestones: ["recover-b"],
+    forceRunning: true,
+  });
+  assert.equal(directRecoveredProjection.id, recoveryFirst.task.id);
+  assert.equal(directRecoveredProjection.state, "RUNNING",
+    "recovery with new unfinished work must never reconstruct the lifetime task as SUCCEEDED from an older completed workset");
+  const directlyRecoveredRequired = JSON.parse(directRecoveredProjection.required_milestones_json);
+  const directlyRecoveredCompleted = JSON.parse(directRecoveredProjection.completed_milestones_json);
+  assert.ok(directlyRecoveredRequired.includes("recover-a"));
+  assert.ok(directlyRecoveredRequired.includes("recover-b"),
+    "begin-time milestone hints must survive projection recovery before the begin action mutates the task");
+  assert.ok(directlyRecoveredRequired.includes("shadow"),
+    "unfinished work held only by the compatibility shadow must migrate into the canonical lifetime projection before shadow retirement");
+  assert.ok(directlyRecoveredCompleted.includes("recover-a"));
+  assert.ok(!directlyRecoveredCompleted.includes("recover-b"));
+  assert.equal(db.prepare("select state from continuation_tasks where id=?").get(shadowId).state, "ABANDONED_AUTO_TASK",
+    "projection recovery must retire the shadow only after its current unfinished contract has been captured");
+  const recoverySecond = runtime.continuationTask({
+    action: "begin",
+    taskId: recoveryFirst.task.id,
+    conversationScopeId: recoveryScope,
+    workspaceId: "ws_architecture",
+    continuationMode: "completion-driven",
+    objective: "recovered second workset",
+    requiredMilestones: ["recover-b"],
+  });
+  assert.equal(recoverySecond.task.id, recoveryFirst.task.id,
+    "a missing legacy task row must be reconstructed from the verified card/workset lineage instead of allocating a shadow task id");
+  assert.equal(recoverySecond.task.anchorMountVerifiedAt, recoveryMounted.task.anchorMountVerifiedAt);
+  assert.equal(recoverySecond.task.anchorMountGeneration, recoveryGeneration);
+  assert.ok(recoverySecond.task.requiredMilestones.includes("shadow"));
+  recoverySnapshot = runtime.continuationArchitectureSnapshot(recoveryScope);
+  assert.equal(recoverySnapshot.card.card_id, recoveryCardId);
+  assert.equal(recoverySnapshot.card.mount_state, "VERIFIED");
+  assert.equal(Number(recoverySnapshot.card.mount_generation), recoveryGeneration);
+  const recoveryActiveWorkset = recoverySnapshot.worksets.find((row) => row.id === recoverySnapshot.card.active_workset_id);
+  assert.equal(recoveryActiveWorkset.legacy_task_id, recoveryFirst.task.id,
+    "the recovered lifetime task must own the only active workset");
+  assert.equal(recoverySnapshot.worksets.filter((row) => ["RUNNING","WAITING_EXTERNAL","SUSPECTED_STALL"].includes(row.state)).length, 1);
 
   const cardInvariantRows = db.prepare(`
     select conversation_scope_id,count(*) as count

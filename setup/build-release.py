@@ -242,6 +242,10 @@ def release_files() -> list[Path]:
             # leak another temporary log/json/text artifact into a release ZIP.
             if relative.parent == Path(".") and file_name.startswith(".tmp-"):
                 continue
+            # Full regression runs may write progress/output logs beside the
+            # source tree. They are operator diagnostics, not release inputs.
+            if relative.parent == Path(".") and relative.suffix.lower() == ".log":
+                continue
             if relative == Path("SHA256SUMS.txt"):
                 continue
             if relative.suffix.lower() == ".zip":

@@ -123,14 +123,14 @@ try {
   const continuationRuntime = new StructuredRuntimeState(stateDir);
   const ownerTask = continuationRuntime.continuationTask({
     action: "begin",
-    conversationScopeId: "native-ui-owner-test",
+    conversationScopeId: "v1/native-ui-owner-test",
     workspaceId: "ws_native_owner",
     objective: "verify owner continuation controls",
     requiredMilestones: ["lock", "stop"],
   });
   const secondOwnerTask = continuationRuntime.continuationTask({
     action: "begin",
-    conversationScopeId: "native-ui-owner-test-2",
+    conversationScopeId: "v1/native-ui-owner-test-2",
     workspaceId: "ws_native_owner_2",
     objective: "verify batch owner continuation controls",
     requiredMilestones: ["pause", "delete"],
@@ -163,10 +163,25 @@ try {
   const pausedTasks = manager("continuation-pause", { taskIds: batchIds });
   assert.equal(pausedTasks.affected, 2);
   assert.ok(pausedTasks.tasks.every((task) => task.state === "PAUSED_BY_USER"));
+  const pausedArchitecture = continuationRuntime.continuationArchitectureSnapshot(ownerTask.task.conversationScopeId);
+  assert.equal(pausedArchitecture.card.active_workset_id, null,
+    "owner pause must detach the immutable card from automatic delivery without deleting it");
+  assert.equal(pausedArchitecture.worksets[0].state, "PAUSED",
+    "owner pause must synchronize the workset state instead of leaving a runnable shadow row");
   assert.equal(continuationRuntime.continuationTask({ action: "claim-continuation", taskId: ownerTask.task.id }).reason, "task-paused-by-user");
   const resumedTasks = manager("continuation-resume", { taskIds: batchIds });
   assert.equal(resumedTasks.affected, 2);
   assert.ok(resumedTasks.tasks.every((task) => task.state === "RUNNING"));
+  const resumedArchitecture = continuationRuntime.continuationArchitectureSnapshot(ownerTask.task.conversationScopeId);
+  assert.equal(resumedArchitecture.worksets.length, 1,
+    "owner resume must reuse the paused workset rather than create a duplicate milestone set");
+  assert.equal(resumedArchitecture.card.active_workset_id, resumedArchitecture.worksets[0].id,
+    "owner resume must reattach the same conversation card to its unfinished workset");
+  assert.equal(resumedArchitecture.worksets[0].state, "RUNNING");
+  assert.ok(resumedArchitecture.worksets[0].continuation_due_at,
+    "owner resume must restore a server-supervisor due time");
+  assert.ok(resumedArchitecture.generations.some((generation) => generation.owner_type === "manual" && generation.state === "WORK_REQUIRED"),
+    "owner resume must establish a fresh manual generation for the resumed turn");
   const unlockedTasks = manager("continuation-unlock", { taskIds: batchIds });
   assert.ok(unlockedTasks.tasks.every((task) => !task.ownerLocked));
   const stoppedTask = manager("continuation-stop", { taskId: ownerTask.task.id });
