@@ -239,16 +239,18 @@ function visibleContinuationTrigger(task) {
   const milestone = compactContinuationField(nextUnresolvedMilestone(task), 420);
   return isChinese()
     ? [
+      "这是本轮要立即执行的用户角色工作请求，不是仅供参考的系统续接说明。",
       "继续执行未完成的 DevSpace 任务。",
       objective ? `当前任务：${objective}` : "",
       milestone ? `下一未完成里程碑：${milestone}` : "",
-      "先调用 continuation_task status 恢复权威状态；如果本轮未直接提供 DevSpace_MCP 工具，先通过连接器工具发现加载它。随后直接继续实际工具操作，不要因为看不到上一条消息、工具未预加载或只完成状态检查就停止，也不要只回复状态或“继续处理中”。",
+      "先调用 continuation_task status 恢复权威状态；如果本轮未直接提供 DevSpace_MCP 工具，先通过连接器工具发现加载它。随后必须在本轮继续实际 DevSpace 工具操作并推进下一未完成里程碑。不要只复述这条消息，不要把它判定为“系统续接指令”，不要因为看不到上一条消息、工具未预加载或只完成状态检查就停止，也不要只回复状态或“继续处理中”，更不要等待第二次续轮才开始工作。",
     ].filter(Boolean).join("\n")
     : [
+      "This is the actual user-role work request for this assistant turn, not system-only continuation metadata.",
       "Continue the unfinished DevSpace task.",
       objective ? `Current task: ${objective}` : "",
       milestone ? `Next unfinished milestone: ${milestone}` : "",
-      "Call continuation_task status first to restore authoritative state. If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. Then continue substantive tool work; do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, and do not reply with only a status or 'still working'.",
+      "Call continuation_task status first to restore authoritative state. If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. Then, in this same turn, perform substantive DevSpace tool work that advances the next unfinished milestone. Do not merely restate this message, do not classify it as a system-only continuation instruction, do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, do not reply with only a status or 'still working', and do not wait for a second continuation before starting work.",
     ].filter(Boolean).join("\n");
 }
 
@@ -273,7 +275,8 @@ function continuationContext(task, workspaceId, reason) {
     "Before acting, reconstruct the current durable state from this Task Contract and the latest available DevSpace evidence. Verify which milestones are actually complete, identify the next unresolved runnable milestone, and check relevant failure, race, or regression risks before choosing the next action. Keep that evaluation internal: do not emit a chain-of-thought transcript, and do not substitute a plan/status-only response for execution.",
     "Tool availability is turn-scoped, not conversation authorization. If the resumed turn does not directly expose the DevSpace_MCP tool namespace, do not stop or claim that DevSpace is unavailable. Use the Host's available connector/tool discovery path first; in ChatGPT, call api_tool.list_resources for DevSpace_MCP (query continuation_task is sufficient), then invoke the discovered DevSpace_MCP tools. Only treat DevSpace as unavailable after that discovery path itself actually fails.",
     "Connector discovery and continuation_task status are control-plane setup, not successful resumed work. If status reports continueRequired/taskIncomplete or any runnable milestone remains, do not produce a final response after discovery/status alone. In that same assistant turn, invoke substantive DevSpace tools that actually advance or verify nextUnresolvedMilestone, and keep executing/polling until the runnable milestone set is completed, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A discovery-only/status-only turn is an invalid automatic continuation and must not voluntarily yield.",
-    "Call continuation_task status first. The runtime atomically claims any server-owned expected synthetic generation; do not search for, expose, or pass a continuation token to ordinary tools. Then continue substantive work with the same sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes until the current milestones are complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the one conversation-lifetime task/card and existing process/workspace state.",
+    "The Host-visible ui/message that created this resumed turn is the actual user-role work request for this assistant turn, not system-only recovery metadata. The first synthetic turn must start substantive DevSpace work after its control-plane status/discovery setup. Never classify that visible request as 'only a system continuation instruction', merely restate it, or defer real work until a second synthetic continuation.",
+    "Call continuation_task status first. The runtime atomically claims any server-owned expected synthetic generation; do not search for, expose, or pass a continuation token to ordinary tools. Then continue substantive work with the same sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes until the current milestones are complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId, the current manual-round milestone card, and the existing process/workspace state; a synthetic continuation must never rotate to another card generation.",
     "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. If runnable milestones remain, keep invoking the required tools in this same turn instead of promising future work.",
   ];
   return lines.join("\n");
@@ -522,6 +525,23 @@ export function installContinuationCoordinator(app, options = {}) {
             anchorMountToken: String(outcome.anchorMountToken),
             anchorMountGeneration: generation,
           };
+          // ChatGPT can mount the visible continuation_anchor iframe while
+          // omitting the one-shot toolresult event. In that ordering,
+          // ensureTask() runs first and cannot ACK because it has no mount
+          // capability yet; the private sender bind that follows is the first
+          // place this same anchor App learns the authoritative token. Recover
+          // that capability only on the actual anchor surface. Ordinary relay
+          // Apps may keep senderCapability, but they must never impersonate a
+          // visible milestone-card ACK.
+          if (state.anchorSurface && state.currentTool === "continuation_anchor") {
+            const knownSurfaceGeneration = Math.max(0, Number(state.anchorMountGeneration || 0));
+            if (knownSurfaceGeneration > 0 && generation > knownSurfaceGeneration) {
+              markAnchorSuperseded();
+            } else if (!knownSurfaceGeneration || knownSurfaceGeneration === generation) {
+              state.anchorMountToken = String(outcome.anchorMountToken);
+              state.anchorMountGeneration = generation;
+            }
+          }
           if (outcome.workspaceId) state.workspaceId = String(outcome.workspaceId);
           if (outcome.task) acceptTask(outcome.task);
         }
@@ -818,6 +838,19 @@ export function installContinuationCoordinator(app, options = {}) {
     state.lastTerminalRefreshAt = 0;
     if (state.task.state === "PAUSED_BY_USER") return;
 
+    // READY may be created by the server-resident generation sweep *after*
+    // this App already bound its sender transport.  The bind path consumes a
+    // READY that existed at mount/rebind time, but without this status path a
+    // later READY can sit indefinitely while the verified App is still alive.
+    // continuation_task status already exposes readyGeneration without
+    // transferring sender authority; the subsequent sender claim is atomic, so
+    // sibling Apps can safely race here without producing duplicate messages.
+    const readyGeneration = Number(current?.readyGeneration || 0);
+    if (Number.isInteger(readyGeneration) && readyGeneration > 0) {
+      await attemptContinuation("supervisor discovered READY generation", { force: true });
+      return;
+    }
+
     // app.sendMessage acceptance is not proof that a resumed assistant turn
     // reached DevSpace. Keep retrying the same persisted continuation after its
     // ACK lease expires, for both process-wake and proactive continuations.
@@ -1098,6 +1131,14 @@ export function installContinuationCoordinator(app, options = {}) {
       mergeContext(app.getHostContext?.());
       await ensureTask();
       const bound = await bindSenderTransport().catch(() => undefined);
+      // If the Host omitted toolresult, bindSenderTransport() may just have
+      // recovered the current anchor generation capability. Give the visible
+      // anchor surface one immediate second chance to perform its authenticated
+      // mount ACK before starting sender/supervisor traffic.
+      if (state.anchorSurface && state.currentTool === "continuation_anchor"
+        && state.anchorMountToken && !state.task?.anchorMountVerifiedAt && !state.anchorSuperseded) {
+        await ensureTask();
+      }
       await consumeReadyAfterSenderBind(bound, "sender transport connected with READY generation").catch(() => false);
       await syncPersistentDisplayMode();
       await heartbeat("sender transport connected").catch(() => undefined);

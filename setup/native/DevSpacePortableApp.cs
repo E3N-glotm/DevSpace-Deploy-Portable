@@ -1461,8 +1461,8 @@ namespace DevSpacePortable.NativeUI
                         && tile.Right <= remoteTiles.ClientSize.Width - remoteTiles.Padding.Right + 1
                         && tile.Top >= remoteTiles.Padding.Top - 1
                         && tile.Bottom + tile.Margin.Bottom <= remoteTiles.ClientSize.Height - remoteTiles.Padding.Bottom + 1);
-                Label sshHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("优先通过现有 Agent", StringComparison.Ordinal));
-                Label privilegeHint = FindControls<Label>(agents).FirstOrDefault(label => (label.Text ?? "").StartsWith("无管理员权限", StringComparison.Ordinal));
+                Label sshHint = FindControls<Label>(agents).FirstOrDefault(label => label.Name == "RemoteAgentSshHint");
+                Label privilegeHint = FindControls<Label>(agents).FirstOrDefault(label => label.Name == "RemoteAgentPrivilegeHint");
                 bool remoteHintsUnclipped = new[] { sshHint, privilegeHint }.All(label =>
                 {
                     if (label == null || label.Width <= 0 || label.Height <= 0) return false;
@@ -2747,7 +2747,8 @@ namespace DevSpacePortable.NativeUI
 
             Label sshHint = new Label
             {
-                Text = "优先通过现有 Agent 连接。Agent 离线时默认自动 SSH 救援：先重启已有 Agent；heartbeat 仍未恢复时自动修复原 Agent 的 endpoint/凭据；未安装时直接把本机 install.sh 与 Agent 经 SSH 送入服务器，不依赖远端 curl。手动安装命令始终保留为最终 fallback。",
+                Name = "RemoteAgentSshHint",
+                Text = "手动点击“一键恢复 / 更新 Agent”时，以当前编辑框中的名称、安装目录、Writable Roots 和 Full Access 开关为准重新登记并应用最新配置；Full Access 下若填写的安装目录不存在，会自动回退到该 SSH 用户的 ~/.local/state。Agent 离线时仍保留自动 SSH 救援与手动安装命令 fallback。",
                 Dock = DockStyle.Fill,
                 AutoEllipsis = false,
                 TextAlign = ContentAlignment.TopLeft,
@@ -2859,6 +2860,7 @@ namespace DevSpacePortable.NativeUI
             form.Controls.Add(copyBar, 0, 3);
             Label privilegeHint = new Label
             {
+                Name = "RemoteAgentPrivilegeHint",
                 Text = "无管理员权限：安装到当前用户可写状态目录并后台运行；若当前用户可写旧 /var/lib/devspace-agent，则自动原位升级。SSH 一键安装使用本机随包 Agent，不要求服务器安装 curl；只有显式使用 sudo 执行安装器时才走系统级安装。",
                 Dock = DockStyle.Fill,
                 AutoEllipsis = false,
@@ -3484,6 +3486,153 @@ echo DEVSPACE_AGENT_STARTED
 ";
         }
 
+        private static string ExistingAgentStateProbeScript(string agentId, IEnumerable<string> allowedRoots = null, string installRoot = null)
+        {
+            List<string> explicitCandidates = new[] { installRoot }
+                .Concat(allowedRoots ?? Enumerable.Empty<string>())
+                .Select(value => (value ?? "").Trim().TrimEnd('/'))
+                .Where(value => value.Length > 0)
+                .Select(value => value + "/.devspace-agent")
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            string rootCandidates = string.Join(" ", explicitCandidates.Select(ShellQuote));
+            return @"set -eu
+state=''
+target_agent_id=" + ShellQuote(agentId ?? "") + @"
+python_probe=$(command -v python3 || command -v python || true)
+for base in " + rootCandidates + @" ""${XDG_STATE_HOME:-$HOME/.local/state}/.devspace-agent"" ""${XDG_STATE_HOME:-$HOME/.local/state}/devspace-agent"" ""$HOME/.local/state/.devspace-agent"" ""$HOME/.local/state/devspace-agent"" ""/var/lib/devspace-agent""; do
+  for candidate in ""$base"" ""$base""/*; do
+    [ -d ""$candidate"" ] || continue
+    [ -f ""$candidate/config.json"" ] || continue
+    if [ -n ""$target_agent_id"" ] && [ -n ""$python_probe"" ]; then
+      candidate_id=$(""$python_probe"" - ""$candidate/config.json"" <<'PY'
+import json, pathlib, sys
+try:
+    print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')).get('agentId',''))
+except Exception:
+    print('')
+PY
+)
+      [ ""$candidate_id"" = ""$target_agent_id"" ] || continue
+    fi
+    state=""$candidate""
+    break 2
+  done
+done
+if [ -n ""$state"" ]; then printf 'DEVSPACE_AGENT_STATE=%s\n' ""$state""; else echo DEVSPACE_AGENT_NOT_INSTALLED; fi
+";
+        }
+
+        private static string ResolveAgentInstallRootScript(string requestedInstallRoot, bool fullAccess)
+        {
+            return @"set -eu
+requested=" + ShellQuote((requestedInstallRoot ?? "").Trim()) + @"
+full_access=" + (fullAccess ? "1" : "0") + @"
+valid_dir() { [ -n ""$1"" ] && [ ""${1#/}"" != ""$1"" ] && [ -d ""$1"" ] && [ -r ""$1"" ] && [ -w ""$1"" ] && [ -x ""$1"" ]; }
+if [ ""$full_access"" = 1 ]; then
+  if valid_dir ""$requested""; then
+    resolved=""$requested""
+  else
+    resolved=""${XDG_STATE_HOME:-$HOME/.local/state}""
+    mkdir -p ""$resolved""
+    valid_dir ""$resolved"" || { echo ""Full Access Agent state root is not writable: $resolved"" >&2; exit 45; }
+  fi
+else
+  valid_dir ""$requested"" || { echo ""Scoped Agent install root does not exist or is not writable: $requested"" >&2; exit 45; }
+  resolved=""$requested""
+fi
+printf 'DEVSPACE_AGENT_INSTALL_ROOT=%s\n' ""$resolved""
+";
+        }
+
+        private async Task<string> ResolveAgentInstallRootViaSshAsync(string requestedInstallRoot, bool fullAccess)
+        {
+            SshRunResult result = await RunSshScriptAsync(ResolveAgentInstallRootScript(requestedInstallRoot, fullAccess), 15000);
+            string resolved = OutputMarker(result.Output, "DEVSPACE_AGENT_INSTALL_ROOT=");
+            if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(resolved))
+            {
+                string detail = !string.IsNullOrWhiteSpace(result.Error) ? result.Error : result.Output;
+                throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
+                    ? "无法确认远端 Agent 安装目录是否可写。"
+                    : detail);
+            }
+            return resolved.Trim().TrimEnd('/');
+        }
+
+        private static bool LinuxPathIsInsideRoot(string path, string root)
+        {
+            string normalizedPath = (path ?? "").Trim().TrimEnd('/');
+            string normalizedRoot = (root ?? "").Trim().TrimEnd('/');
+            if (normalizedPath.Length == 0 || normalizedRoot.Length == 0) return false;
+            return string.Equals(normalizedPath, normalizedRoot, StringComparison.Ordinal)
+                || normalizedPath.StartsWith(normalizedRoot + "/", StringComparison.Ordinal);
+        }
+
+        private static string StopBackgroundAgentStateScript(string stateDir)
+        {
+            return @"set -eu
+state=" + ShellQuote((stateDir ?? "").Trim().TrimEnd('/')) + @"
+[ -n ""$state"" ] || exit 0
+python_bin=$(command -v python3 || command -v python || true)
+state_pids=''
+if [ -n ""$python_bin"" ]; then
+  state_pids=$(""$python_bin"" - ""$state"" ""$$"" ""$PPID"" <<'PY'
+import os, pathlib, sys
+state = os.path.normpath(sys.argv[1])
+excluded = {int(value) for value in sys.argv[2:] if value.isdigit()}
+agent_bin = state + '/bin/devspace-agent.py'
+config = state + '/config.json'
+for entry in pathlib.Path('/proc').iterdir():
+    if not entry.name.isdigit():
+        continue
+    pid = int(entry.name)
+    if pid in excluded:
+        continue
+    try:
+        raw = (entry / 'cmdline').read_bytes()
+        args = [part.decode('utf-8', 'surrogateescape') for part in raw.split(b'\0') if part]
+    except Exception:
+        continue
+    exact_agent = agent_bin in args and config in args
+    exact_state_arg = any(
+        arg == '--state-dir=' + state or (arg == '--state-dir' and index + 1 < len(args) and os.path.normpath(args[index + 1]) == state)
+        for index, arg in enumerate(args)
+    )
+    if exact_agent or exact_state_arg:
+        print(pid)
+PY
+  )
+else
+  pid_file=""$state/agent.pid""
+  pid=$(cat ""$pid_file"" 2>/dev/null || true)
+  if [ -n ""$pid"" ] && kill -0 ""$pid"" 2>/dev/null; then
+    cmdline=$(tr '\0' ' ' <""/proc/$pid/cmdline"" 2>/dev/null || true)
+    case ""$cmdline"" in *""$state/bin/devspace-agent.py""*""$state/config.json""*) state_pids=""$pid"";; esac
+  fi
+fi
+if command -v systemctl >/dev/null 2>&1 && [ ""$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')"" = systemd ]; then
+  if systemctl --user cat devspace-agent.service >/dev/null 2>&1 && systemctl --user cat devspace-agent.service 2>/dev/null | grep -F -- ""$state/"" >/dev/null 2>&1; then
+    systemctl --user stop devspace-agent.service >/dev/null 2>&1 || true
+  fi
+  if sudo -n systemctl cat devspace-agent.service >/dev/null 2>&1 && sudo -n systemctl cat devspace-agent.service 2>/dev/null | grep -F -- ""$state/"" >/dev/null 2>&1; then
+    sudo -n systemctl stop devspace-agent.service >/dev/null 2>&1 || true
+  fi
+fi
+for pid in $state_pids; do kill ""$pid"" 2>/dev/null || true; done
+i=0
+while [ ""$i"" -lt 30 ]; do
+  alive=''
+  for pid in $state_pids; do if kill -0 ""$pid"" 2>/dev/null; then alive=""$alive $pid""; fi; done
+  [ -z ""$alive"" ] && break
+  sleep 0.1
+  i=$((i+1))
+done
+for pid in $state_pids; do if kill -0 ""$pid"" 2>/dev/null; then kill -KILL ""$pid"" 2>/dev/null || true; fi; done
+rm -f ""$state/agent.pid""
+echo DEVSPACE_AGENT_STATE_STOPPED=""$state""
+";
+        }
+
         internal static async Task AutoRecoverConfiguredAgentsAsync(ManagerClient manager)
         {
             StoredSshProfiles profiles = LoadSshProfiles(manager);
@@ -3593,11 +3742,14 @@ echo DEVSPACE_AGENT_STARTED
 
         private static Task<Dictionary<string, object>> CreateSshEnrollmentAsync(ManagerClient manager, string agentId, string name, string[] roots, string installRoot = null, string accessMode = "scoped")
         {
+            string normalizedInstallRoot = (installRoot ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(normalizedInstallRoot))
+                throw new InvalidOperationException("Agent installRoot 必须先解析为远端存在且可写的绝对路径。Full Access 的 SSH 更新路径会自动解析到 SSH 用户的 ~/.local/state。 ");
             return manager.RunJsonAsync("remote-agent-create-enrollment", new
             {
                 agentId = agentId ?? "",
                 name = name,
-                installRoot = string.IsNullOrWhiteSpace(installRoot) ? (roots != null && roots.Length > 0 ? roots[0] : "/home/ubuntu/workspace") : installRoot,
+                installRoot = normalizedInstallRoot,
                 accessMode = string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) ? "full-access" : "scoped",
                 writableRoots = string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) ? new string[0] : (roots ?? new string[0]),
                 ttlMinutes = 15,
@@ -3671,35 +3823,76 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 SaveCurrentSshProfile(false);
                 string agentId = ValueText(_selectedAgent, "id");
                 bool createNew = _creatingNewAgent || string.IsNullOrWhiteSpace(agentId);
-                string agentName = ValueText(_selectedAgent, "name");
-                if (string.IsNullOrWhiteSpace(agentName)) agentName = (_name.Text ?? "").Trim();
-                if (!createNew && IsAgentHeartbeatHealthy(ValueText(_selectedAgent, "status")))
-                {
-                    _status.Text = "Remote Workspace Agent 最近 heartbeat 正常，当前无需执行 SSH 救援。";
-                    return;
-                }
                 string[] selectedWritableRoots = Strings(_selectedAgent, "writableRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
                 string[] selectedRoots = selectedWritableRoots.Length > 0
                     ? selectedWritableRoots
                     : Strings(_selectedAgent, "allowedRoots").Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
-                string[] roots = selectedRoots.Length > 0
-                    ? selectedRoots
-                    : _roots.Lines.Select(value => value.Trim()).Where(value => value.Length > 0).ToArray();
-                string accessMode = ValueText(_selectedAgent, "accessMode");
-                if (string.IsNullOrWhiteSpace(accessMode)) accessMode = _fullAccess.Checked ? "full-access" : "scoped";
-                string installRoot = ValueText(_selectedAgent, "installRoot");
-                if (string.IsNullOrWhiteSpace(installRoot)) installRoot = (_installRoot.Text ?? "").Trim();
-                if (string.IsNullOrWhiteSpace(agentName) || string.IsNullOrWhiteSpace(installRoot) || (!string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) && roots.Length == 0))
-                    throw new InvalidOperationException("请填写服务器显示名和 Agent 安装目录；Scoped 模式还需要至少一个 Linux 可写目录。 ");
+                string selectedInstallRoot = ValueText(_selectedAgent, "installRoot");
+                string selectedAccessMode = ValueText(_selectedAgent, "accessMode");
+                if (string.IsNullOrWhiteSpace(selectedAccessMode)) selectedAccessMode = "scoped";
+                string selectedName = ValueText(_selectedAgent, "name");
+
+                // Silent auto-recovery keeps the historical restart-first behavior
+                // and only uses the last persisted Agent configuration. The explicit
+                // button below is intentionally different: it is an UPDATE operation
+                // and must apply the values currently visible in the editor.
+                if (silent && !createNew)
+                {
+                    if (IsAgentHeartbeatHealthy(ValueText(_selectedAgent, "status"))) return;
+                    if (string.IsNullOrWhiteSpace(selectedName)
+                        || string.IsNullOrWhiteSpace(selectedInstallRoot)
+                        || (!string.Equals(selectedAccessMode, "full-access", StringComparison.OrdinalIgnoreCase) && selectedRoots.Length == 0)) return;
+
+                    _status.Text = "Agent 离线救援：正在通过 SSH 检查并启动已有 Agent…";
+                    SshRunResult automaticRecovery = await RunSshScriptAsync(ExistingAgentRecoveryScript(agentId, selectedRoots, selectedInstallRoot), 30000);
+                    bool automaticNotInstalled = automaticRecovery.ExitCode == 42 || automaticRecovery.Output.Contains("DEVSPACE_AGENT_NOT_INSTALLED");
+                    bool automaticOnline = false;
+                    if (!automaticNotInstalled && automaticRecovery.ExitCode == 0)
+                        automaticOnline = await WaitForAgentOnlineAsync(agentId, selectedName, 5);
+
+                    if (!automaticOnline)
+                    {
+                        Dictionary<string, object> automaticEnrollment = await CreateSshEnrollmentAsync(
+                            _manager,
+                            automaticNotInstalled ? "" : agentId,
+                            selectedName,
+                            selectedRoots,
+                            selectedInstallRoot,
+                            selectedAccessMode);
+                        string automaticState = automaticNotInstalled ? "" : OutputMarker(automaticRecovery.Output, "DEVSPACE_AGENT_STATE=");
+                        SshRunResult automaticInstall = await InstallEnrollmentViaLocalSshAsync(automaticEnrollment, selectedName, selectedRoots, automaticState);
+                        if (automaticInstall.ExitCode == 0)
+                            automaticOnline = await WaitForAgentOnlineAsync(agentId, selectedName, 8);
+                    }
+                    await LoadAgentsAsync();
+                    return;
+                }
+
+                string agentName = (_name.Text ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(agentName)) agentName = selectedName;
+                bool fullAccess = _fullAccess.Checked;
+                string accessMode = fullAccess ? "full-access" : "scoped";
+                string[] editedRoots = _roots.Lines.Select(value => value.Trim()).Where(value => value.Length > 0).ToArray();
+                string[] roots = fullAccess ? new string[0] : editedRoots;
+                string requestedInstallRoot = (_installRoot.Text ?? "").Trim();
+                if (string.IsNullOrWhiteSpace(agentName) || (!fullAccess && roots.Length == 0))
+                    throw new InvalidOperationException("请填写服务器显示名；Scoped 模式还需要至少一个 Linux 可写目录。 ");
+
+                _status.Text = fullAccess
+                    ? "正在通过 SSH 校验 Full Access Agent 状态目录；无效目录会自动回退到 ~/.local/state…"
+                    : "正在通过 SSH 校验 Scoped Agent 安装目录…";
+                string installRoot = await ResolveAgentInstallRootViaSshAsync(requestedInstallRoot, fullAccess);
+                if (!string.Equals(requestedInstallRoot.TrimEnd('/'), installRoot, StringComparison.Ordinal))
+                    _installRoot.Text = installRoot;
 
                 if (createNew)
                 {
                     _status.Text = "正在通过 SSH 部署新的 Remote Workspace Agent…";
-                    Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(_manager, "", agentName, roots, installRoot, accessMode);
-                    SshRunResult install = await InstallEnrollmentViaLocalSshAsync(enrollment, agentName, roots);
-                    if (install.ExitCode != 0)
+                    Dictionary<string, object> newEnrollment = await CreateSshEnrollmentAsync(_manager, "", agentName, roots, installRoot, accessMode);
+                    SshRunResult newInstall = await InstallEnrollmentViaLocalSshAsync(newEnrollment, agentName, roots);
+                    if (newInstall.ExitCode != 0)
                     {
-                        string detail = !string.IsNullOrWhiteSpace(install.Error) ? install.Error : install.Output;
+                        string detail = !string.IsNullOrWhiteSpace(newInstall.Error) ? newInstall.Error : newInstall.Output;
                         throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
                             ? "通过本机 SSH 部署新的 Remote Agent 失败。"
                             : detail);
@@ -3719,46 +3912,57 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     return;
                 }
 
-                _status.Text = "Agent 离线救援：正在通过 SSH 检查并启动已有 Agent…";
-                SshRunResult recovery = await RunSshScriptAsync(ExistingAgentRecoveryScript(agentId, roots, installRoot), 30000);
-                bool notInstalled = recovery.ExitCode == 42 || recovery.Output.Contains("DEVSPACE_AGENT_NOT_INSTALLED");
-                bool online = false;
-                if (!notInstalled && recovery.ExitCode == 0)
+                _status.Text = "正在读取已有 Agent state，并以当前编辑内容重新登记原 Agent…";
+                SshRunResult stateProbe = await RunSshScriptAsync(
+                    ExistingAgentStateProbeScript(agentId, selectedRoots, selectedInstallRoot),
+                    15000);
+                string existingState = OutputMarker(stateProbe.Output, "DEVSPACE_AGENT_STATE=");
+                string stateDirOverride = LinuxPathIsInsideRoot(existingState, installRoot) ? existingState : "";
+                if (!string.IsNullOrWhiteSpace(existingState))
                 {
-                    online = await WaitForAgentOnlineAsync(agentId, agentName, 5);
-                }
-
-                if (!online)
-                {
-                    _status.Text = notInstalled
-                        ? "服务器尚未安装 Agent；正在把本机 install.sh 与 Agent 通过 SSH 直接安装…"
-                        : "已有 Agent 已启动但 heartbeat 未恢复；正在通过本机 SSH 修复 endpoint/凭据并重新登记原 Agent…";
-                    Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(_manager, notInstalled ? "" : agentId, agentName, roots, installRoot, accessMode);
-                    string existingState = notInstalled ? "" : OutputMarker(recovery.Output, "DEVSPACE_AGENT_STATE=");
-                    SshRunResult install = await InstallEnrollmentViaLocalSshAsync(enrollment, agentName, roots, existingState);
-                    if (install.ExitCode != 0)
+                    _status.Text = "正在停止该 Agent 旧 state 中的全部后台/登记进程，再应用当前配置，避免旧 Scoped/Full Access 实例并存…";
+                    SshRunResult stopOld = await RunSshScriptAsync(StopBackgroundAgentStateScript(existingState), 15000);
+                    if (stopOld.ExitCode != 0)
                     {
-                        string detail = !string.IsNullOrWhiteSpace(install.Error) ? install.Error : install.Output;
+                        string detail = !string.IsNullOrWhiteSpace(stopOld.Error) ? stopOld.Error : stopOld.Output;
                         throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
-                            ? "通过本机 SSH 安装/修复 Remote Agent 失败。"
+                            ? "更新 Agent 配置前无法安全停止旧 state 中的后台实例。"
                             : detail);
                     }
-                    online = await WaitForAgentOnlineAsync(agentId, agentName, 8);
                 }
+
+                Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(
+                    _manager,
+                    agentId,
+                    agentName,
+                    roots,
+                    installRoot,
+                    accessMode);
+                SshRunResult install = await InstallEnrollmentViaLocalSshAsync(enrollment, agentName, roots, stateDirOverride);
+                if (install.ExitCode != 0)
+                {
+                    string detail = !string.IsNullOrWhiteSpace(install.Error) ? install.Error : install.Output;
+                    throw new InvalidOperationException(string.IsNullOrWhiteSpace(detail)
+                        ? "通过本机 SSH 更新 Remote Agent 配置失败。"
+                        : detail);
+                }
+                bool online = await WaitForAgentOnlineAsync(agentId, agentName, 8);
 
                 await LoadAgentsAsync();
                 if (!online)
                 {
                     SshRunResult diagnostic = await RunSshScriptAsync(AgentRecoveryDiagnosticScript(agentId, roots, installRoot), 15000);
                     string diagnosticText = string.Join("\r\n", new[] { diagnostic.Output, diagnostic.Error }.Where(value => !string.IsNullOrWhiteSpace(value)));
-                    throw new InvalidOperationException("本机 SSH 已完成 Agent 修复，但 heartbeat 仍未恢复。远端诊断：\r\n" + (string.IsNullOrWhiteSpace(diagnosticText) ? "未返回诊断输出。" : diagnosticText));
+                    throw new InvalidOperationException("本机 SSH 已应用最新 Agent 配置，但 heartbeat 仍未恢复。远端诊断：\r\n" + (string.IsNullOrWhiteSpace(diagnosticText) ? "未返回诊断输出。" : diagnosticText));
                 }
-                _status.Text = "Remote Workspace Agent 已通过 SSH 恢复并重新上线；安装过程不依赖远端 curl。";
+                _status.Text = fullAccess
+                    ? "Remote Workspace Agent 已更新并重新上线；Full Access 已生效，Writable Roots 限制已清空。"
+                    : "Remote Workspace Agent 已更新并重新上线；当前 Writable Roots 与编辑内容一致。";
             }
             catch (Exception ex)
             {
-                _status.Text = "SSH 自动救援失败；手动安装命令仍可用。";
-                if (!silent) MessageBox.Show(this, ex.Message, "Remote Agent SSH 救援失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                _status.Text = silent ? "SSH 自动救援失败；手动更新仍可用。" : "SSH 更新 Agent 失败；手动安装命令仍可用。";
+                if (!silent) MessageBox.Show(this, ex.Message, "Remote Agent SSH 更新失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally { _sshBusy = false; }
         }
@@ -4937,7 +5141,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.58 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.59 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5791,7 +5995,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.58") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.59") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }

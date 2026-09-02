@@ -4,12 +4,21 @@ import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema.js";
 import { migrateDatabase } from "./migrations.js";
+import { pruneCanonicalRepairBackups } from "./state-maintenance.js";
+export { pruneCanonicalRepairBackups } from "./state-maintenance.js";
 export function databasePath(stateDir) {
     return join(stateDir, "devspace.sqlite");
 }
 export function openDatabase(stateDir) {
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     chmodSync(stateDir, 0o700);
+    try {
+        pruneCanonicalRepairBackups(stateDir);
+    }
+    catch {
+        // Repair snapshots are operational safety artifacts, not authoritative
+        // runtime state. Retention must never make DevSpace unavailable.
+    }
     const path = databasePath(stateDir);
     const sqlite = new Database(path);
     chmodSync(path, 0o600);

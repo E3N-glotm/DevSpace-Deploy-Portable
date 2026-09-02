@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { openDatabase } from "./db/client.js";
 
+const DEFAULT_COMPLETED_PROCESS_MAX_COUNT = 5000;
+const DEFAULT_COMPLETED_PROCESS_MAX_AGE_DAYS = 30;
+
 function parseJson(value, fallback) {
     if (!value)
         return fallback;
@@ -54,6 +57,33 @@ export class ProcessRegistryStore {
     constructor(stateDir) {
         this.database = openDatabase(stateDir);
         this.instanceId = `devspace_${randomUUID()}`;
+        try {
+            this.compactCompleted();
+        }
+        catch {
+            // Registry history is diagnostic metadata. Retention failure must not
+            // make process execution unavailable; active rows are never targeted.
+        }
+    }
+    compactCompleted(input = {}) {
+        const maxCompleted = Math.max(1, Math.trunc(Number(input.maxCompleted ?? DEFAULT_COMPLETED_PROCESS_MAX_COUNT)) || DEFAULT_COMPLETED_PROCESS_MAX_COUNT);
+        const maxAgeDays = Math.max(1, Math.trunc(Number(input.maxAgeDays ?? DEFAULT_COMPLETED_PROCESS_MAX_AGE_DAYS)) || DEFAULT_COMPLETED_PROCESS_MAX_AGE_DAYS);
+        const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
+        const terminalPredicate = "status not in ('running', 'detached-running', 'stopping')";
+        const result = this.database.sqlite.prepare(`
+          delete from process_registry
+          where ${terminalPredicate}
+            and (
+              coalesce(completed_at, updated_at) < @cutoff
+              or handle not in (
+                select handle from process_registry
+                where ${terminalPredicate}
+                order by coalesce(completed_at, updated_at) desc, handle desc
+                limit @maxCompleted
+              )
+            )
+        `).run({ cutoff, maxCompleted });
+        return { removedCount: Number(result.changes || 0), maxCompleted, maxAgeDays, cutoff };
     }
     upsertRunning(input) {
         const now = new Date().toISOString();

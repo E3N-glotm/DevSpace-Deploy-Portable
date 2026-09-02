@@ -29,6 +29,10 @@ EXCLUDED_TOP_LEVEL_DIRS = {
     ".test-cache",
     ".tmp-delta-audit",
     ".update-staging",
+    # The source checkout may also host the independently developed Android
+    # client workspace.  It is not part of the Windows Portable payload and
+    # may be untracked/operator-local, so never let it leak into a ZIP build.
+    "android",
     "data",
     "logs",
     "reports",

@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.59
+
+- 修复“**一键恢复 / 更新 Agent**”名义上可更新、实际却只会恢复旧配置的问题：手动点击该按钮时，现有 Agent 不再优先读取登记时保存的 `writableRoots`、`accessMode`、`installRoot` 并在 heartbeat 正常时直接返回，而是把**当前编辑框**中的服务器显示名、Agent 安装目录、Writable Roots 和 Full Access 开关作为新的权威配置。
+- 现有 Agent 的更新继续复用同一个 `agentId`，通过 repair enrollment 重新签发 endpoint/凭据并安装；因此 `Scoped -> 新 Writable Roots`、`Scoped -> Full Access`、`Full Access -> Scoped` 都是原 Agent 的原位配置变更，不会因为“更新”额外制造一个重复服务器记录。
+- 自动离线 SSH 救援和手动配置更新正式拆成两条语义：后台 `silent` 恢复仍只使用最后一次已持久化配置并坚持 restart-first，避免无人值守恢复意外采用尚未保存的 UI 草稿；用户主动点击更新时才应用编辑器中的最新值。
+- 修复 Full Access 错误依赖 `/home/ubuntu/workspace` 的问题。Full Access 不再因为 Writable Roots 为空而硬编码该目录；若用户填写的 install root 不存在或不可写，会在 SSH 端自动回退到该用户的 `${XDG_STATE_HOME:-$HOME/.local/state}` 并创建/验证状态目录。Scoped 模式仍 fail closed：用户指定的 install root 必须真实存在且可读写执行。
+- 当 Agent install root 被修改到新的目录时，更新前会先按 `agentId` 定位旧 state，并只在 PID/cmdline 与旧 `devspace-agent.py + config.json` 精确匹配时停止旧后台实例，再启动新实例，避免同一 Agent 新旧目录双进程并存。
+- 新增 Remote Agent SSH 更新回归，锁定“显式更新读取当前 UI 值、same-agent repair enrollment、Full Access user-state fallback、root 移动安全停旧实例”，并继续通过 native UI resilience、Linux Agent contract、Remote Workspace backend E2E 与 source-tree/version identity 门禁。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.59.md)
+
 ## 1.1.58
 
 - 修复 1.1.57 自动续轮后的任务语义断层：真实 ChatGPT Host 并不保证把 Workspace App 的 `updateModelContext()` 隐藏上下文重放给新 synthetic assistant turn，而 1.1.57 的 `app.sendMessage()` 可见用户消息只有泛化的“继续执行未完成的 DevSpace 任务”，因此模型可能真实地不知道“上一条消息/哪一个任务”指什么。

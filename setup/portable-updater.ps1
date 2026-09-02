@@ -1927,11 +1927,43 @@ function Assert-PortableExecutableImagesDrained {
     # removes the backup after that launch carrier exits. Exempt only the
     # updater's proven ancestor chain, never arbitrary Portable workers.
     $allowedProcessIds = @(Get-UpdaterAncestorProcessIds)
-    $residual = @()
+    $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    $residual = @(Get-PortableRootExecutableProcesses -AllowedProcessIds $allowedProcessIds)
+    if ($residual.Count -eq 0) { return }
+
+    # MainModule.FileName is comparatively expensive on a busy Windows host.
+    # Re-enumerating every system process forty times can make this fail-closed
+    # preflight itself exceed the updater launcher's timeout before the useful
+    # diagnostic reaches stderr. Once a Portable-root image has been proven,
+    # poll only those exact PIDs while waiting for normal shutdown. Whenever
+    # that set drains, perform a new full scan before returning so a process
+    # that started during the wait can never slip into the file transaction.
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
-        $residual = @(Get-PortableRootExecutableProcesses -AllowedProcessIds $allowedProcessIds)
-        if ($residual.Count -eq 0) { return }
-        Start-Sleep -Milliseconds 250
+        $stillRunning = @()
+        foreach ($entry in @($residual)) {
+            $process = $null
+            try {
+                $process = Get-Process -Id ([int]$entry.pid) -ErrorAction Stop
+                if ($allowedProcessIds -contains [int]$process.Id) { continue }
+                $actual = Get-ProcessImagePath $process
+                if (-not [string]::IsNullOrWhiteSpace($actual) -and
+                    $actual.Length -ge $prefix.Length -and
+                    ($actual.Substring(0, $prefix.Length) -ieq $prefix)) {
+                    $stillRunning += [pscustomobject]@{ pid = [int]$process.Id; path = $actual }
+                }
+            } catch {
+                # A process disappearing while we inspect it is the expected
+                # success path; the full rescan below remains authoritative.
+            } finally {
+                if ($process) { try { $process.Dispose() } catch { } }
+            }
+        }
+        $residual = @($stillRunning)
+        if ($residual.Count -eq 0) {
+            $residual = @(Get-PortableRootExecutableProcesses -AllowedProcessIds $allowedProcessIds)
+            if ($residual.Count -eq 0) { return }
+        }
+        if ($attempt -lt 39) { Start-Sleep -Milliseconds 250 }
     }
     $details = ($residual | ForEach-Object { "PID $($_.pid): $($_.path)" }) -join "; "
     throw "Portable executable images are still running after the pre-update stop. No program files were changed. $details"
