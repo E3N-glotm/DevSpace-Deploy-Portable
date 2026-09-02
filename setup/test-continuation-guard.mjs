@@ -14,7 +14,7 @@ const runtimeStateSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace"
 const featureTools = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "feature-tools.js"), "utf8");
 const coordinatorPath = join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js");
 const coordinator = readFileSync(coordinatorPath, "utf8");
-const visibleTriggerSource = coordinator.match(/function visibleContinuationTrigger\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+const visibleTriggerSource = coordinator.match(/function visibleContinuationTrigger\(task\) \{[\s\S]*?\n\}/)?.[0] ?? "";
 const finalizeRelease = readFileSync(join(ROOT, "setup", "finalize-release.py"), "utf8");
 const uiManifest = JSON.parse(readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", ".vite", "manifest.json"), "utf8"));
 const workspaceEntry = uiManifest["workspace-app.html"];
@@ -255,12 +255,14 @@ assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryTo
   "the coordinator must keep generation capabilities inside App/runtime transport instead of exposing them to the model");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
-assert.match(coordinator, /function visibleContinuationTrigger\(\)[\s\S]{0,1100}继续执行未完成的 DevSpace 任务[\s\S]{0,300}可运行里程碑[\s\S]{0,300}不要只回复状态[\s\S]{0,240}继续处理中/,
+assert.match(coordinator, /function visibleContinuationTrigger\(task\)[\s\S]{0,2200}继续执行未完成的 DevSpace 任务[\s\S]{0,500}当前任务[\s\S]{0,500}下一未完成里程碑[\s\S]{0,700}不要只回复状态[\s\S]{0,240}继续处理中/,
   "the visible synthetic continuation trigger must carry sustained-work semantics in the actual Host user-role turn instead of relying only on hidden context");
-assert.match(coordinator, /Continue the unfinished DevSpace task[\s\S]{0,300}runnable milestones remain[\s\S]{0,300}do not reply with only a status[\s\S]{0,240}still working/,
+assert.match(coordinator, /Continue the unfinished DevSpace task[\s\S]{0,500}Current task[\s\S]{0,500}Next unfinished milestone[\s\S]{0,900}do not reply with only a status[\s\S]{0,240}still working/,
   "the English visible synthetic trigger must also forbid a status-only premature final");
 assert.doesNotMatch(coordinator, /继续。直接完成当前未完成的任务。|Continue\. Directly complete the current unfinished task\./,
   "the visible synthetic continuation trigger must not pressure the model to skip state reconstruction or verification");
+assert.match(visibleTriggerSource, /task\?\.objective[\s\S]{0,500}nextUnresolvedMilestone\(task\)/,
+  "the visible synthetic message must carry durable task semantics when hidden model context is not replayed by the Host");
 assert.doesNotMatch(visibleTriggerSource, /taskId=|workspaceId=|deliveryToken|generation capability/,
   "taskId/workspaceId/recovery policy must not be emitted as a visible user message");
 assert.match(coordinator, /function continuationContext\([\s\S]{0,3000}runtime atomically claims any server-owned expected synthetic generation/,
@@ -275,9 +277,9 @@ assert.match(coordinator, /function nextUnresolvedMilestone\([\s\S]{0,900}requir
   "automatic continuation context must identify the first unresolved milestone instead of forcing the resumed model to rediscover it from a long lifetime history");
 assert.match(coordinator, /nextUnresolvedMilestone:[\s\S]{0,1800}Connector discovery and continuation_task status are control-plane setup, not successful resumed work[\s\S]{0,900}do not produce a final response after discovery\/status alone[\s\S]{0,1100}discovery-only\/status-only turn is an invalid automatic continuation/,
   "hidden recovery context must make substantive post-status work mandatory whenever runnable milestones remain");
-assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(\),\s*async \(\) =>/,
+assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) =>/,
   "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
-assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(state\.task\)/,
+assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(state\.task\)/,
   "the irreversible Host send must have a final authoritative terminal-state recheck");
 assert.match(coordinator, /function acceptTask\([\s\S]{0,700}terminal\(state\.task\)[\s\S]{0,300}stopSupervisor\(\)[\s\S]{0,200}stopLifecycleRefresh\(\)/,
   "observing terminal state must synchronously cancel supervisor and lifecycle timers");
@@ -728,14 +730,20 @@ assert.equal(fakeApp.contextUpdates.length >= 1, true);
 const visibleSyntheticText = fakeApp.messages[0]?.content?.[0]?.text ?? "";
 assert.match(visibleSyntheticText, /继续执行未完成的 DevSpace 任务|Continue the unfinished DevSpace task/,
   "automatic recovery must carry the unfinished DevSpace task intent in the Host-visible user-role turn");
-assert.match(visibleSyntheticText, /可运行里程碑|runnable milestones/i,
-  "the visible continuation trigger must preserve milestone-driven sustained work");
+assert.match(visibleSyntheticText, /finish fake task/,
+  "the visible continuation trigger must carry the durable objective so a resumed turn does not have to infer which prior task is meant");
+assert.match(visibleSyntheticText, /done/,
+  "the visible continuation trigger must carry the next unresolved milestone when hidden Host model context is absent");
+assert.match(visibleSyntheticText, /continuation_task status/i,
+  "the visible continuation trigger must tell the resumed turn how to recover authoritative durable state");
+assert.match(visibleSyntheticText, /DevSpace_MCP/i,
+  "the visible continuation trigger must preserve the turn-scoped connector discovery recovery path");
 assert.match(visibleSyntheticText, /不要只回复状态|do not reply with only a status/i,
   "the visible continuation trigger must explicitly reject status-only premature finals");
 assert.match(visibleSyntheticText, /继续处理中|still working/i,
   "the visible continuation trigger must name the observed placeholder-final failure mode");
-assert.doesNotMatch(visibleSyntheticText, /token|UUID|continuation_task|checkpoint|task_fake|ws_fake|authorized recovery/i,
-  "the visible Host trigger must not expose protocol, task identity, or generation capability details");
+assert.doesNotMatch(visibleSyntheticText, /token|UUID|checkpoint|task_fake|ws_fake|authorized recovery/i,
+  "the visible Host trigger may name safe recovery tools but must not expose task/workspace identity or generation capabilities");
 assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery/,
   "durable task/workspace internals must remain out of the visible synthetic message even though the ephemeral resume capability is intentionally visible");
 const hiddenSyntheticContext = fakeApp.contextUpdates.at(-1)?.content?.[0]?.text ?? "";

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -285,6 +286,59 @@ def validate_release_payload(files: list[Path]) -> None:
         )
 
 
+def refresh_manifest_keyfiles() -> None:
+    """Re-hash the exact payload inputs after all release-time generators ran.
+
+    finalize-release.py records key-file hashes before build-release.py runs.
+    The native UI builder (and any other release-time generator invoked before
+    this point) is allowed to replace generated artifacts, so carrying the old
+    hashes into the ZIP can make VERSION-MANIFEST.json disagree with the files
+    shipped beside it.  Refresh the existing fail-closed key-file set only
+    after those generators finish, immediately before checksumming/archiving.
+    """
+    manifest_path = ROOT / "VERSION-MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    key_files = manifest.get("keyFiles")
+    if not isinstance(key_files, dict) or not key_files:
+        raise RuntimeError("VERSION-MANIFEST.json has no keyFiles mapping")
+
+    refreshed: dict[str, str] = {}
+    missing: list[str] = []
+    for raw_key in sorted(key_files):
+        relative = str(raw_key)
+        if relative.endswith(".sha256"):
+            relative = relative.removesuffix(".sha256")
+        relative = relative.replace("\\", "/")
+        source = ROOT / Path(relative)
+        if not source.is_file():
+            missing.append(relative)
+            continue
+        refreshed[f"{relative}.sha256"] = sha256_file(source)
+
+    if missing:
+        preview = "\n".join(missing[:20])
+        raise RuntimeError(
+            "VERSION-MANIFEST.json references missing release key files:\n" + preview
+        )
+
+    manifest["builtAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    manifest["keyFiles"] = refreshed
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    for key, expected in refreshed.items():
+        relative = key.removesuffix(".sha256")
+        actual = sha256_file(ROOT / Path(relative))
+        if actual != expected:
+            raise RuntimeError(
+                f"release key-file hash changed while finalizing manifest: {relative}"
+            )
+    print(f"Refreshed release key-file manifest: {len(refreshed)} files", flush=True)
+
+
 def release_version() -> str:
     manifest = json.loads((ROOT / "VERSION-MANIFEST.json").read_text(encoding="utf-8"))
     release = str(manifest.get("release", ""))
@@ -354,6 +408,7 @@ def main() -> int:
     validate_source_checkout(node)
     validate_installed_core()
     subprocess.run([str(node), str(native_ui_builder)], cwd=ROOT, check=True)
+    refresh_manifest_keyfiles()
     version = release_version()
     plugin_entries = release_plugin_entries()
     validate_release_plugins(plugin_entries)

@@ -2,6 +2,17 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.58
+
+- 修复 1.1.57 自动续轮后的任务语义断层：真实 ChatGPT Host 并不保证把 Workspace App 的 `updateModelContext()` 隐藏上下文重放给新 synthetic assistant turn，而 1.1.57 的 `app.sendMessage()` 可见用户消息只有泛化的“继续执行未完成的 DevSpace 任务”，因此模型可能真实地不知道“上一条消息/哪一个任务”指什么。
+- `app.sendMessage()` 的 Host-visible synthetic user message 现在直接携带压缩后的 **Task Contract objective** 与 **下一未完成 milestone**。即使上一轮 transcript 上下文没有被 Host 正确重放，续轮也能从 durable task 语义继续，而不是靠猜测历史消息。
+- 同一条可见续轮消息明确要求先调用 `continuation_task status` 恢复权威状态；若本轮没有预加载 `DevSpace_MCP`，先通过 connector/tool discovery 加载后继续真实工具操作。这样把“工具 namespace 未展开”和“任务语义不知道”分开处理。
+- 仍不把 taskId、workspaceId、delivery token、generation capability 等内部身份/授权材料写进可见聊天记录；只公开继续任务所必需的自然语言目标、下一里程碑和安全的工具恢复入口。
+- 新增 production-equivalent 回归：在完全不依赖 hidden `updateModelContext` 内容的情况下，断言 Host-visible message 本身包含 objective、下一 milestone、`continuation_task status` 与 `DevSpace_MCP` 恢复路径，同时继续锁定唯一 generation、人工 takeover 和 terminal send barrier。
+- 加固 1.1.58 发布一致性：release-time generator 完成后、checksum/ZIP 之前重新计算 `VERSION-MANIFEST.json` 全部既有 key-file SHA-256，并对缺失文件 fail closed，避免 native EXE、packed/installed core 或 lockfile 在 finalize 后变化却把陈旧摘要带进正式发行包。
+
+[完整更新说明](docs/releases/HOTFIX-1.1.58.md)
+
 ## 1.1.57
 
 - 修复 1.1.56 的 P0-A sender transport 空窗：`continuation_sender bind` 现在返回当前 active Workset 已持久化的 `READY` generation；任意后续普通 DevSpace Workspace App 只要携带同一 conversation Card 的隐藏 capability 完成 sender rebind，就会立即进入唯一 `claim -> authorize -> app.sendMessage`，不再等待已经死亡的旧 milestone iframe 下一次 supervisor tick。若 Host 上完全没有任何 App iframe 存活，MCP server 仍不能越过 MCP Apps 边界自行注入 ChatGPT 消息；1.1.57 保证的是**首个可信 App transport 一恢复就立即消费既有 READY**，而不是把这个不可用的 server-only 能力伪装成已实现。

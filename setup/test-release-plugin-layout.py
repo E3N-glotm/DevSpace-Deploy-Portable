@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import runpy
 from pathlib import Path
@@ -13,6 +14,7 @@ def main() -> int:
     module = runpy.run_path(str(BUILD_RELEASE))
     release_plugin_entries = module["release_plugin_entries"]
     release_files = module["release_files"]
+    refresh_manifest_keyfiles = module["refresh_manifest_keyfiles"]
     validate_release_payload = module["validate_release_payload"]
     validate_release_plugins = module["validate_release_plugins"]
 
@@ -89,6 +91,24 @@ def main() -> int:
     else:
         raise AssertionError("release safety validator did not fail closed on SQLite state")
 
+    # Keep the release builder's final manifest refresh wired into the module
+    # and verify the current checkout can be reconciled to an exact key-file
+    # set. This catches post-finalize generators that would otherwise make the
+    # distributable VERSION-MANIFEST.json stale.
+    refresh_manifest_keyfiles()
+    manifest = json.loads((ROOT / "VERSION-MANIFEST.json").read_text(encoding="utf-8"))
+    mismatches = []
+    for raw_key, expected in manifest["keyFiles"].items():
+        relative = raw_key.removesuffix(".sha256")
+        target = ROOT / Path(relative)
+        if not target.is_file():
+            mismatches.append(f"missing:{relative}")
+            continue
+        actual = hashlib.sha256(target.read_bytes()).hexdigest()
+        if actual != expected:
+            mismatches.append(f"hash:{relative}")
+    assert not mismatches, f"release manifest key-file mismatch after refresh: {mismatches[:10]}"
+
     print(
         json.dumps(
             {
@@ -104,6 +124,7 @@ def main() -> int:
                 "sourceLocalBuildCachesExcluded": True,
                 "liveBackupArchivesExcluded": True,
                 "credentialAndSqliteStateFailClosed": True,
+                "releaseManifestKeyFilesRefreshed": True,
             },
             ensure_ascii=False,
         )

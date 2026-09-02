@@ -215,16 +215,41 @@ function isChinese() {
   return typeof navigator !== "undefined" && String(navigator.language || "").toLowerCase().startsWith("zh");
 }
 
-function visibleContinuationTrigger() {
+function compactContinuationField(value, maxLength = 520) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length <= maxLength ? text : `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function visibleContinuationTrigger(task) {
   // app.sendMessage is the Host-supported way to create the resumed model turn,
   // so the recovery instruction must survive even when updateModelContext is
   // ignored or not replayed into the resumed model turn. Real Host evidence
   // showed that a bare "继续" can still produce a status-only assistant final.
   // Keep protocol/task ids hidden, but make sustained execution explicit in the
   // actual user-role message that creates the turn.
+  // updateModelContext is useful but Host behavior has shown it is not a
+  // reliable cross-turn transcript bridge. The synthetic user-role message is
+  // the only context that is guaranteed to become part of the resumed turn's
+  // visible conversation. Carry the durable objective and next unresolved
+  // milestone in that message so the model does not have to guess what
+  // "unfinished DevSpace task" refers to when the preceding assistant turn was
+  // truncated or its hidden model context was not replayed.
+  const objective = compactContinuationField(task?.objective, 620);
+  const milestone = compactContinuationField(nextUnresolvedMilestone(task), 420);
   return isChinese()
-    ? "继续执行未完成的 DevSpace 任务；如果仍有可运行里程碑，直接继续调用工具完成，不要只回复状态或“继续处理中”。"
-    : "Continue the unfinished DevSpace task. If runnable milestones remain, keep using the tools to complete them; do not reply with only a status or ‘still working’.";
+    ? [
+      "继续执行未完成的 DevSpace 任务。",
+      objective ? `当前任务：${objective}` : "",
+      milestone ? `下一未完成里程碑：${milestone}` : "",
+      "先调用 continuation_task status 恢复权威状态；如果本轮未直接提供 DevSpace_MCP 工具，先通过连接器工具发现加载它。随后直接继续实际工具操作，不要因为看不到上一条消息、工具未预加载或只完成状态检查就停止，也不要只回复状态或“继续处理中”。",
+    ].filter(Boolean).join("\n")
+    : [
+      "Continue the unfinished DevSpace task.",
+      objective ? `Current task: ${objective}` : "",
+      milestone ? `Next unfinished milestone: ${milestone}` : "",
+      "Call continuation_task status first to restore authoritative state. If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. Then continue substantive tool work; do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, and do not reply with only a status or 'still working'.",
+    ].filter(Boolean).join("\n");
 }
 
 function nextUnresolvedMilestone(task) {
@@ -703,7 +728,7 @@ export function installContinuationCoordinator(app, options = {}) {
         const authorized = await callSender("authorize-delivery", { deliveryToken, note: reason }).catch(() => undefined);
         if (!authorized?.accepted) return false;
 
-        const delivery = await sendFollowUp(visibleContinuationTrigger(), async () => {
+        const delivery = await sendFollowUp(visibleContinuationTrigger(state.task), async () => {
           const latest = await callTask("status").catch(() => undefined);
           if (latest?.task) acceptTask(latest.task);
           return Boolean(state.task && !terminal(state.task) && !automationSuppressed(state.task));

@@ -4937,7 +4937,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.57 · Protocol 1.5";
+            _versionLabel.Text = "DevSpace Portable 1.1.58 · Protocol 1.5";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5311,7 +5311,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 BackColor = UiPalette.Surface,
                 ForeColor = UiPalette.Text,
                 Font = UiTypography.Ui(9.25F),
-                Text = "1.1.57 修复真实 Host 自动续轮的两个残余 P0：READY 在旧 sender iframe 失活后会由首个可信普通 Workspace App rebind 立即消费；synthetic turn 即使已做过一次真实工具工作后又过早 final，也会在 work-owner lease 到期后重新生成唯一 READY，并禁止用“继续处理中”之类占位回复假装后台继续。",
+                Text = "1.1.58 修复自动续轮的任务语义断层：即使 Host 没有把隐藏 updateModelContext 重放给新的 assistant turn，真实 app.sendMessage 用户消息也会携带当前任务目标、下一未完成里程碑和 DevSpace_MCP 恢复指令，不再只说泛化的“继续未完成任务”。",
             };
             layout.Controls.Add(_continuationSummary, 0, 1);
 
@@ -5791,7 +5791,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.57") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableVersion", "1.1.58") + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
