@@ -204,22 +204,27 @@ assert.doesNotMatch(runtimeStateSource, /earlyCompletionCorroborated|short-confi
   "runtime state must not arm recovery from repeated UI heartbeat probes alone");
 assert.match(runtimeStateSource, /COMPLETION_STALL_SUSPECT_MS = 25_000/,
   "the primary completion-driven inactivity lease must remain below the one-minute ceiling");
-assert.match(runtimeStateSource, /COMPLETION_SERVER_QUIET_BACKSTOP_MS = 30_000/,
-  "normal ChatGPT web turns that keep the milestone iframe mounted require a bounded server-quiet recovery backstop");
+assert.doesNotMatch(runtimeStateSource, /COMPLETION_SERVER_QUIET_BACKSTOP_MS/,
+  "request silence must not be promoted into a continuation authorization timer");
 assert.doesNotMatch(runtimeStateSource, /COMPLETION_QUIET_RECOVERY_MS|COMPLETION_STALL_CONFIRM_MS/,
   "the old heartbeat-confirmation quiet-window implementations must stay removed");
 assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_MAX_MS = 45_000/,
   "delivery ACK retransmission must remain bounded below one minute");
 assert.ok(runtimeStateSource.includes("server-turn-lease-expired-no-inflight-model-request")
-  && runtimeStateSource.includes("server-confirmed-host-cutoff-no-inflight-model-request")
-  && runtimeStateSource.includes("server-quiet-backstop-no-inflight-model-request"),
-  "resident recovery must keep weak lease suspicion distinct from confirmed-cutoff and bounded server-quiet authorization");
+  && runtimeStateSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
+  "resident recovery must keep weak lease suspicion distinct from confirmed-cutoff authorization");
 assert.match(runtimeStateSource, /!this\.continuationModelRequestInFlight\(current\.conversation_scope_id\)[\s\S]{0,5200}server-turn-lease-expired-no-inflight-model-request/,
   "the resident lease-suspicion/cutoff recovery branch must be forbidden while a real model-originated DevSpace request is in flight");
-assert.match(runtimeStateSource, /serverQuietBackstop[\s\S]{0,1800}server-quiet-backstop-no-inflight-model-request/,
-  "the bounded quiet fallback must arm only from an already persisted SUSPECTED_STALL");
-assert.match(runtimeStateSource, /syntheticQuietBackstop[\s\S]{0,1400}syntheticTurnEnded/,
-  "normally-ended synthetic turns must be able to continue through the same bounded quiet backstop without relying on iframe teardown");
+assert.doesNotMatch(runtimeStateSource, /const serverQuietBackstop/,
+  "server request silence must never arm a replacement Host turn");
+assert.match(runtimeStateSource, /QUIET_BACKSTOP_SENDER_GRACE_MS = 10_000/,
+  "silence-only READY generations must have a short bounded pre-delivery observation window");
+assert.match(runtimeStateSource, /quiet-backstop-claim-grace/,
+  "the sender must defer a newly inferred quiet-backstop READY generation during that observation window");
+assert.match(runtimeStateSource, /same-turn-model-activity-superseded-quiet-claim/,
+  "originating-turn model activity must revoke a silence-only CLAIMED generation before Host delivery");
+assert.doesNotMatch(runtimeStateSource, /const syntheticQuietBackstop/,
+  "synthetic request silence must never be treated as proof that the Host turn ended");
 assert.match(runtimeStateSource, /trackContinuationActivityProcess\(input = \{\}\)[\s\S]{0,2200}watch_process_handles_json/,
   "completion-driven durable process liveness must be persisted independently of the short MCP handler lifetime");
 assert.match(runtimeStateSource, /parseJson\(legacy\.watch_process_handles_json, \[\]\)\.length === 0/,
@@ -271,7 +276,9 @@ assert.match(visibleTriggerSource, /task\?\.objective[\s\S]{0,500}nextUnresolved
   "the visible synthetic message must carry durable task semantics when hidden model context is not replayed by the Host");
 assert.doesNotMatch(visibleTriggerSource, /taskId=|workspaceId=|deliveryToken|generation capability/,
   "taskId/workspaceId/recovery policy must not be emitted as a visible user message");
-assert.match(coordinator, /function continuationContext\([\s\S]{0,3000}runtime atomically claims any server-owned expected synthetic generation/,
+assert.match(coordinator, /function continuationContext\(/,
+  "the coordinator must define hidden continuation context for resumed turns");
+assert.match(coordinator, /runtime atomically claims any server-owned expected synthetic generation/,
   "hidden context must direct the first status call while leaving UUID transport to the runtime");
 assert.match(coordinator, /Tool availability is turn-scoped[\s\S]{0,900}api_tool\.list_resources[\s\S]{0,300}DevSpace_MCP[\s\S]{0,300}continuation_task/,
   "synthetic continuation hidden context must discover DevSpace_MCP through the Host connector path when tool schemas were not preloaded for the resumed turn");
@@ -281,7 +288,13 @@ assert.match(coordinator, /reconstruct the current durable state[\s\S]{0,500}lat
   "hidden recovery context must require evidence-backed state reconstruction and risk checks before action without exposing private reasoning");
 assert.match(coordinator, /function nextUnresolvedMilestone\([\s\S]{0,900}required\.find\(\(milestone\) => !completed\.has\(milestone\)\)/,
   "automatic continuation context must identify the first unresolved milestone instead of forcing the resumed model to rediscover it from a long lifetime history");
-assert.match(coordinator, /nextUnresolvedMilestone:[\s\S]{0,1800}Connector discovery and continuation_task status are control-plane setup, not successful resumed work[\s\S]{0,900}do not produce a final response after discovery\/status alone[\s\S]{0,1100}discovery-only\/status-only turn is an invalid automatic continuation/,
+assert.match(coordinator, /nextUnresolvedMilestone:/,
+  "hidden recovery context must include the durable next unresolved milestone");
+assert.match(coordinator, /Connector discovery and continuation_task status are control-plane setup, not successful resumed work/,
+  "hidden recovery context must classify discovery/status as setup rather than resumed work");
+assert.match(coordinator, /do not produce a final response after discovery\/status, one ordinary tool call, or a checkpoint/,
+  "hidden recovery context must forbid early finalization while runnable milestones remain");
+assert.match(coordinator, /discovery-only\/status-only or one-tool-and-final turn is an invalid automatic continuation/,
   "hidden recovery context must make substantive post-status work mandatory whenever runnable milestones remain");
 assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) =>/,
   "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
@@ -355,21 +368,21 @@ assert.match(coordinator, /synthetic resume work ownership lease expired/,
   "status-only resumed turns must have a dedicated recovery path rather than being treated as successfully completed continuations");
 assert.match(coordinator, /Never end an automatically resumed turn with a placeholder\/status-only reply[\s\S]{0,500}There is no background model execution after a final assistant message/,
   "synthetic recovery context must explicitly forbid placeholder finals such as '继续处理中。'");
-assert.match(runtimeStateSource, /const syntheticTurnEnded = explicitSyntheticTurnEnd \|\| confirmedSyntheticCutoff \|\| syntheticQuietBackstop/,
-  "synthetic retry must require Host-end/cutoff evidence or the bounded no-inflight quiet backstop instead of treating owner-lease expiry as turn completion");
+assert.match(runtimeStateSource, /const syntheticTurnEnded = explicitSyntheticTurnEnd \|\| confirmedSyntheticCutoff/,
+  "synthetic retry must require explicit Host-end evidence or the confirmed-cutoff fallback");
 assert.match(runtimeStateSource, /const abandonedSyntheticWork =[\s\S]{0,1200}&& syntheticTurnEnded/,
   "an expired synthetic ownership lease must not manufacture a duplicate Host turn unless the separate syntheticTurnEnded gate corroborates the resumed turn boundary");
 assert.ok(runtimeStateSource.includes("short synthetic owner lease is only a stale-ownership")
   && runtimeStateSource.includes("Never manufacture a second ChatGPT turn from owner-lease")
-  && runtimeStateSource.includes("bounded server-quiet backstop"),
-  "connector discovery, reasoning, and workspace switching may outlive the short ownership lease; a second synthetic continuation additionally requires Host/cutoff evidence or the bounded no-inflight quiet backstop");
+  && runtimeStateSource.includes("fixed quiet threshold"),
+  "connector discovery, reasoning, and workspace switching may outlive the short ownership lease; silence must remain non-authorizing");
 assert.ok(runtimeStateSource.includes("const confirmedHostCutoff = confirmedHostTurnMs >= HOST_CUTOFF_MIN_SAMPLE_MS")
   && runtimeStateSource.includes("nowMs - turnStartedAt >= confirmedHostTurnMs + CONFIRMED_LIMIT_RECOVERY_GRACE_MS")
   && runtimeStateSource.includes("nowMs - lastModelActivityAt >= CONFIRMED_LIMIT_MODEL_QUIET_MS"),
   "generic completion recovery must still measure a persisted Host cutoff from the real turn start plus grace and model quiet instead of from a short MCP-silence probe");
 assert.ok(runtimeStateSource.includes("if (confirmedHostCutoff)")
   && runtimeStateSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
-  "confirmed Host-cutoff recovery must remain a distinct authoritative evidence path beside the bounded server-quiet fallback");
+  "confirmed Host-cutoff recovery must remain the no-signal authoritative fallback");
 assert.match(runtimeStateSource, /if \(result === "unknown"\)[\s\S]{0,1800}outcomeUncertain:\s*true/,
   "an unknown Host delivery result must remain outcome-uncertain instead of being converted into an automatic retry");
 assert.match(runtimeStateSource, /DELIVERING is an outcome-uncertain zone[\s\S]{0,900}preserve the same generation/,
@@ -378,8 +391,12 @@ assert.match(coordinator, /deliveryAckRetryDue[\s\S]{0,1500}deliveryAckRetryAfte
   "delivery ACK retransmission must honor the persisted retry schedule instead of polling new turns every supervisor tick");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 500, 1_500, 3_000, 5_000\]/,
   "post-sendMessage MCP readiness must stay inside a ten-second bounded retry window");
-assert.match(server, /Never issue a second continuation_anchor inside the same manual round[\s\S]{0,500}anchorMountVerificationPending is true[\s\S]{0,500}keep using the requested generation/,
-  "after the one permitted card is issued for a manual round, pending iframe verification must reuse that generation instead of minting a duplicate card");
+assert.match(server, /call continuation_anchor exactly once before substantive DevSpace work/,
+  "each manual round must issue its milestone card exactly once before substantive DevSpace work");
+assert.match(server, /Repeated checkpoints with the same required milestone set[\s\S]{0,260}reuse the current generation and must not render duplicates/,
+  "same-milestone synthetic work must reuse the current visible-card generation without duplicate rendering");
+assert.match(server, /anchorMountVerificationPending is true, keep using the requested generation while verification arrives/,
+  "pending iframe verification must keep using the requested generation instead of minting a duplicate card");
 assert.match(server, /const finalResponseAllowed = outcome\.finalResponseAllowed !== false/,
   "Task Contract rendering must preserve the structured finalResponseAllowed gate");
 assert.match(server, /Do not end with an ACK[\s\S]{0,260}checkpoint[\s\S]{0,520}same assistant turn[\s\S]{0,700}runnable milestone set/,
@@ -388,14 +405,26 @@ assert.match(server, /successful checkpoint persists progress[\s\S]{0,500}does n
   "Task Contract rendering must forbid checkpoint-as-yield and require owned long-process completion in synthetic turns");
 assert.match(server, /nextRequiredMilestones/,
   "Task Contract results must expose remaining milestones as structured state instead of relying on a prose ACK convention");
-assert.match(server, /taskIncomplete=\$\{Boolean\(outcome\.taskIncomplete\)\}; finalResponseAllowed=\$\{finalResponseAllowed\}/,
-  "ordinary DevSpace work must surface machine-readable task/final-response state while milestones remain");
-assert.match(server, /UNAVAILABLE\/Connection failed\/fetch\/ECONN\/TLS\/handshake\/timeout[\s\S]{0,500}readiness backoff/,
+assert.match(server, /taskIncomplete=\$\{Boolean\(outcome\.taskIncomplete\)\};[\s\S]{0,260}finalResponseAllowed=\$\{finalResponseAllowed\};[\s\S]{0,260}remainingMilestones=/,
+  "ordinary DevSpace work must surface machine-readable incomplete/sustained-work/final-response state while milestones remain");
+assert.match(server, /continueInSameTurn=\$\{Boolean\(outcome\.continueInSameTurn\)\}/,
+  "continuation_task text must expose the same-turn sustained-work directive");
+assert.match(server, /syntheticWorkMustContinue=\$\{Boolean\(outcome\.syntheticWorkMustContinue\)\}/,
+  "continuation_task text must expose the synthetic sustained-work directive");
+assert.match(server, /continueInSameTurn:\s*z\.boolean\(\)\.optional\(\)/,
+  "continuation_task structured output must expose continueInSameTurn");
+assert.match(server, /syntheticWorkMustContinue:\s*z\.boolean\(\)\.optional\(\)/,
+  "continuation_task structured output must expose syntheticWorkMustContinue");
+assert.match(server, /Retry transient transport failures over bounded readiness backoff before declaring failure/,
   "server guidance must retain bounded transport-readiness retries");
-assert.match(server, /Before replaying uncertain side effects[\s\S]{0,300}durable process\/file\/task state/,
+assert.match(server, /Before replaying uncertain side effects, inspect durable state/,
   "transport recovery must remain side-effect aware before replaying uncertain mutations");
-assert.match(server, /CONVERSATION_CARD_PRECONDITION[\s\S]{0,1300}each manual user-message\/task round[\s\S]{0,900}manualTakeover=true exactly once[\s\S]{0,1000}continuation_anchor exactly once[\s\S]{0,1000}Synthetic\/App continuation turns[\s\S]{0,900}reuse the same manual-round card/,
-  "every ordinary DevSpace tool description must enforce one visible milestone card per manual user round while synthetic continuations reuse it");
+assert.match(server, /CONVERSATION_CARD_PRECONDITION[\s\S]{0,1300}Every manual user message that actually uses DevSpace owns exactly one fresh visible milestone card/,
+  "every ordinary DevSpace tool description must establish one visible milestone card per manual user message");
+assert.match(server, /manualTakeover=true exactly once[\s\S]{0,800}continuation_anchor exactly once before substantive DevSpace work/,
+  "manual turn ownership and card issuance must each happen exactly once");
+assert.match(server, /Synthetic\/App continuation turns MUST omit manualTakeover and reuse the current card while requiredMilestones is unchanged/,
+  "synthetic continuations must reuse the current manual-round card while the milestone set is unchanged");
 assert.match(server, /sourceTool: "continuation_task", anchorMounted: false/,
   "headless continuation_task begin must never mark the visible continuation anchor as mounted");
 assert.match(server, /sourceTool: "continuation_anchor"[\s\S]{0,180}anchorMounted: false[\s\S]{0,500}prepareContinuationAnchorMount/,
@@ -428,16 +457,30 @@ assert.match(coordinator, /bindSenderTransport\(\)[\s\S]{0,900}state\.anchorSurf
   "after private bind recovers a missing anchor capability, onConnected must immediately retry the authenticated visible-card ACK");
 assert.doesNotMatch(coordinator, /Reuse the one conversation-lifetime task\/card/,
   "synthetic recovery guidance must distinguish lifetime task identity from the current manual-round card generation");
-assert.match(coordinator, /Reuse the conversation-lifetime taskId, the current manual-round milestone card[\s\S]{0,300}synthetic continuation must never rotate to another card generation/,
-  "synthetic guidance must explicitly preserve the current manual-round card while reusing the lifetime taskId");
+assert.match(coordinator, /Reuse the conversation-lifetime taskId and existing process\/workspace state/,
+  "synthetic guidance must explicitly reuse the lifetime taskId and durable workspace/process state");
+assert.match(coordinator, /Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged/,
+  "synthetic guidance must explicitly preserve the current milestone-card generation while the milestone set is unchanged");
+assert.match(coordinator, /If and only if a status\/checkpoint reports milestoneCardRequired\/reanchorRequired because the synthetic checkpoint changed the required milestone set[\s\S]{0,260}continuation_anchor exactly once for that new generation/,
+  "synthetic guidance must rotate the visible card only when the milestone set actually changes");
+assert.match(coordinator, /syntheticWorkMustContinue/,
+  "synthetic prompt/context must carry the runtime sustained-work directive");
+assert.match(coordinator, /continueInSameTurn/,
+  "synthetic prompt/context must carry the same-turn directive");
+assert.match(coordinator, /finalResponseAllowed/,
+  "synthetic prompt/context must carry the final-response gate");
+assert.match(coordinator, /one-tool-and-final/,
+  "synthetic guidance must reject one-tool-and-final short automatic turns");
 assert.match(coordinator, /senderTransportAvailable\(\)[\s\S]{0,1600}callSender\("heartbeat"/,
   "a generic current Workspace App may run only the sender transport path after receiving a verified private capability");
 assert.match(coordinator, /if \(!state\.anchorSurface\) \{[\s\S]{0,500}never arm recovery from it/,
   "teardown of a transport-only App must not impersonate authoritative milestone-card lifecycle evidence");
-assert.ok(server.includes("this ChatGPT thread owns exactly one lifetime DevSpace Task Contract/taskId")
-  && server.includes("each manual user-message/task round that actually uses DevSpace owns exactly one visible milestone card")
-  && server.includes("A later manual user message starts a new card generation"),
-  "server guidance must keep task identity thread-lifetime while card identity is one-per-manual-user-round");
+assert.ok(server.includes("Every real ChatGPT thread owns one lifetime DevSpace Task Contract/taskId")
+  && server.includes("Every manual user message that actually uses DevSpace owns exactly one fresh visible continuation_anchor milestone card")
+  && server.includes("Synthetic resumed turns omit manualTakeover")
+  && server.includes("reuse the current card while requiredMilestones is unchanged")
+  && server.includes("If a synthetic checkpoint changes requiredMilestones, the runtime rotates one new generation"),
+  "server guidance must keep task identity thread-lifetime, rotate once per manual message, and rotate synthetic cards only on required-milestone-set revision");
 assert.match(runtimeStateSource, /function anchorMountRecoveryRequired[\s\S]{0,1000}return !row\.anchor_mount_verified_at && !row\.anchor_mount_requested_at/,
   "runtime gating must permit exactly one UI-bearing anchor issuance inside the current manual user round");
 assert.match(runtimeStateSource, /Exactly one UI-bearing continuation_anchor may be issued in the current[\s\S]{0,500}new manual round explicitly rotates\/reset these[\s\S]{0,500}synthetic continuations never do/,
@@ -480,10 +523,10 @@ assert.match(coordinator, /preClaim = await callTask\("status"\)[\s\S]{0,500}sta
 assert.ok(server.includes("Later new work reactivates that taskId with continuation_task action=begin")
   || server.includes("Later user work reactivates the same taskId through continuation_task begin"),
   "server instructions must keep one thread-lifetime taskId across sequential user tasks");
-assert.ok(server.includes("new milestone required on the lifetime Task Contract")
-  && server.includes("continuation_task action=begin with the same taskId/workspaceId")
-  && server.includes("exactly one visible milestone card per manual user round"),
-  "a completed lifetime ledger must reactivate the same taskId while a new manual user round receives its own visible card");
+assert.ok(server.includes("Later new work reactivates that taskId with continuation_task action=begin")
+  && server.includes("Every manual user message that actually uses DevSpace owns exactly one fresh visible continuation_anchor milestone card")
+  && server.includes("All card generations reuse the same lifetime taskId"),
+  "a completed lifetime ledger must reactivate the same taskId while each later manual DevSpace message receives one fresh visible card generation");
 assert.match(server, /continue\/resume reuses unfinished milestones/,
   "continue/resume must reuse unfinished milestones instead of manufacturing duplicate work items");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 500, 1_500, 3_000, 5_000\]/,
@@ -1979,6 +2022,7 @@ try {
   const lifetimeVerified = verifyRuntimeAnchor(lifetimeSingleton, "v1/test-conversation-lifetime-singleton", "ui_lifetime_anchor");
   const firstAnchorMountedAt = lifetimeVerified.task.lastAnchorMountedAt;
   const firstAnchorVerifiedAt = lifetimeVerified.task.anchorMountVerifiedAt;
+  const firstAnchorGeneration = lifetimeVerified.task.anchorMountGeneration;
   runtime.continuationTask({
     action: "checkpoint",
     taskId: lifetimeSingleton.task.id,
@@ -2028,10 +2072,14 @@ try {
   assert.equal(secondEpoch.task.state, "RUNNING");
   assert.deepEqual(secondEpoch.task.requiredMilestones, ["first user task", "second user task"]);
   assert.deepEqual(secondEpoch.task.completedMilestones, ["first user task"]);
-  assert.equal(secondEpoch.task.lastAnchorMountedAt, firstAnchorMountedAt,
-    "reactivating later user work must preserve the original visible card mount instead of mounting again");
-  assert.equal(secondEpoch.task.anchorMountVerifiedAt, firstAnchorVerifiedAt,
-    "reactivating later work must preserve the original verified iframe mount instead of requesting a second card");
+  assert.equal(secondEpoch.task.lastAnchorMountedAt, undefined,
+    "reactivating later manual user work must clear the prior card mount while keeping the same lifetime task row");
+  assert.equal(secondEpoch.task.anchorMountVerifiedAt, undefined,
+    "reactivating later manual work must require the fresh card generation to ACK independently");
+  assert.equal(secondEpoch.task.anchorMountGeneration, firstAnchorGeneration + 1,
+    "reactivating a completed lifetime ledger for a later manual message must rotate exactly one fresh card generation");
+  assert.equal(secondEpoch.manualRoundCardRequired, true);
+  assert.equal(secondEpoch.initialAnchorRequired, true);
   const lifetimeRows = runtime.database.sqlite.prepare(`
     select count(*) as count from continuation_tasks
     where conversation_scope_id='v1/test-conversation-lifetime-singleton'
@@ -2046,10 +2094,26 @@ try {
   });
   assert.equal(lifetimeEnsuredAgain.task.id, lifetimeSingleton.task.id);
   assert.equal(lifetimeEnsuredAgain.newMilestoneRequired, false);
+  const secondEpochAnchorDirective = runtime.continuationSupervisorDirective({
+    conversationScopeId: "v1/test-conversation-lifetime-singleton",
+    workspaceId: "ws_lifetime_c",
+  });
+  assert.equal(secondEpochAnchorDirective?.taskId, lifetimeSingleton.task.id);
+  assert.equal(secondEpochAnchorDirective?.initialAnchorRequired, true,
+    "later manual user work must request the newly-rotated visible card before becoming headless again");
+  assert.equal(secondEpochAnchorDirective?.reanchorRequired, true);
+  assert.equal(secondEpochAnchorDirective?.reason, "initial-anchor-required");
+  const secondEpochVerified = verifyRuntimeAnchor(
+    secondEpoch,
+    "v1/test-conversation-lifetime-singleton",
+    "ui_lifetime_anchor_second",
+  );
+  assert.equal(secondEpochVerified.task.anchorMountGeneration, firstAnchorGeneration + 1);
+  assert.ok(secondEpochVerified.task.anchorMountVerifiedAt);
   assert.equal(runtime.continuationSupervisorDirective({
     conversationScopeId: "v1/test-conversation-lifetime-singleton",
     workspaceId: "ws_lifetime_c",
-  }), undefined, "reactivated work with an already-mounted card must keep all liveness maintenance headless");
+  }), undefined, "after the fresh later-manual card ACK, liveness maintenance must become headless again");
 
   const headlessAuto = runtime.continuationTask({
     action: "begin-auto",

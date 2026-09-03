@@ -60,7 +60,7 @@ try {
   assert.match(runtimeSource, /continuationModelToolAuthorization\(input = \{\}\)[\s\S]{0,12000}turn-origin-handshake-required/,
     "runtime ownership authorization must fail closed without guessing whether an ambiguous request is manual or synthetic");
   assert.match(runtimeSource, /same-turn-model-activity-superseded-quiet-ready/,
-    "runtime must allow real same-turn model activity to retire only an unclaimed READY inferred from the weak quiet backstop");
+    "runtime must retain compatibility cleanup for stale pre-upgrade quiet-backstop READY generations");
   const beginRequestIndex = serverSource.indexOf("beginContinuationModelRequest(conversationScopeId)");
   const authorizeRequestIndex = serverSource.indexOf("continuationModelToolAuthorization({ conversationScopeId })");
   assert.ok(beginRequestIndex >= 0 && authorizeRequestIndex > beginRequestIndex,
@@ -82,16 +82,15 @@ try {
     "neither the visible synthetic message nor hidden context may ask the model to transport generation UUIDs");
   assert.match(runtimeSource, /COMPLETION_STALL_SUSPECT_MS = 25_000/,
     "the primary completion-driven inactivity lease must remain below the one-minute ceiling");
-  assert.match(runtimeSource, /COMPLETION_SERVER_QUIET_BACKSTOP_MS = 30_000/,
-    "normal Host turns that keep the iframe mounted need a bounded under-one-minute server-quiet recovery backstop");
+  assert.doesNotMatch(runtimeSource, /COMPLETION_SERVER_QUIET_BACKSTOP_MS/,
+    "request silence must not be promoted into a replacement Host-turn authorization timer");
   assert.doesNotMatch(runtimeSource, /COMPLETION_QUIET_RECOVERY_MS|COMPLETION_STALL_CONFIRM_MS/,
     "the old heartbeat-confirmation quiet-window implementations must stay removed");
   assert.match(runtimeSource, /DELIVERY_ACK_RETRY_MAX_MS = 45_000/,
     "unacknowledged Host delivery must never back off beyond one minute");
   assert.ok(runtimeSource.includes("server-turn-lease-expired-no-inflight-model-request")
-    && runtimeSource.includes("server-confirmed-host-cutoff-no-inflight-model-request")
-    && runtimeSource.includes("server-quiet-backstop-no-inflight-model-request"),
-    "the resident supervisor must distinguish weak lease suspicion, confirmed-cutoff recovery, and the bounded no-inflight server-quiet fallback");
+    && runtimeSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
+    "the resident supervisor must distinguish weak lease suspicion from confirmed-cutoff recovery without authorizing from silence");
   assert.match(coordinatorSource, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) =>/,
     "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
   assert.match(coordinatorSource, /authorize-delivery[\s\S]{0,1800}sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) => \{[\s\S]{0,900}callTask\("status"\)/,
@@ -136,6 +135,7 @@ try {
   let snapshot = runtime.continuationArchitectureSnapshot(scope);
   assert.ok(snapshot.card, "first DevSpace work must allocate the conversation card identity");
   const stableCardId = snapshot.card.card_id;
+  const stableCardGeneration = Number(snapshot.card.mount_generation);
   assert.equal(snapshot.worksets.length, 1);
   assert.equal(snapshot.worksets[0].sequence, 1);
   assert.equal(snapshot.card.active_workset_id, snapshot.worksets[0].id);
@@ -243,7 +243,7 @@ try {
   assert.equal(snapshot.card.card_id, stableCardId);
   assert.ok(snapshot.card.mount_token);
   assert.ok(Number(snapshot.card.mount_generation) > 0);
-  const senderCapability = {
+  let senderCapability = {
     taskId: first.task.id,
     anchorMountToken: snapshot.card.mount_token,
     anchorMountGeneration: Number(snapshot.card.mount_generation),
@@ -323,7 +323,32 @@ try {
   assert.equal(second.task?.state, "RUNNING", "a new explicit begin after completion must reactivate work on the lifetime card");
   assert.equal(second.task.id, first.task.id, "legacy compatibility projection may keep the lifetime task id during 1.1.54 bridge");
   snapshot = runtime.continuationArchitectureSnapshot(scope);
-  assert.equal(snapshot.card.card_id, stableCardId, "a new user task must reuse the same conversation card");
+  assert.notEqual(snapshot.card.card_id, stableCardId,
+    "a genuinely new manual user task must rotate to a fresh visible milestone card generation");
+  assert.equal(Number(snapshot.card.mount_generation), stableCardGeneration + 1,
+    "a genuinely new manual user task must rotate the visible card exactly once");
+  const secondMount = runtime.prepareContinuationAnchorMount({
+    taskId: second.task.id,
+    conversationScopeId: scope,
+  });
+  assert.equal(Number(secondMount.anchorMountGeneration), stableCardGeneration + 1,
+    "the fresh manual round must mount the rotated card generation");
+  const secondMounted = runtime.continuationTask({
+    action: "anchor-mounted",
+    taskId: second.task.id,
+    conversationScopeId: scope,
+    coordinatorInstanceId: "ui_architecture_test",
+    anchorMountToken: secondMount.anchorMountToken,
+  });
+  assert.equal(secondMounted.accepted, true, JSON.stringify(secondMounted));
+  snapshot = runtime.continuationArchitectureSnapshot(scope);
+  assert.equal(snapshot.card.mount_state, "VERIFIED",
+    "the rotated manual-round card must be verified before later sender/lease assertions");
+  senderCapability = {
+    taskId: second.task.id,
+    anchorMountToken: snapshot.card.mount_token,
+    anchorMountGeneration: Number(snapshot.card.mount_generation),
+  };
   assert.equal(snapshot.worksets.length, 2, "a new user task must create a sequential workset");
   assert.deepEqual(snapshot.worksets.map((row) => row.sequence), [1, 2]);
   const active = snapshot.worksets[1];
@@ -413,41 +438,12 @@ try {
   releaseLongModelRequest();
   assert.equal(runtime.continuationModelRequestInFlight(scope), false);
   const quietRecoverySweep = runtime.continuationSupervisorSweep();
-  assert.equal(quietRecoverySweep.ready.length, 1,
-    "after the real request ends and the bounded quiet backstop has matured, the resident supervisor must recover a normal Host turn even when its iframe never tears down");
+  assert.equal(quietRecoverySweep.ready.length, 0,
+    "request silence alone must remain non-authorizing even after a long interval because the model may still be reasoning outside DevSpace");
   const quietRecoveryLegacy = db.prepare("select stall_state,stall_evidence from continuation_tasks where id=?").get(first.task.id);
-  assert.equal(quietRecoveryLegacy.stall_state, "CONTINUATION_ARMED");
-  assert.equal(quietRecoveryLegacy.stall_evidence, "server-quiet-backstop-no-inflight-model-request");
-  const quietBackstopGeneration = quietRecoverySweep.ready[0].generation;
-  assert.ok(quietBackstopGeneration > activeGeneration.generation);
-  assert.equal(runtime.continuationSupervisorSweep().ready.length, 0,
-    "the quiet backstop must still create only one live READY generation");
-  const cardGenerationBeforeLateModelActivity = db.prepare(`
-    select mount_generation from continuation_conversation_cards where conversation_scope_id=?
-  `).get(scope)?.mount_generation;
-  const lateManualTool = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
-  assert.equal(lateManualTool.accepted, true,
-    "a real ordinary model tool request must supersede an unclaimed READY generation inferred only from quiet silence");
-  assert.equal(lateManualTool.reason, "same-turn-model-activity-superseded-quiet-ready");
-  assert.equal(lateManualTool.supersededGeneration, quietBackstopGeneration);
-  const retiredQuietGeneration = db.prepare(`
-    select state,failure_reason from continuation_generations where workset_id=? and generation=?
-  `).get(active.id, quietBackstopGeneration);
-  assert.equal(retiredQuietGeneration.state, "SUPERSEDED");
-  assert.equal(retiredQuietGeneration.failure_reason, "same-turn-model-activity-superseded-quiet-backstop");
-  const recoveredSameTurn = db.prepare(`
-    select stall_state,stall_evidence from continuation_tasks where id=?
-  `).get(first.task.id);
-  assert.equal(recoveredSameTurn.stall_state, "ACTIVE");
-  assert.equal(recoveredSameTurn.stall_evidence, null);
-  assert.equal(db.prepare(`
-    select mount_generation from continuation_conversation_cards where conversation_scope_id=?
-  `).get(scope)?.mount_generation, cardGenerationBeforeLateModelActivity,
-  "same-turn liveness recovery must not rotate or remount the visible manual-round card");
-  db.prepare(`
-    update continuation_generations set state='NO_WORK',closed_at=?,failure_reason='test-reset',updated_at=?
-    where workset_id=? and generation=?
-  `).run(new Date().toISOString(), new Date().toISOString(), active.id, quietBackstopGeneration);
+  assert.equal(quietRecoveryLegacy.stall_state, "SUSPECTED_STALL");
+  assert.match(String(quietRecoveryLegacy.stall_evidence || ""), /lease-expired/,
+    "silence may remain a diagnostic suspicion but must not become continuation authorization");
   db.prepare(`
     update continuation_tasks set stall_state='ACTIVE',stall_suspected_at=null,stall_armed_at=null,stall_evidence=null,
       continuation_pending=0 where id=?
@@ -469,7 +465,8 @@ try {
   assert.equal(confirmedCutoffRecoveryLegacy.stall_state, "CONTINUATION_ARMED");
   assert.equal(confirmedCutoffRecoveryLegacy.stall_evidence, "server-confirmed-host-cutoff-no-inflight-model-request");
   const confirmedCutoffGeneration = confirmedCutoffRecoverySweep.ready[0].generation;
-  assert.ok(confirmedCutoffGeneration > quietBackstopGeneration);
+  assert.ok(confirmedCutoffGeneration > activeGeneration.generation,
+    "confirmed-cutoff recovery must advance beyond the originating generation without depending on a quiet-backstop generation");
   db.prepare(`
     update continuation_generations set state='NO_WORK',closed_at=?,failure_reason='test-reset',updated_at=?
     where workset_id=? and generation=?
@@ -539,8 +536,13 @@ try {
 
   db.prepare("update continuation_generations set due_at=? where delivery_token=?")
     .run(past, senderA.deliveryToken);
-  db.prepare("update continuation_worksets set continuation_due_at=? where id=?")
-    .run(past, active.id);
+  // Regression: a sender can die after CLAIMED while the workset's ordinary
+  // continuation deadline is still unset/future.  The sender-claim lease is
+  // independently authoritative and must still be swept; otherwise a single
+  // pre-send crash can strand an unfinished task indefinitely (the overnight
+  // generation-79 incident stayed CLAIMED for hours this way).
+  db.prepare("update continuation_worksets set continuation_due_at=null where id=?")
+    .run(active.id);
   const senderCrashSweep = runtime.continuationSupervisorSweep();
   assert.equal(senderCrashSweep.ready.length, 1,
     "a claimed sender that disappears before Host delivery must expire and produce a new READY generation");

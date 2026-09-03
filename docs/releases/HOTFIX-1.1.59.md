@@ -14,7 +14,7 @@
 
 第五，真实 Host 已观察到第一条 synthetic `ui/message` 被模型误判为“只是系统续接说明”，首个 resumed turn 只复述恢复信息、不做实质工具操作，直到第二次续轮才开始工作。synthetic visible/hidden contract 现已明确首轮就是本轮实际用户角色工作请求，并要求 status/discovery 后在同一 turn 继续实质 DevSpace 操作。
 
-第六，真实 ChatGPT 网页在普通 assistant turn 正常结束后可能继续保留里程碑 iframe 和 heartbeat，并不会可靠触发 `onTeardown()`。如果状态机只接受 timeout / teardown / 已确认 Host cutoff，那么 25 秒 Turn Lease 过期后会永久停在 `SUSPECTED_STALL`。1.1.59 因此增加一个与工具契约一致的、严格受控的 **under-one-minute server-quiet backstop**：先等待 25 秒进入疑似静默，再额外确认 30 秒无模型 DevSpace 请求、无 durable process 后才允许生成下一代；heartbeat 本身仍不构成授权。
+第六，进一步 live 验证证明：真实 ChatGPT 网页里的“模型正在长时间纯推理”与“assistant turn 已经结束”在 DevSpace 侧都可能表现为一段没有模型 DevSpace 请求的静默，因此任何固定的 server-quiet 阈值都存在误抢占风险。最终 1.1.59 不再把纯静默升级为 continuation authorization：25 秒 Turn Lease 过期只进入 `SUSPECTED_STALL`，只有显式 Host timeout / teardown 或已经确认的 Host cutoff + grace + model quiet 才能生成下一代。iframe heartbeat 同样只证明卡片存活，不证明 turn 已结束。
 
 ## 关键修复
 
@@ -48,10 +48,11 @@
 
 - 普通静默、Turn Lease 到期的第一阶段只允许进入 `SUSPECTED_STALL`，不会在 25 秒阈值处直接生成新的 Host turn。
 - 明确 Host timeout / teardown 证据，以及用户已确认的真实 Host cutoff + grace + model quiet，继续作为更强的恢复证据。
-- 对真实网页“assistant 已结束但 iframe 继续存活”的情况，增加约 **55 秒总静默窗口**的 bounded server-quiet backstop：25 秒进入 `SUSPECTED_STALL` 后，再稳定 30 秒；期间只要存在模型侧 DevSpace 请求或 durable process handle 就保持 fail-closed。该后备只解决 Host 不提供 turn-end 信号的问题，不把 iframe heartbeat 当成 turn-end。
+- **纯 request silence 永远不再作为 continuation authorization。** 25 秒 lease 过期后只记录 `SUSPECTED_STALL`；即使随后持续数分钟没有 DevSpace 请求，也不得据此创建 READY generation。这样模型在长推理、上下文压缩或等待非 DevSpace 工作期间不会被 watchdog 抢占。
+- 无显式 timeout / teardown 时，唯一保留的自动兜底是**已经确认过的真实 Host cutoff**：从真实 turn start 计算 cutoff，再附加 recovery grace 与 model quiet，避免把普通短静默当成 Host 截断。
 - `CLAIMED` 是发送前状态，可以在 claim lease 到期后安全回收；`DELIVERING` 是结果不确定区，timer 永远不能据此重发。
 - `app.sendMessage` 返回 `unknown` 时保留原 generation 的 `DELIVERING`，不转换成 READY；只有明确 `failed/rejected` 才允许下一次 generation。
-- synthetic work owner 的 45 秒短 lease 只用于检测 stale ownership，不能凭自身到期制造第二个 ChatGPT turn；后续 synthetic→synthetic 同样必须有 Host/cutoff 证据，或满足同一约 55 秒 no-inflight server-quiet backstop。
+- synthetic work owner 的 45 秒短 lease 只用于检测 stale ownership，不能凭自身到期制造第二个 ChatGPT turn；后续 synthetic→synthetic 同样必须有显式 Host timeout / teardown 或 confirmed-cutoff 证据。
 
 ### 6. READY-after-bind 不再饿死
 
@@ -75,7 +76,7 @@
 
 - 真实网页 Host 可能在模型长推理、上下文压缩或等待外部工具返回期间保持当前 assistant turn 存活，但这一段时间未必持续产生 DevSpace 调用；旧 bounded quiet-backstop 因而仍存在把“同一轮仍在工作”误判成“上一轮已经结束”的窗口。
 - 模型发起新的 DevSpace 请求时，server 现在先登记 model-originated request in-flight，再执行 continuation ownership authorization，关闭“授权检查通过后、in-flight 尚未可见前”被 supervisor 抢占的竞态。
-- 如果当前 manual turn 的真实模型活动遇到仅由 `server-quiet-backstop-no-inflight-model-request` 产生、尚未进入真实发送的 weak READY generation，runtime 会撤销该 weak READY 并继续当前 turn，而不是强迫模型进入 synthetic/manual takeover 竞争。
+- 最终架构已经**停止生成新的 quiet-backstop READY**。升级兼容代码仍能识别旧 runtime 遗留的 `server-quiet-backstop-no-inflight-model-request` READY/CLAIMED，并在真实同轮模型活动重新出现时安全撤销这些 stale generation，防止升级过程中旧状态继续阻塞。
 - 已经 claim、已经进入 `DELIVERING` 或拥有更强 Host/cutoff 证据的 generation 不会被该规则撤销；因此修复只消除 weak false-positive，不削弱 durable delivery 的去重语义。
 - 同一手动用户消息的异常恢复继续复用当前 visible card generation；weak quiet recovery 不得自行旋转新卡。
 
@@ -107,10 +108,10 @@
 3. 同一测试锁定 install root 改变时旧 state 的安全停止逻辑，同时确认后台 `silent` recovery 仍读取 persisted Agent 配置。
 4. `test-native-ui-resilience.mjs`、`test-linux-agent-contract.mjs`、`test-remote-workspace-backend.mjs` 与 `verify-source-tree.mjs` 继续作为 UI 生命周期、Linux Agent 权限契约、后端 repair enrollment 和版本身份门禁。
 5. `test-continuation-guard.mjs` 新增 READY-after-bind 模拟：初次 sender bind 没有 READY，后续 supervisor status 才出现 READY，必须在下一次 refresh 原子 claim 且只发送一次；同时锁定首条 visible synthetic message 的“actual user-role work request / 首轮必须实质工作”语义。
-6. `test-continuation-architecture.mjs` 继续覆盖 generation ownership、manual takeover、card/workset singleton、confirmed-cutoff 恢复，并新增 server-quiet backstop 动态验证：真实模型 DevSpace 请求仍在 flight 时即使静默窗口成熟也不得续轮；请求释放后只生成一个 READY generation。
+6. `test-continuation-architecture.mjs` 继续覆盖 generation ownership、manual takeover、card/workset singleton、confirmed-cutoff 恢复，并新增 fail-closed 静默验证：真实模型 DevSpace 请求结束后，即使长期静默也只能停在 `SUSPECTED_STALL`，不得仅凭 silence 生成 READY；显式 Host timeout 与 confirmed cutoff 仍能正常恢复。
 7. `test-updater-apply-recovery.mjs` 覆盖无关 Portable-root executable 在文件事务前阻断更新，并要求 stderr/stdout 保留具体 PID/文件路径和 `No program files were changed` 诊断。
-8. `test-continuation-guard.mjs` 额外锁定 synthetic owner lease 不能单独重发、`DELIVERING/unknown` 仍不可 timer retry，以及 synthetic 正常结束时只能通过 Host/cutoff 或 bounded no-inflight quiet gate 进入下一轮。
-9. `test-continuation-architecture.mjs` / `test-continuation-guard.mjs` 同时锁定 same-turn weak READY 撤销、model request in-flight 登记顺序以及“弱静默恢复不能旋转当前手动卡片”的不变量。
+8. `test-continuation-guard.mjs` 额外锁定 synthetic owner lease 不能单独重发、`DELIVERING/unknown` 仍不可 timer retry，以及 synthetic 只能通过显式 Host-end 或 confirmed-cutoff gate 进入下一轮；固定 quiet threshold 不得重新出现。
+9. `test-continuation-architecture.mjs` / `test-continuation-guard.mjs` 同时锁定 model request in-flight 登记顺序、纯静默只能产生 `SUSPECTED_STALL`、以及对 pre-upgrade weak READY/CLAIMED 的兼容撤销逻辑。
 10. canonical-repair retention 专项回归锁定严格文件名匹配、最近 3 份 / 512 MiB 双上限，并验证主库、WAL/SHM 与非目标 SQLite 文件不会被删除。
 11. `test-process-registry-retention.mjs` 验证活动/过渡状态永不清理，终态历史受到 5000 条 + 30 天双重约束。
 12. `test-continuation-guard.mjs` 新增 checkpoint 终态卫生覆盖：具备 durable evidence 且最后 milestone 完成时必须原子 `SUCCEEDED` 并清除 synthetic ownership；缺失 evidence 时必须继续 RUNNING。

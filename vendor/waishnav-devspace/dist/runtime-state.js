@@ -8,24 +8,16 @@ const DEFAULT_TASK_CONTRACT_MILESTONES = [
 ];
 const TASK_CONTRACT_VERSION = 2;
 const ANCHOR_LEASE_MS = 90_000;
-// This is an activity-suspicion threshold, not a ChatGPT turn deadline.  Its
-// expiry first moves an unfinished task to SUSPECTED_STALL.  A later resident
-// sweep may use the bounded server-quiet backstop below, but only while there is
-// no model-originated DevSpace request or durable process still in flight.
+// This is an activity-suspicion threshold, not a ChatGPT turn deadline. Its
+// expiry only moves an unfinished task to SUSPECTED_STALL. Request silence can
+// persist for minutes while the model reasons outside DevSpace, so it is never
+// sufficient to authorize a replacement Host turn.
 const COMPLETION_STALL_SUSPECT_MS = 25_000;
-// ChatGPT's web Host can keep the milestone iframe mounted after a normal
-// assistant turn has already finished, so iframe teardown is not a reliable
-// turn-boundary signal.  Give the first weak suspicion another 30 seconds to
-// settle before the resident server is allowed to recover.  Together with the
-// 25-second suspicion lease this caps the no-Host-signal fallback at ~55s.
-// Any real model DevSpace request or durable process guard keeps this fail-closed.
-const COMPLETION_SERVER_QUIET_BACKSTOP_MS = 30_000;
 // MCP Apps does not expose a standard authoritative "assistant turn finished"
 // event. A surviving/verified iframe heartbeat therefore proves only that the
 // card is alive; repeated heartbeats themselves MUST NOT arm a continuation.
-// Recovery is authorized by independent Host/lifecycle evidence, a previously
-// confirmed Host cutoff, or the bounded server-quiet backstop above after all
-// model/process activity gates are clear.
+// Recovery is authorized only by independent Host/lifecycle evidence or the
+// previously confirmed Host cutoff fallback.
 const CONFIRMED_LIMIT_RECOVERY_GRACE_MS = 20_000;
 const CONFIRMED_LIMIT_MODEL_QUIET_MS = 30_000;
 const HOST_CUTOFF_MIN_SAMPLE_MS = 30_000;
@@ -43,6 +35,14 @@ const DELIVERY_ACK_RETRY_MAX_MS = 45_000;
 // paused/cancelled, or the Host forcibly truncates the model turn.
 const SYNTHETIC_WORK_OWNER_LEASE_MS = 45_000;
 const CONTINUATION_SENDER_CLAIM_LEASE_MS = 15_000;
+// A server-quiet backstop is necessarily weaker than timeout/teardown evidence:
+// the Host exposes no authoritative "assistant turn finished" event, so a long
+// reasoning interval can look identical to a completed turn.  Keep a short
+// pre-delivery observation window only for READY generations inferred from that
+// weak signal.  A real model tool request during READY/CLAIMED wins the race and
+// revokes the synthetic claim before any Host-visible follow-up can be sent.
+// Strong timeout/teardown/confirmed-cutoff generations bypass this grace.
+const QUIET_BACKSTOP_SENDER_GRACE_MS = 10_000;
 const CONTINUATION_COOLDOWN_MS = 45_000;
 const AUTO_TASK_ABANDON_AFTER_MS = 24 * 60 * 60 * 1000;
 const TERMINAL_CONTINUATION_STATES = new Set([
@@ -226,28 +226,27 @@ export class StructuredRuntimeState {
         const card = this.database.sqlite.prepare(`
           select active_workset_id from continuation_conversation_cards where conversation_scope_id=?
         `).get(conversationScopeId);
-        let readyGeneration = card?.active_workset_id
+        let preDeliveryGeneration = card?.active_workset_id
             ? this.database.sqlite.prepare(`
-                select id,generation,state from continuation_generations
-                where workset_id=? and owner_type='synthetic' and state='READY'
+                select id,generation,state,delivery_token,created_at from continuation_generations
+                where workset_id=? and owner_type='synthetic' and state in ('READY','CLAIMED')
                 order by generation asc limit 1
               `).get(card.active_workset_id)
             : undefined;
-        // A READY generation created only by the bounded server-quiet
-        // backstop has not been claimed or sent yet. If an ordinary model tool
-        // request reaches the server while there is still no active synthetic
-        // owner/token, that request is stronger evidence that the *same* assistant
-        // turn is alive than the earlier inference from silence. A future
-        // synthetic turn cannot be the source of this request: the Host cannot
-        // create that turn until the READY generation is claimed and delivered,
-        // at which point delivery_owner/token become synthetic ownership.
+        // A READY/CLAIMED generation created only by the bounded server-quiet
+        // backstop has not been Host-delivered yet. If an ordinary model tool
+        // request reaches the server in that pre-delivery interval, that request
+        // is stronger evidence that the *same* assistant turn is alive than the
+        // earlier inference from silence. A future synthetic turn cannot be the
+        // source of the request until the generation reaches DELIVERING and its
+        // Host ui/message is accepted.
         //
-        // Retire only this weak, unclaimed READY state. Host timeout/teardown,
-        // confirmed-cutoff READY generations, CLAIMED/DELIVERING generations,
-        // and any token-bearing synthetic owner remain fail-closed.
-        if (readyGeneration
-            && !syntheticOwned
-            && !currentToken
+        // Retire only weak READY/CLAIMED state. DELIVERING and synthetic-active
+        // ownership remain fail-closed because the resumed Host turn may already
+        // exist by then. Timeout/teardown/confirmed-cutoff generations never use
+        // this weak stall_evidence and therefore are unaffected.
+        if (preDeliveryGeneration
+            && owner !== "synthetic-active"
             && task.state === "RUNNING"
             && normalizedContinuationMode(task.continuation_mode, "compat") === "completion-driven"
             && String(task.stall_evidence || "") === "server-quiet-backstop-no-inflight-model-request") {
@@ -259,8 +258,7 @@ export class StructuredRuntimeState {
                 if (!freshTask
                     || freshTask.state !== "RUNNING"
                     || normalizedContinuationMode(freshTask.continuation_mode, "compat") !== "completion-driven"
-                    || ["synthetic-pending", "synthetic-active"].includes(String(freshTask.delivery_owner || ""))
-                    || String(freshTask.delivery_token || "").trim()
+                    || String(freshTask.delivery_owner || "") === "synthetic-active"
                     || String(freshTask.stall_evidence || "") !== "server-quiet-backstop-no-inflight-model-request")
                     return undefined;
                 const freshCard = this.database.sqlite.prepare(`
@@ -268,24 +266,40 @@ export class StructuredRuntimeState {
                 `).get(conversationScopeId);
                 if (!freshCard?.active_workset_id)
                     return undefined;
-                const freshReady = this.database.sqlite.prepare(`
-                  select id,generation from continuation_generations
-                  where workset_id=? and owner_type='synthetic' and state='READY'
+                const freshPreDelivery = this.database.sqlite.prepare(`
+                  select id,generation,state,delivery_token from continuation_generations
+                  where workset_id=? and owner_type='synthetic' and state in ('READY','CLAIMED')
                   order by generation asc limit 1
                 `).get(freshCard.active_workset_id);
-                if (!freshReady)
+                if (!freshPreDelivery)
+                    return undefined;
+                const generationState = String(freshPreDelivery.state || "");
+                const taskDeliveryToken = String(freshTask.delivery_token || "").trim();
+                const generationDeliveryToken = String(freshPreDelivery.delivery_token || "").trim();
+                if (generationState === "READY"
+                    && (String(freshTask.delivery_owner || "") === "synthetic-pending" || taskDeliveryToken))
+                    return undefined;
+                if (generationState === "CLAIMED"
+                    && (String(freshTask.delivery_owner || "") !== "synthetic-pending"
+                        || !generationDeliveryToken
+                        || taskDeliveryToken !== generationDeliveryToken))
                     return undefined;
                 const retired = this.database.sqlite.prepare(`
                   update continuation_generations set
                     state='SUPERSEDED',closed_at=?,
                     failure_reason='same-turn-model-activity-superseded-quiet-backstop',updated_at=?
-                  where id=? and state='READY'
-                `).run(nowIso, nowIso, freshReady.id);
+                  where id=? and state=?
+                `).run(nowIso, nowIso, freshPreDelivery.id, generationState);
                 if (Number(retired.changes || 0) !== 1)
                     return undefined;
                 this.database.sqlite.prepare(`
                   update continuation_tasks set
-                    continuation_pending=0,stall_state='ACTIVE',stall_suspected_at=null,
+                    superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+                    delivery_token=null,delivery_owner=null,delivery_owner_expires_at=null,
+                    continuation_pending=0,delivery_ack_started_at=null,
+                    delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
+                    delivery_work_baseline_count=0,
+                    stall_state='ACTIVE',stall_suspected_at=null,
                     stall_probe_count=0,stall_last_probe_at=null,stall_armed_at=null,stall_evidence=null,
                     turn_lease_expires_at=?,last_model_activity_at=?,last_activity_at=?,updated_at=?
                   where id=?
@@ -295,13 +309,18 @@ export class StructuredRuntimeState {
                     state='RUNNING',continuation_due_at=?,last_model_activity_at=?,updated_at=?
                   where id=?
                 `).run(nextLeaseAt, nowIso, nowIso, freshCard.active_workset_id);
-                return { generation: Number(freshReady.generation || 0) };
+                return {
+                    generation: Number(freshPreDelivery.generation || 0),
+                    generationState,
+                };
             })();
             if (recovered) {
-                readyGeneration = undefined;
+                preDeliveryGeneration = undefined;
                 return {
                     accepted: true,
-                    reason: "same-turn-model-activity-superseded-quiet-ready",
+                    reason: recovered.generationState === "CLAIMED"
+                        ? "same-turn-model-activity-superseded-quiet-claim"
+                        : "same-turn-model-activity-superseded-quiet-ready",
                     taskId: task.id,
                     owner: "manual",
                     supersededGeneration: recovered.generation,
@@ -309,12 +328,12 @@ export class StructuredRuntimeState {
                 };
             }
         }
-        if (syntheticOwned || currentToken || readyGeneration) {
+        if (syntheticOwned || currentToken || preDeliveryGeneration) {
             return {
                 accepted: false,
                 reason: "turn-origin-handshake-required",
                 taskId: task.id,
-                readyGeneration: readyGeneration?.generation,
+                readyGeneration: preDeliveryGeneration?.state === "READY" ? preDeliveryGeneration?.generation : undefined,
                 syntheticOwnerActive: syntheticOwned,
                 syntheticTokenPending: Boolean(currentToken),
             };
@@ -355,11 +374,12 @@ export class StructuredRuntimeState {
                 Number(task.anchor_mount_generation || 0),
                 Number(card?.mount_generation || 0),
             ) + 1;
-            // A visible milestone surface belongs to one manual user round, not
-            // to the lifetime ChatGPT thread.  Rotating the current-card slot
-            // revokes the old iframe capability while leaving the already
-            // rendered transcript card untouched.  Synthetic continuations do
-            // not call this method and therefore keep using the same round card.
+            // A visible milestone surface belongs to one milestone-card
+            // generation, not to the lifetime ChatGPT thread. Every real manual
+            // user message starts a fresh generation. Synthetic continuations
+            // reuse that generation while the required milestone set is stable,
+            // but a synthetic checkpoint that changes that set also rotates the
+            // card so the transcript exposes the new milestone contract.
             this.database.sqlite.prepare(`
               update continuation_tasks set
                 anchor_mount_token=null,anchor_mount_requested_at=null,anchor_mount_verified_at=null,
@@ -1080,22 +1100,26 @@ export class StructuredRuntimeState {
         const candidates = this.database.sqlite.prepare(`
           select w.* from continuation_worksets w
           where w.state in ('RUNNING','SUSPECTED_STALL')
-            and w.continuation_due_at is not null
-            and w.continuation_due_at<=?
             and exists(
               select 1 from continuation_milestones m
               where m.workset_id=w.id and m.state='PENDING'
             )
-          order by w.continuation_due_at asc
+            and (
+              (w.continuation_due_at is not null and w.continuation_due_at<=?)
+              or exists(
+                select 1 from continuation_generations g
+                where g.workset_id=w.id and g.owner_type='synthetic'
+                  and g.state='CLAIMED' and g.due_at is not null and g.due_at<=?
+              )
+            )
+          order by coalesce(w.continuation_due_at, ?) asc
           limit 128
-        `).all(nowIso);
+        `).all(nowIso, nowIso, nowIso);
         const ready = [];
         for (const candidate of candidates) {
             const outcome = this.database.sqlite.transaction(() => {
                 const current = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(candidate.id);
                 if (!current || !["RUNNING", "SUSPECTED_STALL"].includes(String(current.state)))
-                    return undefined;
-                if (!current.continuation_due_at || Date.parse(current.continuation_due_at) > nowMs)
                     return undefined;
                 const pendingMilestone = this.database.sqlite.prepare(`
                   select 1 as pending from continuation_milestones where workset_id=? and state='PENDING' limit 1
@@ -1108,6 +1132,12 @@ export class StructuredRuntimeState {
                     and state in ('READY','CLAIMED','DELIVERING','DELIVERED','TURN_ACKED','WORK_REQUIRED')
                   order by generation desc limit 1
                 `).get(current.id);
+                const currentSyntheticDue = liveSynthetic?.due_at ? Date.parse(liveSynthetic.due_at) : NaN;
+                const expiredSenderClaim = String(liveSynthetic?.state || "") === "CLAIMED"
+                    && Number.isFinite(currentSyntheticDue) && currentSyntheticDue <= nowMs;
+                const worksetDue = current.continuation_due_at ? Date.parse(current.continuation_due_at) : NaN;
+                if ((!Number.isFinite(worksetDue) || worksetDue > nowMs) && !expiredSenderClaim)
+                    return undefined;
                 let retryAuthorized = false;
                 if (liveSynthetic) {
                     const syntheticOwnerTask = current.legacy_task_id
@@ -1122,8 +1152,7 @@ export class StructuredRuntimeState {
                     // Retrying DELIVERING from a timer can visibly duplicate the
                     // continuation message, so it must wait for an explicit
                     // delivery result or manual takeover instead of lease expiry.
-                    const senderClaimExpired = String(liveSynthetic.state) === "CLAIMED"
-                        && Number.isFinite(syntheticDue) && syntheticDue <= nowMs;
+                    const senderClaimExpired = expiredSenderClaim;
                     const syntheticWorkOwnerExpiresAt = syntheticOwnerTask?.delivery_owner_expires_at
                         ? Date.parse(syntheticOwnerTask.delivery_owner_expires_at) : NaN;
                     const syntheticTurnStartedAt = syntheticOwnerTask?.turn_started_at
@@ -1143,20 +1172,18 @@ export class StructuredRuntimeState {
                         && nowMs - syntheticTurnStartedAt >= confirmedSyntheticTurnLimitMs + CONFIRMED_LIMIT_RECOVERY_GRACE_MS
                         && Number.isFinite(syntheticLastModelActivityAt)
                         && nowMs - syntheticLastModelActivityAt >= CONFIRMED_LIMIT_MODEL_QUIET_MS;
-                    const syntheticQuietBackstop = Number.isFinite(syntheticLastModelActivityAt)
-                        && nowMs - syntheticLastModelActivityAt >= COMPLETION_STALL_SUSPECT_MS + COMPLETION_SERVER_QUIET_BACKSTOP_MS
-                        && parseJson(syntheticOwnerTask?.watch_process_handles_json, []).length === 0
-                        && !this.continuationModelRequestInFlight(current.conversation_scope_id);
                     // The short synthetic owner lease is only a stale-ownership
                     // detector. Connector discovery, long reasoning, workspace
                     // switching, and other Host-side work are invisible to the
                     // DevSpace request counter and may legitimately exceed it.
-                    // Never manufacture a second ChatGPT turn from owner-lease
-                    // expiry alone.  In addition to explicit Host/cutoff evidence,
-                    // the same bounded server-quiet backstop used for manual turns
-                    // may corroborate a normally-ended synthetic turn once all
-                    // DevSpace model/process activity has been absent for ~55s.
-                    const syntheticTurnEnded = explicitSyntheticTurnEnd || confirmedSyntheticCutoff || syntheticQuietBackstop;
+                    // Never manufacture a second ChatGPT turn from owner-lease or
+                    // request silence alone. The Host exposes no authoritative
+                    // distinction between "the model is still reasoning" and
+                    // "the assistant turn ended", so any fixed quiet threshold
+                    // can preempt a valid multi-minute reasoning interval. Retry
+                    // only from explicit Host timeout/teardown evidence or the
+                    // already-confirmed Host cutoff fallback.
+                    const syntheticTurnEnded = explicitSyntheticTurnEnd || confirmedSyntheticCutoff;
                     const abandonedSyntheticWork = ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state))
                         && String(syntheticOwnerTask?.delivery_owner || "") === "synthetic-active"
                         && Number.isFinite(syntheticWorkOwnerExpiresAt) && syntheticWorkOwnerExpiresAt <= nowMs
@@ -1216,18 +1243,12 @@ export class StructuredRuntimeState {
                         const leaseExpired = Number.isFinite(turnLeaseExpiresAt) && nowMs >= turnLeaseExpiresAt;
                         const turnStartedAt = Date.parse(String(legacy.turn_started_at || ""));
                         const lastModelActivityAt = Date.parse(String(legacy.last_model_activity_at || ""));
-                        const stallSuspectedAt = Date.parse(String(legacy.stall_suspected_at || ""));
                         const confirmedHostTurnMs = Math.max(0, Number(legacy.confirmed_turn_limit_ms || 0));
                         const confirmedHostCutoff = confirmedHostTurnMs >= HOST_CUTOFF_MIN_SAMPLE_MS
                             && Number.isFinite(turnStartedAt)
                             && nowMs - turnStartedAt >= confirmedHostTurnMs + CONFIRMED_LIMIT_RECOVERY_GRACE_MS
                             && Number.isFinite(lastModelActivityAt)
                             && nowMs - lastModelActivityAt >= CONFIRMED_LIMIT_MODEL_QUIET_MS;
-                        const serverQuietBackstop = String(legacy.stall_state || "ACTIVE") === "SUSPECTED_STALL"
-                            && Number.isFinite(stallSuspectedAt)
-                            && nowMs - stallSuspectedAt >= COMPLETION_SERVER_QUIET_BACKSTOP_MS
-                            && Number.isFinite(lastModelActivityAt)
-                            && nowMs - lastModelActivityAt >= COMPLETION_STALL_SUSPECT_MS + COMPLETION_SERVER_QUIET_BACKSTOP_MS;
                         if (confirmedHostCutoff) {
                             const changed = this.database.sqlite.prepare(`
                               update continuation_tasks set
@@ -1236,17 +1257,6 @@ export class StructuredRuntimeState {
                                 stall_evidence='server-confirmed-host-cutoff-no-inflight-model-request',updated_at=?
                               where id=? and state='RUNNING' and continuation_mode='completion-driven'
                                 and stall_state in ('ACTIVE','SUSPECTED_STALL')
-                            `).run(nowIso, nowIso, nowIso, legacy.id);
-                            armed = Number(changed.changes || 0) === 1;
-                        }
-                        else if (serverQuietBackstop) {
-                            const changed = this.database.sqlite.prepare(`
-                              update continuation_tasks set
-                                stall_state='CONTINUATION_ARMED',stall_armed_at=?,
-                                stall_probe_count=stall_probe_count+1,stall_last_probe_at=?,
-                                stall_evidence='server-quiet-backstop-no-inflight-model-request',updated_at=?
-                              where id=? and state='RUNNING' and continuation_mode='completion-driven'
-                                and stall_state='SUSPECTED_STALL'
                             `).run(nowIso, nowIso, nowIso, legacy.id);
                             armed = Number(changed.changes || 0) === 1;
                         }
@@ -1265,9 +1275,10 @@ export class StructuredRuntimeState {
                             `).run(nowIso, nowIso, nowIso, legacy.id);
                         }
                         else if (leaseExpired && String(legacy.stall_state || "ACTIVE") === "SUSPECTED_STALL") {
-                            // Before the bounded backstop matures, silence remains
-                            // diagnostic only. Repeated resident sweeps refresh the
-                            // probe without authorizing early recovery.
+                            // Silence remains diagnostic only. Repeated resident
+                            // sweeps refresh the probe without authorizing a new
+                            // Host turn. Only explicit Host end evidence or the
+                            // confirmed-cutoff fallback may advance to ARMED.
                             this.database.sqlite.prepare(`
                               update continuation_tasks set
                                 stall_probe_count=stall_probe_count+1,stall_last_probe_at=?,
@@ -1356,6 +1367,20 @@ export class StructuredRuntimeState {
             `).get(card.active_workset_id);
             if (!generation)
                 return { accepted: false, reason: "no-ready-generation" };
+            if (String(task.stall_evidence || "") === "server-quiet-backstop-no-inflight-model-request") {
+                const createdAt = generation.created_at ? Date.parse(generation.created_at) : NaN;
+                if (Number.isFinite(createdAt)) {
+                    const claimReadyAt = createdAt + QUIET_BACKSTOP_SENDER_GRACE_MS;
+                    if (nowMs < claimReadyAt) {
+                        return {
+                            accepted: false,
+                            reason: "quiet-backstop-claim-grace",
+                            retryAfterMs: Math.max(1, claimReadyAt - nowMs),
+                            generation: Number(generation.generation || 0),
+                        };
+                    }
+                }
+            }
             const deliveryToken = randomUUID();
             const changed = this.database.sqlite.prepare(`
               update continuation_generations set state='CLAIMED',delivery_token=?,claimed_at=?,due_at=?,updated_at=?
@@ -2142,6 +2167,8 @@ export class StructuredRuntimeState {
         const continuationDirective = (task) => {
             if (!task) return {
                 continueRequired: false,
+                continueInSameTurn: false,
+                syntheticWorkMustContinue: false,
                 nextRequiredMilestones: [],
                 taskIncomplete: false,
                 remainingMilestones: [],
@@ -2153,23 +2180,40 @@ export class StructuredRuntimeState {
             const taskIncomplete = remainingMilestones.length > 0 && !terminalStates.has(task.state);
             const blocked = ["WAITING_EXTERNAL", "WAITING_SUPERVISOR", "PAUSED_BY_USER"].includes(task.state);
             const continueRequired = taskIncomplete && task.state === "RUNNING" && task.continuationMode !== "compat";
+            const syntheticWorkMustContinue = continueRequired
+                && String(task.deliveryOwner || "") === "synthetic-active";
             return {
                 continueRequired,
+                continueInSameTurn: syntheticWorkMustContinue,
+                syntheticWorkMustContinue,
                 nextRequiredMilestones: continueRequired ? remainingMilestones : [],
                 taskIncomplete,
                 remainingMilestones,
                 finalResponseAllowed: !taskIncomplete || blocked,
             };
         };
+        // checkpoint is the authoritative mutation boundary for its required /
+        // completed milestone deltas and evidence. Feeding those same values
+        // into canonical projection recovery first would pre-apply the delta,
+        // making the checkpoint unable to detect a milestone-set revision or
+        // any other material progress. Keep projection recovery structural on
+        // checkpoint calls; the action-specific block below performs the merge.
+        const checkpointOwnsMutation = action === "checkpoint";
         const recoveredCanonicalProjection = this.recoverCanonicalConversationTaskProjection({
             conversationScopeId: input.conversationScopeId,
             taskId: input.taskId,
             workspaceId: input.workspaceId,
             objective: input.objective,
-            requiredMilestones: input.requiredMilestones,
-            completedMilestones: input.completedMilestones,
-            evidence: input.evidence,
-            forceRunning: action === 'begin' || action === 'begin-auto',
+            requiredMilestones: checkpointOwnsMutation ? undefined : input.requiredMilestones,
+            completedMilestones: checkpointOwnsMutation ? undefined : input.completedMilestones,
+            evidence: checkpointOwnsMutation ? undefined : input.evidence,
+            // Do not let projection recovery pre-reactivate a terminal lifetime
+            // task for explicit begin/begin-auto.  The begin state machine below
+            // must still observe the terminal row so it can rotate exactly one
+            // fresh manual-round card (or keep begin-auto terminal/no-work).
+            // Active/shadow Worksets are still recovered as RUNNING by the
+            // authoritativeActiveWorkset path inside projection recovery.
+            forceRunning: false,
         });
         const find = () => {
             if (recoveredCanonicalProjection && (
@@ -2223,9 +2267,27 @@ export class StructuredRuntimeState {
         };
         if (action === "status") {
             let row = find();
+            const deliveryToken = input.deliveryToken ? String(input.deliveryToken) : "";
+            const manualTakeover = input.manualTakeover === true
+                || String(input.note ?? "").trim() === "manual-user-turn-takeover";
             if (row && terminalStates.has(String(row.state || ""))) {
                 this.closeTerminalContinuationArtifacts(row.id, row.terminal_reason || row.state, nowIso);
                 row = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id);
+                if (manualTakeover && !deliveryToken && input.internalAnchorPreparation !== true) {
+                    const rotated = this.rotateContinuationManualRoundCard(row.id, nowIso) || row;
+                    const task = rowToTask(rotated);
+                    return {
+                        task,
+                        accepted: true,
+                        reason: "manual-round-started",
+                        manualRoundCardRequired: true,
+                        milestoneCardRequired: true,
+                        initialAnchorRequired: true,
+                        reanchorRequired: true,
+                        conversationLifetimeSingleton: false,
+                        ...continuationDirective(task),
+                    };
+                }
                 const task = rowToTask(row);
                 return {
                     task,
@@ -2263,7 +2325,6 @@ export class StructuredRuntimeState {
                     anchorLeaseExpiresAt, nowIso, row.id);
                 return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id)) };
             }
-            const deliveryToken = input.deliveryToken ? String(input.deliveryToken) : "";
             // Some already-open ChatGPT conversations keep an older cached
             // continuation_task schema even after Portable is upgraded. Keep a
             // narrow compatibility CAS on the long-standing `note` field so a
@@ -2272,8 +2333,6 @@ export class StructuredRuntimeState {
             // status calls never send this exact marker, and synthetic resume
             // context explicitly omits it, so ambiguous tokenless status remains
             // fail-closed.
-            const manualTakeover = input.manualTakeover === true
-                || String(input.note ?? "").trim() === "manual-user-turn-takeover";
             const expectedGeneration = row?.delivery_token
                 ? this.database.sqlite.prepare(`
                     select state from continuation_generations
@@ -2634,6 +2693,8 @@ export class StructuredRuntimeState {
         }
         if (action === "begin" || action === "begin-auto") {
             let existing = find();
+            let beginManualCardRequired = false;
+            let beginMustRotateCard = false;
             if (existing && existing.deadline_at && Date.parse(existing.deadline_at) <= now.getTime()) {
                 if (existing.owner_locked) {
                     this.database.sqlite.prepare("update continuation_tasks set waiting_reason='Owner lock prevented automatic wall-clock termination.', owner_control_note='wall-clock-budget-reached-while-locked', updated_at=? where id=?")
@@ -2651,6 +2712,15 @@ export class StructuredRuntimeState {
                 }
             }
             if (existing && action === "begin" && terminalStates.has(existing.state)) {
+                beginManualCardRequired = true;
+                const cardBeforeBegin = this.database.sqlite.prepare(`
+                  select * from continuation_conversation_cards where conversation_scope_id=?
+                `).get(existing.conversation_scope_id);
+                const pendingFreshCard = Number(existing.anchor_mount_generation || 0) > 0
+                    && !existing.anchor_mount_verified_at
+                    && Number(cardBeforeBegin?.mount_generation || 0) === Number(existing.anchor_mount_generation || 0)
+                    && !cardBeforeBegin?.mount_verified_at;
+                beginMustRotateCard = !pendingFreshCard;
                 const turnLeaseId = `turn_${randomUUID()}`;
                 this.database.sqlite.prepare(`
                   update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
@@ -2664,6 +2734,10 @@ export class StructuredRuntimeState {
                 `).run(nowIso, turnLeaseId, completionTurnLeaseExpiresAt(), nowIso, nowIso, nowIso, existing.id);
                 existing = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id);
                 this.syncContinuationArchitectureForLegacyTask(existing.id, { forceNewWorkset: true });
+                if (beginMustRotateCard) {
+                    existing = this.rotateContinuationManualRoundCard(existing.id, nowIso) || existing;
+                    beginMustRotateCard = false;
+                }
             }
             if (existing && action === "begin-auto" && terminalStates.has(existing.state)
                 && isCanonicalConversationScope(input.conversationScopeId ?? existing.conversation_scope_id)) {
@@ -2735,8 +2809,23 @@ export class StructuredRuntimeState {
                         requestedMode, requestedMode, requestedMode, requestedMode, requestedMode, requestedMode,
                         nowIso, existing.id);
                     this.syncContinuationArchitectureForLegacyTask(existing.id);
-                    const task = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id));
-                    return { task, created: false, upgraded: true, ...continuationDirective(task) };
+                    let refreshed = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id);
+                    if (beginManualCardRequired && beginMustRotateCard)
+                        refreshed = this.rotateContinuationManualRoundCard(existing.id, nowIso) || refreshed;
+                    const task = rowToTask(refreshed);
+                    return {
+                        task,
+                        created: false,
+                        upgraded: true,
+                        ...(beginManualCardRequired ? {
+                            manualRoundCardRequired: true,
+                            milestoneCardRequired: true,
+                            initialAnchorRequired: true,
+                            reanchorRequired: true,
+                            conversationLifetimeSingleton: false,
+                        } : {}),
+                        ...continuationDirective(task),
+                    };
                 }
                 const task = rowToTask(existing);
                 return { task, created: false, ...continuationDirective(task) };
@@ -3128,12 +3217,17 @@ export class StructuredRuntimeState {
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true, reason: "resident-stage-complete" };
         }
         if (action === "checkpoint") {
-            const required = new Set(parseJson(row.required_milestones_json, []));
+            const requiredBefore = parseJson(row.required_milestones_json, []);
+            const required = new Set(requiredBefore);
             for (const value of Array.isArray(input.requiredMilestones) ? input.requiredMilestones : []) {
                 const item = String(value).trim();
                 if (item) required.add(item);
             }
             const requiredMilestones = [...required].slice(0, 64);
+            const requiredMilestoneSetChanged = requiredBefore.length !== requiredMilestones.length
+                || requiredBefore.some((value, index) => value !== requiredMilestones[index]);
+            const syntheticMilestoneRevision = String(row.delivery_owner || "") === "synthetic-active"
+                && requiredMilestoneSetChanged;
             const completed = new Set(parseJson(row.completed_milestones_json, []));
             for (const value of Array.isArray(input.completedMilestones) ? input.completedMilestones : []) {
                 const item = String(value).trim();
@@ -3266,11 +3360,29 @@ export class StructuredRuntimeState {
             if (terminalStates.has(state))
                 this.closeTerminalContinuationArtifacts(taskId, terminalReason || state, nowIso);
             this.syncContinuationArchitectureForLegacyTask(taskId);
-            const task = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId));
+            let refreshed = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
+            if (syntheticMilestoneRevision && !terminalStates.has(state)) {
+                const card = this.database.sqlite.prepare(`
+                  select * from continuation_conversation_cards where conversation_scope_id=?
+                `).get(refreshed.conversation_scope_id);
+                const alreadyPendingFreshCard = Number(refreshed.anchor_mount_generation || 0) > 0
+                    && !refreshed.anchor_mount_verified_at
+                    && Number(card?.mount_generation || 0) === Number(refreshed.anchor_mount_generation || 0)
+                    && !card?.mount_verified_at;
+                if (!alreadyPendingFreshCard)
+                    refreshed = this.rotateContinuationManualRoundCard(taskId, nowIso) || refreshed;
+            }
+            const task = rowToTask(refreshed);
             return {
                 task,
                 accepted: true,
                 ...(waitingForSupervisorAck ? { reason: "supervisor-ack-pending" } : {}),
+                ...(syntheticMilestoneRevision && !terminalStates.has(state) ? {
+                    milestoneCardRequired: true,
+                    initialAnchorRequired: true,
+                    reanchorRequired: true,
+                    conversationLifetimeSingleton: false,
+                } : {}),
                 ...continuationDirective(task),
             };
         }
