@@ -82,6 +82,16 @@ try {
       "every new manual user message must rotate one fresh visible card even when the lifetime task was terminal");
 
     const manualGeneration = Number(manualStatus.task.anchorMountGeneration);
+    const terminalTakeoverRow = db.prepare(`
+      select manual_takeover_at,turn_started_at,assistant_turn_owner
+      from continuation_tasks where id=?
+    `).get(taskId);
+    assert.equal(terminalTakeoverRow.manual_takeover_at, terminalTakeoverRow.turn_started_at,
+      "terminal first-status must persist the durable same-manual-round marker");
+    assert.equal(terminalTakeoverRow.assistant_turn_owner, "manual");
+    assert.equal(mountAndVerify(taskId, scope, "ui_manual_terminal_status"), manualGeneration,
+      "the first card may mount before same-round terminal begin refines the plan");
+
     const reactivated = runtime.continuationTask({
       action: "begin",
       taskId,
@@ -92,8 +102,118 @@ try {
       requiredMilestones: ["manual-new"],
     });
     assert.equal(Number(reactivated.task.anchorMountGeneration), manualGeneration,
-      "status + begin for one manual message must not create two card generations");
-    assert.equal(reactivated.milestoneCardRequired, true);
+      "status + mounted card + begin for one manual message must not create two card generations");
+    assert.equal(reactivated.milestoneCardRequired, undefined,
+      "same-round terminal begin must reuse the already-mounted manual card rather than request another one");
+    assert.deepEqual(reactivated.task.requiredMilestones, ["manual-new"]);
+    assert.deepEqual(reactivated.task.completedMilestones, []);
+  }
+
+  // A terminal task's fresh manual card is UI state, not new work. The
+  // continuation_anchor-equivalent begin must preserve SUCCEEDED when it
+  // replays only milestones that are already complete; the pending generation
+  // from first-status is still mounted normally and no fallback milestones are
+  // allowed to appear on the next substantive contract/recovery touch.
+  {
+    const scope = "v1/test-terminal-anchor-replay-stays-terminal";
+    const milestone = "terminal-anchor-done";
+    const { taskId, generation } = createVerifiedTask(scope, milestone);
+    finishTask(taskId, scope, milestone);
+
+    const manualStatus = runtime.continuationTask({
+      action: "status",
+      taskId,
+      conversationScopeId: scope,
+      manualTakeover: true,
+    });
+    assert.equal(manualStatus.task.state, "SUCCEEDED");
+    assert.equal(Number(manualStatus.task.anchorMountGeneration), generation + 1);
+
+    const replayedAnchorPlan = runtime.continuationTask({
+      action: "begin",
+      taskId,
+      conversationScopeId: scope,
+      workspaceId: "ws_card_lifecycle",
+      continuationMode: "completion-driven",
+      objective: milestone,
+      requiredMilestones: [milestone],
+      replaceActiveMilestones: true,
+      sourceTool: "continuation_anchor",
+    });
+    assert.equal(replayedAnchorPlan.task.state, "SUCCEEDED",
+      "replaying an already-completed terminal plan for the manual card must not reactivate the task");
+    assert.equal(replayedAnchorPlan.task.taskIncomplete, undefined);
+    assert.deepEqual(replayedAnchorPlan.task.requiredMilestones, [milestone]);
+    assert.deepEqual(replayedAnchorPlan.task.completedMilestones, [milestone]);
+    assert.equal(Number(replayedAnchorPlan.task.anchorMountGeneration), generation + 1,
+      "terminal anchor replay must reuse the card generation rotated by first-status");
+    assert.equal(mountAndVerify(taskId, scope, "ui_terminal_anchor_replay"), generation + 1);
+
+    const afterSubstantiveContractTouch = runtime.ensureContinuationTaskContract({
+      conversationScopeId: scope,
+      workspaceId: "ws_card_lifecycle",
+      substantive: true,
+    });
+    assert.equal(afterSubstantiveContractTouch.task.state, "SUCCEEDED",
+      "an ordinary tool touch after the completed manual card must preserve terminal state");
+    assert.deepEqual(afterSubstantiveContractTouch.task.requiredMilestones, [milestone]);
+    assert.deepEqual(afterSubstantiveContractTouch.task.completedMilestones, [milestone]);
+    assert.ok(!afterSubstantiveContractTouch.task.requiredMilestones.includes("Complete the original user-requested DevSpace work"));
+    assert.ok(!afterSubstantiveContractTouch.task.requiredMilestones.includes("Run necessary verification and deliver completion evidence"));
+    assert.equal(runtime.continuationArchitectureSnapshot(scope).card.active_workset_id, null,
+      "a terminal card replay must not manufacture an active workset");
+  }
+
+  // dev15 could append only the built-in fallback milestones after the
+  // terminal-anchor resurrection bug. complete() may atomically repair that
+  // exact legacy contamination, but it must never drop a custom milestone.
+  {
+    const scope = "v1/test-terminal-generic-fallback-repair";
+    const milestone = "completed-original-plan";
+    const { taskId } = createVerifiedTask(scope, milestone);
+    finishTask(taskId, scope, milestone);
+
+    runtime.database.sqlite.prepare(`
+      update continuation_tasks set state='RUNNING', required_milestones_json=?, terminal_reason=null where id=?
+    `).run(JSON.stringify([
+      milestone,
+      "Complete the original user-requested DevSpace work",
+      "Run necessary verification and deliver completion evidence",
+    ]), taskId);
+    runtime.syncContinuationArchitectureForLegacyTask(taskId);
+
+    const repaired = runtime.continuationTask({
+      action: "complete",
+      taskId,
+      conversationScopeId: scope,
+      requiredMilestones: [milestone],
+      completedMilestones: [milestone],
+      evidence: { legacyFallbackRepairVerified: true },
+    });
+    assert.equal(repaired.accepted, true);
+    assert.equal(repaired.task.state, "SUCCEEDED");
+    assert.deepEqual(repaired.task.requiredMilestones, [milestone],
+      "complete should remove only the known legacy generic fallback contamination");
+    assert.equal(runtime.continuationArchitectureSnapshot(scope).card.active_workset_id, null);
+
+    const customScope = "v1/test-terminal-custom-milestone-not-repairable";
+    const customOriginal = "custom-original";
+    const customPending = "custom-pending";
+    const custom = createVerifiedTask(customScope, customOriginal);
+    runtime.database.sqlite.prepare(`
+      update continuation_tasks set required_milestones_json=? where id=?
+    `).run(JSON.stringify([customOriginal, customPending]), custom.taskId);
+    const refused = runtime.continuationTask({
+      action: "complete",
+      taskId: custom.taskId,
+      conversationScopeId: customScope,
+      requiredMilestones: [customOriginal],
+      completedMilestones: [customOriginal],
+      evidence: { mustNotBypassCustomMilestone: true },
+    });
+    assert.equal(refused.accepted, false);
+    assert.equal(refused.reason, "required-milestones-missing");
+    assert.deepEqual(refused.missingMilestones, [customPending]);
   }
 
   // Hosts that call begin directly for genuinely new terminal work must still

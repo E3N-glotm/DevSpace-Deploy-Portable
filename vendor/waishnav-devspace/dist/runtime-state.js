@@ -2406,6 +2406,31 @@ export class StructuredRuntimeState {
                 this.closeTerminalContinuationArtifacts(row.id, row.terminal_reason || row.state, nowIso);
                 row = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id);
                 if (manualTakeover && !deliveryToken && input.internalAnchorPreparation !== true) {
+                    // A terminal lifetime task still needs one visible card for
+                    // each new manual message, but that first-status call is
+                    // also the durable identity of the manual round. Persist
+                    // the same marker used by non-terminal manual takeover so
+                    // a later begin/continuation_anchor in THIS user message can
+                    // refine/reactivate work without manufacturing a second
+                    // card after the first card has already mounted.
+                    const turnLeaseId = `turn_${randomUUID()}`;
+                    const turnLeaseExpiresAt = normalizedMode(row.continuation_mode, "compat") === "completion-driven"
+                        ? completionTurnLeaseExpiresAt()
+                        : row.turn_lease_expires_at;
+                    this.database.sqlite.prepare(`
+                      update continuation_tasks set
+                        continuation_pending=0,delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,
+                        delivery_work_baseline_count=coalesce(substantive_activity_count,0),
+                        manual_takeover_at=?,turn_started_at=?,turn_lease_id=?,turn_lease_expires_at=?,
+                        assistant_turn_state='GENERATING',assistant_turn_owner='manual',
+                        assistant_turn_completion_lease_id=null,assistant_turn_completion_requested_at=null,
+                        assistant_turn_completed_at=null,assistant_turn_completion_source=null,
+                        assistant_turn_completion_note=null,
+                        last_model_activity_at=?,last_activity_at=?,last_host_signal='connected',last_host_signal_at=?,
+                        updated_at=? where id=?
+                    `).run(nowIso, nowIso, turnLeaseId, turnLeaseExpiresAt,
+                        nowIso, nowIso, nowIso, nowIso, row.id);
+                    row = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id);
                     const rotated = this.rotateContinuationManualRoundCard(row.id, nowIso) || row;
                     const task = rowToTask(rotated);
                     return {
@@ -2872,7 +2897,44 @@ export class StructuredRuntimeState {
                 }
             }
             if (existing && action === "begin" && terminalStates.has(existing.state)) {
-                beginManualCardRequired = true;
+                const suppliedRequired = [...new Set((Array.isArray(input.requiredMilestones) ? input.requiredMilestones : [])
+                    .map((value) => String(value).trim()).filter(Boolean))].slice(0, 64);
+                const terminalCompleted = new Set(parseJson(existing.completed_milestones_json, [])
+                    .map((value) => String(value).trim()).filter(Boolean));
+                const sameTerminalManualRound = Boolean(existing.manual_takeover_at
+                    && existing.turn_started_at
+                    && String(existing.manual_takeover_at) === String(existing.turn_started_at)
+                    && String(existing.assistant_turn_owner ?? "") === "manual");
+                const terminalAnchorReplay = input.replaceActiveMilestones === true
+                    && String(input.sourceTool ?? "") === "continuation_anchor";
+                const terminalAnchorHasUnfinishedWork = suppliedRequired.some((milestone) => !terminalCompleted.has(milestone));
+                // A new manual message still owns one fresh visible card even
+                // when the lifetime task is already complete.  The card is a
+                // per-message UI surface, however, and is not itself evidence
+                // of new work.  continuation_anchor therefore must not revive a
+                // terminal Task Contract when it merely replays the already
+                // completed plan.  Doing so creates a transient RUNNING task
+                // with no pending milestone; the next ordinary tool/recovery
+                // pass can then manufacture the generic fallback milestones.
+                // Explicit continuation_task begin calls remain the API for
+                // genuinely new work and retain the historical reactivation
+                // behavior, including callers that intentionally reuse a
+                // milestone description.
+                if (terminalAnchorReplay && !terminalAnchorHasUnfinishedWork) {
+                    const task = rowToTask(existing);
+                    return {
+                        task,
+                        created: false,
+                        upgraded: false,
+                        ...continuationDirective(task),
+                    };
+                }
+                // Direct begin on a terminal task represents a new manual round
+                // and therefore owns a new card.  If first-status already
+                // established this exact manual round, however, begin is only
+                // plan refinement/reactivation and MUST reuse that round's card
+                // even when the card has already mounted and verified.
+                beginManualCardRequired = !sameTerminalManualRound;
                 const cardBeforeBegin = this.database.sqlite.prepare(`
                   select * from continuation_conversation_cards where conversation_scope_id=?
                 `).get(existing.conversation_scope_id);
@@ -2880,8 +2942,16 @@ export class StructuredRuntimeState {
                     && !existing.anchor_mount_verified_at
                     && Number(cardBeforeBegin?.mount_generation || 0) === Number(existing.anchor_mount_generation || 0)
                     && !cardBeforeBegin?.mount_verified_at;
-                beginMustRotateCard = !pendingFreshCard;
-                const turnLeaseId = `turn_${randomUUID()}`;
+                beginMustRotateCard = beginManualCardRequired && !pendingFreshCard;
+                const turnLeaseId = sameTerminalManualRound && existing.turn_lease_id
+                    ? existing.turn_lease_id
+                    : `turn_${randomUUID()}`;
+                const turnStartedAt = sameTerminalManualRound && existing.turn_started_at
+                    ? existing.turn_started_at
+                    : nowIso;
+                const turnLeaseExpiresAt = sameTerminalManualRound && existing.turn_lease_expires_at
+                    ? existing.turn_lease_expires_at
+                    : completionTurnLeaseExpiresAt();
                 this.database.sqlite.prepare(`
                   update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
                     continuation_pending=0, watch_process_handles_json='[]',
@@ -2896,7 +2966,7 @@ export class StructuredRuntimeState {
                     stall_state='ACTIVE', stall_suspected_at=null, stall_probe_count=0,
                     stall_last_probe_at=null, stall_armed_at=null, stall_evidence=null,
                     updated_at=? where id=?
-                `).run(nowIso, turnLeaseId, completionTurnLeaseExpiresAt(), nowIso, nowIso, nowIso, existing.id);
+                `).run(turnStartedAt, turnLeaseId, turnLeaseExpiresAt, nowIso, nowIso, nowIso, existing.id);
                 existing = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id);
                 // Do not allocate the reactivated Workset yet. This same begin
                 // call may carry the new manual-round objective/milestones, and
@@ -3852,7 +3922,29 @@ export class StructuredRuntimeState {
                         : "continuation-anchor-required",
                 };
             }
-            const required = new Set(parseJson(row.required_milestones_json, []));
+            const persistedRequiredMilestones = parseJson(row.required_milestones_json, [])
+                .map((value) => String(value).trim()).filter(Boolean);
+            const suppliedRequiredMilestones = [...new Set((Array.isArray(input.requiredMilestones) ? input.requiredMilestones : [])
+                .map((value) => String(value).trim()).filter(Boolean))].slice(0, 64);
+            const suppliedRequiredSet = new Set(suppliedRequiredMilestones);
+            const omittedPersistedMilestones = suppliedRequiredMilestones.length > 0
+                ? persistedRequiredMilestones.filter((milestone) => !suppliedRequiredSet.has(milestone))
+                : [];
+            const legacyFallbackOnlyRepair = suppliedRequiredMilestones.length > 0
+                && omittedPersistedMilestones.length > 0
+                && omittedPersistedMilestones.every((milestone) => DEFAULT_TASK_CONTRACT_MILESTONES.includes(milestone));
+            // dev15 could transiently resurrect an already-completed terminal
+            // task when continuation_anchor mounted the next manual card.  A
+            // following architecture recovery then appended the two generic
+            // default milestones.  Allow complete() to repair exactly that
+            // legacy contamination when the caller supplies an authoritative
+            // completed plan and every omitted persisted item is one of the
+            // built-in fallback placeholders.  Custom/user milestones can
+            // never be removed through this compatibility path.
+            const requiredMilestones = legacyFallbackOnlyRepair
+                ? suppliedRequiredMilestones
+                : persistedRequiredMilestones;
+            const required = new Set(requiredMilestones);
             const completed = new Set(parseJson(row.completed_milestones_json, []));
             for (const value of Array.isArray(input.completedMilestones) ? input.completedMilestones : []) {
                 const item = String(value).trim();
@@ -3870,10 +3962,10 @@ export class StructuredRuntimeState {
             }
             this.database.sqlite.transaction(() => {
                 this.database.sqlite.prepare(`
-                  update continuation_tasks set state='SUCCEEDED', completed_milestones_json=?, evidence_json=?,
+                  update continuation_tasks set state='SUCCEEDED', required_milestones_json=?, completed_milestones_json=?, evidence_json=?,
                     terminal_reason='completed', continuation_pending=0,
                     turn_lease_expires_at=null, anchor_lease_expires_at=null, updated_at=? where id=?
-                `).run(JSON.stringify([...completed]), JSON.stringify(evidence), nowIso, taskId);
+                `).run(JSON.stringify(requiredMilestones), JSON.stringify([...completed]), JSON.stringify(evidence), nowIso, taskId);
                 this.closeTerminalContinuationArtifacts(taskId, "completed", nowIso);
             })();
             this.syncContinuationArchitectureForLegacyTask(taskId);

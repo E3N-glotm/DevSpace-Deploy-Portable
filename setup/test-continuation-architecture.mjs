@@ -1091,6 +1091,37 @@ try {
   assert.equal(terminalStatus.continueRequired, false);
   assert.equal(terminalStatus.finalResponseAllowed, true);
 
+  const terminalReplayStatus = runtime.continuationTask({
+    action: "status",
+    taskId: terminalRaceTask.task.id,
+    conversationScopeId: terminalRaceScope,
+    manualTakeover: true,
+  });
+  const terminalReplayGeneration = Number(terminalReplayStatus.task.anchorMountGeneration);
+  const terminalReplay = runtime.continuationTask({
+    action: "begin",
+    taskId: terminalRaceTask.task.id,
+    conversationScopeId: terminalRaceScope,
+    workspaceId: "ws_architecture",
+    continuationMode: "completion-driven",
+    objective: "terminal delivery race",
+    requiredMilestones: ["terminal-race-done"],
+    replaceActiveMilestones: true,
+    sourceTool: "continuation_anchor",
+  });
+  assert.equal(terminalReplay.task.state, "SUCCEEDED",
+    "a completed lifetime task must not be resurrected when continuation_anchor only replays its completed plan");
+  assert.equal(Number(terminalReplay.task.anchorMountGeneration), terminalReplayGeneration);
+  runtime.syncContinuationArchitectureForLegacyTask(terminalRaceTask.task.id, { substantive: true });
+  const terminalReplayAfterSync = runtime.continuationTask({
+    action: "status", taskId: terminalRaceTask.task.id, conversationScopeId: terminalRaceScope,
+  });
+  assert.equal(terminalReplayAfterSync.task.state, "SUCCEEDED");
+  assert.deepEqual(terminalReplayAfterSync.task.requiredMilestones, ["terminal-race-done"]);
+  assert.deepEqual(terminalReplayAfterSync.task.completedMilestones, ["terminal-race-done"]);
+  assert.equal(runtime.continuationArchitectureSnapshot(terminalRaceScope).card.active_workset_id, null,
+    "terminal architecture sync after a card-only replay must remain detached/idle");
+
   const recoveryScope = "v1/recover-missing-legacy-projection";
   const recoveryFirst = runtime.continuationTask({
     action: "begin",
