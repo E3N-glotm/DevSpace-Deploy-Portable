@@ -744,9 +744,26 @@ export class StructuredRuntimeState {
             const isolateCurrentActivePlan = authoritativeActiveWorkset
                 && Boolean(canonical)
                 && !activeShadowTask;
+            const canonicalCompletedSet = new Set(canonicalCompleted);
+            const canonicalPlanAlreadyComplete = Boolean(canonical)
+                && canonicalRequired.length > 0
+                && canonicalRequired.every((milestone) => canonicalCompletedSet.has(milestone));
+            // A completion-driven task can legitimately remain RUNNING for a
+            // short period after every current milestone is complete while its
+            // one visible manual-round card is still waiting for iframe mount
+            // verification.  During that window there is intentionally no
+            // unfinished active Workset. Falling back to the conversation-wide
+            // lifetime milestone union here resurrects SUPERSEDED/historical
+            // plans (including the two generic compatibility milestones) on
+            // the very next substantive tool call. Freeze the already-complete
+            // canonical plan instead. Explicit new-work hints are still merged
+            // below, so a real begin can reactivate work without losing them.
+            const freezeCompletedCanonicalPlan = canonicalPlanAlreadyComplete
+                && !activeShadowTask
+                && !authoritativeActiveWorkset;
             const projectedMilestoneRows = isolateCurrentActivePlan
                 ? milestoneRows
-                : lifetimeMilestoneRows;
+                : freezeCompletedCanonicalPlan ? [] : lifetimeMilestoneRows;
             const projectedCanonicalRequired = isolateCurrentActivePlan
                 ? []
                 : canonicalRequired;

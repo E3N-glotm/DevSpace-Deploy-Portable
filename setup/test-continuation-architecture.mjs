@@ -1263,6 +1263,82 @@ try {
   assert.ok(!JSON.parse(activePriorityRecovered.completed_milestones_json).includes("new-active-pending"));
   assert.equal(runtime.continuationArchitectureSnapshot(activePriorityScope).card.active_workset_id, priorityWorksetId);
 
+  // Regression (dev17): when the current canonical plan has completed but its
+  // fresh manual card is still waiting for iframe ACK, the task intentionally
+  // remains RUNNING. A later substantive tool call must not interpret the lack
+  // of PENDING milestones as license to rebuild the active plan from the entire
+  // lifetime Workset history. That used to resurrect both superseded user work
+  // and the built-in generic fallback milestones.
+  const completedPendingAckScope = "v1/recover-complete-plan-pending-anchor-ack";
+  const genericA = "Complete the original user-requested DevSpace work";
+  const genericB = "Run necessary verification and deliver completion evidence";
+  const completedPendingSeed = runtime.continuationTask({
+    action: "begin", conversationScopeId: completedPendingAckScope, workspaceId: "ws_architecture",
+    continuationMode: "completion-driven", objective: "historical generic seed",
+    requiredMilestones: ["historical-old", genericA, genericB],
+  });
+  const completedPendingSeedMount = runtime.prepareContinuationAnchorMount({
+    taskId: completedPendingSeed.task.id, conversationScopeId: completedPendingAckScope,
+  });
+  runtime.continuationTask({
+    action: "anchor-mounted", taskId: completedPendingSeed.task.id, conversationScopeId: completedPendingAckScope,
+    coordinatorInstanceId: "ui_completed_pending_seed", anchorMountToken: completedPendingSeedMount.anchorMountToken,
+  });
+  const completedPendingSeedDone = runtime.continuationTask({
+    action: "checkpoint", taskId: completedPendingSeed.task.id, conversationScopeId: completedPendingAckScope,
+    completedMilestones: ["historical-old", genericA, genericB],
+    evidence: { historicalSeed: "complete" }, progressFingerprint: "historical-seed-complete",
+  });
+  assert.equal(completedPendingSeedDone.task.state, "SUCCEEDED");
+
+  const completedPendingManual = runtime.continuationTask({
+    action: "status", taskId: completedPendingSeed.task.id, conversationScopeId: completedPendingAckScope,
+    manualTakeover: true,
+  });
+  const completedPendingGeneration = Number(completedPendingManual.task.anchorMountGeneration);
+  assert.ok(completedPendingGeneration > Number(completedPendingSeed.task.anchorMountGeneration));
+  const completedPendingCurrent = runtime.continuationTask({
+    action: "begin", taskId: completedPendingSeed.task.id, conversationScopeId: completedPendingAckScope,
+    workspaceId: "ws_architecture", continuationMode: "completion-driven",
+    objective: "current plan waiting for card ack", requiredMilestones: ["current-only"],
+  });
+  assert.equal(Number(completedPendingCurrent.task.anchorMountGeneration), completedPendingGeneration,
+    "same manual round must keep the one pending card generation");
+  assert.deepEqual(completedPendingCurrent.task.requiredMilestones, ["current-only"]);
+  const completedPendingMount = runtime.prepareContinuationAnchorMount({
+    taskId: completedPendingSeed.task.id,
+    conversationScopeId: completedPendingAckScope,
+  });
+  assert.equal(Number(completedPendingMount.anchorMountGeneration), completedPendingGeneration,
+    "preparing the current manual card must reuse the generation rotated by first-status");
+  assert.equal(completedPendingMount.alreadyVerified, false);
+
+  const completedPendingCheckpoint = runtime.continuationTask({
+    action: "checkpoint", taskId: completedPendingSeed.task.id, conversationScopeId: completedPendingAckScope,
+    completedMilestones: ["current-only"], evidence: { currentOnly: "verified" },
+    progressFingerprint: "current-only-complete",
+  });
+  assert.equal(completedPendingCheckpoint.task.state, "RUNNING",
+    "completion must wait for the current card ACK rather than bypass the mount gate");
+  assert.equal(completedPendingCheckpoint.task.anchorMountVerificationPending, true);
+  assert.deepEqual(completedPendingCheckpoint.task.requiredMilestones, ["current-only"]);
+  assert.deepEqual(completedPendingCheckpoint.task.completedMilestones, ["current-only"]);
+
+  const afterPendingAckSubstantiveTouch = runtime.ensureContinuationTaskContract({
+    conversationScopeId: completedPendingAckScope,
+    workspaceId: "ws_architecture",
+    substantive: true,
+  });
+  assert.equal(afterPendingAckSubstantiveTouch.task.state, "RUNNING");
+  assert.deepEqual(afterPendingAckSubstantiveTouch.task.requiredMilestones, ["current-only"],
+    "substantive recovery while waiting for card ACK must freeze the completed current plan, not lifetime-union history");
+  assert.deepEqual(afterPendingAckSubstantiveTouch.task.completedMilestones, ["current-only"]);
+  assert.ok(!afterPendingAckSubstantiveTouch.task.requiredMilestones.includes("historical-old"));
+  assert.ok(!afterPendingAckSubstantiveTouch.task.requiredMilestones.includes(genericA));
+  assert.ok(!afterPendingAckSubstantiveTouch.task.requiredMilestones.includes(genericB));
+  assert.equal(Number(afterPendingAckSubstantiveTouch.task.anchorMountGeneration), completedPendingGeneration,
+    "recovery must not rotate a second card while the requested generation is waiting for ACK");
+
   const cardInvariantRows = db.prepare(`
     select conversation_scope_id,count(*) as count
     from continuation_conversation_cards

@@ -399,8 +399,12 @@ assert.ok(runtimeStateSource.includes("const applyManualRoundPlan = (currentRow)
   && runtimeStateSource.includes("milestoneSetChanged ? { forceNewWorkset: true } : {}")
   && runtimeStateSource.includes("manualMilestoneSetChanged: true"),
   "the first manual status must atomically install a different user milestone plan before rotating that user message's fresh card");
-assert.match(runtimeStateSource, /const isolateCurrentActivePlan = authoritativeActiveWorkset[\s\S]{0,240}Boolean\(canonical\)[\s\S]{0,240}!activeShadowTask[\s\S]{0,500}projectedMilestoneRows = isolateCurrentActivePlan[\s\S]{0,300}milestoneRows[\s\S]{0,300}lifetimeMilestoneRows/,
-  "canonical projection recovery must isolate SUPERSEDED milestones only when a real canonical active plan is authoritative, while preserving lineage for shadow disaster recovery");
+assert.ok(runtimeStateSource.includes("const isolateCurrentActivePlan = authoritativeActiveWorkset")
+  && runtimeStateSource.includes("const freezeCompletedCanonicalPlan = canonicalPlanAlreadyComplete")
+  && runtimeStateSource.includes("&& !activeShadowTask\n                && !authoritativeActiveWorkset;")
+  && runtimeStateSource.includes("const projectedMilestoneRows = isolateCurrentActivePlan")
+  && runtimeStateSource.includes(": freezeCompletedCanonicalPlan ? [] : lifetimeMilestoneRows;"),
+  "canonical projection recovery must isolate the active plan and freeze an already-completed canonical plan while card ACK is pending, without discarding lifetime lineage needed for disaster recovery");
 assert.doesNotMatch(runtimeStateSource, /const confirmedHostCutoff|const confirmedSyntheticCutoff/,
   "historical Host cutoff samples must not participate in automatic continuation authorization");
 assert.match(runtimeStateSource, /if \(result === "unknown"\)[\s\S]{0,1800}outcomeUncertain:\s*true/,
