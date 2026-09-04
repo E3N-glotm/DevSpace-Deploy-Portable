@@ -25,8 +25,14 @@ try {
     "the verified card App must use the dedicated sender bridge");
   assert.match(coordinatorSource, /callSender\("claim"/,
     "Host delivery must claim a server ContinuationGeneration through the sender bridge");
-  assert.match(serverSource, /z\.enum\(\["bind",\s*"heartbeat",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
-    "continuation_sender must expose context-derived bind, relay heartbeat, and final authorize-delivery before Host user-role transport");
+  assert.match(serverSource, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
+    "continuation_sender must expose context-derived bind, relay heartbeat, observational Host telemetry, and final authorize-delivery before Host user-role transport");
+  assert.match(runtimeSource, /recordContinuationHostTelemetry\(input = \{\}\)[\s\S]{0,6200}continuation-host-telemetry/,
+    "Host telemetry must be stored separately from Assistant Turn / continuation authorization state");
+  assert.match(coordinatorSource, /window\.addEventListener\("openai:set_globals",\s*onOpenAiGlobals\)/,
+    "the Workspace App must observe Host global-surface changes without reading message content");
+  assert.match(coordinatorSource, /callSender\("telemetry",\s*\{\s*telemetry:\s*payload\s*\}\)/,
+    "the Workspace App must report bounded Host-surface names through the app-only sender bridge");
   assert.match(serverSource, /function enablePortableContinuationAnchorRenderer[\s\S]{0,1200}continuation_anchor[\s\S]{0,800}open_workspace/,
     "the Portable server must adapt the upstream Workspace App renderer so continuation_anchor is a real visible result card instead of an ACK-only ghost iframe");
   assert.match(serverSource, /openAiConversationScopeId\(context\?\._meta\)[\s\S]{0,900}input\.action === "bind"[\s\S]{0,700}bindContinuationSender/,
@@ -59,12 +65,14 @@ try {
     "manual/synthetic ownership must be checked before the requested tool handler can run");
   assert.match(runtimeSource, /continuationModelToolAuthorization\(input = \{\}\)[\s\S]{0,12000}turn-origin-handshake-required/,
     "runtime ownership authorization must fail closed without guessing whether an ambiguous request is manual or synthetic");
-  assert.match(runtimeSource, /same-turn-model-activity-superseded-quiet-ready/,
-    "runtime must retain compatibility cleanup for stale pre-upgrade quiet-backstop READY generations");
+  assert.match(runtimeSource, /assistant_turn_state[\s\S]{0,1800}COMPLETION_REQUESTED/,
+    "runtime must persist an explicit Assistant Turn Completion Contract instead of inferring turn end from silence");
+  assert.match(runtimeSource, /action === "turn-complete"[\s\S]{0,3200}COMPLETION_REQUESTED/,
+    "normal model-driven turn completion must require an explicit turn-complete intent bound to the current turn lease");
   const beginRequestIndex = serverSource.indexOf("beginContinuationModelRequest(conversationScopeId)");
   const authorizeRequestIndex = serverSource.indexOf("continuationModelToolAuthorization({ conversationScopeId })");
   assert.ok(beginRequestIndex >= 0 && authorizeRequestIndex > beginRequestIndex,
-    "server must register the model-originated request before ownership authorization so the resident quiet sweep cannot race into READY between auth and handler entry");
+    "server must register the model-originated request before ownership authorization so lifecycle/generation state cannot race the handler entry");
   assert.match(serverSource, /manualTakeover:\s*z\.boolean\(\)\.optional\(\)/,
     "manual takeover must be an explicit status CAS marker instead of being inferred from a missing synthetic token");
   assert.ok(serverSource.includes("On the first status of a manual/user turn, set manualTakeover=true exactly once")
@@ -89,8 +97,8 @@ try {
   assert.match(runtimeSource, /DELIVERY_ACK_RETRY_MAX_MS = 45_000/,
     "unacknowledged Host delivery must never back off beyond one minute");
   assert.ok(runtimeSource.includes("server-turn-lease-expired-no-inflight-model-request")
-    && runtimeSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
-    "the resident supervisor must distinguish weak lease suspicion from confirmed-cutoff recovery without authorizing from silence");
+    && !runtimeSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
+    "the resident supervisor must keep weak lease suspicion as telemetry and remove historical-cutoff authorization");
   assert.match(coordinatorSource, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) =>/,
     "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
   assert.match(coordinatorSource, /authorize-delivery[\s\S]{0,1800}sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) => \{[\s\S]{0,900}callTask\("status"\)/,
@@ -109,7 +117,7 @@ try {
     "generation delivery must update the canonical continuation_tasks.last_send_result column");
 
   const migration = db.prepare("select max(version) as version from devspace_schema_migrations").get();
-  assert.equal(Number(migration.version), 31, "1.1.56 continuation runtime reset migration must be applied");
+  assert.equal(Number(migration.version), 32, "1.1.59 dev11 Assistant Turn Completion Contract migration must be applied");
   assert.equal(db.prepare("select value from continuation_runtime_meta where key='schema_epoch'").get().value, "2");
 
   const expectedTables = [
@@ -194,16 +202,18 @@ try {
   db.prepare(`
     update continuation_tasks set stall_state='CONTINUATION_ARMED',stall_armed_at=?,
       stall_evidence='pending-anchor-transport-test',continuation_pending=0,
+      assistant_turn_state='TIMED_OUT',assistant_turn_completion_lease_id=turn_lease_id,
+      assistant_turn_completed_at=?,assistant_turn_completion_source='host-timeout',
       delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,updated_at=?
     where id=?
-  `).run(pendingArmAt, pendingArmAt, first.task.id);
+  `).run(pendingArmAt, pendingArmAt, pendingArmAt, first.task.id);
   db.prepare(`
     update continuation_worksets set state='RUNNING',continuation_due_at=?,updated_at=?
     where id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
   `).run(pendingArmAt, pendingArmAt, scope);
   const pendingReady = runtime.continuationSupervisorSweep();
   assert.equal(pendingReady.ready.length, 1,
-    "the resident supervisor must be able to create a generation while iframe ACK is pending");
+    "an ATCC-authorized Host-ended turn must still be able to create a generation while iframe ACK is pending");
   const pendingClaim = runtime.claimReadyContinuationGeneration({
     conversationScopeId: scope,
     taskId: first.task.id,
@@ -280,6 +290,44 @@ try {
     anchorMountGeneration: inheritedSenderCapability.anchorMountGeneration,
   });
   assert.equal(relayHeartbeat.accepted, true);
+  const beforeTelemetry = db.prepare(`
+    select assistant_turn_state,substantive_activity_count,turn_lease_expires_at,stall_state,updated_at
+    from continuation_tasks where id=?
+  `).get(first.task.id);
+  const beforeTelemetryGeneration = db.prepare(`
+    select current_generation,state from continuation_worksets
+    where id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+  `).get(scope);
+  const telemetry = runtime.recordContinuationHostTelemetry({
+    conversationScopeId: scope,
+    taskId: first.task.id,
+    senderInstanceId: "ui_transport_relay",
+    anchorMountToken: inheritedSenderCapability.anchorMountToken,
+    anchorMountGeneration: inheritedSenderCapability.anchorMountGeneration,
+    telemetry: {
+      openaiKeys: ["sendFollowUpMessage", "callTool", "callTool"],
+      hostContextKeys: ["platform", "toolInfo"],
+      globalsKeys: ["theme", "locale"],
+      parentMethods: ["ui/notifications/host-context-changed"],
+    },
+  });
+  assert.equal(telemetry.accepted, true);
+  const afterTelemetry = db.prepare(`
+    select assistant_turn_state,substantive_activity_count,turn_lease_expires_at,stall_state,updated_at
+    from continuation_tasks where id=?
+  `).get(first.task.id);
+  const afterTelemetryGeneration = db.prepare(`
+    select current_generation,state from continuation_worksets
+    where id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+  `).get(scope);
+  assert.deepEqual(afterTelemetry, beforeTelemetry,
+    "observational Host telemetry must not mutate task activity, lease, Assistant Turn state, stall state, or updated_at");
+  assert.deepEqual(afterTelemetryGeneration, beforeTelemetryGeneration,
+    "observational Host telemetry must not create or advance a continuation generation");
+  const telemetryEvents = runtime.pollEvents({ kind: "continuation-host-telemetry", subject: scope, limit: 10 }).events;
+  assert.equal(telemetryEvents.length, 1);
+  assert.deepEqual(telemetryEvents[0].payload.openaiKeys, ["callTool", "sendFollowUpMessage"]);
+  assert.deepEqual(telemetryEvents[0].payload.parentMethods, ["ui/notifications/host-context-changed"]);
   snapshot = runtime.continuationArchitectureSnapshot(scope);
   assert.equal(snapshot.card.card_id, stableCardId);
   assert.equal(snapshot.card.coordinator_instance_id, "ui_architecture_test",
@@ -452,25 +500,20 @@ try {
     .run(new Date(Date.now() - 1000).toISOString(), active.id);
   db.prepare(`
     update continuation_tasks set confirmed_turn_limit_ms=30000,
-      turn_started_at=?,last_model_activity_at=? where id=?
+      turn_lease_expires_at=?,turn_started_at=?,last_model_activity_at=? where id=?
   `).run(
+    new Date(Date.now() - 5_000).toISOString(),
     new Date(Date.now() - 60_000).toISOString(),
     new Date(Date.now() - 40_000).toISOString(),
     first.task.id,
   );
   const confirmedCutoffRecoverySweep = runtime.continuationSupervisorSweep();
-  assert.equal(confirmedCutoffRecoverySweep.ready.length, 1,
-    "once a persisted confirmed Host cutoff + grace + model quiet prove the turn ended, the resident supervisor may create exactly one recovery generation");
+  assert.equal(confirmedCutoffRecoverySweep.ready.length, 0,
+    "a historical confirmed Host cutoff must remain telemetry-only because a later live turn may legally outlive it");
   const confirmedCutoffRecoveryLegacy = db.prepare("select stall_state,stall_evidence from continuation_tasks where id=?").get(first.task.id);
-  assert.equal(confirmedCutoffRecoveryLegacy.stall_state, "CONTINUATION_ARMED");
-  assert.equal(confirmedCutoffRecoveryLegacy.stall_evidence, "server-confirmed-host-cutoff-no-inflight-model-request");
-  const confirmedCutoffGeneration = confirmedCutoffRecoverySweep.ready[0].generation;
-  assert.ok(confirmedCutoffGeneration > activeGeneration.generation,
-    "confirmed-cutoff recovery must advance beyond the originating generation without depending on a quiet-backstop generation");
-  db.prepare(`
-    update continuation_generations set state='NO_WORK',closed_at=?,failure_reason='test-reset',updated_at=?
-    where workset_id=? and generation=?
-  `).run(new Date().toISOString(), new Date().toISOString(), active.id, confirmedCutoffGeneration);
+  assert.equal(confirmedCutoffRecoveryLegacy.stall_state, "SUSPECTED_STALL");
+  assert.match(String(confirmedCutoffRecoveryLegacy.stall_evidence || ""), /lease-expired/,
+    "historical cutoff elapsed time may coexist with a diagnostic suspicion but cannot arm continuation");
   db.prepare(`
     update continuation_tasks set stall_state='ACTIVE',stall_armed_at=null,stall_evidence=null,
       last_model_activity_at=?,turn_lease_expires_at=?,continuation_pending=0 where id=?
@@ -478,11 +521,16 @@ try {
   db.prepare("update continuation_worksets set state='RUNNING',continuation_due_at=? where id=?")
     .run(new Date(Date.now() - 1000).toISOString(), active.id);
 
-  db.prepare("update continuation_tasks set stall_state='CONTINUATION_ARMED',continuation_pending=0 where id=?")
-    .run(first.task.id);
+  db.prepare(`
+    update continuation_tasks set
+      stall_state='CONTINUATION_ARMED',continuation_pending=0,
+      assistant_turn_state='COMPLETED',assistant_turn_completion_lease_id=turn_lease_id,
+      assistant_turn_completed_at=?,assistant_turn_completion_source='host-teardown-after-model-intent'
+    where id=?
+  `).run(new Date().toISOString(), first.task.id);
   const armedSweep = runtime.continuationSupervisorSweep();
   assert.equal(armedSweep.ready.length, 1,
-    "resident supervisor must create a READY generation only after independent Host/lifecycle stall authorization");
+    "resident supervisor must create a READY generation only after ATCC records the current assistant turn as completed");
   const syntheticGeneration = armedSweep.ready[0].generation;
   assert.ok(syntheticGeneration > activeGeneration.generation);
   assert.equal(runtime.continuationSupervisorSweep().ready.length, 0,
@@ -670,6 +718,7 @@ try {
   runtime.continuationTask({
     action: "host-signal",
     taskId: first.task.id,
+    coordinatorInstanceId: "ui_architecture_test",
     hostProfileId: "architecture-synthetic@test",
     hostSignal: "timeout",
     elapsedMs: 60_000,
@@ -755,6 +804,7 @@ try {
   runtime.continuationTask({
     action: "host-signal",
     taskId: partialTask.task.id,
+    coordinatorInstanceId: "ui_partial_tool",
     hostProfileId: "architecture-partial@test",
     hostSignal: "timeout",
     elapsedMs: 60_000,
@@ -794,8 +844,8 @@ try {
       new Date(Date.now() - 40_000).toISOString(),
       cutoffTask.task.id,
     );
-  assert.equal(runtime.continuationSupervisorSweep().ready.some((entry) => entry.conversationScopeId === cutoffScope), true,
-    "the conservative generic recovery may arm only after the persisted confirmed Host cutoff + grace has elapsed from the actual turn start");
+  assert.equal(runtime.continuationSupervisorSweep().ready.some((entry) => entry.conversationScopeId === cutoffScope), false,
+    "even after the historical confirmed cutoff + grace elapses, no current-turn Host-end signal means fail-closed SUSPECTED_STALL");
 
   const readyBeforeManualStatus = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
   assert.equal(readyBeforeManualStatus.accepted, false);
@@ -867,16 +917,18 @@ try {
   db.prepare(`
     update continuation_tasks set stall_state='CONTINUATION_ARMED',stall_armed_at=?,
       stall_evidence='architecture-manual-race-rearm',continuation_pending=0,
+      assistant_turn_state='COMPLETED',assistant_turn_completion_lease_id=turn_lease_id,
+      assistant_turn_completed_at=?,assistant_turn_completion_source='host-teardown-after-model-intent',
       delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,updated_at=?
     where id=?
-  `).run(raceRearmAt, raceRearmAt, first.task.id);
+  `).run(raceRearmAt, raceRearmAt, raceRearmAt, first.task.id);
   db.prepare(`
     update continuation_worksets set state='RUNNING',continuation_due_at=?,updated_at=?
     where id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
   `).run(raceRearmAt, raceRearmAt, scope);
   const raceReadySweep = runtime.continuationSupervisorSweep();
   assert.equal(raceReadySweep.ready.length, 1,
-    "the claimed-sender race fixture must create one fresh generation after the READY pre-claim takeover test");
+    "the claimed-sender race fixture must create one fresh generation only after ATCC completes the new manual turn");
 
   const staleRaceSender = runtime.claimReadyContinuationGeneration({
     conversationScopeId: scope,
@@ -976,8 +1028,12 @@ try {
   }).accepted, true);
   const terminalRaceCapability = runtime.continuationSenderCapability({ taskId: terminalRaceTask.task.id });
   const terminalRaceNow = new Date().toISOString();
-  db.prepare(`update continuation_tasks set stall_state='CONTINUATION_ARMED',stall_armed_at=?,stall_evidence='terminal-race-test',continuation_pending=0,delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,updated_at=? where id=?`)
-    .run(terminalRaceNow, terminalRaceNow, terminalRaceTask.task.id);
+  db.prepare(`update continuation_tasks set
+    stall_state='CONTINUATION_ARMED',stall_armed_at=?,stall_evidence='terminal-race-test',continuation_pending=0,
+    assistant_turn_state='COMPLETED',assistant_turn_completion_lease_id=turn_lease_id,
+    assistant_turn_completed_at=?,assistant_turn_completion_source='host-teardown-after-model-intent',
+    delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,updated_at=? where id=?`)
+    .run(terminalRaceNow, terminalRaceNow, terminalRaceNow, terminalRaceTask.task.id);
   db.prepare(`update continuation_worksets set state='RUNNING',continuation_due_at=?,updated_at=? where id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)`)
     .run(terminalRaceNow, terminalRaceNow, terminalRaceScope);
   assert.equal(runtime.continuationSupervisorSweep().ready.length, 1);

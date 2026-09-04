@@ -154,6 +154,11 @@ const migrations = [
         name: "continuation-1.1.56-runtime-reset",
         up: migrateContinuation1156RuntimeReset,
     },
+    {
+        version: 32,
+        name: "continuation-assistant-turn-completion-contract",
+        up: migrateContinuationAssistantTurnCompletionContract,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -1190,6 +1195,59 @@ function migrateContinuation1156RuntimeReset(sqlite) {
 
       delete from continuation_tasks
       where conversation_scope_id not glob 'v1/*';
+    `);
+}
+function migrateContinuationAssistantTurnCompletionContract(sqlite) {
+    // 1.1.59 dev11: elapsed time, request silence, iframe heartbeat and an
+    // historical Host cutoff are not assistant-turn lifecycle signals. Persist
+    // an explicit Assistant Turn Completion Contract (ATCC) instead. A normal
+    // model-driven continuation requires a model completion intent bound to the
+    // current turn lease plus a later Host lifecycle teardown for that same
+    // turn. Explicit Host timeout remains independently authoritative.
+    addColumnIfMissing(sqlite, "continuation_tasks", "assistant_turn_state", "text not null default 'UNKNOWN'");
+    addColumnIfMissing(sqlite, "continuation_tasks", "assistant_turn_owner", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "assistant_turn_completion_lease_id", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "assistant_turn_completion_requested_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "assistant_turn_completed_at", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "assistant_turn_completion_source", "text");
+    addColumnIfMissing(sqlite, "continuation_tasks", "assistant_turn_completion_note", "text");
+    sqlite.exec(`
+      update continuation_generations
+      set state='SUPERSEDED',closed_at=coalesce(closed_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+          failure_reason=coalesce(failure_reason,'1.1.59-dev11-atcc-invalidates-pre-delivery-inference'),
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      where owner_type='synthetic' and state in ('READY','CLAIMED');
+
+      update continuation_tasks
+      set assistant_turn_state=case
+            when state='RUNNING' and turn_lease_id is not null then 'GENERATING'
+            else coalesce(nullif(assistant_turn_state,''),'UNKNOWN')
+          end,
+          assistant_turn_owner=case
+            when state='RUNNING' and delivery_owner='synthetic-active' then 'synthetic'
+            when state='RUNNING' then 'manual'
+            else assistant_turn_owner
+          end,
+          delivery_work_baseline_count=case
+            when state='RUNNING' then coalesce(substantive_activity_count,0)
+            else delivery_work_baseline_count
+          end,
+          assistant_turn_completion_lease_id=null,
+          assistant_turn_completion_requested_at=null,
+          assistant_turn_completed_at=null,
+          assistant_turn_completion_source=null,
+          assistant_turn_completion_note=null,
+          continuation_pending=case when delivery_owner='synthetic-pending' then 0 else continuation_pending end,
+          superseded_delivery_token=case
+            when delivery_owner='synthetic-pending' then coalesce(delivery_token,superseded_delivery_token)
+            else superseded_delivery_token
+          end,
+          delivery_token=case when delivery_owner='synthetic-pending' then null else delivery_token end,
+          delivery_owner=case when delivery_owner='synthetic-pending' then 'manual' else delivery_owner end,
+          delivery_owner_expires_at=case when delivery_owner='synthetic-pending' then null else delivery_owner_expires_at end;
+
+      create index if not exists continuation_tasks_assistant_turn_state_idx
+        on continuation_tasks(continuation_mode, state, assistant_turn_state, updated_at desc);
     `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

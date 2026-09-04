@@ -135,9 +135,21 @@ try {
     objective: "verify batch owner continuation controls",
     requiredMilestones: ["pause", "delete"],
   });
+  // dev11 accepts timeout/teardown lifecycle evidence only from the current
+  // verified Workspace App coordinator. This owner-UI test is not exercising
+  // card transport itself, so seed the equivalent verified-host fixture before
+  // asserting learned timeout telemetry.
+  const ownerCoordinatorId = "ui_native_owner_test";
+  const ownerAnchorVerifiedAt = new Date().toISOString();
+  continuationRuntime.database.sqlite.prepare(`
+    update continuation_tasks
+      set anchor_mount_verified_at=?,anchor_mount_coordinator_id=?,coordinator_instance_id=?
+    where id=?
+  `).run(ownerAnchorVerifiedAt, ownerCoordinatorId, ownerCoordinatorId, ownerTask.task.id);
   continuationRuntime.continuationTask({
     action: "host-signal",
     taskId: ownerTask.task.id,
+    coordinatorInstanceId: ownerCoordinatorId,
     hostProfileId: "native-ui-test-host",
     hostSignal: "timeout",
     elapsedMs: 30_000,

@@ -155,19 +155,61 @@ if (!String(manifest.release || "").startsWith("DevSpacePortable-Windows-x64-"))
 const packageVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 const manifestVersion = String(manifest.runtime?.devspacePortable || "");
 const releaseVersion = String(manifest.release || "").replace(/^DevSpacePortable-Windows-x64-/, "");
+const displayVersion = String(manifest.displayVersion || packageVersion).trim();
 if (!packageVersion || packageVersion !== manifestVersion || packageVersion !== releaseVersion) {
   throw new Error(
     `Portable version identity drift: package.json=${packageVersion || "missing"}, ` +
     `manifest.runtime.devspacePortable=${manifestVersion || "missing"}, release=${releaseVersion || "missing"}.`,
   );
 }
+if (!displayVersion || (displayVersion !== packageVersion && !displayVersion.startsWith(`${packageVersion} `))) {
+  throw new Error(
+    `Portable display-version identity drift: displayVersion=${displayVersion || "missing"}, ` +
+    `runtime version=${packageVersion}.`,
+  );
+}
+
+const displayDevSuffix = displayVersion === packageVersion
+  ? ""
+  : displayVersion.slice(packageVersion.length).trim();
+if (displayDevSuffix) {
+  const match = /^dev([1-9]\d*)$/.exec(displayDevSuffix);
+  if (!match) {
+    throw new Error(
+      `Portable display-version development suffix is invalid: ${JSON.stringify(displayDevSuffix)}.`,
+    );
+  }
+  const expectedIteration = Number(match[1]);
+  const development = manifest.development;
+  if (
+    !development ||
+    development.channel !== "dev" ||
+    Number(development.iteration) !== expectedIteration ||
+    String(development.label || "") !== displayDevSuffix
+  ) {
+    throw new Error(
+      `Portable development metadata drift: displayVersion=${displayVersion}, ` +
+      `development=${JSON.stringify(development || null)}.`,
+    );
+  }
+} else if (manifest.development) {
+  throw new Error(
+    `Portable development metadata is present for stable displayVersion=${displayVersion}: ` +
+    `${JSON.stringify(manifest.development)}.`,
+  );
+}
 
 const versionIdentitySources = [
   ["setup/portable-manager.cjs", `const PORTABLE_VERSION = "${packageVersion}";`],
+  ...(displayDevSuffix
+    ? [["setup/portable-manager.cjs", `const PORTABLE_DEV_ITERATION = "${displayDevSuffix}";`]]
+    : []),
   ["scripts/start-devspace.sh", `export DEVSPACE_PORTABLE_VERSION="${packageVersion}"`],
   ["vendor/waishnav-devspace/dist/capabilities.js", `DEVSPACE_SERVER_VERSION = "${packageVersion}"`],
-  ["vendor/waishnav-devspace/dist/ui/assets/runtime-enhancements.js", `DevSpace Portable ${packageVersion} · Protocol 1.5`],
-  ["setup/native/DevSpacePortableApp.cs", `DevSpace Portable ${packageVersion} · Protocol 1.5`],
+  // The executable/service identity stays strict semver, while user-visible
+  // surfaces intentionally include the current development iteration label (devN).
+  ["vendor/waishnav-devspace/dist/ui/assets/runtime-enhancements.js", `DevSpace Portable ${displayVersion} · Protocol 1.5`],
+  ["setup/native/DevSpacePortableApp.cs", `DevSpace Portable ${displayVersion} · Protocol 1.5`],
 ];
 for (const [file, expected] of versionIdentitySources) {
   const source = readFileSync(join(root, file), "utf8");
@@ -182,6 +224,7 @@ console.log(JSON.stringify({
   largest,
   release: manifest.release,
   portableVersion: packageVersion,
+  displayVersion,
   versionIdentitySourcesChecked: versionIdentitySources.length,
   forbiddenTrackedPaths: 0,
   sensitiveTrackedFiles: 0,

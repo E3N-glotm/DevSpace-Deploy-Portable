@@ -198,7 +198,9 @@ try {
     "utf8",
   );
   const portableVersion = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
-  if (!enhancementSource.includes(`DevSpace Portable ${portableVersion} · Protocol 1.5`)
+  const versionManifest = JSON.parse(await readFile(new URL("../VERSION-MANIFEST.json", import.meta.url), "utf8"));
+  const portableDisplayVersion = String(versionManifest.displayVersion || portableVersion);
+  if (!enhancementSource.includes(`DevSpace Portable ${portableDisplayVersion} · Protocol 1.5`)
       || !enhancementSource.includes("session_rollback")
       || !enhancementSource.includes("session_changes")) {
     throw new Error("session review, rollback, or version footer is missing from the Workspace App");

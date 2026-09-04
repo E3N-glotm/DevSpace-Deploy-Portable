@@ -49,7 +49,8 @@
 - 普通静默、Turn Lease 到期的第一阶段只允许进入 `SUSPECTED_STALL`，不会在 25 秒阈值处直接生成新的 Host turn。
 - 明确 Host timeout / teardown 证据，以及用户已确认的真实 Host cutoff + grace + model quiet，继续作为更强的恢复证据。
 - **纯 request silence 永远不再作为 continuation authorization。** 25 秒 lease 过期后只记录 `SUSPECTED_STALL`；即使随后持续数分钟没有 DevSpace 请求，也不得据此创建 READY generation。这样模型在长推理、上下文压缩或等待非 DevSpace 工作期间不会被 watchdog 抢占。
-- 无显式 timeout / teardown 时，唯一保留的自动兜底是**已经确认过的真实 Host cutoff**：从真实 turn start 计算 cutoff，再附加 recovery grace 与 model quiet，避免把普通短静默当成 Host 截断。
+- 历史 Host cutoff 现在只保留为遥测/诊断。live 验证已经证明后续 assistant turn 可以合法超过先前观测到的 cutoff，因此它不能在缺少当前 turn 结束信号时授权 READY。
+- 自动恢复只接受**当前 turn 的显式 Host timeout / teardown 或经过验证的 lifecycle 终止证据**；没有这类证据时宁可保持 `SUSPECTED_STALL`，也不抢占仍在工作的模型。
 - `CLAIMED` 是发送前状态，可以在 claim lease 到期后安全回收；`DELIVERING` 是结果不确定区，timer 永远不能据此重发。
 - `app.sendMessage` 返回 `unknown` 时保留原 generation 的 `DELIVERING`，不转换成 READY；只有明确 `failed/rejected` 才允许下一次 generation。
 - synthetic work owner 的 45 秒短 lease 只用于检测 stale ownership，不能凭自身到期制造第二个 ChatGPT turn；后续 synthetic→synthetic 同样必须有显式 Host timeout / teardown 或 confirmed-cutoff 证据。
@@ -108,9 +109,9 @@
 3. 同一测试锁定 install root 改变时旧 state 的安全停止逻辑，同时确认后台 `silent` recovery 仍读取 persisted Agent 配置。
 4. `test-native-ui-resilience.mjs`、`test-linux-agent-contract.mjs`、`test-remote-workspace-backend.mjs` 与 `verify-source-tree.mjs` 继续作为 UI 生命周期、Linux Agent 权限契约、后端 repair enrollment 和版本身份门禁。
 5. `test-continuation-guard.mjs` 新增 READY-after-bind 模拟：初次 sender bind 没有 READY，后续 supervisor status 才出现 READY，必须在下一次 refresh 原子 claim 且只发送一次；同时锁定首条 visible synthetic message 的“actual user-role work request / 首轮必须实质工作”语义。
-6. `test-continuation-architecture.mjs` 继续覆盖 generation ownership、manual takeover、card/workset singleton、confirmed-cutoff 恢复，并新增 fail-closed 静默验证：真实模型 DevSpace 请求结束后，即使长期静默也只能停在 `SUSPECTED_STALL`，不得仅凭 silence 生成 READY；显式 Host timeout 与 confirmed cutoff 仍能正常恢复。
+6. `test-continuation-architecture.mjs` 继续覆盖 generation ownership、manual takeover、card/workset singleton，并新增 fail-closed 静默/历史 cutoff 验证：真实模型 DevSpace 请求结束后，即使长期静默或超过旧 confirmed cutoff，也只能停在 `SUSPECTED_STALL`；只有显式当前-turn Host end 证据才能生成 READY。
 7. `test-updater-apply-recovery.mjs` 覆盖无关 Portable-root executable 在文件事务前阻断更新，并要求 stderr/stdout 保留具体 PID/文件路径和 `No program files were changed` 诊断。
-8. `test-continuation-guard.mjs` 额外锁定 synthetic owner lease 不能单独重发、`DELIVERING/unknown` 仍不可 timer retry，以及 synthetic 只能通过显式 Host-end 或 confirmed-cutoff gate 进入下一轮；固定 quiet threshold 不得重新出现。
+8. `test-continuation-guard.mjs` 额外锁定 synthetic owner lease 不能单独重发、`DELIVERING/unknown` 仍不可 timer retry，以及 synthetic 只能通过显式当前-turn Host-end/lifecycle gate 进入下一轮；固定 quiet threshold 和 historical-cutoff 无信号 gate 都不得重新出现。
 9. `test-continuation-architecture.mjs` / `test-continuation-guard.mjs` 同时锁定 model request in-flight 登记顺序、纯静默只能产生 `SUSPECTED_STALL`、以及对 pre-upgrade weak READY/CLAIMED 的兼容撤销逻辑。
 10. canonical-repair retention 专项回归锁定严格文件名匹配、最近 3 份 / 512 MiB 双上限，并验证主库、WAL/SHM 与非目标 SQLite 文件不会被删除。
 11. `test-process-registry-retention.mjs` 验证活动/过渡状态永不清理，终态历史受到 5000 条 + 30 天双重约束。

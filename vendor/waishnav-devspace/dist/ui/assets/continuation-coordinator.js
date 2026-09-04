@@ -1,11 +1,11 @@
 const TASK_TOOL = "continuation_task";
 const SENDER_TOOL = "continuation_sender";
-const DEFAULT_SUPERVISOR_TICK_MS = 5_000;
+// Keep completion delivery responsive after the guarded ATCC handoff without
+// turning polling into a completion signal.  The runtime still authorizes only
+// exact-turn COMPLETED/TIMED_OUT state; this tick merely notices it promptly.
+const DEFAULT_SUPERVISOR_TICK_MS = 2_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
 const DEFAULT_TERMINAL_REFRESH_MS = 60_000;
-const CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS = 5_000;
-const CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS = 20_000;
-const CONFIRMED_TURN_LIMIT_MODEL_QUIET_MS = 30_000;
 // A resumed ChatGPT turn can be created before its MCP connector has fully
 // rehydrated. Keep retrying the same idempotent control call across roughly a
 // 30-second readiness window instead of giving up after ~8 seconds.
@@ -34,6 +34,20 @@ function uniqueId() {
 function safeProfilePart(value, fallback) {
   const text = String(value ?? "").trim().replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 72);
   return text || fallback;
+}
+
+function safeTelemetryName(value) {
+  const text = String(value ?? "").trim();
+  return /^[A-Za-z0-9._:/-]{1,160}$/.test(text) ? text : undefined;
+}
+
+function ownTelemetryKeys(value) {
+  if (!value || (typeof value !== "object" && typeof value !== "function")) return [];
+  try {
+    return Object.getOwnPropertyNames(value).map(safeTelemetryName).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function textFromToolResult(result) {
@@ -169,41 +183,29 @@ function deliveryAckRetryDue(task) {
   return !Number.isFinite(sentAt) || Date.now() - sentAt >= 15_000;
 }
 
-function confirmedCutoffRecoveryReady(task) {
-  if (!task || task.state !== "RUNNING" || task.continuationMode === "compat" || !hasUnfinishedMilestones(task)) return false;
-  const confirmedLimitMs = Number(task.confirmedTurnLimitMs || 0);
-  if (confirmedLimitMs < 30_000) return false;
-  if (taskElapsedMs(task) < confirmedLimitMs + CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS) return false;
-  const lastModelAt = Date.parse(task.lastModelActivityAt || "");
-  if (!Number.isFinite(lastModelAt)) return false;
-  return Date.now() - lastModelAt >= CONFIRMED_TURN_LIMIT_MODEL_QUIET_MS;
-}
-
 function completionActivityLeaseExpired(task) {
   if (!completionDrivenTask(task) || task?.state !== "RUNNING" || !hasUnfinishedMilestones(task)) return false;
   const expiresAt = Date.parse(task.turnLeaseExpiresAt || "");
   return Number.isFinite(expiresAt) && Date.now() >= expiresAt;
 }
 
-function syntheticResumeWorkRetryDue(task) {
-  if (!completionDrivenTask(task) || task?.state !== "RUNNING" || !hasUnfinishedMilestones(task)) return false;
-  if (task?.syntheticResumeWorkRequired !== true) return false;
-  // The resumed synthetic turn has a dedicated work-ownership lease after its
-  // connectivity status ACK. This lease answers only whether the synthetic
-  // owner ever progressed beyond control traffic; it is not a task-completion
-  // timer. Prefer it over the generic model Turn Lease so a short status-only
-  // turn can be retried sooner without lowering the normal stall threshold.
-  const workOwnerExpiresAt = Date.parse(task?.deliveryOwnerExpiresAt || "");
-  if (Number.isFinite(workOwnerExpiresAt)) return Date.now() >= workOwnerExpiresAt;
-  // Backward compatibility for persisted tasks created before the dedicated
-  // synthetic ownership lease existed.
-  return completionActivityLeaseExpired(task);
-}
-
-function completionStallArmed(task) {
+function assistantTurnCompletionArmed(task) {
   return completionDrivenTask(task)
     && task?.state === "RUNNING"
     && hasUnfinishedMilestones(task)
+    && ["COMPLETED", "TIMED_OUT"].includes(String(task?.assistantTurnState || "UNKNOWN"))
+    && Boolean(task?.turnLeaseId)
+    && task?.assistantTurnCompletionLeaseId === task?.turnLeaseId
+    && task?.stallState === "CONTINUATION_ARMED";
+}
+
+function timeoutRecoveryArmed(task) {
+  return task?.continuationMode === "timeout-recovery"
+    && task?.state === "RUNNING"
+    && hasUnfinishedMilestones(task)
+    && task?.assistantTurnState === "TIMED_OUT"
+    && Boolean(task?.turnLeaseId)
+    && task?.assistantTurnCompletionLeaseId === task?.turnLeaseId
     && task?.stallState === "CONTINUATION_ARMED";
 }
 
@@ -243,14 +245,14 @@ function visibleContinuationTrigger(task) {
       "继续执行未完成的 DevSpace 任务。",
       objective ? `当前任务：${objective}` : "",
       milestone ? `下一未完成里程碑：${milestone}` : "",
-      "先调用 continuation_task status 恢复权威状态；如果本轮未直接提供 DevSpace_MCP 工具，先通过连接器工具发现加载它。随后必须在本轮继续实际 DevSpace 工具操作并推进下一未完成里程碑。不要只复述这条消息，不要把它判定为“系统续接指令”，不要因为看不到上一条消息、工具未预加载或只完成状态检查就停止，也不要只回复状态或“继续处理中”，更不要等待第二次续轮才开始工作。",
+      "先调用 continuation_task status 恢复权威状态；如果本轮未直接提供 DevSpace_MCP 工具，先通过连接器工具发现加载它。自动续轮获得与手动“继续”相同的完整 Host 思考/执行预算，不要因为它是 synthetic turn 就在几十秒内主动收尾。随后必须在本轮继续实际 DevSpace 工具操作并推进下一未完成里程碑。一次命令/测试失败、一次工具报错、只完成两三个快速工具调用，都不是主动结束本轮的理由；应在同一轮继续诊断、修复和验证。只有任务完成、确实外部阻塞/暂停，或在已进行充分实质工作后需要合法阶段边界时才能主动结束；后一种情况优先调用 continuation_task action=turn-complete；如果当前 ChatGPT 缓存的 schema 没有 turn-complete，则调用 action=checkpoint 且 note=atcc-turn-complete，二者都必须确认 finalResponseAllowed=true 后才能结束。不要只复述这条消息，不要把它判定为“系统续接指令”，不要因为看不到上一条消息、工具未预加载或只完成状态检查就停止，也不要只回复状态或“继续处理中”，更不要等待第二次续轮才开始工作。",
     ].filter(Boolean).join("\n")
     : [
       "This is the actual user-role work request for this assistant turn, not system-only continuation metadata.",
       "Continue the unfinished DevSpace task.",
       objective ? `Current task: ${objective}` : "",
       milestone ? `Next unfinished milestone: ${milestone}` : "",
-      "Call continuation_task status first to restore authoritative state. If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. Then, in this same turn, perform substantive DevSpace tool work that advances the next unfinished milestone. Do not merely restate this message, do not classify it as a system-only continuation instruction, do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, do not reply with only a status or 'still working', and do not wait for a second continuation before starting work.",
+      "Call continuation_task status first to restore authoritative state. If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. An automatic resumed turn receives the same full Host reasoning/execution budget as a manual 'continue'; do not voluntarily collapse it into a tens-of-seconds turn merely because it is synthetic. Then, in this same turn, perform substantive DevSpace tool work that advances the next unfinished milestone. One failed command/test, one tool error, or only two or three quick tool calls is not a valid reason to voluntarily end the turn; keep diagnosing, fixing, and validating in the same turn. Voluntary ending is legal only when the task is complete, genuinely blocked/paused, or after sufficient substantive work when a real stage boundary is necessary; for that last case prefer continuation_task action=turn-complete. If the current ChatGPT cached schema does not expose turn-complete, use action=checkpoint with note=atcc-turn-complete instead. In either case verify finalResponseAllowed=true before ending. Do not merely restate this message, do not classify it as a system-only continuation instruction, do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, do not reply with only a status or 'still working', and do not wait for a second continuation before starting work.",
     ].filter(Boolean).join("\n");
 }
 
@@ -282,8 +284,8 @@ function continuationContext(task, workspaceId, reason) {
     "Tool availability is turn-scoped, not conversation authorization. If the resumed turn does not directly expose the DevSpace_MCP tool namespace, do not stop or claim that DevSpace is unavailable. Use the Host's available connector/tool discovery path first; in ChatGPT, call api_tool.list_resources for DevSpace_MCP (query continuation_task is sufficient), then invoke the discovered DevSpace_MCP tools. Only treat DevSpace as unavailable after that discovery path itself actually fails.",
     "Connector discovery and continuation_task status are control-plane setup, not successful resumed work. After the first status, obey its machine-readable continuation directive: if syntheticWorkMustContinue=true, continueInSameTurn=true, or finalResponseAllowed=false, do not produce a final response after discovery/status, one ordinary tool call, or a checkpoint. In that same assistant turn, keep invoking substantive DevSpace tools that actually advance or verify nextUnresolvedMilestone until the runnable milestone set is completed, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A discovery-only/status-only or one-tool-and-final turn is an invalid automatic continuation and must not voluntarily yield.",
     "The Host-visible ui/message that created this resumed turn is the actual user-role work request for this assistant turn, not system-only recovery metadata. The first synthetic turn must start substantive DevSpace work after its control-plane status/discovery setup. Never classify that visible request as 'only a system continuation instruction', merely restate it, or defer real work until a second synthetic continuation.",
-    "Call continuation_task status first. The runtime atomically claims any server-owned expected synthetic generation; do not search for, expose, or pass a continuation token to ordinary tools. Then continue substantive work with the same sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes until the current milestones are complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId and existing process/workspace state. Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged. If and only if a status/checkpoint reports milestoneCardRequired/reanchorRequired because the synthetic checkpoint changed the required milestone set, issue continuation_anchor exactly once for that new generation; otherwise never create a duplicate card.",
-    "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. If runnable milestones remain, keep invoking the required tools in this same turn instead of promising future work.",
+    "Call continuation_task status first. The runtime atomically claims any server-owned expected synthetic generation; do not search for, expose, or pass a continuation token to ordinary tools. Then continue substantive work with the same full Host reasoning budget and sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes until the current milestones are complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId and existing process/workspace state. Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged. If and only if a status/checkpoint reports milestoneCardRequired/reanchorRequired because the synthetic checkpoint changed the required milestone set, issue continuation_anchor exactly once for that new generation; otherwise never create a duplicate card.",
+    "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. A failed command/test or a small number of quick tool calls is not a legitimate yield boundary. If runnable milestones remain, keep diagnosing and invoking the required tools in this same turn instead of promising future work. If a genuine incomplete-stage boundary is necessary after sustained work, prefer continuation_task action=turn-complete; if the current cached schema does not expose that action, use continuation_task action=checkpoint with note=atcc-turn-complete. Do not voluntarily final while the returned finalResponseAllowed is false.",
   ];
   return lines.join("\n");
 }
@@ -344,6 +346,13 @@ export function installContinuationCoordinator(app, options = {}) {
     anchorMountGeneration: undefined,
     anchorMountAcked: false,
     anchorSuperseded: false,
+    // A historical visible card may outlive the manual round that created it.
+    // When a newer card generation is issued, collapse only this iframe's UI.
+    // Keep the connected App alive as a sender-only relay so a READY generation
+    // cannot be stranded merely because ChatGPT delays/omits mounting the new
+    // card iframe. Sender bind re-authenticates against the current generation;
+    // this flag never grants mount/ACK authority for the new card.
+    headlessSenderRelay: false,
     senderCapability: undefined,
     ensuringTask: undefined,
     supervisorTimer: undefined,
@@ -356,6 +365,15 @@ export function installContinuationCoordinator(app, options = {}) {
     hostProfileId: undefined,
     hostContext: undefined,
     displayModeRequestInFlight: false,
+    hostTelemetry: {
+      openaiKeys: new Set(),
+      hostContextKeys: new Set(),
+      globalsKeys: new Set(),
+      parentMethods: new Set(),
+      lastFingerprint: "",
+      flushTimer: undefined,
+      cleanup: undefined,
+    },
   };
   const supervisorTickMs = Math.max(250, Number(options.supervisorTickMs ?? DEFAULT_SUPERVISOR_TICK_MS));
   const heartbeatIntervalMs = Math.max(supervisorTickMs, Number(options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS));
@@ -377,11 +395,17 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   function activeSenderCapability() {
+    const authoritativeGeneration = Math.max(0, Number(state.task?.anchorMountGeneration || 0));
     if (state.senderCapability?.taskId === state.task?.id
-      && state.senderCapability?.conversationScopeId === state.task?.conversationScopeId) {
+      && state.senderCapability?.conversationScopeId === state.task?.conversationScopeId
+      && (!authoritativeGeneration
+        || Number(state.senderCapability?.anchorMountGeneration || 0) === authoritativeGeneration)) {
       return state.senderCapability;
     }
-    if (state.anchorSurface && state.task?.id && state.task?.conversationScopeId && state.anchorMountToken && state.anchorMountGeneration) {
+    if (!state.anchorSuperseded
+      && state.anchorSurface && state.task?.id && state.task?.conversationScopeId
+      && state.anchorMountToken && state.anchorMountGeneration
+      && (!authoritativeGeneration || Number(state.anchorMountGeneration) === authoritativeGeneration)) {
       return {
         taskId: state.task.id,
         conversationScopeId: state.task.conversationScopeId,
@@ -432,6 +456,76 @@ export function installContinuationCoordinator(app, options = {}) {
   function buildHostProfileId() {
     const info = app.getHostVersion?.() ?? {};
     return `${safeProfilePart(info.name, "unknown-host")}@${safeProfilePart(info.version, "unknown-version")}`;
+  }
+
+  function addTelemetryNames(target, values) {
+    let changed = false;
+    for (const value of values ?? []) {
+      const safe = safeTelemetryName(value);
+      if (!safe || target.has(safe) || target.size >= 128) continue;
+      target.add(safe);
+      changed = true;
+    }
+    return changed;
+  }
+
+  function hostTelemetryPayload() {
+    const sorted = (set) => [...set].sort();
+    return {
+      openaiKeys: sorted(state.hostTelemetry.openaiKeys),
+      hostContextKeys: sorted(state.hostTelemetry.hostContextKeys),
+      globalsKeys: sorted(state.hostTelemetry.globalsKeys),
+      parentMethods: sorted(state.hostTelemetry.parentMethods),
+    };
+  }
+
+  async function flushHostTelemetry() {
+    if (state.disposed || !state.connected || !senderTransportAvailable()) return false;
+    const payload = hostTelemetryPayload();
+    const fingerprint = JSON.stringify(payload);
+    if (fingerprint === state.hostTelemetry.lastFingerprint) return false;
+    const outcome = await callSender("telemetry", { telemetry: payload }).catch(() => undefined);
+    if (!outcome?.accepted) return false;
+    state.hostTelemetry.lastFingerprint = fingerprint;
+    return true;
+  }
+
+  function scheduleHostTelemetryFlush() {
+    if (state.hostTelemetry.flushTimer || state.disposed) return;
+    state.hostTelemetry.flushTimer = setTimeout(() => {
+      state.hostTelemetry.flushTimer = undefined;
+      void flushHostTelemetry();
+    }, 250);
+  }
+
+  function collectOpenAiTelemetry() {
+    if (typeof window === "undefined") return;
+    if (addTelemetryNames(state.hostTelemetry.openaiKeys, ownTelemetryKeys(window.openai))) {
+      scheduleHostTelemetryFlush();
+    }
+  }
+
+  function startHostTelemetryObserver() {
+    if (state.hostTelemetry.cleanup || typeof window === "undefined" || typeof window.addEventListener !== "function") return;
+    const onParentMessage = (event) => {
+      if (event?.source !== window.parent) return;
+      const method = safeTelemetryName(event?.data?.method);
+      if (method && addTelemetryNames(state.hostTelemetry.parentMethods, [method])) scheduleHostTelemetryFlush();
+    };
+    const onOpenAiGlobals = (event) => {
+      const detail = event?.detail?.globals ?? event?.detail;
+      if (addTelemetryNames(state.hostTelemetry.globalsKeys, ownTelemetryKeys(detail))) scheduleHostTelemetryFlush();
+      collectOpenAiTelemetry();
+    };
+    window.addEventListener("message", onParentMessage);
+    window.addEventListener("openai:set_globals", onOpenAiGlobals);
+    state.hostTelemetry.cleanup = () => {
+      window.removeEventListener?.("message", onParentMessage);
+      window.removeEventListener?.("openai:set_globals", onOpenAiGlobals);
+      if (state.hostTelemetry.flushTimer) clearTimeout(state.hostTelemetry.flushTimer);
+      state.hostTelemetry.flushTimer = undefined;
+    };
+    collectOpenAiTelemetry();
   }
 
   async function callTask(action, extra = {}) {
@@ -585,7 +679,11 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   function scheduleAuthoritativeRefresh(reason = "app lifecycle resume") {
-    if (state.disposed || state.anchorSuperseded || terminal(state.task) || !senderTransportAvailable() || !state.task?.id) return;
+    if (state.disposed || terminal(state.task) || !state.task?.id) return;
+    // A superseded visible card is still allowed to refresh as a headless
+    // sender relay. It may temporarily have no current-generation capability;
+    // supervisorTick() will rebind it before any sender claim is attempted.
+    if (!state.anchorSuperseded && !senderTransportAvailable()) return;
     if (state.lifecycleRefreshTimer) return;
     state.lifecycleRefreshTimer = setTimeout(() => {
       state.lifecycleRefreshTimer = undefined;
@@ -623,11 +721,15 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   function markAnchorSuperseded() {
+    if (state.anchorSuperseded) return;
     state.anchorSuperseded = true;
+    state.headlessSenderRelay = true;
     state.anchorMountToken = undefined;
     state.anchorMountAcked = false;
-    stopSupervisor();
-    stopLifecycleRefresh();
+    // Do not stop the supervisor/lifecycle loop. The old *visible surface* is
+    // retired, but its already-connected App remains a transport relay. The
+    // next authoritative refresh will bind a fresh private sender capability
+    // for the new generation without ever ACKing that new visible card.
     if (typeof document !== "undefined") {
       document.documentElement?.setAttribute?.("data-devspace-anchor-superseded", "true");
       if (document.body) {
@@ -640,7 +742,7 @@ export function installContinuationCoordinator(app, options = {}) {
   async function heartbeat(note = "workspace-app") {
     if (!senderTransportAvailable() || !state.task?.id || terminal(state.task)) return;
     state.lastHeartbeatAt = Date.now();
-    if (state.anchorSurface && state.task?.anchorMountVerifiedAt) {
+    if (state.anchorSurface && !state.anchorSuperseded && state.task?.anchorMountVerifiedAt) {
       await callTask("heartbeat", { note }).catch(() => undefined);
     } else {
       await callSender("heartbeat", { note }).catch(() => undefined);
@@ -666,7 +768,10 @@ export function installContinuationCoordinator(app, options = {}) {
       if (!senderTransportAvailable() || !state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
       const status = await callTask("status");
       if (status?.task) state.task = status.task;
-      if (state.anchorSuperseded) return false;
+      if (state.anchorSuperseded && !senderTransportAvailable()) {
+        const rebound = await bindSenderTransport().catch(() => undefined);
+        if (!rebound?.accepted || !senderTransportAvailable()) return false;
+      }
       if (!state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
       await heartbeat(reason);
       if (typeof app.updateModelContext === "function") {
@@ -732,7 +837,10 @@ export function installContinuationCoordinator(app, options = {}) {
       }
       const preClaim = await callTask("status").catch(() => undefined);
       if (preClaim?.task) state.task = preClaim.task;
-      if (state.anchorSuperseded) return false;
+      if (state.anchorSuperseded && !senderTransportAvailable()) {
+        const rebound = await bindSenderTransport().catch(() => undefined);
+        if (!rebound?.accepted || !senderTransportAvailable()) return false;
+      }
       const claim = await callSender("claim", { note: reason });
       if (!claim?.accepted) return false;
       const deliveryToken = claim.deliveryToken;
@@ -814,7 +922,8 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   async function supervisorTickImpl({ forceAuthoritative = false } = {}) {
-    if (state.disposed || !senderTransportAvailable() || !state.task?.id) return;
+    if (state.disposed || !state.connected || !state.task?.id) return;
+    if (!state.anchorSuperseded && !senderTransportAvailable()) return;
     const cachedTerminal = terminal(state.task);
     if (!forceAuthoritative && cachedTerminal && Date.now() - state.lastTerminalRefreshAt < terminalRefreshMs) return;
 
@@ -834,7 +943,18 @@ export function installContinuationCoordinator(app, options = {}) {
     const current = await callTask("status").catch(() => undefined);
     if (current?.task) acceptTask(current.task);
     await syncPersistentDisplayMode();
-    if (state.anchorSuperseded) return;
+    if (state.anchorSuperseded) {
+      // Generation rotation intentionally invalidates the old card's mount
+      // capability. Rebind only the private sender capability to the current
+      // generation. This closes the live failure where ATCC created READY but
+      // claimed_at/delivered_at stayed null until the next manual user message.
+      const rebound = await bindSenderTransport().catch(() => undefined);
+      if (!rebound?.accepted || !senderTransportAvailable()) return;
+      if (await consumeReadyAfterSenderBind(
+        rebound,
+        "superseded card headless relay rebound with READY generation",
+      ).catch(() => false)) return;
+    }
     if (!state.task || terminal(state.task)) {
       state.lastTerminalRefreshAt = Date.now();
       stopSupervisor();
@@ -878,17 +998,6 @@ export function installContinuationCoordinator(app, options = {}) {
       return;
     }
 
-    // A synthetic resumed turn is not healthy merely because its first status
-    // call reached DevSpace. Keep the already-authorized continuation
-    // obligation durable until the model performs a real non-control DevSpace
-    // operation. Prefer its dedicated work-ownership lease; the generic model
-    // Turn Lease remains only a compatibility fallback. Elapsed time never
-    // marks the task complete: milestones and substantive work still do.
-    if (syntheticResumeWorkRetryDue(state.task)) {
-      await attemptContinuation("synthetic resume work ownership lease expired", { force: true });
-      return;
-    }
-
     const hasWatchedProcesses = Array.isArray(state.task.watchProcessHandles)
       && state.task.watchProcessHandles.length > 0;
 
@@ -927,17 +1036,8 @@ export function installContinuationCoordinator(app, options = {}) {
       if (probed?.task) state.task = probed.task;
       if (state.task) publishTaskForCard(state.task);
     }
-    if (completionStallArmed(state.task)) {
-      await attemptContinuation("task contract stall corroborated", { force: true });
-      return;
-    }
-    if (confirmedCutoffRecoveryReady(state.task)) {
-      // This is deliberately NOT a generic silence/learned-budget watchdog. It
-      // is available only after a user/Owner-confirmed real Host cutoff lower
-      // bound has already elapsed, plus a grace period and model quiet window.
-      // It covers hosts that visibly truncate the assistant turn but omit both
-      // toolcancelled timeout and resource-teardown reason signals.
-      await attemptContinuation("confirmed turn-limit lease expired", { force: true });
+    if (assistantTurnCompletionArmed(state.task)) {
+      await attemptContinuation("Assistant Turn Completion Contract armed", { force: true });
       return;
     }
     // Intentionally no learned-budget or ordinary process-completion trigger.
@@ -1046,6 +1146,7 @@ export function installContinuationCoordinator(app, options = {}) {
 
   function mergeContext(context) {
     if (context && typeof context === "object") {
+      if (addTelemetryNames(state.hostTelemetry.hostContextKeys, ownTelemetryKeys(context))) scheduleHostTelemetryFlush();
       state.hostContext = { ...(state.hostContext ?? {}), ...context };
     }
     const tool = toolFromContext(context);
@@ -1127,6 +1228,7 @@ export function installContinuationCoordinator(app, options = {}) {
   app.addEventListener("toolresult", onToolResult);
   app.addEventListener("toolcancelled", onToolCancelled);
   app.addEventListener("hostcontextchanged", onHostContextChanged);
+  startHostTelemetryObserver();
 
   const controller = {
     state,
@@ -1148,6 +1250,7 @@ export function installContinuationCoordinator(app, options = {}) {
       await consumeReadyAfterSenderBind(bound, "sender transport connected with READY generation").catch(() => false);
       await syncPersistentDisplayMode();
       await heartbeat("sender transport connected").catch(() => undefined);
+      await flushHostTelemetry().catch(() => false);
       startSupervisor();
     },
     ensureTask,
@@ -1159,67 +1262,36 @@ export function installContinuationCoordinator(app, options = {}) {
     },
     async onTeardown(params) {
       if (state.disposed) return;
-      if (!state.anchorSurface) {
+      if (!state.anchorSurface || state.headlessSenderRelay) {
         // Ordinary tool-result Apps may act as transport relays, but their UI
-        // teardown says only that this relay iframe is going away. It is not
+        // teardown says only that this relay iframe is going away. The same is
+        // true for a superseded historical card after it has been demoted to a
+        // headless sender relay: it no longer owns the current visible card or
+        // Host lifecycle evidence. It is not
         // evidence that the assistant turn ended, so never arm recovery from it.
         controller.dispose();
         return;
       }
       const reason = String(params?.reason ?? "resource teardown");
       const timedOut = /timeout|deadline|budget/i.test(reason);
-      const completionRecoveryCandidate = completionDrivenTask(state.task)
-        && state.task?.state === "RUNNING"
-        && hasUnfinishedMilestones(state.task)
-        && state.anchorSurface
-        && Boolean(state.task?.anchorMountVerifiedAt);
-      // Explicit Host timeout/deadline/budget is authoritative and may recover
-      // immediately. A generic teardown is weaker: persist it, wait a short
-      // grace window, then recover only if no replacement iframe has connected
-      // and no newer model activity has appeared. A replacement App writes a
-      // later "connected" Host signal and therefore cancels the old iframe's
-      // recovery. This covers ordinary assistant completion without confusing
-      // same-conversation iframe replacement with a stopped model turn.
-      const teardown = await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
-      if (timedOut
-        && state.task?.continuationMode !== "compat"
-        && state.task?.state === "RUNNING"
-        && hasUnfinishedMilestones(state.task)) {
-        await attemptContinuation(`host teardown: ${reason}`, { force: true });
-        controller.dispose();
-        return;
-      }
-      const confirmedLimitElapsed = confirmedCutoffRecoveryReady(state.task);
-      if (confirmedLimitElapsed
-        && state.task?.continuationMode !== "compat"
-        && state.task?.state === "RUNNING"
-        && hasUnfinishedMilestones(state.task)) {
-        await attemptContinuation("confirmed turn-limit teardown", { force: true });
-        controller.dispose();
-        return;
-      }
-      if (completionRecoveryCandidate && teardown?.task?.lastHostSignal === "teardown") {
-        const teardownSignalAt = Date.parse(teardown.task.lastHostSignalAt || "");
-        const modelActivityAtTeardown = Date.parse(teardown.task.lastModelActivityAt || "");
-        await sleep(CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS);
-        const current = await callTask("status").catch(() => undefined);
-        if (current?.task) state.task = current.task;
-        const authoritativeSignalAt = Date.parse(state.task?.lastHostSignalAt || "");
-        const authoritativeModelAt = Date.parse(state.task?.lastModelActivityAt || "");
-        const sameTeardownStillAuthoritative = state.task?.lastHostSignal === "teardown"
-          && Number.isFinite(teardownSignalAt)
-          && Number.isFinite(authoritativeSignalAt)
-          && authoritativeSignalAt === teardownSignalAt;
-        const noNewModelActivity = !Number.isFinite(authoritativeModelAt)
-          || !Number.isFinite(modelActivityAtTeardown)
-          || authoritativeModelAt <= Math.max(modelActivityAtTeardown, teardownSignalAt + 1_000);
-        if (sameTeardownStillAuthoritative
-          && noNewModelActivity
-          && completionDrivenTask(state.task)
-          && state.task?.state === "RUNNING"
-          && hasUnfinishedMilestones(state.task)) {
-          await attemptContinuation("verified surface teardown", { force: true });
-        }
+      // The MCP Apps SDK does not expose an assistant-final event and generic
+      // resource teardown carries no reason payload. Therefore teardown alone
+      // is never interpreted as model completion. If it does arrive after the
+      // model signed ATCC for this exact turn lease, it is an immediate
+      // confirmation fast path. Ordinary ChatGPT finals may emit no teardown at
+      // all; the resident runtime separately promotes only the explicit signed
+      // COMPLETION_REQUESTED lease after its guarded handoff grace. Explicit
+      // Host timeout remains independently authoritative. GENERATING silence is
+      // never converted into a completion signal by either path.
+      const lifecycle = await recordHostSignal(timedOut ? "timeout" : "teardown", reason);
+      if (lifecycle?.task) state.task = lifecycle.task;
+      if (assistantTurnCompletionArmed(state.task) || timeoutRecoveryArmed(state.task)) {
+        await attemptContinuation(
+          state.task?.assistantTurnState === "TIMED_OUT"
+            ? `ATCC Host timeout: ${reason}`
+            : "ATCC normal assistant completion confirmed by Host teardown",
+          { force: true },
+        );
       }
       controller.dispose();
     },
@@ -1233,6 +1305,8 @@ export function installContinuationCoordinator(app, options = {}) {
       app.removeEventListener?.("toolresult", onToolResult);
       app.removeEventListener?.("toolcancelled", onToolCancelled);
       app.removeEventListener?.("hostcontextchanged", onHostContextChanged);
+      state.hostTelemetry.cleanup?.();
+      state.hostTelemetry.cleanup = undefined;
     },
   };
   return controller;

@@ -68,6 +68,8 @@ const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const PORTABLE_VERSION = "1.1.59";
+const PORTABLE_DEV_ITERATION = "dev15";
+const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -664,6 +666,7 @@ function uiLeaseValue(existing = {}) {
     lastHeartbeatAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + UI_LEASE_TTL_MS).toISOString(),
     portableVersion: PORTABLE_VERSION,
+    portableDisplayVersion: PORTABLE_DISPLAY_VERSION,
   };
 }
 
@@ -2933,6 +2936,7 @@ async function probeUrl(url, timeoutMs = 20000) {
 function dashboardPublicProbeFingerprint(publicUrl, provider, tunnel, tunnelSupervisor, tunnelNetwork) {
   return JSON.stringify({
     portableVersion: PORTABLE_VERSION,
+    portableDisplayVersion: PORTABLE_DISPLAY_VERSION,
     publicUrl,
     provider,
     tunnelPid: tunnel?.pid || null,
@@ -3478,6 +3482,7 @@ async function dashboardStatus() {
         : "ready";
   return {
     portableVersion: PORTABLE_VERSION,
+    portableDisplayVersion: PORTABLE_DISPLAY_VERSION,
     protocolVersion: "1.5",
     refreshedAt: new Date().toISOString(),
     overall: dashboardIndicator(
@@ -3642,6 +3647,7 @@ function showConfig() {
     permissions: normalizePermissionSettings(deployment.permissions || config.permissions || { profile: "workspace" }),
     features: normalizeFeatureSettings(deployment.features || config.features || {}),
     portableVersion: PORTABLE_VERSION,
+    portableDisplayVersion: PORTABLE_DISPLAY_VERSION,
     protocolVersion: "1.5",
     uiLease: uiLeaseStatus(),
     providerUrls,

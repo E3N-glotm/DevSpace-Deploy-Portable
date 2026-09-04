@@ -186,8 +186,8 @@ assert.doesNotMatch(coordinator, /attemptContinuation\("task contract turn lease
   "plain activity-lease expiry must never directly create another assistant turn");
 assert.doesNotMatch(coordinator, /COMPLETION_STALL_CONFIRM_MS|shortConfirmDue|activity lease still expired after short stall confirmation/,
   "repeated iframe heartbeat probes must never turn silence into an automatic recovery authorization");
-assert.match(coordinator, /completionStallArmed[\s\S]{0,1800}CONTINUATION_ARMED/,
-  "completion-driven recovery may consume a persisted CONTINUATION_ARMED state only after an independent path armed it");
+assert.match(coordinator, /function assistantTurnCompletionArmed\(task\)[\s\S]{0,900}\["COMPLETED", "TIMED_OUT"\][\s\S]{0,500}assistantTurnCompletionLeaseId === task\?\.turnLeaseId[\s\S]{0,300}CONTINUATION_ARMED/,
+  "completion-driven recovery must require an explicit ATCC terminal state bound to the exact current turn lease in addition to the armed delivery state");
 assert.match(server, /completion-driven[\s\S]{0,900}timeout-recovery[\s\S]{0,900}resident/,
   "tool contract must expose completion-driven, strict timeout-recovery, and explicit resident modes");
 assert.match(server, /maxContinuations[\s\S]{0,260}0 or omitted means unlimited[\s\S]{0,900}wallClockMinutes[\s\S]{0,260}0 or omitted means unlimited/,
@@ -198,8 +198,8 @@ assert.match(server, /"confirm-turn-limit"/,
   "continuation_task must retain the explicit confirm-turn-limit control action");
 assert.match(coordinator, /SUSPECTED_STALL/,
   "coordinator recovery must retain the fail-closed suspected-stall state");
-assert.match(runtimeStateSource, /confirmedCutoffCorroborated[\s\S]{0,1200}CONTINUATION_ARMED/,
-  "confirmed Host cutoff evidence may still arm completion-driven recovery");
+assert.doesNotMatch(runtimeStateSource, /confirmedCutoffCorroborated[\s\S]{0,1200}CONTINUATION_ARMED/,
+  "historical Host cutoff observations must not arm completion-driven recovery without a current-turn end signal");
 assert.doesNotMatch(runtimeStateSource, /earlyCompletionCorroborated|short-confirmed-probe/,
   "runtime state must not arm recovery from repeated UI heartbeat probes alone");
 assert.match(runtimeStateSource, /COMPLETION_STALL_SUSPECT_MS = 25_000/,
@@ -211,18 +211,26 @@ assert.doesNotMatch(runtimeStateSource, /COMPLETION_QUIET_RECOVERY_MS|COMPLETION
 assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_MAX_MS = 45_000/,
   "delivery ACK retransmission must remain bounded below one minute");
 assert.ok(runtimeStateSource.includes("server-turn-lease-expired-no-inflight-model-request")
-  && runtimeStateSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
-  "resident recovery must keep weak lease suspicion distinct from confirmed-cutoff authorization");
+  && !runtimeStateSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
+  "resident recovery must keep historical cutoff telemetry out of the authorization evidence set");
 assert.match(runtimeStateSource, /!this\.continuationModelRequestInFlight\(current\.conversation_scope_id\)[\s\S]{0,5200}server-turn-lease-expired-no-inflight-model-request/,
   "the resident lease-suspicion/cutoff recovery branch must be forbidden while a real model-originated DevSpace request is in flight");
 assert.doesNotMatch(runtimeStateSource, /const serverQuietBackstop/,
   "server request silence must never arm a replacement Host turn");
-assert.match(runtimeStateSource, /QUIET_BACKSTOP_SENDER_GRACE_MS = 10_000/,
-  "silence-only READY generations must have a short bounded pre-delivery observation window");
-assert.match(runtimeStateSource, /quiet-backstop-claim-grace/,
-  "the sender must defer a newly inferred quiet-backstop READY generation during that observation window");
-assert.match(runtimeStateSource, /same-turn-model-activity-superseded-quiet-claim/,
-  "originating-turn model activity must revoke a silence-only CLAIMED generation before Host delivery");
+assert.doesNotMatch(runtimeStateSource, /QUIET_BACKSTOP_SENDER_GRACE_MS|quiet-backstop-claim-grace|same-turn-model-activity-superseded-quiet-claim/,
+  "dev12 must keep the last quiet-backstop sender compatibility path removed instead of retaining a timer-owned pre-delivery race");
+assert.match(runtimeStateSource, /assistant_turn_state[\s\S]{0,2200}COMPLETION_REQUESTED/,
+  "runtime must persist the Assistant Turn Completion Contract rather than infer completion from request silence");
+assert.match(runtimeStateSource, /action === "turn-complete"[\s\S]{0,3600}assistant_turn_completion_lease_id/,
+  "normal assistant completion intent must be explicitly signed and bound to the current turn lease");
+assert.match(runtimeStateSource, /MODEL_COMPLETION_HANDOFF_GRACE_MS = 8_000/,
+  "normal ChatGPT finals without Apps teardown must use a prompt bounded handoff grace only after explicit ATCC intent");
+assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,4200}assistant_turn_state='COMPLETED'[\s\S]{0,1200}model-completion-handoff-grace/,
+  "the resident runtime must promote only a durable explicit completion request into a completed turn after the handoff grace");
+assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,3000}assistant_turn_state \|\| ""\) !== "COMPLETION_REQUESTED"[\s\S]{0,2400}continuationModelRequestInFlight\(current\.conversation_scope_id\)/,
+  "the handoff grace must be unreachable from GENERATING silence and must fail closed while any model-originated DevSpace request is in flight");
+assert.match(runtimeStateSource, /touchContinuationModelActivity[\s\S]{0,4200}assistant_turn_state='COMPLETION_REQUESTED'[\s\S]{0,300}then 'GENERATING'/,
+  "later substantive model activity must revoke a pending completion intent before its handoff deadline can authorize anything");
 assert.doesNotMatch(runtimeStateSource, /const syntheticQuietBackstop/,
   "synthetic request silence must never be treated as proof that the Host turn ended");
 assert.match(runtimeStateSource, /trackContinuationActivityProcess\(input = \{\}\)[\s\S]{0,2200}watch_process_handles_json/,
@@ -235,21 +243,18 @@ assert.doesNotMatch(server, /continuationActivityProcessGuards\(\)[\s\S]{0,2600}
   "the resident completion-driven process guard must never consume stdout through process.attach");
 assert.match(server, /\["exec_command", "write_stdin", "process_attach", "process_kill"\][\s\S]{0,1000}trackContinuationActivityProcess/,
   "process-bearing model tool results must automatically register or release the completion-driven activity guard");
-assert.match(coordinator, /CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS/);
-assert.match(coordinator, /confirmed turn-limit teardown/);
-assert.match(coordinator, /CONFIRMED_TURN_LIMIT_RECOVERY_GRACE_MS/);
-assert.match(coordinator, /confirmed turn-limit lease expired/,
-  "a user-confirmed real cutoff must have a conservative no-host-signal recovery path after the lower bound expires");
-assert.doesNotMatch(coordinator, /continuationMode !== "completion-driven" && confirmedCutoffRecoveryReady/,
-  "completion-driven tasks must share the confirmed-cutoff recovery gate instead of depending on a surviving pre-cutoff UI heartbeat");
+assert.doesNotMatch(coordinator, /CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS/,
+  "historical Host cutoff timing must not survive as a teardown authorization heuristic");
+assert.doesNotMatch(coordinator, /confirmedCutoffRecoveryReady|confirmed turn-limit lease expired|confirmed turn-limit teardown/,
+  "historical cutoff values must remain telemetry-only and must not create a no-signal continuation path");
 for (const lifecyclePattern of [/visibilitychange/, /pageshow/, /focus/, /online/, /IntersectionObserver/, /forceAuthoritative/]) {
   assert.match(coordinator, lifecyclePattern,
     "a reactivated/recreated task card must immediately refresh authoritative continuation state");
 }
 assert.match(coordinator, /startSupervisor\(\);\s*startLifecycleRefresh\(\);/,
   "verified continuation anchors must actually install lifecycle refresh hooks in production, not merely define them");
-assert.match(coordinator, /DEFAULT_SUPERVISOR_TICK_MS = 5_000/,
-  "an active visible card should poll authoritative milestone/status state on a short cadence");
+assert.match(coordinator, /DEFAULT_SUPERVISOR_TICK_MS = 2_000/,
+  "an active visible card should notice an already-authorized ATCC continuation promptly without making polling itself an authorization signal");
 assert.match(coordinator, /DEFAULT_TERMINAL_REFRESH_MS/,
   "terminal refresh compatibility metadata may remain, but terminal transition must cancel active timers below");
 assert.match(coordinator, /const cachedTerminal = terminal\(state\.task\)/,
@@ -258,18 +263,20 @@ assert.match(coordinator, /Always begin from authoritative server state[\s\S]{0,
   "a still-mounted turn card must query authoritative state so it can observe terminal transitions or same-task reactivation while it remains alive");
 assert.doesNotMatch(coordinator, /attemptContinuation\("task contract resource teardown"/,
   "ordinary resource teardown must fail closed instead of creating another model turn");
-assert.match(coordinator, /A generic teardown is weaker[\s\S]{0,700}no replacement iframe has connected[\s\S]{0,500}no newer model activity has appeared/,
-  "generic teardown recovery must require a short grace plus authoritative no-replacement/no-new-model checks");
-assert.match(coordinator, /attemptContinuation\("verified surface teardown"[\s\S]{0,80}force: true/,
-  "a verified current card teardown may request fast completion recovery only after the grace checks pass");
+assert.match(coordinator, /resource teardown carries no reason payload[\s\S]{0,700}teardown alone[\s\S]{0,700}confirmation fast path[\s\S]{0,700}COMPLETION_REQUESTED lease after its guarded handoff grace/,
+  "generic teardown must remain non-authorizing by itself while acting only as an optional fast path for an explicit ATCC completion request");
+assert.match(coordinator, /recordHostSignal\(timedOut \? "timeout" : "teardown"[\s\S]{0,700}assistantTurnCompletionArmed\(state\.task\)[\s\S]{0,800}ATCC normal assistant completion confirmed by Host teardown/,
+  "verified teardown may still trigger the immediate ATCC fast path when the same exact turn already signed completion");
 assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryToken|DevSpace resume token/,
   "the coordinator must keep generation capabilities inside App/runtime transport instead of exposing them to the model");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
 assert.match(coordinator, /function visibleContinuationTrigger\(task\)[\s\S]{0,2200}继续执行未完成的 DevSpace 任务[\s\S]{0,500}当前任务[\s\S]{0,500}下一未完成里程碑[\s\S]{0,700}不要只回复状态[\s\S]{0,240}继续处理中/,
   "the visible synthetic continuation trigger must carry sustained-work semantics in the actual Host user-role turn instead of relying only on hidden context");
-assert.match(coordinator, /Continue the unfinished DevSpace task[\s\S]{0,500}Current task[\s\S]{0,500}Next unfinished milestone[\s\S]{0,900}do not reply with only a status[\s\S]{0,240}still working/,
+assert.match(coordinator, /Continue the unfinished DevSpace task[\s\S]{0,500}Current task[\s\S]{0,500}Next unfinished milestone[\s\S]{0,1800}do not reply with only a status[\s\S]{0,240}still working/,
   "the English visible synthetic trigger must also forbid a status-only premature final");
+assert.match(coordinator, /One failed command\/test[\s\S]{0,500}two or three quick tool calls[\s\S]{0,900}action=turn-complete[\s\S]{0,300}finalResponseAllowed=true/,
+  "the visible synthetic trigger must explicitly reject short failure-driven turns and require the ATCC stage-boundary handshake before a voluntary incomplete final");
 assert.doesNotMatch(coordinator, /继续。直接完成当前未完成的任务。|Continue\. Directly complete the current unfinished task\./,
   "the visible synthetic continuation trigger must not pressure the model to skip state reconstruction or verification");
 assert.match(visibleTriggerSource, /task\?\.objective[\s\S]{0,500}nextUnresolvedMilestone\(task\)/,
@@ -336,24 +343,38 @@ assert.match(runtimeStateSource, /continuationSenderCapability\(input = \{\}\)[\
   "sender capability must exist from the requested card generation even before iframe ACK");
 assert.match(runtimeStateSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0,5200}state='READY'[\s\S]{0,1200}readyGeneration/,
   "sender bind must surface an already-durable READY generation so a newly mounted ordinary App can consume it immediately");
+assert.match(runtimeStateSource, /recordContinuationHostTelemetry\(input = \{\}\)[\s\S]{0,6200}continuation-host-telemetry/,
+  "Host-surface telemetry must remain an event-journal diagnostic instead of becoming continuation authorization state");
+assert.match(coordinator, /function safeTelemetryName\(value\)[\s\S]{0,260}A-Za-z0-9\._:\/-/,
+  "the coordinator must bound telemetry to safe Host API key/method names instead of arbitrary content");
+assert.match(coordinator, /window\.addEventListener\("openai:set_globals",\s*onOpenAiGlobals\)/,
+  "the coordinator must observe Host global-surface changes");
+assert.match(coordinator, /callSender\("telemetry",\s*\{\s*telemetry:\s*payload\s*\}\)/,
+  "the coordinator must report Host-surface names through the hidden sender bridge");
 assert.match(coordinator, /async function consumeReadyAfterSenderBind\([\s\S]{0,1300}readyGeneration[\s\S]{0,800}attemptContinuation\(reason, \{ force: true \}\)/,
   "a newly bound sender transport must immediately consume READY instead of waiting for the old milestone iframe or another supervisor tick");
 assert.match(coordinator, /bindSenderTransport\(\)[\s\S]{0,700}consumeReadyAfterSenderBind\(bound/,
   "ordinary Workspace App bind/rehydrate must wire directly into deterministic READY delivery");
-assert.match(coordinator, /const current = await callTask\("status"\)[\s\S]{0,1400}current\?\.readyGeneration[\s\S]{0,700}attemptContinuation\("supervisor discovered READY generation", \{ force: true \}\)/,
-  "an already-bound sender must consume a READY generation that appears later during an ordinary supervisor status refresh");
+assert.match(coordinator, /const current = await callTask\("status"\)[\s\S]{0,3200}current\?\.readyGeneration[\s\S]{0,900}attemptContinuation\("supervisor discovered READY generation", \{ force: true \}\)/,
+  "an already-bound or generation-safely rebound sender must consume a READY generation that appears later during an ordinary supervisor status refresh");
 assert.match(runtimeStateSource, /manual-user-turn-takeover/,
   "runtime must retain an old-schema-compatible manual takeover CAS marker on the existing note field");
 assert.match(server, /older cached schema without manualTakeover[\s\S]{0,500}manual-user-turn-takeover/,
   "server guidance must document the manual takeover fallback for already-open Hosts whose continuation_task schema is stale");
 assert.match(coordinator, /function senderTransportAvailable\(\)[\s\S]{0,500}anchorMountRequestedAt[\s\S]{0,240}activeSenderCapability\(\)/,
   "a later trusted Workspace App relay must keep sender transport available while the original iframe ACK is pending");
-assert.match(coordinator, /same sustained execution semantics as a manual 'continue'[\s\S]{0,500}polling owned long-running processes[\s\S]{0,500}Host truncates the turn/,
-  "hidden recovery context must keep synthetic turns working until the same natural stopping point as manual continuation");
-assert.match(coordinator, /syntheticResumeWorkRetryDue[\s\S]{0,900}syntheticResumeWorkRequired[\s\S]{0,600}deliveryOwnerExpiresAt/,
-  "the coordinator must retain a durable resumed-turn work obligation after the connectivity ACK");
-assert.match(runtimeStateSource, /SYNTHETIC_WORK_OWNER_LEASE_MS = 45_000/,
-  "the short synthetic owner lease remains useful for detecting stale ownership, but must not independently manufacture another Host turn");
+assert.match(coordinator, /same full Host reasoning budget and sustained execution semantics as a manual 'continue'[\s\S]{0,500}polling owned long-running processes[\s\S]{0,500}Host truncates the turn/,
+  "hidden recovery context must give synthetic turns the same reasoning/execution budget and natural stopping point as manual continuation");
+assert.match(runtimeStateSource, /syntheticResumeWorkRequired:\s*row\.delivery_owner === "synthetic-active"[\s\S]{0,220}deliveryOwnerExpiresAt/,
+  "runtime status must retain a durable resumed-turn work obligation after the connectivity ACK");
+assert.match(runtimeStateSource, /SYNTHETIC_WORK_OWNER_LEASE_MS = 30 \* 60_000/,
+  "synthetic ownership must remain durable across manual-like reasoning/execution intervals rather than expiring after a few tens of seconds");
+assert.match(runtimeStateSource, /const minimumWorkDelta = owner === "synthetic" \? 4 : 1/,
+  "synthetic turn-complete must require a stronger post-ACK substantive-work floor than the old two-call short-loop contract");
+assert.match(runtimeStateSource, /SYNTHETIC_MIN_ACTIVE_WORK_MS = 120_000/,
+  "an incomplete synthetic stage must receive a manual-like minimum active work window before voluntary turn-complete is legal");
+assert.match(runtimeStateSource, /const activeWorkMs =[\s\S]{0,700}synthetic-turn-min-active-work-required[\s\S]{0,700}minimumActiveWorkMs/,
+  "synthetic turn-complete must enforce the active-work quality gate without using that timer as continuation authority");
 assert.match(runtimeStateSource, /const materialCheckpoint = gainedCompletedMilestone \|\| progressChanged \|\| evidenceChanged/,
   "synthetic resume completion must require a material checkpoint rather than an arbitrary control checkpoint");
 assert.match(runtimeStateSource, /Number\(row\.substantive_activity_count \|\| 0\) > Number\(row\.delivery_work_baseline_count \|\| 0\)/,
@@ -362,27 +383,26 @@ assert.match(runtimeStateSource, /const syntheticTurnMayYield = remainingAfterCh
   "synthetic resume ownership must survive material checkpoints until the runnable milestone set is complete or explicitly blocked");
 assert.match(migrations, /version: 29[\s\S]{0,180}continuation-synthetic-work-baseline[\s\S]{0,240}migrateContinuationSyntheticWorkBaseline/,
   "the synthetic work baseline must be added through a durable SQLite migration");
-assert.match(coordinator, /deliveryOwnerExpiresAt[\s\S]{0,900}completionActivityLeaseExpired/,
-  "status-only synthetic recovery must prefer its dedicated ownership lease and keep the generic Turn Lease only as a compatibility fallback");
-assert.match(coordinator, /synthetic resume work ownership lease expired/,
-  "status-only resumed turns must have a dedicated recovery path rather than being treated as successfully completed continuations");
+assert.doesNotMatch(coordinator, /synthetic resume work ownership lease expired|syntheticResumeWorkRetryDue/,
+  "synthetic ownership expiry must not be a client-side continuation trigger in dev12");
 assert.match(coordinator, /Never end an automatically resumed turn with a placeholder\/status-only reply[\s\S]{0,500}There is no background model execution after a final assistant message/,
   "synthetic recovery context must explicitly forbid placeholder finals such as '继续处理中。'");
-assert.match(runtimeStateSource, /const syntheticTurnEnded = explicitSyntheticTurnEnd \|\| confirmedSyntheticCutoff/,
-  "synthetic retry must require explicit Host-end evidence or the confirmed-cutoff fallback");
+assert.match(runtimeStateSource, /const syntheticTurnLeaseId = String\(syntheticOwnerTask\?\.turn_lease_id[\s\S]{0,260}const syntheticCompletionLeaseId = String\(syntheticOwnerTask\?\.assistant_turn_completion_lease_id[\s\S]{0,420}const syntheticMode = normalizedContinuationMode[\s\S]{0,420}const syntheticTurnEnded =[\s\S]{0,520}syntheticCompletionLeaseId === syntheticTurnLeaseId/,
+  "synthetic retry must require a terminal ATCC state bound to the exact current resumed-turn lease");
 assert.match(runtimeStateSource, /const abandonedSyntheticWork =[\s\S]{0,1200}&& syntheticTurnEnded/,
   "an expired synthetic ownership lease must not manufacture a duplicate Host turn unless the separate syntheticTurnEnded gate corroborates the resumed turn boundary");
-assert.ok(runtimeStateSource.includes("short synthetic owner lease is only a stale-ownership")
+assert.ok(runtimeStateSource.includes("synthetic owner lease is only a stale-ownership")
   && runtimeStateSource.includes("Never manufacture a second ChatGPT turn from owner-lease")
   && runtimeStateSource.includes("fixed quiet threshold"),
-  "connector discovery, reasoning, and workspace switching may outlive the short ownership lease; silence must remain non-authorizing");
-assert.ok(runtimeStateSource.includes("const confirmedHostCutoff = confirmedHostTurnMs >= HOST_CUTOFF_MIN_SAMPLE_MS")
-  && runtimeStateSource.includes("nowMs - turnStartedAt >= confirmedHostTurnMs + CONFIRMED_LIMIT_RECOVERY_GRACE_MS")
-  && runtimeStateSource.includes("nowMs - lastModelActivityAt >= CONFIRMED_LIMIT_MODEL_QUIET_MS"),
-  "generic completion recovery must still measure a persisted Host cutoff from the real turn start plus grace and model quiet instead of from a short MCP-silence probe");
-assert.ok(runtimeStateSource.includes("if (confirmedHostCutoff)")
-  && runtimeStateSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
-  "confirmed Host-cutoff recovery must remain the no-signal authoritative fallback");
+  "connector discovery, reasoning, and workspace switching may outlive ownership bookkeeping; silence must remain non-authorizing");
+assert.ok(runtimeStateSource.includes("const applyManualRoundPlan = (currentRow) =>")
+  && runtimeStateSource.includes("milestoneSetChanged ? { forceNewWorkset: true } : {}")
+  && runtimeStateSource.includes("manualMilestoneSetChanged: true"),
+  "the first manual status must atomically install a different user milestone plan before rotating that user message's fresh card");
+assert.match(runtimeStateSource, /const isolateCurrentActivePlan = authoritativeActiveWorkset[\s\S]{0,240}Boolean\(canonical\)[\s\S]{0,240}!activeShadowTask[\s\S]{0,500}projectedMilestoneRows = isolateCurrentActivePlan[\s\S]{0,300}milestoneRows[\s\S]{0,300}lifetimeMilestoneRows/,
+  "canonical projection recovery must isolate SUPERSEDED milestones only when a real canonical active plan is authoritative, while preserving lineage for shadow disaster recovery");
+assert.doesNotMatch(runtimeStateSource, /const confirmedHostCutoff|const confirmedSyntheticCutoff/,
+  "historical Host cutoff samples must not participate in automatic continuation authorization");
 assert.match(runtimeStateSource, /if \(result === "unknown"\)[\s\S]{0,1800}outcomeUncertain:\s*true/,
   "an unknown Host delivery result must remain outcome-uncertain instead of being converted into an automatic retry");
 assert.match(runtimeStateSource, /DELIVERING is an outcome-uncertain zone[\s\S]{0,900}preserve the same generation/,
@@ -427,8 +447,10 @@ assert.match(server, /Synthetic\/App continuation turns MUST omit manualTakeover
   "synthetic continuations must reuse the current manual-round card while the milestone set is unchanged");
 assert.match(server, /sourceTool: "continuation_task", anchorMounted: false/,
   "headless continuation_task begin must never mark the visible continuation anchor as mounted");
-assert.match(server, /sourceTool: "continuation_anchor"[\s\S]{0,180}anchorMounted: false[\s\S]{0,500}prepareContinuationAnchorMount/,
-  "the model-side continuation_anchor invocation must issue the single card result and mount token without fabricating actual iframe telemetry");
+assert.match(server, /sourceTool: "continuation_anchor"[\s\S]{0,900}replaceActiveMilestones: true[\s\S]{0,500}anchorMounted: false/,
+  "continuation_anchor must use the trusted active-plan replacement path without fabricating actual iframe telemetry");
+assert.match(server, /anchorMounted: false[\s\S]{0,1200}prepareContinuationAnchorMount/,
+  "the model-side continuation_anchor invocation must issue the single card result and mount token only after the unmounted task transition");
 assert.match(server, /anchorMountToken:\s*z\.string\(\)\.uuid\(\)\.optional\(\)\.describe\("Card-generation capability returned only by continuation_anchor\./,
   "the continuation tool contract must retain the immutable-card token capability needed for same-card iframe rehydration");
 assert.match(server, /anchorMountGeneration:\s*z\.number\(\)\.int\(\)\.nonnegative\(\)\.optional\(\)\.describe\("Immutable visible-card generation\. Rehydrated cards must echo the exact current generation/,
@@ -444,9 +466,15 @@ assert.match(coordinator, /senderCapabilityFromResult[\s\S]{0,1800}devspace\/con
 assert.match(coordinator, /anchorMountGeneration:\s*undefined[\s\S]{0,200}anchorSuperseded:\s*false/,
   "the anchor surface must track its issuance generation and whether a newer recovery card superseded it");
 assert.match(coordinator, /authoritativeGeneration[\s\S]{0,500}surfaceGeneration[\s\S]{0,500}markAnchorSuperseded\(\)/,
-  "a lazily mounted old ghost generation must become inert before it can ACK or start the supervisor");
+  "a lazily mounted old ghost generation must retire its visible-card authority before it can ACK the newer card");
 assert.match(coordinator, /data-devspace-anchor-superseded[\s\S]{0,500}replaceChildren\(\)/,
   "a superseded immutable historical card must collapse its own iframe surface instead of remaining a second active milestone UI");
+assert.match(coordinator, /headlessSenderRelay:\s*false/,
+  "the coordinator state must explicitly track headless sender-relay demotion");
+assert.match(coordinator, /function markAnchorSuperseded\(\)[\s\S]{0,700}state\.headlessSenderRelay = true/,
+  "a superseded visible card must demote to a headless sender relay instead of killing the only surviving Host transport");
+assert.match(coordinator, /activeSenderCapability\(\)[\s\S]{0,900}anchorMountGeneration[\s\S]{0,700}authoritativeGeneration/,
+  "a headless relay must reject its stale sender capability until private bind refreshes it to the authoritative current generation");
 assert.match(coordinator, /const mountToken = state\.anchorMountToken[\s\S]{0,500}callTask\("heartbeat",\s*\{\s*note:\s*`anchor-mount-ack:\$\{mountToken\}`\s*\}\)/,
   "the actual continuation_anchor iframe must support an old-schema-compatible token-authenticated heartbeat ACK");
 assert.match(coordinator, /callTask\("anchor-mounted",\s*\{[\s\S]{0,180}anchorMountToken:\s*mountToken,[\s\S]{0,180}anchorMountGeneration:\s*state\.anchorMountGeneration/,
@@ -473,8 +501,8 @@ assert.match(coordinator, /one-tool-and-final/,
   "synthetic guidance must reject one-tool-and-final short automatic turns");
 assert.match(coordinator, /senderTransportAvailable\(\)[\s\S]{0,1600}callSender\("heartbeat"/,
   "a generic current Workspace App may run only the sender transport path after receiving a verified private capability");
-assert.match(coordinator, /if \(!state\.anchorSurface\) \{[\s\S]{0,500}never arm recovery from it/,
-  "teardown of a transport-only App must not impersonate authoritative milestone-card lifecycle evidence");
+assert.match(coordinator, /if \(!state\.anchorSurface \|\| state\.headlessSenderRelay\) \{[\s\S]{0,700}never arm recovery from it/,
+  "teardown of a transport-only or superseded headless App must not impersonate authoritative current-card lifecycle evidence");
 assert.ok(server.includes("Every real ChatGPT thread owns one lifetime DevSpace Task Contract/taskId")
   && server.includes("Every manual user message that actually uses DevSpace owns exactly one fresh visible continuation_anchor milestone card")
   && server.includes("Synthetic resumed turns omit manualTakeover")
@@ -518,8 +546,8 @@ assert.match(runtimeStateSource, /requestingCoordinatorId[\s\S]{0,700}anchor_mou
   "only the currently verified milestone coordinator may claim an automatic continuation");
 assert.match(coordinator, /authoritativeGeneration > surfaceGeneration\) markAnchorSuperseded\(\)/,
   "every authoritative coordinator result must immediately retire a historical card whose generation is stale");
-assert.match(coordinator, /preClaim = await callTask\("status"\)[\s\S]{0,500}state\.anchorSuperseded[\s\S]{0,500}callSender\("claim"/,
-  "the App must re-check authoritative generation immediately before claiming a continuation");
+assert.match(coordinator, /preClaim = await callTask\("status"\)[\s\S]{0,800}state\.anchorSuperseded[\s\S]{0,500}bindSenderTransport\(\)[\s\S]{0,500}callSender\("claim"/,
+  "the App must re-check authoritative generation and rebind a superseded relay before claiming a continuation");
 assert.ok(server.includes("Later new work reactivates that taskId with continuation_task action=begin")
   || server.includes("Later user work reactivates the same taskId through continuation_task begin"),
   "server instructions must keep one thread-lifetime taskId across sequential user tasks");
@@ -540,7 +568,7 @@ assert.match(workspaceBundle, /window\.__DEVSPACE_ATTACH_CONTINUATION__\?\.\(Y_\
 assert.match(workspaceBundle, /window\.__DEVSPACE_CONTINUATION_CONNECTED__\?\.\(Y_\)/);
 assert.match(workspaceBundle, /window\.__DEVSPACE_CONTINUATION_TEARDOWN__\?\.\(Y_,e,t\)/);
 
-const { toolWidgetDescriptorMeta, workspaceAppHtml, workspaceAppResourceResult, workspaceAppUri } = await import(`${pathToFileURL(packagedServerPath).href}?descriptor=${Date.now()}`);
+const { toolWidgetDescriptorMeta, workspaceAppGenerationUri, workspaceAppHtml, workspaceAppResourceResult, workspaceAppResultMeta, workspaceAppUri } = await import(`${pathToFileURL(packagedServerPath).href}?descriptor=${Date.now()}`);
 const descriptorConfig = {
   widgets: "changes",
   features: { continuationGuard: true },
@@ -561,6 +589,20 @@ assert.equal(workspaceMeta?._meta?.["openai/outputTemplate"], undefined);
 assert.match(anchorUri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/);
 assert.equal(anchorMeta?._meta?.ui?.resourceUri, anchorUri);
 assert.equal(anchorMeta?._meta?.["openai/outputTemplate"], anchorUri);
+const generation7Uri = workspaceAppGenerationUri(descriptorConfig, 7);
+const generation8Uri = workspaceAppGenerationUri(descriptorConfig, 8);
+assert.match(generation7Uri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}-g7\.html$/,
+  "a deliberate milestone-card generation must receive a generation-specific result cache key");
+assert.equal(workspaceAppGenerationUri(descriptorConfig, 7), generation7Uri,
+  "replaying the same generation must preserve the same result cache key");
+assert.notEqual(generation8Uri, generation7Uri,
+  "a later deliberate milestone-card generation must not reuse an earlier generation cache key");
+assert.equal(workspaceAppGenerationUri(descriptorConfig, 0), anchorUri,
+  "invalid/non-positive generations must fall back to the stable revisioned Workspace App URI");
+const generation7Meta = workspaceAppResultMeta(descriptorConfig, 7);
+assert.equal(generation7Meta?.ui?.resourceUri, generation7Uri);
+assert.equal(generation7Meta?.["ui/resourceUri"], generation7Uri);
+assert.equal(generation7Meta?.["openai/outputTemplate"], generation7Uri);
 const fullWorkspaceMeta = toolWidgetDescriptorMeta({ ...descriptorConfig, widgets: "full" }, "workspace");
 assert.equal(fullWorkspaceMeta?._meta?.ui?.resourceUri, anchorUri,
   "widgets=full keeps the explicit compatibility behavior where workspace calls render cards");
@@ -589,6 +631,11 @@ assert.equal(staleResource.contents?.[0]?.uri, staleResourceUri, "compatibility 
 assert.equal(staleResource.contents?.[0]?.mimeType, "text/html;profile=mcp-app");
 assert.match(staleResource.contents?.[0]?.text ?? "", /window\.__DEVSPACE_MCP_APP__=/, "compatibility reads must return the current self-contained Workspace App");
 assert.equal(staleResource.contents?.[0]?._meta?.ui?.domain, descriptorConfig.publicBaseUrl);
+const generationResource = workspaceAppResourceResult(descriptorConfig, generation7Uri);
+assert.equal(generationResource.contents?.[0]?.uri, generation7Uri,
+  "generation-specific compatibility reads must preserve the exact result-level URI requested by the host");
+assert.match(generationResource.contents?.[0]?.text ?? "", /installContinuationCoordinator/,
+  "generation-specific result cache keys must still resolve to the current self-contained Workspace App");
 const historicalContinuationGuardUri = "ui://devspace/continuation-guard.html";
 const historicalContinuationGuardResource = workspaceAppResourceResult(descriptorConfig, historicalContinuationGuardUri);
 assert.equal(historicalContinuationGuardResource.contents?.[0]?.uri, historicalContinuationGuardUri);
@@ -776,7 +823,17 @@ class FakeApp {
       }
       if (input.hostSignal === "timeout") {
         const observed = Math.max(1000, Number(input.elapsedMs || 1000));
-        this.task = { ...this.task, observedTurnBudgetMs: observed, recommendedContinueAfterMs: Math.floor(observed * 0.88), hostTimeoutSamples: 1 };
+        const turnLeaseId = this.task?.turnLeaseId ?? `turn_${this.task?.id ?? "fake"}`;
+        this.task = {
+          ...this.task,
+          turnLeaseId,
+          observedTurnBudgetMs: observed,
+          recommendedContinueAfterMs: Math.floor(observed * 0.88),
+          hostTimeoutSamples: 1,
+          assistantTurnState: "TIMED_OUT",
+          assistantTurnCompletionLeaseId: turnLeaseId,
+          stallState: "CONTINUATION_ARMED",
+        };
       }
       return { structuredContent: { task: this.task, accepted: true } };
     }
@@ -856,8 +913,10 @@ assert.match(visibleSyntheticText, /不要等待第二次续轮|do not wait for 
   "the first synthetic turn must be told to start substantive work without waiting for another continuation");
 assert.match(visibleSyntheticText, /继续处理中|still working/i,
   "the visible continuation trigger must name the observed placeholder-final failure mode");
-assert.doesNotMatch(visibleSyntheticText, /token|UUID|checkpoint|task_fake|ws_fake|authorized recovery/i,
-  "the visible Host trigger may name safe recovery tools but must not expose task/workspace identity or generation capabilities");
+assert.doesNotMatch(visibleSyntheticText, /token|UUID|task_fake|ws_fake|authorized recovery/i,
+  "the visible Host trigger may name safe recovery actions, including the cached-schema checkpoint compatibility action, but must not expose task/workspace identity or generation capabilities");
+assert.match(visibleSyntheticText, /checkpoint[^\n]{0,120}note=atcc-turn-complete/i,
+  "the visible Host trigger must expose only the exact reserved checkpoint completion signature needed by Hosts with a cached pre-dev11 schema");
 assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery/,
   "durable task/workspace internals must remain out of the visible synthetic message even though the ephemeral resume capability is intentionally visible");
 const hiddenSyntheticContext = fakeApp.contextUpdates.at(-1)?.content?.[0]?.text ?? "";
@@ -1112,11 +1171,15 @@ assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => entry.name === "
   "the visible anchor must authenticate the recovered capability through the normal mount-ACK path");
 missingToolResultAnchorController.dispose();
 
-// A historical card can remain mounted in ChatGPT after a later assistant turn
-// has already rotated the same lifetime task to a newer card generation. The
-// old iframe must discover that authoritative generation change on its next
-// status refresh, become inert, and never claim/send a continuation.
+// Live dev12 failure: a historical card can remain mounted after a later manual
+// turn rotates the lifetime task to a newer card generation, while ChatGPT may
+// delay/omit mounting the *new* continuation_anchor iframe. The old visible UI
+// must retire immediately, but killing its App transport strands a later READY
+// generation forever (claimed_at/delivered_at stay null). Demote the old card to
+// a sender-only relay, privately rebind it to the new generation, and let the
+// atomic sender claim deliver exactly once without ACKing the new visible card.
 const supersededSurfaceApp = new FakeApp();
+supersededSurfaceApp.autoVerifyAnchor = false;
 supersededSurfaceApp.task = {
   id: "task_superseded_surface",
   workspaceId: "ws_superseded_surface",
@@ -1131,6 +1194,7 @@ supersededSurfaceApp.task = {
   anchorMountVerifiedAt: "2026-01-01T00:00:00.000Z",
   anchorMountCoordinatorId: "ui_generation_one",
   anchorMountGeneration: 1,
+  anchorMountRequestedAt: "2026-01-01T00:00:00.000Z",
   turnLeaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
   turnStartedAt: new Date(Date.now() - 60_000).toISOString(),
 };
@@ -1155,27 +1219,48 @@ assert.equal(supersededSurfaceController.state.anchorSuperseded, false);
 assert.equal(supersededSurfaceController.state.anchorMountGeneration, 1);
 supersededSurfaceApp.task = {
   ...supersededSurfaceApp.task,
-  anchorMountVerifiedAt: "2026-01-01T00:01:00.000Z",
-  anchorMountCoordinatorId: "ui_generation_two",
+  anchorMountVerifiedAt: undefined,
+  anchorMountCoordinatorId: undefined,
   anchorMountGeneration: 2,
+  anchorMountRequestedAt: "2026-01-01T00:01:00.000Z",
 };
+supersededSurfaceApp.anchorMountGeneration = 2;
+supersededSurfaceApp.anchorMountToken = "00000000-0000-4000-8000-00000000a002";
+supersededSurfaceApp.statusReadyGeneration = 13;
+supersededSurfaceApp.bindReadyGeneration = 13;
 const staleClaimCountBeforeRefresh = supersededSurfaceApp.callInputs.filter(
   (entry) => entry.name === "continuation_sender" && entry.action === "claim",
 ).length;
 await supersededSurfaceController.refreshNow();
 assert.equal(supersededSurfaceController.state.anchorSuperseded, true,
-  "an old card must retire itself as soon as authoritative status reports a newer generation");
-assert.equal(await supersededSurfaceController.attemptContinuation("superseded surface", { force: true }), false,
-  "a superseded card must refuse continuation even when its stale local task had been armed");
+  "an old card must retire its visible surface as soon as authoritative status reports a newer generation");
+assert.equal(supersededSurfaceController.state.headlessSenderRelay, true,
+  "the retired historical card must stay alive only as a headless sender relay");
+assert.equal(supersededSurfaceController.state.anchorMountGeneration, 1,
+  "headless relay demotion must never mutate the historical iframe into the new visible-card generation");
+assert.equal(supersededSurfaceController.state.senderCapability?.anchorMountGeneration, 2,
+  "the private sender capability must rebind independently to the current generation");
 assert.equal(
   supersededSurfaceApp.callInputs.filter(
     (entry) => entry.name === "continuation_sender" && entry.action === "claim",
   ).length,
-  staleClaimCountBeforeRefresh,
-  "a superseded iframe must not issue a sender claim after it observes the newer generation",
+  staleClaimCountBeforeRefresh + 1,
+  "the headless relay must claim the current READY generation exactly once after generation-safe rebind",
 );
-assert.equal(supersededSurfaceApp.messages.length, 0,
-  "a superseded iframe must never send a visible synthetic continuation message");
+assert.equal(supersededSurfaceApp.messages.length, 1,
+  "a surviving historical App relay must deliver READY even when the new visible card never ACKed");
+assert.equal(supersededSurfaceApp.callInputs.some(
+  (entry) => entry.name === "continuation_task" && entry.action === "anchor-mounted"
+    && Number(entry.anchorMountGeneration) === 2,
+), false, "a headless historical relay must never impersonate the new card's mount ACK");
+// Real sender claim atomically removes the READY generation. The fake server
+// does not implement the generation table, so clear its synthetic READY fixture
+// before verifying that the next supervisor refresh remains exactly-once.
+supersededSurfaceApp.statusReadyGeneration = undefined;
+supersededSurfaceApp.bindReadyGeneration = undefined;
+await supersededSurfaceController.refreshNow();
+assert.equal(supersededSurfaceApp.messages.length, 1,
+  "repeated headless refreshes must remain exactly-once after the READY generation was claimed");
 supersededSurfaceController.dispose();
 
 class FlakyTransportApp extends FakeApp {
@@ -1298,6 +1383,7 @@ completionLeaseApp.task = {
   continuationPending: false,
   watchProcessHandles: [],
   stallState: "ACTIVE",
+  turnLeaseId: "turn_completion_lease",
   turnLeaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
   lastModelActivityAt: new Date(Date.now() - 4 * 60_000).toISOString(),
   turnStartedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
@@ -1326,6 +1412,8 @@ completionArmedApp.task = {
   id: "task_completion_armed",
   workspaceId: "ws_completion_armed",
   stallState: "CONTINUATION_ARMED",
+  assistantTurnState: "COMPLETED",
+  assistantTurnCompletionLeaseId: "turn_completion_lease",
   turnLeaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
 };
 const completionArmedController = installContinuationCoordinator(completionArmedApp, {
@@ -1337,11 +1425,11 @@ completionArmedApp.emit("toolinput", { arguments: { workspaceId: "ws_completion_
 await completionArmedController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
 assert.equal(completionArmedApp.messages.length, 1,
-  "a corroborated completion-driven stall should resume the persisted task");
+  "an ATCC-completed current turn should resume the persisted task");
 assert.equal(completionArmedApp.callInputs.find(
   (entry) => entry.name === "continuation_sender" && entry.action === "claim",
 )?.note,
-  "task contract stall corroborated");
+  "Assistant Turn Completion Contract armed");
 completionArmedController.dispose();
 
 const completionTeardownApp = new FakeApp();
@@ -1421,18 +1509,11 @@ const confirmedLeaseElapsedController = installContinuationCoordinator(confirmed
 confirmedLeaseElapsedApp.emit("toolinput", { arguments: { workspaceId: "ws_confirmed_lease_elapsed", taskId: "task_confirmed_lease_elapsed" } });
 await confirmedLeaseElapsedController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
-assert.equal(confirmedLeaseElapsedApp.messages.length, 1,
-  "after a user-confirmed real cutoff lower bound + grace + model quiet, a surviving Anchor Lease must recover even when the Host omitted formal lifecycle signals");
-assert.ok(confirmedLeaseElapsedApp.callInputs.some(
-  (entry) => entry.name === "continuation_sender"
-    && entry.action === "claim"
-    && /confirmed turn-limit lease expired/i.test(entry.note ?? ""),
-));
+assert.equal(confirmedLeaseElapsedApp.messages.length, 0,
+  "an elapsed historical cutoff must remain telemetry-only when the current Host omitted a real end signal");
 confirmedLeaseElapsedController.dispose();
 
-// Completion-driven tasks use the same user-confirmed cutoff recovery gate.
-// This specifically covers an iframe that was frozen before its activity
-// heartbeat could persist CONTINUATION_ARMED, then later reactivated.
+// Completion-driven tasks must also refuse historical-cutoff-only recovery.
 const completionConfirmedCutoffApp = new FakeApp();
 completionConfirmedCutoffApp.task = {
   id: "task_completion_confirmed_cutoff",
@@ -1462,13 +1543,8 @@ completionConfirmedCutoffApp.emit("toolinput", {
 await completionConfirmedCutoffController.onConnected();
 assert.equal(completionConfirmedCutoffApp.messages.length, 0);
 await completionConfirmedCutoffController.refreshNow();
-assert.equal(completionConfirmedCutoffApp.messages.length, 1,
-  "a reactivated completion-driven App must resume after confirmed cutoff + grace + model quiet without requiring an earlier UI heartbeat");
-assert.ok(completionConfirmedCutoffApp.callInputs.some(
-  (entry) => entry.name === "continuation_sender"
-    && entry.action === "claim"
-    && /confirmed turn-limit lease expired/i.test(entry.note ?? ""),
-));
+assert.equal(completionConfirmedCutoffApp.messages.length, 0,
+  "a reactivated completion-driven App must not infer current-turn completion from an old cutoff sample");
 completionConfirmedCutoffController.dispose();
 
 // A still-mounted turn card must catch up when a headless checkpoint/complete
@@ -1750,8 +1826,8 @@ const confirmedLimitElapsedController = installContinuationCoordinator(confirmed
 confirmedLimitElapsedApp.emit("toolinput", { arguments: { workspaceId: "ws_confirmed_limit_elapsed", taskId: "task_confirmed_limit_elapsed" } });
 await confirmedLimitElapsedController.onConnected();
 await confirmedLimitElapsedController.onTeardown({});
-assert.equal(confirmedLimitElapsedApp.messages.length, 1,
-  "resource teardown may recover only after a user/Owner-confirmed Host turn limit has already elapsed");
+assert.equal(confirmedLimitElapsedApp.messages.length, 0,
+  "ordinary resource teardown must stay non-authorizing even after a historical Host cutoff elapsed; only verified current-card lifecycle teardown may recover");
 confirmedLimitElapsedController.dispose();
 
 const finishedTeardownApp = new FakeApp();
@@ -2070,8 +2146,24 @@ try {
   assert.equal(secondEpoch.task.id, lifetimeSingleton.task.id,
     "new user work after SUCCEEDED must reactivate the same taskId rather than create a shadow task");
   assert.equal(secondEpoch.task.state, "RUNNING");
-  assert.deepEqual(secondEpoch.task.requiredMilestones, ["first user task", "second user task"]);
-  assert.deepEqual(secondEpoch.task.completedMilestones, ["first user task"]);
+  assert.deepEqual(secondEpoch.task.requiredMilestones, ["second user task"],
+    "a later manual user task must replace the active milestone plan instead of projecting the lifetime history union");
+  assert.deepEqual(secondEpoch.task.completedMilestones, [],
+    "completed milestones from the previous manual task must remain historical rather than leak into the new active plan");
+  const secondEpochArchitecture = runtime.continuationArchitectureSnapshot("v1/test-conversation-lifetime-singleton");
+  const historicalFirstWorkset = secondEpochArchitecture.worksets.find((row) => row.sequence === 1);
+  const activeSecondWorkset = secondEpochArchitecture.worksets.find((row) => row.id === secondEpochArchitecture.card.active_workset_id);
+  assert.equal(historicalFirstWorkset?.state, "SUCCEEDED",
+    "replacing the active plan must preserve the completed first user task as historical Workset lineage");
+  assert.equal(activeSecondWorkset?.sequence, 2,
+    "the second manual task must allocate exactly one sequential active Workset");
+  assert.deepEqual(
+    secondEpochArchitecture.milestones
+      .filter((row) => row.workset_id === historicalFirstWorkset?.id && row.state !== "ARCHIVED")
+      .map((row) => row.description),
+    ["first user task"],
+    "historical Workset lineage must retain the first task milestone after active-plan replacement",
+  );
   assert.equal(secondEpoch.task.lastAnchorMountedAt, undefined,
     "reactivating later manual user work must clear the prior card mount while keeping the same lifetime task row");
   assert.equal(secondEpoch.task.anchorMountVerifiedAt, undefined,
@@ -2780,18 +2872,15 @@ try {
     taskId: completionLeaseRuntime.task.id,
     coordinatorInstanceId: "ui_stall_probe",
   });
-  assert.equal(armedCompletionStall.task.stallState, "CONTINUATION_ARMED",
-    "confirmed Host cutoff + quiet window + surviving UI heartbeat should corroborate a suspected stall");
+  assert.equal(armedCompletionStall.task.stallState, "SUSPECTED_STALL",
+    "confirmed Host cutoff + quiet window + surviving UI heartbeat must remain non-authorizing telemetry");
   const armedCompletionClaim = runtime.continuationTask({
     action: "claim-continuation",
     taskId: completionLeaseRuntime.task.id,
     note: "task contract stall corroborated",
   });
-  assert.equal(armedCompletionClaim.accepted, true,
-    "only a persisted CONTINUATION_ARMED completion-driven task may recover through the stall path");
-  assert.equal(armedCompletionClaim.task.continuationCount, 1);
-  assert.equal(armedCompletionClaim.task.maxContinuations, 0,
-    "unlimited continuation mode must still count resumptions without imposing a terminal maximum");
+  assert.equal(armedCompletionClaim.accepted, false,
+    "historical cutoff telemetry must not turn a suspected stall into a recoverable continuation");
 
   const completionTeardownRuntime = runtime.continuationTask({
     action: "begin",
@@ -2829,6 +2918,8 @@ try {
     elapsedMs: 1_000,
   });
   assert.equal(firstVerifiedTeardown.accepted, true);
+  assert.equal(firstVerifiedTeardown.task.assistantTurnState, "GENERATING",
+    "verified generic teardown alone must not complete an active assistant turn");
   const tooEarlyVerifiedTeardownClaim = runtime.continuationTask({
     action: "claim-continuation",
     taskId: verifiedSurfaceTeardownTask.task.id,
@@ -2836,25 +2927,20 @@ try {
     note: "verified surface teardown",
   });
   assert.equal(tooEarlyVerifiedTeardownClaim.accepted, false,
-    "generic verified-card teardown must wait the short replacement-iframe grace instead of continuing immediately");
+    "generic verified-card teardown must remain non-authorizing without a model completion intent");
   assert.equal(tooEarlyVerifiedTeardownClaim.reason, "continuation-trigger-not-authorized");
-  const replacementConnected = runtime.continuationTask({
-    action: "host-signal",
-    taskId: verifiedSurfaceTeardownTask.task.id,
-    coordinatorInstanceId: "ui_verified_surface_teardown",
-    hostProfileId: "chatgpt@verified-surface-teardown",
-    hostSignal: "connected",
-    elapsedMs: 0,
+  runtime.touchContinuationModelActivity({
+    workspaceId: "ws_verified_surface_teardown",
+    conversationScopeId: "conversation-verified-surface-teardown",
+    substantive: true,
   });
-  assert.equal(replacementConnected.accepted, true);
-  const cancelledByReplacement = runtime.continuationTask({
-    action: "claim-continuation",
+  const completionRequested = runtime.continuationTask({
+    action: "turn-complete",
     taskId: verifiedSurfaceTeardownTask.task.id,
-    coordinatorInstanceId: "ui_verified_surface_teardown",
-    note: "verified surface teardown",
+    note: "verified normal assistant stage complete",
   });
-  assert.equal(cancelledByReplacement.accepted, false,
-    "a replacement iframe connected signal must cancel the prior teardown recovery candidate");
+  assert.equal(completionRequested.accepted, true);
+  assert.equal(completionRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
   const secondVerifiedTeardown = runtime.continuationTask({
     action: "host-signal",
     taskId: verifiedSurfaceTeardownTask.task.id,
@@ -2864,13 +2950,8 @@ try {
     elapsedMs: 2_000,
   });
   assert.equal(secondVerifiedTeardown.accepted, true);
-  runtime.database.sqlite.prepare(
-    "update continuation_tasks set last_host_signal_at=?, last_model_activity_at=? where id=?",
-  ).run(
-    new Date(Date.now() - 6_000).toISOString(),
-    new Date(Date.now() - 7_000).toISOString(),
-    verifiedSurfaceTeardownTask.task.id,
-  );
+  assert.equal(secondVerifiedTeardown.task.assistantTurnState, "COMPLETED");
+  assert.equal(secondVerifiedTeardown.task.assistantTurnCompletionLeaseId, secondVerifiedTeardown.task.turnLeaseId);
   const verifiedTeardownClaim = runtime.continuationTask({
     action: "claim-continuation",
     taskId: verifiedSurfaceTeardownTask.task.id,
@@ -2878,7 +2959,7 @@ try {
     note: "verified surface teardown",
   });
   assert.equal(verifiedTeardownClaim.accepted, true,
-    "an unfinished verified current card may continue after 5 seconds of authoritative teardown with no replacement or newer model activity");
+    "an unfinished verified current card may continue only after same-turn model completion intent plus Host teardown");
   assert.equal(verifiedTeardownClaim.task.continuationCount, 1);
 
   runtime.continuationTask({
@@ -2961,8 +3042,8 @@ try {
     taskId: confirmedGateElapsed.task.id,
     note: "confirmed turn-limit teardown",
   });
-  assert.equal(confirmedElapsedClaim.accepted, true,
-    "a teardown may be claimed only after an explicitly confirmed limit plus safety grace has elapsed");
+  assert.equal(confirmedElapsedClaim.accepted, false,
+    "legacy confirmed-limit reason text is no longer an authorization path; verified lifecycle teardown has its own explicit gate");
 
   const confirmedLeaseGate = runtime.continuationTask({
     action: "begin",
@@ -2989,8 +3070,8 @@ try {
     taskId: confirmedLeaseGate.task.id,
     note: "confirmed turn-limit lease expired",
   });
-  assert.equal(leaseElapsedClaim.accepted, true,
-    "the no-host-signal recovery claim must be authorized only after confirmed cutoff + recovery grace + model quiet");
+  assert.equal(leaseElapsedClaim.accepted, false,
+    "no-host-signal recovery must remain fail-closed even after an old confirmed cutoff elapsed");
   const rejectedWatch = runtime.continuationTask({ action: "watch-process", taskId: a.task.id, processHandle: "build-1" });
   assert.equal(rejectedWatch.accepted, false);
   assert.equal(rejectedWatch.reason, "resident-mode-required",
@@ -3047,6 +3128,7 @@ try {
     conversationScopeId: "conversation-budget-reuse",
     workspaceId: "ws_budget_reuse",
   });
+  verifyRuntimeAnchor(learnedReuseTask, "conversation-budget-reuse", "ui_reuse");
   const learnedReuse = runtime.continuationTask({
     action: "host-signal",
     taskId: learnedReuseTask.task.id,
@@ -3446,6 +3528,7 @@ try {
   runtime.continuationTask({
     action: "host-signal",
     taskId: proactiveAck.task.id,
+    coordinatorInstanceId: "ui_proactive_ack_anchor",
     hostProfileId: "proactive-timeout@test",
     hostSignal: "timeout",
     elapsedMs: 10_000,
@@ -3581,6 +3664,7 @@ try {
   runtime.continuationTask({
     action: "host-signal",
     taskId: proactiveAck.task.id,
+    coordinatorInstanceId: "ui_proactive_ack_anchor",
     hostProfileId: "synthetic-status-only@test",
     hostSignal: "timeout",
     elapsedMs: 60_000,
@@ -3592,7 +3676,8 @@ try {
   });
   assert.equal(statusOnlyRetryAfterHostEnd.accepted, true,
     "a status-only synthetic turn may retry after independent Host timeout evidence proves that the resumed turn ended");
-  assert.equal(statusOnlyRetryAfterHostEnd.syntheticResumeWorkRetry, true);
+  assert.equal(statusOnlyRetryAfterHostEnd.assistantTurnCompletion, "TIMED_OUT",
+    "dev11 must authorize the retry from the exact-turn ATCC timeout state rather than a synthetic owner-lease retry flag");
   assert.notEqual(statusOnlyRetryAfterHostEnd.deliveryToken, proactiveClaim.deliveryToken,
     "status-only recovery must create a new generation so a late failed turn cannot execute in parallel");
   assert.equal(statusOnlyRetryAfterHostEnd.deliveryGeneration, proactiveClaim.deliveryGeneration + 1);
@@ -3673,9 +3758,11 @@ try {
     requiredMilestones: ["perform direct resumed work"],
     maxContinuations: 4,
   });
+  verifyRuntimeAnchor(directWork, "conversation-direct-synthetic-work", "ui_direct_work_anchor");
   runtime.continuationTask({
     action: "host-signal",
     taskId: directWork.task.id,
+    coordinatorInstanceId: "ui_direct_work_anchor",
     hostProfileId: "direct-work@test",
     hostSignal: "timeout",
     elapsedMs: 10_000,
@@ -3769,9 +3856,11 @@ try {
     requiredMilestones: ["finish exactly once"],
     maxContinuations: 4,
   });
+  verifyRuntimeAnchor(manualTakeover, "conversation-manual-takeover", "ui_manual_takeover_anchor");
   runtime.continuationTask({
     action: "host-signal",
     taskId: manualTakeover.task.id,
+    coordinatorInstanceId: "ui_manual_takeover_anchor",
     hostProfileId: "manual-race@test",
     hostSignal: "timeout",
     elapsedMs: 10_000,
