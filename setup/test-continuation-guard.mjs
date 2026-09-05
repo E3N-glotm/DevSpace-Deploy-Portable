@@ -373,8 +373,16 @@ assert.match(runtimeStateSource, /const minimumWorkDelta = owner === "synthetic"
   "synthetic turn-complete must require a stronger post-ACK substantive-work floor than the old two-call short-loop contract");
 assert.match(runtimeStateSource, /SYNTHETIC_MIN_ACTIVE_WORK_MS = 120_000/,
   "an incomplete synthetic stage must receive a manual-like minimum active work window before voluntary turn-complete is legal");
+assert.match(runtimeStateSource, /SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO = 0\.95/,
+  "a synthetic incomplete-stage boundary must reserve only a small finalization margin from a confirmed Host budget");
+assert.match(runtimeStateSource, /function syntheticMinimumActiveWorkMs\(row\)[\s\S]{0,600}confirmed_turn_limit_ms[\s\S]{0,500}SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO/,
+  "synthetic voluntary completion must derive its duration gate from the learned real Host cutoff instead of a fixed two-minute target");
 assert.match(runtimeStateSource, /const activeWorkMs =[\s\S]{0,700}synthetic-turn-min-active-work-required[\s\S]{0,700}minimumActiveWorkMs/,
   "synthetic turn-complete must enforce the active-work quality gate without using that timer as continuation authority");
+assert.match(coordinator, /Four substantive operations are only the post-ACK minimum, not a target duration[\s\S]{0,500}confirmed Host cutoff[\s\S]{0,500}two-minute synthetic turn/,
+  "synthetic Host-visible context must explicitly reject treating four tool calls or two minutes as the target work duration");
+assert.match(coordinator, /synthetic-turn-min-active-work-required[\s\S]{0,300}retryAfterMs[\s\S]{0,300}raw final/,
+  "a rejected synthetic turn-complete must instruct the model to keep working rather than bypassing the duration gate with a raw final");
 assert.match(runtimeStateSource, /const materialCheckpoint = gainedCompletedMilestone \|\| progressChanged \|\| evidenceChanged/,
   "synthetic resume completion must require a material checkpoint rather than an arbitrary control checkpoint");
 assert.match(runtimeStateSource, /Number\(row\.substantive_activity_count \|\| 0\) > Number\(row\.delivery_work_baseline_count \|\| 0\)/,

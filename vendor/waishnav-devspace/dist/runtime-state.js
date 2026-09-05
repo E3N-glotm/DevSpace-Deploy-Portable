@@ -44,6 +44,14 @@ const SYNTHETIC_WORK_OWNER_LEASE_MS = 30 * 60_000;
 // only a minimum for *voluntary incomplete turn-complete*; it never delays a
 // completed task and never authorizes a continuation by elapsed time.
 const SYNTHETIC_MIN_ACTIVE_WORK_MS = 120_000;
+// Once this Host has a confirmed real turn cutoff, an unfinished synthetic
+// continuation should consume essentially the same work window as a manual
+// "continue" turn.  The old fixed two-minute gate only prevented 20-60 second
+// loops and still allowed the live ~90 second / two minute collapse reported
+// by the owner.  Keep five percent headroom for ATCC signing/final rendering,
+// but otherwise hold voluntary incomplete-stage completion near the verified
+// Host budget.
+const SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO = 0.95;
 const CONTINUATION_SENDER_CLAIM_LEASE_MS = 15_000;
 // ChatGPT's current Apps host does not emit resource teardown after an ordinary
 // assistant final.  A model-signed ATCC completion intent would therefore stay
@@ -109,6 +117,16 @@ function median(values) {
 function deliveryAckRetryDelayMs(retryCount) {
     const exponent = Math.max(0, Math.min(8, Math.round(Number(retryCount || 1)) - 1));
     return Math.min(DELIVERY_ACK_RETRY_MAX_MS, DELIVERY_ACK_RETRY_BASE_MS * (2 ** exponent));
+}
+function syntheticMinimumActiveWorkMs(row) {
+    const confirmedHostLimitMs = Number(row?.confirmed_turn_limit_ms || 0);
+    if (Number.isFinite(confirmedHostLimitMs) && confirmedHostLimitMs >= HOST_CUTOFF_MIN_SAMPLE_MS) {
+        return Math.max(
+            SYNTHETIC_MIN_ACTIVE_WORK_MS,
+            Math.floor(confirmedHostLimitMs * SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO),
+        );
+    }
+    return SYNTHETIC_MIN_ACTIVE_WORK_MS;
 }
 function anchorMountRecoveryRequired(row, nowMs = Date.now(), _currentHostTurnFingerprint) {
     if (!row)
@@ -3288,7 +3306,7 @@ export class StructuredRuntimeState {
             const activeWorkMs = Number.isFinite(turnStartedAtMs)
                 ? Math.max(0, now.getTime() - turnStartedAtMs)
                 : 0;
-            const minimumActiveWorkMs = owner === "synthetic" ? SYNTHETIC_MIN_ACTIVE_WORK_MS : 0;
+            const minimumActiveWorkMs = owner === "synthetic" ? syntheticMinimumActiveWorkMs(row) : 0;
             if (owner === "synthetic" && activeWorkMs < minimumActiveWorkMs) {
                 return {
                     task: rowToTask(row),
@@ -3298,6 +3316,8 @@ export class StructuredRuntimeState {
                     minimumSubstantiveWorkDelta: minimumWorkDelta,
                     activeWorkMs,
                     minimumActiveWorkMs,
+                    confirmedHostTurnLimitMs: Number(row.confirmed_turn_limit_ms || 0) || undefined,
+                    syntheticHostBudgetRatio: SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO,
                     retryAfterMs: Math.max(1, minimumActiveWorkMs - activeWorkMs),
                     ...continuationDirective(rowToTask(row)),
                 };

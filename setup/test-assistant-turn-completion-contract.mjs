@@ -329,6 +329,80 @@ try {
   assert.equal(syntheticReady.accepted, true);
   assert.equal(syntheticReady.task.assistantTurnState, "COMPLETION_REQUESTED");
 
+  // dev18: when the Host has a confirmed real cutoff, the synthetic
+  // incomplete-stage boundary must track that budget rather than silently
+  // falling back to the old fixed two-minute floor. With the live 1552-second
+  // Host budget, 95% is ~24m34s, which is materially equivalent to a manual
+  // continue turn while still leaving a small ATCC/final-rendering reserve.
+  const budgetScope = "conversation-atcc-synthetic-host-budget";
+  const budgetSynthetic = begin(budgetScope);
+  mount(budgetSynthetic, budgetScope, "ui_atcc_synthetic_host_budget");
+  runtime.continuationTask({
+    action: "confirm-turn-limit",
+    taskId: budgetSynthetic.task.id,
+    elapsedMs: 1_552_000,
+    note: "confirmed-live-host-budget",
+  });
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set
+      delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
+      delivery_work_baseline_count=coalesce(substantive_activity_count,0)
+    where id=?
+  `).run(budgetSynthetic.task.id);
+  work(budgetSynthetic, budgetScope, 4);
+  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
+    .run(new Date(Date.now() - 121_000).toISOString(), budgetSynthetic.task.id);
+  const budgetTooEarly = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: budgetSynthetic.task.id,
+    note: "four-ops-and-two-minutes-is-not-manual-equivalent",
+  });
+  assert.equal(budgetTooEarly.accepted, false);
+  assert.equal(budgetTooEarly.reason, "synthetic-turn-min-active-work-required");
+  assert.equal(budgetTooEarly.confirmedHostTurnLimitMs, 1_552_000);
+  assert.equal(budgetTooEarly.syntheticHostBudgetRatio, 0.95);
+  assert.equal(budgetTooEarly.minimumActiveWorkMs, Math.floor(1_552_000 * 0.95));
+  assert.ok(budgetTooEarly.minimumActiveWorkMs > 24 * 60_000,
+    "a known ~26 minute Host should require roughly a full manual-length synthetic stage");
+  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
+    .run(new Date(Date.now() - budgetTooEarly.minimumActiveWorkMs - 1_000).toISOString(), budgetSynthetic.task.id);
+  const budgetReady = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: budgetSynthetic.task.id,
+    note: "synthetic-stage-consumed-manual-equivalent-budget",
+  });
+  assert.equal(budgetReady.accepted, true);
+  assert.equal(budgetReady.task.assistantTurnState, "COMPLETION_REQUESTED");
+
+  // The duration gate owns only a voluntary incomplete-stage boundary. A real
+  // verified Host cutoff remains independently authoritative and must recover
+  // even if it occurs earlier than the learned synthetic work target.
+  const budgetTimeoutScope = "conversation-atcc-synthetic-host-budget-timeout";
+  const budgetTimeout = begin(budgetTimeoutScope);
+  mount(budgetTimeout, budgetTimeoutScope, "ui_atcc_synthetic_budget_timeout");
+  runtime.continuationTask({
+    action: "confirm-turn-limit",
+    taskId: budgetTimeout.task.id,
+    elapsedMs: 1_552_000,
+    note: "confirmed-live-host-budget",
+  });
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set delivery_owner='synthetic-active',assistant_turn_owner='synthetic'
+    where id=?
+  `).run(budgetTimeout.task.id);
+  const earlyRealTimeout = runtime.continuationTask({
+    action: "host-signal",
+    taskId: budgetTimeout.task.id,
+    coordinatorInstanceId: "ui_atcc_synthetic_budget_timeout",
+    hostProfileId: "chatgpt@atcc-synthetic-budget-timeout",
+    hostSignal: "timeout",
+    elapsedMs: 60_000,
+    note: "verified-host-cutoff-still-authoritative",
+  });
+  assert.equal(earlyRealTimeout.accepted, true);
+  assert.equal(earlyRealTimeout.task.assistantTurnState, "TIMED_OUT",
+    "a verified Host cutoff must bypass the voluntary synthetic duration gate");
+
   // An already-open ChatGPT Host can cache the pre-dev11 action enum even
   // after the MCP service has upgraded.  The exact reserved checkpoint note
   // is therefore a model-owned compatibility signature for turn-complete.
@@ -675,6 +749,8 @@ try {
     laterSubstantiveWorkRevokesIntent: true,
     explicitHostTimeoutContinues: true,
     syntheticMinimumSubstantiveWorkDelta: 4,
+    syntheticVoluntaryBoundaryTracksConfirmedHostBudget: true,
+    verifiedHostTimeoutBypassesSyntheticVoluntaryDurationGate: true,
     cachedSchemaCheckpointCompletionCompatibility: true,
     syntheticOwnerLeaseExpiryDoesNotContinue: true,
     manualTakeoverInvalidatesOldTurnIntent: true,
