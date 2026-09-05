@@ -313,36 +313,88 @@ try {
   const syntheticTooEarly = runtime.continuationTask({
     action: "turn-complete",
     taskId: synthetic.task.id,
-    note: "synthetic-stage-had-four-ops-but-is-still-too-short",
+    note: "synthetic-stage-had-four-ops-but-host-budget-is-uncalibrated",
   });
   assert.equal(syntheticTooEarly.accepted, false);
-  assert.equal(syntheticTooEarly.reason, "synthetic-turn-min-active-work-required");
-  assert.equal(syntheticTooEarly.minimumActiveWorkMs, 120_000);
-  assert.ok(syntheticTooEarly.activeWorkMs < syntheticTooEarly.minimumActiveWorkMs);
+  assert.equal(syntheticTooEarly.reason, "synthetic-host-budget-calibration-required");
+  assert.equal(syntheticTooEarly.minimumActiveWorkMs, undefined,
+    "an uncalibrated Host must not fall back to a hard-coded synthetic duration");
+  assert.equal(syntheticTooEarly.retryAfterMs, undefined,
+    "an uncalibrated Host must not manufacture a fixed wait before completion");
   runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
-    .run(new Date(Date.now() - 121_000).toISOString(), synthetic.task.id);
-  const syntheticReady = runtime.continuationTask({
+    .run(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), synthetic.task.id);
+  const syntheticStillUncalibrated = runtime.continuationTask({
     action: "turn-complete",
     taskId: synthetic.task.id,
-    note: "synthetic-stage-had-sustained-real-work",
+    note: "elapsed-time-alone-must-never-become-a-fixed-fallback",
   });
-  assert.equal(syntheticReady.accepted, true);
-  assert.equal(syntheticReady.task.assistantTurnState, "COMPLETION_REQUESTED");
+  assert.equal(syntheticStillUncalibrated.accepted, false);
+  assert.equal(syntheticStillUncalibrated.reason, "synthetic-host-budget-calibration-required");
 
-  // dev18: when the Host has a confirmed real cutoff, the synthetic
-  // incomplete-stage boundary must track that budget rather than silently
-  // falling back to the old fixed two-minute floor. With the live 1552-second
-  // Host budget, 95% is ~24m34s, which is materially equivalent to a manual
-  // continue turn while still leaving a small ATCC/final-rendering reserve.
+  // dev19: an Owner/manual seed is telemetry only. It must never become a
+  // permanent synthetic turn cap because a later Host deployment may expose a
+  // different window. Only verified timeout samples calibrate the gate.
+  const seedScope = "conversation-atcc-synthetic-owner-seed";
+  const seedSynthetic = begin(seedScope);
+  mount(seedSynthetic, seedScope, "ui_atcc_synthetic_owner_seed");
+  runtime.continuationTask({
+    action: "confirm-turn-limit",
+    taskId: seedSynthetic.task.id,
+    elapsedMs: 420_000,
+    note: "owner-telemetry-seed-only",
+  });
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set
+      delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
+      delivery_work_baseline_count=coalesce(substantive_activity_count,0)
+    where id=?
+  `).run(seedSynthetic.task.id);
+  work(seedSynthetic, seedScope, 4);
+  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
+    .run(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), seedSynthetic.task.id);
+  const seedCannotAuthorizeBoundary = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: seedSynthetic.task.id,
+    note: "owner-seed-must-not-be-a-hard-coded-cap",
+  });
+  assert.equal(seedCannotAuthorizeBoundary.accepted, false);
+  assert.equal(seedCannotAuthorizeBoundary.reason, "synthetic-host-budget-calibration-required");
+  assert.equal(seedCannotAuthorizeBoundary.hostTimeoutSamples, 0);
+  assert.equal(seedCannotAuthorizeBoundary.confirmedHostTurnLimitMs, 420_000,
+    "the telemetry seed may be reported but must not authorize a boundary");
+
+  // A verified timeout sample calibrates the current Host profile. The numbers
+  // below are arbitrary fixtures: changing the sample changes the derived gate
+  // without changing runtime source constants.
+  const calibrationProfile = "chatgpt@atcc-adaptive-budget";
+  const calibrationScope = "conversation-atcc-host-budget-calibration";
+  const calibration = begin(calibrationScope);
+  mount(calibration, calibrationScope, "ui_atcc_budget_calibration");
+  const calibratedByTimeout = runtime.continuationTask({
+    action: "host-signal",
+    taskId: calibration.task.id,
+    coordinatorInstanceId: "ui_atcc_budget_calibration",
+    hostProfileId: calibrationProfile,
+    hostSignal: "timeout",
+    elapsedMs: 600_000,
+    note: "verified-host-timeout-sample",
+  });
+  assert.equal(calibratedByTimeout.accepted, true);
+  assert.equal(calibratedByTimeout.task.hostTimeoutSamples, 1);
+
   const budgetScope = "conversation-atcc-synthetic-host-budget";
   const budgetSynthetic = begin(budgetScope);
   mount(budgetSynthetic, budgetScope, "ui_atcc_synthetic_host_budget");
-  runtime.continuationTask({
-    action: "confirm-turn-limit",
+  const inheritedProfile = runtime.continuationTask({
+    action: "host-signal",
     taskId: budgetSynthetic.task.id,
-    elapsedMs: 1_552_000,
-    note: "confirmed-live-host-budget",
+    hostProfileId: calibrationProfile,
+    hostSignal: "connected",
+    elapsedMs: 0,
+    note: "inherit-live-host-profile",
   });
+  assert.equal(inheritedProfile.accepted, true);
+  assert.equal(inheritedProfile.task.hostTimeoutSamples, 1);
   runtime.database.sqlite.prepare(`
     update continuation_tasks set
       delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
@@ -351,19 +403,18 @@ try {
   `).run(budgetSynthetic.task.id);
   work(budgetSynthetic, budgetScope, 4);
   runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
-    .run(new Date(Date.now() - 121_000).toISOString(), budgetSynthetic.task.id);
+    .run(new Date(Date.now() - 120_000).toISOString(), budgetSynthetic.task.id);
   const budgetTooEarly = runtime.continuationTask({
     action: "turn-complete",
     taskId: budgetSynthetic.task.id,
-    note: "four-ops-and-two-minutes-is-not-manual-equivalent",
+    note: "live-calibrated-budget-not-yet-consumed",
   });
   assert.equal(budgetTooEarly.accepted, false);
   assert.equal(budgetTooEarly.reason, "synthetic-turn-min-active-work-required");
-  assert.equal(budgetTooEarly.confirmedHostTurnLimitMs, 1_552_000);
+  assert.equal(budgetTooEarly.confirmedHostTurnLimitMs, 600_000);
+  assert.equal(budgetTooEarly.hostTimeoutSamples, 1);
   assert.equal(budgetTooEarly.syntheticHostBudgetRatio, 0.95);
-  assert.equal(budgetTooEarly.minimumActiveWorkMs, Math.floor(1_552_000 * 0.95));
-  assert.ok(budgetTooEarly.minimumActiveWorkMs > 24 * 60_000,
-    "a known ~26 minute Host should require roughly a full manual-length synthetic stage");
+  assert.equal(budgetTooEarly.minimumActiveWorkMs, Math.floor(600_000 * 0.95));
   runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
     .run(new Date(Date.now() - budgetTooEarly.minimumActiveWorkMs - 1_000).toISOString(), budgetSynthetic.task.id);
   const budgetReady = runtime.continuationTask({
@@ -374,18 +425,12 @@ try {
   assert.equal(budgetReady.accepted, true);
   assert.equal(budgetReady.task.assistantTurnState, "COMPLETION_REQUESTED");
 
-  // The duration gate owns only a voluntary incomplete-stage boundary. A real
+  // The adaptive duration gate owns only a voluntary incomplete-stage boundary. A real
   // verified Host cutoff remains independently authoritative and must recover
-  // even if it occurs earlier than the learned synthetic work target.
+  // even if it occurs before any profile calibration or learned work target.
   const budgetTimeoutScope = "conversation-atcc-synthetic-host-budget-timeout";
   const budgetTimeout = begin(budgetTimeoutScope);
   mount(budgetTimeout, budgetTimeoutScope, "ui_atcc_synthetic_budget_timeout");
-  runtime.continuationTask({
-    action: "confirm-turn-limit",
-    taskId: budgetTimeout.task.id,
-    elapsedMs: 1_552_000,
-    note: "confirmed-live-host-budget",
-  });
   runtime.database.sqlite.prepare(`
     update continuation_tasks set delivery_owner='synthetic-active',assistant_turn_owner='synthetic'
     where id=?
@@ -435,6 +480,18 @@ try {
   });
   assert.equal(cachedHostForgery.accepted, false);
   assert.equal(cachedHostForgery.reason, "turn-complete-model-only");
+  // Cached-schema compatibility uses the same adaptive gate. Seed this row as
+  // if the Host profile had already observed one verified timeout; this is a
+  // test fixture, not a product duration constant.
+  const cachedHostSampleMs = 300_000;
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set
+      host_timeout_samples=1,
+      confirmed_turn_limit_ms=?,
+      confirmed_turn_limit_source='host-timeout-initial-regime',
+      cutoff_samples_json=?,cutoff_epoch=0
+    where id=?
+  `).run(cachedHostSampleMs, JSON.stringify([cachedHostSampleMs]), cachedSchema.task.id);
   const cachedTooEarly = runtime.continuationTask({
     action: "checkpoint",
     taskId: cachedSchema.task.id,
@@ -442,8 +499,9 @@ try {
   });
   assert.equal(cachedTooEarly.accepted, false);
   assert.equal(cachedTooEarly.reason, "synthetic-turn-min-active-work-required");
+  assert.equal(cachedTooEarly.minimumActiveWorkMs, Math.floor(cachedHostSampleMs * 0.95));
   runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
-    .run(new Date(Date.now() - 121_000).toISOString(), cachedSchema.task.id);
+    .run(new Date(Date.now() - cachedTooEarly.minimumActiveWorkMs - 1_000).toISOString(), cachedSchema.task.id);
   const cachedRequested = runtime.continuationTask({
     action: "checkpoint",
     taskId: cachedSchema.task.id,

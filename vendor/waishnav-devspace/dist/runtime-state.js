@@ -39,18 +39,15 @@ const DELIVERY_ACK_RETRY_MAX_MS = 45_000;
 // synthetic work.  Manual takeover can revoke this ownership immediately and
 // therefore remains the higher-priority preemption mechanism.
 const SYNTHETIC_WORK_OWNER_LEASE_MS = 30 * 60_000;
-// A synthetic turn with runnable milestones may not voluntarily sign an
-// incomplete-stage boundary immediately after a few quick tool calls.  This is
-// only a minimum for *voluntary incomplete turn-complete*; it never delays a
-// completed task and never authorizes a continuation by elapsed time.
-const SYNTHETIC_MIN_ACTIVE_WORK_MS = 120_000;
-// Once this Host has a confirmed real turn cutoff, an unfinished synthetic
+// Once this Host has *live verified timeout samples*, an unfinished synthetic
 // continuation should consume essentially the same work window as a manual
-// "continue" turn.  The old fixed two-minute gate only prevented 20-60 second
-// loops and still allowed the live ~90 second / two minute collapse reported
-// by the owner.  Keep five percent headroom for ATCC signing/final rendering,
-// but otherwise hold voluntary incomplete-stage completion near the verified
-// Host budget.
+// "continue" turn.  The ratio is intentionally dimensionless: there is no
+// hard-coded 2/10/26 minute synthetic duration.  A Host that changes its turn
+// window is relearned from verified timeout samples without a source change.
+// Owner/manual confirm-turn-limit values remain useful telemetry seeds but are
+// not sufficient by themselves to authorize an early synthetic boundary; that
+// avoids a stale historical value becoming a permanent shorter turn cap after
+// the Host increases its real window.
 const SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO = 0.95;
 const CONTINUATION_SENDER_CLAIM_LEASE_MS = 15_000;
 // ChatGPT's current Apps host does not emit resource teardown after an ordinary
@@ -118,15 +115,38 @@ function deliveryAckRetryDelayMs(retryCount) {
     const exponent = Math.max(0, Math.min(8, Math.round(Number(retryCount || 1)) - 1));
     return Math.min(DELIVERY_ACK_RETRY_MAX_MS, DELIVERY_ACK_RETRY_BASE_MS * (2 ** exponent));
 }
-function syntheticMinimumActiveWorkMs(row) {
+function syntheticAdaptiveActiveWorkGate(row) {
+    const timeoutSamples = Math.max(0, Math.round(Number(row?.host_timeout_samples || 0)));
     const confirmedHostLimitMs = Number(row?.confirmed_turn_limit_ms || 0);
-    if (Number.isFinite(confirmedHostLimitMs) && confirmedHostLimitMs >= HOST_CUTOFF_MIN_SAMPLE_MS) {
-        return Math.max(
-            SYNTHETIC_MIN_ACTIVE_WORK_MS,
-            Math.floor(confirmedHostLimitMs * SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO),
-        );
+    const confirmedSource = String(row?.confirmed_turn_limit_source || "");
+    const liveCutoffSamples = numericSamples(row?.cutoff_samples_json);
+    const liveVerified = timeoutSamples > 0
+        && /^host-timeout-/.test(confirmedSource)
+        && liveCutoffSamples.length > 0;
+    if (!liveVerified) {
+        return {
+            calibrated: false,
+            timeoutSamples,
+            confirmedHostLimitMs: Number.isFinite(confirmedHostLimitMs) && confirmedHostLimitMs > 0
+                ? confirmedHostLimitMs
+                : undefined,
+        };
     }
-    return SYNTHETIC_MIN_ACTIVE_WORK_MS;
+    const robustSampleMs = median(liveCutoffSamples);
+    const adaptiveHostLimitMs = Number.isFinite(confirmedHostLimitMs) && confirmedHostLimitMs >= HOST_CUTOFF_MIN_SAMPLE_MS
+        ? confirmedHostLimitMs
+        : robustSampleMs;
+    if (!Number.isFinite(adaptiveHostLimitMs) || adaptiveHostLimitMs < HOST_CUTOFF_MIN_SAMPLE_MS) {
+        return { calibrated: false, timeoutSamples };
+    }
+    return {
+        calibrated: true,
+        timeoutSamples,
+        confirmedHostLimitMs: Math.round(adaptiveHostLimitMs),
+        minimumActiveWorkMs: Math.max(1, Math.floor(adaptiveHostLimitMs * SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO)),
+        budgetRatio: SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO,
+        cutoffEpoch: Math.max(0, Math.round(Number(row?.cutoff_epoch || 0))),
+    };
 }
 function anchorMountRecoveryRequired(row, nowMs = Date.now(), _currentHostTurnFingerprint) {
     if (!row)
@@ -3306,7 +3326,27 @@ export class StructuredRuntimeState {
             const activeWorkMs = Number.isFinite(turnStartedAtMs)
                 ? Math.max(0, now.getTime() - turnStartedAtMs)
                 : 0;
-            const minimumActiveWorkMs = owner === "synthetic" ? syntheticMinimumActiveWorkMs(row) : 0;
+            const syntheticBudgetGate = owner === "synthetic" ? syntheticAdaptiveActiveWorkGate(row) : undefined;
+            if (owner === "synthetic" && !syntheticBudgetGate?.calibrated) {
+                return {
+                    task: rowToTask(row),
+                    accepted: false,
+                    reason: "synthetic-host-budget-calibration-required",
+                    substantiveWorkDelta: workDelta,
+                    minimumSubstantiveWorkDelta: minimumWorkDelta,
+                    activeWorkMs,
+                    hostTimeoutSamples: syntheticBudgetGate?.timeoutSamples ?? Number(row.host_timeout_samples || 0),
+                    confirmedHostTurnLimitMs: syntheticBudgetGate?.confirmedHostLimitMs,
+                    // Deliberately no retryAfterMs: there is no fixed fallback
+                    // duration. Keep doing runnable work until the task finishes,
+                    // blocks/pauses, or a verified Host timeout supplies the
+                    // current profile's real turn-window sample.
+                    ...continuationDirective(rowToTask(row)),
+                };
+            }
+            const minimumActiveWorkMs = owner === "synthetic"
+                ? syntheticBudgetGate.minimumActiveWorkMs
+                : 0;
             if (owner === "synthetic" && activeWorkMs < minimumActiveWorkMs) {
                 return {
                     task: rowToTask(row),
@@ -3316,8 +3356,10 @@ export class StructuredRuntimeState {
                     minimumSubstantiveWorkDelta: minimumWorkDelta,
                     activeWorkMs,
                     minimumActiveWorkMs,
-                    confirmedHostTurnLimitMs: Number(row.confirmed_turn_limit_ms || 0) || undefined,
-                    syntheticHostBudgetRatio: SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO,
+                    confirmedHostTurnLimitMs: syntheticBudgetGate.confirmedHostLimitMs,
+                    hostTimeoutSamples: syntheticBudgetGate.timeoutSamples,
+                    cutoffEpoch: syntheticBudgetGate.cutoffEpoch,
+                    syntheticHostBudgetRatio: syntheticBudgetGate.budgetRatio,
                     retryAfterMs: Math.max(1, minimumActiveWorkMs - activeWorkMs),
                     ...continuationDirective(rowToTask(row)),
                 };

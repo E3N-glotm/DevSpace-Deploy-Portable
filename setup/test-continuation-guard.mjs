@@ -11,6 +11,7 @@ const packagedConfigPath = join(ROOT, "app", "node_modules", "@waishnav", "devsp
 const migrations = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "db", "migrations.js"), "utf8");
 const server = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "server.js"), "utf8");
 const runtimeStateSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "runtime-state.js"), "utf8");
+const syntheticAdaptiveGateSource = runtimeStateSource.match(/function syntheticAdaptiveActiveWorkGate\(row\) \{[\s\S]*?\n\}/)?.[0] ?? "";
 const featureTools = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "feature-tools.js"), "utf8");
 const coordinatorPath = join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js");
 const coordinator = readFileSync(coordinatorPath, "utf8");
@@ -271,12 +272,33 @@ assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryTo
   "the coordinator must keep generation capabilities inside App/runtime transport instead of exposing them to the model");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
-assert.match(coordinator, /function visibleContinuationTrigger\(task\)[\s\S]{0,2200}继续执行未完成的 DevSpace 任务[\s\S]{0,500}当前任务[\s\S]{0,500}下一未完成里程碑[\s\S]{0,700}不要只回复状态[\s\S]{0,240}继续处理中/,
-  "the visible synthetic continuation trigger must carry sustained-work semantics in the actual Host user-role turn instead of relying only on hidden context");
-assert.match(coordinator, /Continue the unfinished DevSpace task[\s\S]{0,500}Current task[\s\S]{0,500}Next unfinished milestone[\s\S]{0,1800}do not reply with only a status[\s\S]{0,240}still working/,
-  "the English visible synthetic trigger must also forbid a status-only premature final");
-assert.match(coordinator, /One failed command\/test[\s\S]{0,500}two or three quick tool calls[\s\S]{0,900}action=turn-complete[\s\S]{0,300}finalResponseAllowed=true/,
-  "the visible synthetic trigger must explicitly reject short failure-driven turns and require the ATCC stage-boundary handshake before a voluntary incomplete final");
+assert.ok(visibleTriggerSource,
+  "the continuation coordinator must expose one visibleContinuationTrigger(task) function for the actual Host user-role turn");
+for (const [pattern, message] of [
+  [/@DevSpace MCP 继续执行未完成任务/, "the Chinese synthetic turn must explicitly activate DevSpace MCP rather than emit a bare continue"],
+  [/继续执行未完成的 DevSpace 任务/, "the Chinese synthetic turn must explicitly request unfinished DevSpace execution"],
+  [/当前任务/, "the Chinese synthetic turn must carry the durable current objective"],
+  [/下一未完成里程碑/, "the Chinese synthetic turn must carry the next unresolved milestone"],
+  [/不要只回复状态/, "the Chinese synthetic turn must forbid a status-only premature final"],
+  [/继续处理中/, "the Chinese synthetic turn must forbid a still-working-only premature final"],
+  [/Continue the unfinished DevSpace task/, "the English synthetic turn must explicitly request unfinished DevSpace execution"],
+  [/Current task/, "the English synthetic turn must carry the durable current objective"],
+  [/Next unfinished milestone/, "the English synthetic turn must carry the next unresolved milestone"],
+  [/do not reply with only a status/, "the English synthetic turn must forbid a status-only premature final"],
+  [/still working/, "the English synthetic turn must forbid a still-working-only premature final"],
+  [/一次命令\/测试失败/, "one failed command or test must not terminate a Chinese synthetic turn"],
+  [/One failed command\/test/, "one failed command or test must not terminate an English synthetic turn"],
+  [/少量快速工具调用/, "a few quick Chinese tool calls must not be treated as sufficient resumed work"],
+  [/a few quick tool calls/, "a few quick English tool calls must not be treated as sufficient resumed work"],
+  [/action=turn-complete/, "a voluntary incomplete stage boundary must use the ATCC turn-complete handshake"],
+  [/finalResponseAllowed=true/, "a voluntary incomplete final must require explicit runtime permission"],
+  [/不使用固定分钟数/, "the Chinese synthetic duration policy must explicitly reject a hard-coded number of minutes"],
+  [/缩短或延长窗口/, "the Chinese synthetic duration policy must relearn both shorter and longer Host windows"],
+  [/uses no fixed number of minutes/, "the English synthetic duration policy must explicitly reject a hard-coded number of minutes"],
+  [/shorter or longer Host windows must be relearned/, "the English synthetic duration policy must relearn both shorter and longer Host windows"],
+]) {
+  assert.match(visibleTriggerSource, pattern, message);
+}
 assert.doesNotMatch(coordinator, /继续。直接完成当前未完成的任务。|Continue\. Directly complete the current unfinished task\./,
   "the visible synthetic continuation trigger must not pressure the model to skip state reconstruction or verification");
 assert.match(visibleTriggerSource, /task\?\.objective[\s\S]{0,500}nextUnresolvedMilestone\(task\)/,
@@ -357,6 +379,20 @@ assert.match(coordinator, /bindSenderTransport\(\)[\s\S]{0,700}consumeReadyAfter
   "ordinary Workspace App bind/rehydrate must wire directly into deterministic READY delivery");
 assert.match(coordinator, /const current = await callTask\("status"\)[\s\S]{0,3200}current\?\.readyGeneration[\s\S]{0,900}attemptContinuation\("supervisor discovered READY generation", \{ force: true \}\)/,
   "an already-bound or generation-safely rebound sender must consume a READY generation that appears later during an ordinary supervisor status refresh");
+assert.match(server, /const continuationWakeClients = new Set\(\)/,
+  "the resident server must keep a bounded wake-only subscriber set instead of relying exclusively on a background iframe timer");
+assert.match(server, /res\.write\(`event: wake\\ndata: \$\{JSON\.stringify\(\{ reason \}\)\}\\n\\n`\)/,
+  "the resident wake channel must emit only a wake reason payload rather than continuation authority");
+assert.match(server, /const sweep = runtimeState\.continuationSupervisorSweep\(\)[\s\S]{0,500}if \(sweep\.ready\.length > 0\)[\s\S]{0,1200}broadcastContinuationWake\("ready-generation"\)/,
+  "the resident server must push a wake-only event specifically when the authoritative supervisor persists a READY generation");
+assert.match(server, /app\.get\("\/mcp-app-assets\/continuation-wake"[\s\S]{0,500}text\/event-stream[\s\S]{0,700}writeContinuationWake\(res, "connected"\)/,
+  "a recreated/surviving Workspace App must be able to subscribe to the same-origin READY wake channel and immediately refresh durable state");
+assert.doesNotMatch(server, /writeContinuationWake\([\s\S]{0,180}taskId|writeContinuationWake\([\s\S]{0,180}deliveryToken|writeContinuationWake\([\s\S]{0,180}anchorMountToken/,
+  "wake events must not carry task or delivery authority");
+assert.match(coordinator, /new EventSource\(CONTINUATION_WAKE_URL\)[\s\S]{0,500}addEventListener\("wake"[\s\S]{0,350}supervisorTick\(\{ forceAuthoritative: true \}\)/,
+  "a wake event must force authoritative status/CAS handling rather than directly manufacturing app.sendMessage");
+assert.match(coordinator, /@DevSpace MCP 继续执行未完成任务。/,
+  "the synthetic user-role request must preserve the explicit connector activation cue that works for manual continuation");
 assert.match(runtimeStateSource, /manual-user-turn-takeover/,
   "runtime must retain an old-schema-compatible manual takeover CAS marker on the existing note field");
 assert.match(server, /older cached schema without manualTakeover[\s\S]{0,500}manual-user-turn-takeover/,
@@ -371,18 +407,52 @@ assert.match(runtimeStateSource, /SYNTHETIC_WORK_OWNER_LEASE_MS = 30 \* 60_000/,
   "synthetic ownership must remain durable across manual-like reasoning/execution intervals rather than expiring after a few tens of seconds");
 assert.match(runtimeStateSource, /const minimumWorkDelta = owner === "synthetic" \? 4 : 1/,
   "synthetic turn-complete must require a stronger post-ACK substantive-work floor than the old two-call short-loop contract");
-assert.match(runtimeStateSource, /SYNTHETIC_MIN_ACTIVE_WORK_MS = 120_000/,
-  "an incomplete synthetic stage must receive a manual-like minimum active work window before voluntary turn-complete is legal");
+assert.doesNotMatch(runtimeStateSource, /SYNTHETIC_MIN_ACTIVE_WORK_MS|syntheticMinimumActiveWorkMs/,
+  "synthetic voluntary completion must not retain a fixed-duration fallback");
 assert.match(runtimeStateSource, /SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO = 0\.95/,
   "a synthetic incomplete-stage boundary must reserve only a small finalization margin from a confirmed Host budget");
-assert.match(runtimeStateSource, /function syntheticMinimumActiveWorkMs\(row\)[\s\S]{0,600}confirmed_turn_limit_ms[\s\S]{0,500}SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO/,
-  "synthetic voluntary completion must derive its duration gate from the learned real Host cutoff instead of a fixed two-minute target");
-assert.match(runtimeStateSource, /const activeWorkMs =[\s\S]{0,700}synthetic-turn-min-active-work-required[\s\S]{0,700}minimumActiveWorkMs/,
-  "synthetic turn-complete must enforce the active-work quality gate without using that timer as continuation authority");
-assert.match(coordinator, /Four substantive operations are only the post-ACK minimum, not a target duration[\s\S]{0,500}confirmed Host cutoff[\s\S]{0,500}two-minute synthetic turn/,
-  "synthetic Host-visible context must explicitly reject treating four tool calls or two minutes as the target work duration");
-assert.match(coordinator, /synthetic-turn-min-active-work-required[\s\S]{0,300}retryAfterMs[\s\S]{0,300}raw final/,
-  "a rejected synthetic turn-complete must instruct the model to keep working rather than bypassing the duration gate with a raw final");
+assert.ok(syntheticAdaptiveGateSource,
+  "runtime-state must define one syntheticAdaptiveActiveWorkGate(row) implementation");
+assert.match(syntheticAdaptiveGateSource, /host_timeout_samples/,
+  "synthetic voluntary completion calibration must require persisted live Host timeout sample count");
+assert.match(syntheticAdaptiveGateSource, /\^host-timeout-/,
+  "manual/user confirmed telemetry seeds must not masquerade as a live Host timeout regime");
+assert.match(syntheticAdaptiveGateSource, /cutoff_samples_json/,
+  "synthetic voluntary completion calibration must require live cutoff samples from the current Host regime");
+assert.match(syntheticAdaptiveGateSource, /liveVerified[\s\S]*timeoutSamples > 0[\s\S]*confirmedSource[\s\S]*liveCutoffSamples\.length > 0/,
+  "synthetic voluntary completion must fail closed unless all live Host timeout evidence is present");
+assert.match(syntheticAdaptiveGateSource, /adaptiveHostLimitMs \* SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO/,
+  "the calibrated boundary must be derived from the adaptive Host limit using only the dimensionless reserve ratio");
+const uncalibratedBudgetBranch = runtimeStateSource.match(/if \(owner === "synthetic" && !syntheticBudgetGate\?\.calibrated\) \{[\s\S]*?\n\s*\}/)?.[0] ?? "";
+assert.ok(uncalibratedBudgetBranch,
+  "turn-complete must have an explicit fail-closed branch for an uncalibrated synthetic Host profile");
+assert.match(uncalibratedBudgetBranch, /synthetic-host-budget-calibration-required/,
+  "an uncalibrated synthetic Host profile must reject voluntary incomplete completion");
+assert.match(uncalibratedBudgetBranch, /Deliberately no retryAfterMs/,
+  "the uncalibrated branch must document that it intentionally exposes no fixed retry duration");
+assert.doesNotMatch(uncalibratedBudgetBranch, /^\s*retryAfterMs\s*:/m,
+  "an uncalibrated Host must never manufacture a fixed wait/retry duration");
+
+const calibratedBudgetBranch = runtimeStateSource.match(/if \(owner === "synthetic" && activeWorkMs < minimumActiveWorkMs\) \{[\s\S]*?\n\s*\}/)?.[0] ?? "";
+assert.ok(calibratedBudgetBranch,
+  "turn-complete must have an explicit calibrated minimum-active-work branch");
+assert.match(calibratedBudgetBranch, /synthetic-turn-min-active-work-required/,
+  "a calibrated synthetic Host profile must reject a voluntary boundary before its adaptive earliest point");
+assert.match(calibratedBudgetBranch, /retryAfterMs:\s*Math\.max\(1, minimumActiveWorkMs - activeWorkMs\)/,
+  "a calibrated retry delay must be derived only from the adaptive Host boundary minus actual active work");
+assert.match(runtimeStateSource, /const activeWorkMs =[\s\S]*?syntheticAdaptiveActiveWorkGate\(row\)[\s\S]*?minimumActiveWorkMs = owner === "synthetic"[\s\S]*?synthetic-turn-min-active-work-required/,
+  "synthetic turn-complete must enforce adaptive work quality without turning a fixed elapsed duration into continuation authority");
+
+for (const [pattern, message] of [
+  [/Four substantive operations are only a minimum quality floor, not permission to stop/, "hidden synthetic context must treat four substantive operations only as a quality floor"],
+  [/no fixed number of minutes/, "hidden synthetic context must explicitly reject a hard-coded minute duration"],
+  [/earliest permitted voluntary boundary/, "hidden synthetic context must treat the learned budget only as the earliest optional boundary"],
+  [/synthetic-host-budget-calibration-required/, "hidden synthetic context must recognize the uncalibrated rejection reason"],
+  [/synthetic-turn-min-active-work-required/, "hidden synthetic context must recognize the calibrated too-early rejection reason"],
+  [/never invent a fixed wait/, "hidden synthetic context must forbid inventing a hard-coded retry duration"],
+]) {
+  assert.match(coordinator, pattern, message);
+}
 assert.match(runtimeStateSource, /const materialCheckpoint = gainedCompletedMilestone \|\| progressChanged \|\| evidenceChanged/,
   "synthetic resume completion must require a material checkpoint rather than an arbitrary control checkpoint");
 assert.match(runtimeStateSource, /Number\(row\.substantive_activity_count \|\| 0\) > Number\(row\.delivery_work_baseline_count \|\| 0\)/,
@@ -2985,13 +3055,13 @@ try {
   const confirmedLimit = runtime.continuationTask({
     action: "confirm-turn-limit",
     taskId: a.task.id,
-    elapsedMs: 1_549_000,
-    note: "user-observed-25m49s",
+    elapsedMs: 1_000_000,
+    note: "owner-observed-telemetry-seed",
   });
   assert.equal(confirmedLimit.accepted, true);
   assert.equal(confirmedLimit.reason, "confirmed-turn-limit-recorded");
-  assert.equal(confirmedLimit.task.confirmedTurnLimitMs, 1_549_000);
-  assert.equal(confirmedLimit.task.confirmedTurnLimitSource, "user-observed-25m49s");
+  assert.equal(confirmedLimit.task.confirmedTurnLimitMs, 1_000_000);
+  assert.equal(confirmedLimit.task.confirmedTurnLimitSource, "owner-observed-telemetry-seed");
   const confirmedGateEarly = runtime.continuationTask({
     action: "begin",
     conversationScopeId: "conversation-confirmed-gate-early",
@@ -3167,6 +3237,30 @@ try {
   assert.equal(shorterBudget.task.confirmedTurnLimitMs, 300000,
     "a second material downward change must remain learnable rather than being blocked by monotonic confirmedTurnLimit logic");
   assert.ok(shorterBudget.task.cutoffEpoch > learnedReuse.task.cutoffEpoch);
+  const shorterEpoch = shorterBudget.task.cutoffEpoch;
+  const longerProbe1 = runtime.continuationTask({
+    action: "host-signal",
+    taskId: learnedReuseTask.task.id,
+    coordinatorInstanceId: "ui_reuse",
+    hostProfileId: "chatgpt@test",
+    hostSignal: "timeout",
+    elapsedMs: 600000,
+  });
+  assert.equal(longerProbe1.task.confirmedTurnLimitMs, 300000,
+    "one longer timeout must not immediately double the adaptive Host budget on a single outlier");
+  const longerProbe2 = runtime.continuationTask({
+    action: "host-signal",
+    taskId: learnedReuseTask.task.id,
+    coordinatorInstanceId: "ui_reuse",
+    hostProfileId: "chatgpt@test",
+    hostSignal: "timeout",
+    elapsedMs: 600000,
+  });
+  assert.equal(longerProbe2.task.confirmedTurnLimitMs, 600000,
+    "two consistent materially longer Host timeouts must promote the adaptive regime without a source-code change");
+  assert.equal(longerProbe2.task.confirmedTurnLimitSource, "host-timeout-regime-up");
+  assert.ok(longerProbe2.task.cutoffEpoch > shorterEpoch,
+    "a confirmed upward Host-window regime change must advance the cutoff epoch");
   const delivery = runtime.continuationTask({
     action: "delivery-result",
     taskId: a.task.id,

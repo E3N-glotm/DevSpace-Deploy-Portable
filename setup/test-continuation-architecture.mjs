@@ -829,18 +829,21 @@ try {
   });
   const cutoffWorksetId = runtime.continuationArchitectureSnapshot(cutoffScope).card.active_workset_id;
   db.prepare("update continuation_worksets set continuation_due_at=? where id=?").run(past, cutoffWorksetId);
+  // Historical/owner-provided cutoff telemetry must never become continuation
+  // authority. The fixture value is intentionally arbitrary; changing it must
+  // not change the fail-closed result below.
   db.prepare(`
-    update continuation_tasks set turn_lease_expires_at=?,confirmed_turn_limit_ms=1552000,
+    update continuation_tasks set turn_lease_expires_at=?,confirmed_turn_limit_ms=900000,
       stall_state='ACTIVE',stall_suspected_at=null where id=?
   `).run(past, cutoffTask.task.id);
   assert.equal(runtime.continuationSupervisorSweep().ready.some((entry) => entry.conversationScopeId === cutoffScope), false);
   db.prepare("update continuation_tasks set stall_state='SUSPECTED_STALL',stall_suspected_at=? where id=?")
     .run(new Date(Date.now() - 30_000).toISOString(), cutoffTask.task.id);
   assert.equal(runtime.continuationSupervisorSweep().ready.some((entry) => entry.conversationScopeId === cutoffScope), false,
-    "a short activity-lease confirmation must not create a duplicate turn before the persisted ~25m52s Host cutoff");
+    "a short activity-lease confirmation must not create a duplicate turn before any persisted historical cutoff telemetry");
   db.prepare(`update continuation_tasks set turn_started_at=?,last_model_activity_at=? where id=?`)
     .run(
-      new Date(Date.now() - 1_580_000).toISOString(),
+      new Date(Date.now() - 980_000).toISOString(),
       new Date(Date.now() - 40_000).toISOString(),
       cutoffTask.task.id,
     );

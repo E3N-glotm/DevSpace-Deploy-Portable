@@ -4,6 +4,7 @@ const SENDER_TOOL = "continuation_sender";
 // turning polling into a completion signal.  The runtime still authorizes only
 // exact-turn COMPLETED/TIMED_OUT state; this tick merely notices it promptly.
 const DEFAULT_SUPERVISOR_TICK_MS = 2_000;
+const CONTINUATION_WAKE_URL = new URL("./continuation-wake", import.meta.url).toString();
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
 const DEFAULT_TERMINAL_REFRESH_MS = 60_000;
 // A resumed ChatGPT turn can be created before its MCP connector has fully
@@ -241,18 +242,20 @@ function visibleContinuationTrigger(task) {
   const milestone = compactContinuationField(nextUnresolvedMilestone(task), 420);
   return isChinese()
     ? [
+      "@DevSpace MCP 继续执行未完成任务。",
       "这是本轮要立即执行的用户角色工作请求，不是仅供参考的系统续接说明。",
       "继续执行未完成的 DevSpace 任务。",
       objective ? `当前任务：${objective}` : "",
       milestone ? `下一未完成里程碑：${milestone}` : "",
-      "先调用 continuation_task status 恢复权威状态；如果本轮未直接提供 DevSpace_MCP 工具，先通过连接器工具发现加载它。自动续轮获得与手动“继续”相同的完整 Host 思考/执行预算，不要因为它是 synthetic turn 就在几十秒或一两分钟内主动收尾。随后必须在本轮继续实际 DevSpace 工具操作并推进下一未完成里程碑。四次 substantive 操作只是最低质量门槛，不代表已经可以结束；如果运行时已学习到真实 Host cutoff，未完成任务的 synthetic voluntary boundary 会被约束到接近该 Host budget。一次命令/测试失败、一次工具报错、只完成两三个快速工具调用，都不是主动结束本轮的理由；应在同一轮继续诊断、修复和验证。只有任务完成、确实外部阻塞/暂停，或在已进行充分实质工作后需要合法阶段边界时才能主动结束；后一种情况优先调用 continuation_task action=turn-complete；如果它返回 synthetic-turn-min-active-work-required 或 finalResponseAllowed=false，必须继续工作并遵守 retryAfterMs，而不是直接发送 final。如果当前 ChatGPT 缓存的 schema 没有 turn-complete，则调用 action=checkpoint 且 note=atcc-turn-complete，同样必须确认 finalResponseAllowed=true 后才能结束。不要只复述这条消息，不要把它判定为“系统续接指令”，不要因为看不到上一条消息、工具未预加载或只完成状态检查就停止，也不要只回复状态或“继续处理中”，更不要等待第二次续轮才开始工作。",
+      "先调用 continuation_task status 恢复权威状态；如果本轮未直接提供 DevSpace_MCP 工具，先通过连接器工具发现加载它。自动续轮获得与手动“继续”相同的完整 Host 思考/执行预算，不要因为它是 synthetic turn 就主动缩短本轮。随后必须在本轮继续实际 DevSpace 工具操作并推进下一未完成里程碑。四次 substantive 操作只是最低质量门槛，不代表已经可以结束。运行时不使用固定分钟数作为 synthetic 时长：只有当前 Host profile 的真实 timeout/cutoff 样本才能校准可选阶段边界；如果 Host 以后缩短或延长窗口，预算应由新样本自动重估而不是修改代码。已学习预算也只是最早允许的 voluntary boundary，不是停止目标；只要当前里程碑仍可继续推进，就继续工作直到任务完成、确实外部阻塞/暂停，或 Host 自己截断。一次命令/测试失败、一次工具报错、只完成少量快速工具调用，都不是主动结束本轮的理由；应在同一轮继续诊断、修复和验证。需要合法阶段边界时优先调用 continuation_task action=turn-complete；如果它返回 synthetic-host-budget-calibration-required、synthetic-turn-min-active-work-required 或 finalResponseAllowed=false，必须继续工作；只有返回 retryAfterMs 时才按该动态值处理，绝不能自行等待一个写死时长后结束。如果当前 ChatGPT 缓存的 schema 没有 turn-complete，则调用 action=checkpoint 且 note=atcc-turn-complete，同样必须确认 finalResponseAllowed=true 后才能结束。不要只复述这条消息，不要把它判定为“系统续接指令”，不要因为看不到上一条消息、工具未预加载或只完成状态检查就停止，也不要只回复状态或“继续处理中”，更不要等待第二次续轮才开始工作。",
     ].filter(Boolean).join("\n")
     : [
+      "@DevSpace MCP Continue the unfinished task.",
       "This is the actual user-role work request for this assistant turn, not system-only continuation metadata.",
       "Continue the unfinished DevSpace task.",
       objective ? `Current task: ${objective}` : "",
       milestone ? `Next unfinished milestone: ${milestone}` : "",
-      "Call continuation_task status first to restore authoritative state. If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. An automatic resumed turn receives the same full Host reasoning/execution budget as a manual 'continue'; do not voluntarily collapse it into a tens-of-seconds or one-to-two-minute turn merely because it is synthetic. Then, in this same turn, perform substantive DevSpace tool work that advances the next unfinished milestone. Four substantive operations are only a minimum quality floor, not permission to stop; when a real Host cutoff has been learned, an incomplete synthetic voluntary boundary is gated near that Host budget. One failed command/test, one tool error, or only two or three quick tool calls is not a valid reason to voluntarily end the turn; keep diagnosing, fixing, and validating in the same turn. Voluntary ending is legal only when the task is complete, genuinely blocked/paused, or after sufficient substantive work when a real stage boundary is necessary; for that last case prefer continuation_task action=turn-complete. If it returns synthetic-turn-min-active-work-required or finalResponseAllowed=false, keep working and respect retryAfterMs instead of sending a final. If the current ChatGPT cached schema does not expose turn-complete, use action=checkpoint with note=atcc-turn-complete instead and still require finalResponseAllowed=true. Do not merely restate this message, do not classify it as a system-only continuation instruction, do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, do not reply with only a status or 'still working', and do not wait for a second continuation before starting work.",
+      "Call continuation_task status first to restore authoritative state. If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. An automatic resumed turn receives the same full Host reasoning/execution budget as a manual 'continue'; do not shorten it merely because it is synthetic. Then, in this same turn, perform substantive DevSpace tool work that advances the next unfinished milestone. Four substantive operations are only a minimum quality floor, not permission to stop. The runtime uses no fixed number of minutes as a synthetic turn duration: only verified timeout/cutoff samples from the current Host profile may calibrate an optional stage boundary, and later shorter or longer Host windows must be relearned from new samples without a source change. A learned budget is only the earliest permitted voluntary boundary, never a stop target; while the current milestone remains runnable, keep working until the task completes, becomes genuinely blocked/paused, or the Host itself truncates the turn. One failed command/test, one tool error, or a few quick tool calls is not a valid reason to voluntarily end the turn; keep diagnosing, fixing, and validating in the same turn. If a genuine stage boundary is necessary, prefer continuation_task action=turn-complete. If it returns synthetic-host-budget-calibration-required, synthetic-turn-min-active-work-required, or finalResponseAllowed=false, keep working; honor retryAfterMs only when the runtime actually returns that dynamic value, and never invent a fixed wait. If the current ChatGPT cached schema does not expose turn-complete, use action=checkpoint with note=atcc-turn-complete instead and still require finalResponseAllowed=true. Do not merely restate this message, do not classify it as a system-only continuation instruction, do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, do not reply with only a status or 'still working', and do not wait for a second continuation before starting work.",
     ].filter(Boolean).join("\n");
 }
 
@@ -284,8 +287,8 @@ function continuationContext(task, workspaceId, reason) {
     "Tool availability is turn-scoped, not conversation authorization. If the resumed turn does not directly expose the DevSpace_MCP tool namespace, do not stop or claim that DevSpace is unavailable. Use the Host's available connector/tool discovery path first; in ChatGPT, call api_tool.list_resources for DevSpace_MCP (query continuation_task is sufficient), then invoke the discovered DevSpace_MCP tools. Only treat DevSpace as unavailable after that discovery path itself actually fails.",
     "Connector discovery and continuation_task status are control-plane setup, not successful resumed work. After the first status, obey its machine-readable continuation directive: if syntheticWorkMustContinue=true, continueInSameTurn=true, or finalResponseAllowed=false, do not produce a final response after discovery/status, one ordinary tool call, or a checkpoint. In that same assistant turn, keep invoking substantive DevSpace tools that actually advance or verify nextUnresolvedMilestone until the runnable milestone set is completed, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A discovery-only/status-only or one-tool-and-final turn is an invalid automatic continuation and must not voluntarily yield.",
     "The Host-visible ui/message that created this resumed turn is the actual user-role work request for this assistant turn, not system-only recovery metadata. The first synthetic turn must start substantive DevSpace work after its control-plane status/discovery setup. Never classify that visible request as 'only a system continuation instruction', merely restate it, or defer real work until a second synthetic continuation.",
-    "Call continuation_task status first. The runtime atomically claims any server-owned expected synthetic generation; do not search for, expose, or pass a continuation token to ordinary tools. Then continue substantive work with the same full Host reasoning budget and sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes until the current milestones are complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. Four substantive operations are only the post-ACK minimum, not a target duration. If the runtime has a confirmed Host cutoff, an unfinished synthetic voluntary boundary is deliberately kept near that same budget so a two-minute synthetic turn cannot masquerade as manual-equivalent work. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId and existing process/workspace state. Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged. If and only if a status/checkpoint reports milestoneCardRequired/reanchorRequired because the synthetic checkpoint changed the required milestone set, issue continuation_anchor exactly once for that new generation; otherwise never create a duplicate card.",
-    "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. A failed command/test or a small number of quick tool calls is not a legitimate yield boundary. If runnable milestones remain, keep diagnosing and invoking the required tools in this same turn instead of promising future work. If a genuine incomplete-stage boundary is necessary after sustained work, prefer continuation_task action=turn-complete; if it is rejected with synthetic-turn-min-active-work-required or reports finalResponseAllowed=false, continue substantive work and respect retryAfterMs rather than bypassing the gate with a raw final. If the current cached schema does not expose that action, use continuation_task action=checkpoint with note=atcc-turn-complete. Do not voluntarily final while the returned finalResponseAllowed is false.",
+    "Call continuation_task status first. The runtime atomically claims any server-owned expected synthetic generation; do not search for, expose, or pass a continuation token to ordinary tools. Then continue substantive work with the same full Host reasoning budget and sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes until the current milestones are complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. Four substantive operations are only the post-ACK minimum, not a target duration. Synthetic duration is never a fixed number of minutes. A current Host profile becomes calibrated only from verified timeout/cutoff samples, and later Host-window changes must update that profile from new observations without a source-code change. Even a calibrated budget is merely the earliest legal incomplete-stage boundary, not an instruction to stop; keep working while the milestone is runnable. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId and existing process/workspace state. Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged. If and only if a status/checkpoint reports milestoneCardRequired/reanchorRequired because the synthetic checkpoint changed the required milestone set, issue continuation_anchor exactly once for that new generation; otherwise never create a duplicate card.",
+    "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. A failed command/test or a small number of quick tool calls is not a legitimate yield boundary. If runnable milestones remain, keep diagnosing and invoking the required tools in this same turn instead of promising future work. If a genuine incomplete-stage boundary is necessary after sustained work, prefer continuation_task action=turn-complete; if it is rejected with synthetic-host-budget-calibration-required, synthetic-turn-min-active-work-required, or reports finalResponseAllowed=false, continue substantive work. Respect retryAfterMs only if the runtime actually supplies that dynamically learned value; never invent or wait for a hard-coded duration. If the current cached schema does not expose that action, use continuation_task action=checkpoint with note=atcc-turn-complete. Do not voluntarily final while the returned finalResponseAllowed is false.",
   ];
   return lines.join("\n");
 }
@@ -356,6 +359,7 @@ export function installContinuationCoordinator(app, options = {}) {
     senderCapability: undefined,
     ensuringTask: undefined,
     supervisorTimer: undefined,
+    wakeSource: undefined,
     lifecycleRefreshTimer: undefined,
     lifecycleCleanup: undefined,
     lastHeartbeatAt: 0,
@@ -1054,7 +1058,37 @@ export function installContinuationCoordinator(app, options = {}) {
     }
   }
 
+  function stopWakeSource() {
+    const source = state.wakeSource;
+    state.wakeSource = undefined;
+    try {
+      source?.close?.();
+    } catch {
+      // Best-effort teardown only.
+    }
+  }
+
+  function startWakeSource() {
+    if (state.wakeSource || state.disposed || typeof EventSource !== "function") return;
+    try {
+      const source = new EventSource(CONTINUATION_WAKE_URL);
+      state.wakeSource = source;
+      source.addEventListener("wake", () => {
+        // Wake hints are never continuation authority. The forced tick re-reads
+        // durable server state and still has to win continuation_sender CAS.
+        void supervisorTick({ forceAuthoritative: true });
+      });
+      source.addEventListener("error", () => {
+        // EventSource reconnects automatically; timer/lifecycle paths remain
+        // independent fallbacks and no send is manufactured from an error.
+      });
+    } catch {
+      state.wakeSource = undefined;
+    }
+  }
+
   function startSupervisor() {
+    startWakeSource();
     // Keep a lightweight supervisor alive for non-terminal waiting tasks too. A
     // watch-process registration may arrive after the anchor is mounted, and a
     // stopped timer would otherwise never discover that new server-side watch.
@@ -1299,6 +1333,7 @@ export function installContinuationCoordinator(app, options = {}) {
       if (state.disposed) return;
       state.disposed = true;
       stopSupervisor();
+      stopWakeSource();
       stopLifecycleRefresh();
       app.removeEventListener?.("toolinput", onToolInput);
       app.removeEventListener?.("toolinputpartial", onToolInput);

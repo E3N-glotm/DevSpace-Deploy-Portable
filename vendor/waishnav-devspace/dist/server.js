@@ -551,7 +551,7 @@ function serverInstructions(config) {
         config.features?.continuationGuard
         ? " Every real ChatGPT thread owns one lifetime DevSpace Task Contract/taskId. Every manual user message that actually uses DevSpace owns exactly one fresh visible continuation_anchor milestone card. At the start of every assistant turn that will use DevSpace, first call continuation_task action=status. The first status of a manual user turn sets manualTakeover=true exactly once (or, only on an older cached schema, note=manual-user-turn-takeover); when that manual message defines a different task, include its objective and requiredMilestones in the same first status so the manual takeover, active milestone set, workset switch and fresh card are one atomic priority transition. This manual transition supersedes READY/CLAIMED/DELIVERING/synthetic ownership before any manual side effect. When status reports manualRoundCardRequired/milestoneCardRequired/initialAnchorRequired/reanchorRequired, call continuation_anchor exactly once before substantive DevSpace work. Synthetic resumed turns omit manualTakeover, atomically claim the server-owned expected generation, and reuse the current card while requiredMilestones is unchanged. If a synthetic checkpoint changes requiredMilestones, the runtime rotates one new generation and reports milestoneCardRequired/initialAnchorRequired/reanchorRequired; issue continuation_anchor exactly once for that generation. Repeated same-set checkpoints, progress/evidence updates, reconnects, page refreshes, service restarts, workspace switches, iframe rehydrates, heartbeat and lease refresh reuse the current generation and must not render duplicates. If anchorMountVerificationPending is true, never issue a duplicate for that generation. All card generations reuse the same lifetime taskId. Later new work reactivates that taskId with continuation_task action=begin; continue/resume reuses unfinished milestones. completion-driven means required milestones and evidence, not elapsed time, own completion. 1.1.59 dev14 uses the Assistant Turn Completion Contract (ATCC): long reasoning, response generation, request silence, activity-lease expiry, iframe heartbeat, synthetic ownership expiry and historical Host cutoff samples are diagnostic only and can never end the current assistant turn. The only completion-driven automatic continuation authorities are (1) a verified explicit Host timeout for the exact current turn, or (2) an explicit model-signed stage boundary while milestones remain. A normal model-driven stage boundary requires the model, after substantive current-turn work, to call continuation_task action=turn-complete as its final DevSpace control action; this records COMPLETION_REQUESTED for the exact current turn lease but does not itself interrupt the response. If the verified current Workspace App observes lifecycle teardown for that same request, teardown is an immediate confirmation fast path. Because the current ChatGPT Apps Host does not reliably emit teardown after an ordinary assistant final, the runtime also promotes only that exact model-signed COMPLETION_REQUESTED lease after a bounded 8-second completion-handoff grace, provided no model-originated DevSpace request is still in flight. GENERATING silence, replying/thinking, lease expiry, heartbeat and historical cutoff samples can never enter this handoff path. If the model performs any later substantive DevSpace work after turn-complete, the completion request is revoked back to GENERATING and the old handoff permanently loses authority. Manual takeover likewise rotates the turn lease and invalidates stale completion intent. Manual turns require substantive current-turn work before turn-complete; synthetic resumed turns have the same full reasoning/turn budget as manual continue, a long ownership lease, at least four post-ACK substantive operations, and a two-minute minimum active-work window before they may voluntarily end an incomplete runnable stage. Neither of those synthetic quality gates is a timer that creates a continuation. Automatic resumes must receive the same sustained-execution rule as manual input. When finalResponseAllowed=false, do not stop after ACK/status/progress/checkpoint; continue substantive work until the milestone is complete, genuinely blocked, explicitly paused/cancelled, the Host truncates the turn, or you intentionally sign turn-complete after sufficient work because this stage is genuinely ready to end. Retry transient transport failures over bounded readiness backoff before declaring failure. Before replaying uncertain side effects, inspect durable state. Use complete only after the current required milestone-card generation is issued/verified and all required milestones are verified with evidence."
             : "",
-    ].join("").replace("1.1.59 dev14", "1.1.59 dev18");
+].join("").replace("1.1.59 dev14", "1.1.59 dev19");
     const compactActivityInstruction = " Keep tool calls task-driven and minimal because the client may expose every MCP invocation and its JSON arguments in a native activity panel. Do not call capabilities, doctor, session_list, session_resume, or show_changes merely to demonstrate or test the UI. Do not issue no-op diagnostics after the required result is already known. Use show_changes only once after actual file modifications.";
     if (config.toolMode === "codex") {
         return `Use DevSpace as a local-or-remote coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Remote Linux projects use devspace://<agent-id-or-name>/absolute/linux/path and then use the same tools as local projects; do not fall back to SSH merely because the workspace is remote. Use ${toolNames.read} for direct file reads, apply_patch for structured multi-file modifications, exec_command for commands, and write_stdin to poll or interact with running processes. ${permissions} Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction files before working in their scope.${featureInstruction}${artifactInstruction}${showChangesInstruction}${compactActivityInstruction}`;
@@ -3562,6 +3562,29 @@ export function createServer(config = loadConfig(), options = {}) {
     const runtimeState = new StructuredRuntimeState(config.stateDir);
     structuredRuntimeState = runtimeState;
     continuationTaskContractsEnabled = Boolean(config.features?.continuationGuard);
+    // Browser/Host scheduling can freeze a background Workspace App after the
+    // assistant final, so its JavaScript polling timer is not a reliable READY
+    // consumer. This channel is wake-only: it never carries task ids/tokens or
+    // grants delivery authority. The App must still re-read durable state and
+    // win the existing continuation_sender CAS before app.sendMessage.
+    const continuationWakeClients = new Set();
+    const writeContinuationWake = (res, reason = "ready") => {
+        if (!res || res.writableEnded || res.destroyed)
+            return false;
+        try {
+            res.write(`event: wake\ndata: ${JSON.stringify({ reason })}\n\n`);
+            return true;
+        }
+        catch {
+            return false;
+        }
+    };
+    const broadcastContinuationWake = (reason = "ready") => {
+        for (const res of [...continuationWakeClients]) {
+            if (!writeContinuationWake(res, reason))
+                continuationWakeClients.delete(res);
+        }
+    };
     const remoteAgents = new RemoteAgentManager(config, runtimeState);
     const pluginManager = new PluginManager(config, runtimeState);
     if (!Object.prototype.hasOwnProperty.call(config, "_devspaceBaseSkillPaths")) {
@@ -3696,6 +3719,7 @@ export function createServer(config = loadConfig(), options = {}) {
                         generation: entry.generation,
                     })),
                 });
+                broadcastContinuationWake("ready-generation");
             }
         }
         catch (error) {
@@ -3705,6 +3729,13 @@ export function createServer(config = loadConfig(), options = {}) {
         }
     }, 5_000);
     continuationSupervisorTimer.unref();
+    const continuationWakeHeartbeatTimer = setInterval(() => {
+        if (!continuationTaskContractsEnabled || continuationWakeClients.size === 0)
+            return;
+        // Liveness hint only. It cannot create or authorize a continuation.
+        broadcastContinuationWake("heartbeat");
+    }, 10_000);
+    continuationWakeHeartbeatTimer.unref();
     if (config.logging.trustProxy) {
         // The supported deployments terminate TLS at a single local reverse proxy
         // (for example ngrok or Tailscale Funnel). Trusting every proxy allows a
@@ -3757,6 +3788,20 @@ export function createServer(config = loadConfig(), options = {}) {
     app.options("/mcp-app-assets/{*asset}", (_req, res) => {
         setAssetHeaders(res);
         res.sendStatus(204);
+    });
+    app.get("/mcp-app-assets/continuation-wake", (req, res) => {
+        setAssetHeaders(res);
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, max-age=0, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.flushHeaders?.();
+        continuationWakeClients.add(res);
+        // Reconnect after READY must discover already-persisted work instantly.
+        writeContinuationWake(res, "connected");
+        const remove = () => continuationWakeClients.delete(res);
+        req.once("close", remove);
+        res.once("close", remove);
+        res.once("finish", remove);
     });
     app.use("/mcp-app-assets", express.static(uiBuildDirectory(), {
         immutable: true,
@@ -3909,6 +3954,16 @@ export function createServer(config = loadConfig(), options = {}) {
                 clearInterval(sessionCleanupTimer);
                 clearInterval(continuationProcessGuardTimer);
                 clearInterval(continuationSupervisorTimer);
+                clearInterval(continuationWakeHeartbeatTimer);
+                for (const res of continuationWakeClients) {
+                    try {
+                        res.end();
+                    }
+                    catch {
+                        // Best-effort shutdown only.
+                    }
+                }
+                continuationWakeClients.clear();
                 const results = await transports.closeAll();
                 logSessionCloseResults("server_shutdown", results);
                 fileWatches.close();
