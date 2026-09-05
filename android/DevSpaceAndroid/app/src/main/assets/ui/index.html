@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>DevSpace Mobile</title>
+  <style>
+    :root{
+      --bg:#f4f6f8;--surface:#ffffff;--surface2:#f7f8fa;--surface3:#eceff3;
+      --text:#16191e;--muted:#68717d;--line:#dfe3e8;--gold:#b88122;--gold2:#d8a746;
+      --ok:#198754;--warn:#b56b00;--bad:#c93d4c;--blue:#2d6cdf;--shadow:0 10px 30px rgba(24,31,40,.07);
+    }
+    @media(prefers-color-scheme:dark){:root{
+      --bg:#090b0e;--surface:#11151a;--surface2:#171c22;--surface3:#20262e;
+      --text:#eef2f7;--muted:#929daa;--line:#2a323d;--gold:#e0ad4d;--gold2:#f0c66d;
+      --ok:#5dcc91;--warn:#efb45f;--bad:#f07882;--blue:#76adff;--shadow:0 14px 34px rgba(0,0,0,.22);
+    }}
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+    html,body{margin:0;width:100%;min-height:100%;overflow-x:hidden;overflow-y:auto;overscroll-behavior-y:auto;background:var(--bg);color:var(--text);font-family:Inter,Roboto,"Noto Sans SC",system-ui,sans-serif}
+    body{padding:0 0 calc(92px + env(safe-area-inset-bottom));touch-action:pan-y}
+    button,input,textarea,select{font:inherit}
+    .top{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(18px);border-bottom:1px solid var(--line);padding:calc(12px + env(safe-area-inset-top)) 15px 11px}
+    .topRow{max-width:880px;margin:auto;display:flex;align-items:center;gap:11px}
+    .logo{width:40px;height:40px;display:grid;place-items:center;border-radius:13px;background:linear-gradient(145deg,var(--gold2),#8b621d);color:#15120c;font-weight:900;font-size:22px;box-shadow:0 7px 20px rgba(184,129,34,.18)}
+    .brand{min-width:0;flex:1}.brand b{display:block;font-size:16px}.brand small{display:block;margin-top:2px;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .liveDot{width:10px;height:10px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 4px color-mix(in srgb,var(--muted) 14%,transparent)}
+    .liveDot.ok{background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 16%,transparent)}
+    .liveDot.warn{background:var(--warn);box-shadow:0 0 0 4px color-mix(in srgb,var(--warn) 15%,transparent)}
+    .liveDot.bad{background:var(--bad);box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 15%,transparent)}
+    main{max-width:880px;margin:auto;padding:15px}
+    .page{display:none;animation:pageIn .16s ease}.page.active{display:block}@keyframes pageIn{from{opacity:.4;transform:translateY(4px)}to{opacity:1;transform:none}}
+    .hero{border:1px solid color-mix(in srgb,var(--gold) 38%,var(--line));background:linear-gradient(145deg,color-mix(in srgb,var(--gold) 15%,var(--surface)),var(--surface) 58%,color-mix(in srgb,var(--blue) 7%,var(--surface)));border-radius:23px;padding:18px;box-shadow:var(--shadow)}
+    .heroTop{display:flex;gap:12px;align-items:flex-start}.heroText{flex:1;min-width:0}.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--gold);font-weight:750}.hero h1{font-size:21px;line-height:1.25;margin:7px 0}.hero p{font-size:12px;color:var(--muted);line-height:1.65;margin:0;word-break:break-word}
+    .stateBadge{padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:var(--surface);font-size:10px;font-weight:750;white-space:nowrap}.stateBadge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,var(--line))}.stateBadge.warn{color:var(--warn)}.stateBadge.bad{color:var(--bad)}
+    .actionRow{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:16px}
+    button{border:1px solid var(--line);background:var(--surface2);color:var(--text);border-radius:13px;padding:11px 12px;font-size:12px;font-weight:700;min-height:42px}button:active{transform:translateY(1px)}button.primary{background:linear-gradient(145deg,var(--gold2),#b57d25);border-color:var(--gold2);color:#17130b}button.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,var(--line));background:color-mix(in srgb,var(--bad) 6%,var(--surface))}button.ghost{background:transparent;color:var(--muted)}button.small{padding:8px 10px;min-height:35px;font-size:10px}
+    .statusGrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:13px}.statusCard{border:1px solid var(--line);background:var(--surface);border-radius:17px;padding:13px;min-height:90px}.statusCard .k{font-size:10px;color:var(--muted);margin-bottom:8px}.statusCard b{display:block;font-size:13px;line-height:1.35}.statusCard small{display:block;margin-top:5px;color:var(--muted);font-size:9px;line-height:1.45}.dotline{display:flex;align-items:center;gap:7px}.tinyDot{width:8px;height:8px;border-radius:50%;background:var(--muted)}.tinyDot.ok{background:var(--ok)}.tinyDot.warn{background:var(--warn)}.tinyDot.bad{background:var(--bad)}
+    .sectionLabel{font-size:10px;color:var(--muted);letter-spacing:1.15px;text-transform:uppercase;margin:20px 3px 8px}
+    .card{background:var(--surface);border:1px solid var(--line);border-radius:19px;padding:15px;box-shadow:var(--shadow);margin-bottom:12px}.cardTitle{display:flex;gap:10px;align-items:center;margin-bottom:12px}.cardIcon{width:33px;height:33px;border-radius:11px;background:var(--surface2);border:1px solid var(--line);display:grid;place-items:center;font-size:12px;font-weight:900;color:var(--gold)}.cardTitle .copy{flex:1}.cardTitle h2{font-size:14px;margin:0}.cardTitle p{font-size:10px;color:var(--muted);margin:3px 0 0;line-height:1.4}
+    label.field{display:block;margin:11px 0}.field span{display:flex;justify-content:space-between;gap:10px;margin:0 2px 6px;font-size:11px;font-weight:650}.field em{font-style:normal;color:var(--muted);font-size:9px;font-weight:500}
+    input,textarea,select{width:100%;border:1px solid var(--line);background:var(--surface2);color:var(--text);border-radius:12px;padding:11px 12px;outline:none;font-size:12px}input:focus,textarea:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px color-mix(in srgb,var(--gold) 12%,transparent)}textarea{min-height:92px;resize:vertical;line-height:1.5}
+    .row{display:flex;gap:8px;align-items:center}.row>*{min-width:0}.row .fill{flex:1}
+    .switchRow{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent)}.switchRow:last-child{border-bottom:0}.switchCopy{flex:1}.switchCopy b{display:block;font-size:12px}.switchCopy small{display:block;color:var(--muted);font-size:9.5px;line-height:1.5;margin-top:3px}
+    .switch{position:relative;width:45px;height:25px;flex:0 0 auto}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;inset:0;border-radius:999px;background:var(--surface3);border:1px solid var(--line);transition:.2s}.slider:before{content:"";position:absolute;width:19px;height:19px;left:2px;top:2px;border-radius:50%;background:var(--muted);transition:.2s}.switch input:checked+.slider{background:color-mix(in srgb,var(--gold) 28%,var(--surface));border-color:var(--gold)}.switch input:checked+.slider:before{transform:translateX(20px);background:var(--gold2)}
+    .provider{border:1px solid var(--line);border-radius:16px;padding:13px;background:var(--surface2);margin-top:10px}.provider.active{border-color:color-mix(in srgb,var(--gold) 55%,var(--line));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--gold) 10%,transparent)}.providerHead{display:flex;align-items:center;gap:9px}.providerHead .copy{flex:1}.providerHead b{font-size:12px}.providerHead small{display:block;margin-top:2px;color:var(--muted);font-size:9px}
+    .note{border-left:2px solid var(--gold);background:color-mix(in srgb,var(--gold) 6%,var(--surface));padding:9px 10px;border-radius:0 10px 10px 0;color:var(--muted);font-size:10px;line-height:1.55;margin:10px 0}.note.bad{border-left-color:var(--bad)}
+    .console{background:color-mix(in srgb,var(--bg) 70%,#000);border:1px solid var(--line);border-radius:14px;padding:12px;min-height:140px;white-space:pre-wrap;word-break:break-word;font:10.5px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;color:color-mix(in srgb,var(--text) 78%,var(--muted))}
+    .domainList{display:none}.domainList.show{display:block}
+    .nav{position:fixed;z-index:40;left:10px;right:10px;bottom:calc(9px + env(safe-area-inset-bottom));max-width:650px;margin:auto;display:grid;grid-template-columns:repeat(5,1fr);gap:5px;padding:6px;border:1px solid var(--line);border-radius:19px;background:color-mix(in srgb,var(--surface) 92%,transparent);backdrop-filter:blur(18px);box-shadow:0 15px 38px rgba(0,0,0,.22)}.nav button{border:0;background:transparent;padding:8px 3px;min-height:46px;color:var(--muted);border-radius:13px;font-size:9px;font-weight:700}.nav button b{display:block;font-size:13px;line-height:1;margin-bottom:5px}.nav button.active{background:color-mix(in srgb,var(--gold) 12%,var(--surface));color:var(--gold)}
+    .toast{position:fixed;z-index:80;left:50%;bottom:calc(78px + env(safe-area-inset-bottom));transform:translate(-50%,18px);max-width:calc(100% - 32px);padding:10px 13px;border-radius:12px;border:1px solid var(--line);background:var(--surface3);font-size:11px;opacity:0;pointer-events:none;transition:.2s;box-shadow:var(--shadow)}.toast.show{opacity:1;transform:translate(-50%,0)}.toast.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,var(--line))}
+    @media(min-width:720px){.statusGrid{grid-template-columns:repeat(4,1fr)}.split{display:grid;grid-template-columns:1fr 1fr;gap:12px}.split>.card{margin-bottom:0}}
+  </style>
+</head>
+<body>
+  <header class="top"><div class="topRow">
+    <div class="logo">D</div>
+    <div class="brand"><b>DevSpace Mobile</b><small id="version">Android lifecycle-ui</small></div>
+    <span id="liveDot" class="liveDot"></span>
+  </div></header>
+
+  <main>
+    <section id="page-overview" class="page active">
+      <div class="hero">
+        <div class="heroTop"><div class="heroText"><div class="eyebrow">Runtime overview</div><h1 id="headline">服务已停止</h1><p id="detail">MCP 与公网 Tunnel 均未运行。</p></div><span id="stateBadge" class="stateBadge">STOPPED</span></div>
+        <div class="actionRow"><button class="primary" onclick="startServer()">启动服务</button><button class="danger" onclick="stopServer()">停止全部</button></div>
+      </div>
+      <div class="statusGrid">
+        <div class="statusCard"><div class="k">总体状态</div><div class="dotline"><span id="serviceDot" class="tinyDot"></span><b id="serviceText">已停止</b></div><small id="uptimeText">Uptime 0s</small></div>
+        <div class="statusCard"><div class="k">MCP</div><div class="dotline"><span id="mcpDot" class="tinyDot"></span><b id="mcpText">stopped</b></div><small id="mcpUrlText">127.0.0.1:7676</small></div>
+        <div class="statusCard"><div class="k">Tunnel</div><div class="dotline"><span id="tunnelDot" class="tinyDot"></span><b id="tunnelText">stopped</b></div><small id="providerText">provider: none</small></div>
+        <div class="statusCard"><div class="k">Root</div><div class="dotline"><span id="rootDot" class="tinyDot"></span><b id="rootText">未检测</b></div><small>Magisk / KernelSU / APatch</small></div>
+      </div>
+      <div class="sectionLabel">生命周期规则</div>
+      <div class="card"><div class="note">未开启“开机自动启动”时：按 Home 仅进入后台，服务继续；从最近任务中划掉 DevSpace 后，MCP、ngrok、cloudflared 会一并停止。开启开机自动启动后，允许服务脱离界面常驻并在系统启动后恢复。</div><div class="row"><button class="fill" onclick="checkRoot()">检测 Root</button><button class="fill" onclick="showPage('runtime')">查看诊断</button></div></div>
+    </section>
+
+    <section id="page-mcp" class="page">
+      <div class="sectionLabel">MCP / OAuth</div>
+      <div class="card"><div class="cardTitle"><div class="cardIcon">M</div><div class="copy"><h2>公网与本地 MCP</h2><p>独立 OAuth Server，不依赖 Windows DevSpace</p></div></div>
+        <label class="field"><span>Public Base URL <em>不要带 /mcp</em></span><input id="publicBaseUrl" placeholder="https://xxxx.ngrok-free.app" inputmode="url" autocapitalize="none"></label>
+        <label class="field"><span>Owner Password <em id="ownerHint">尚未保存</em></span><input id="ownerPassword" type="password" placeholder="留空保持现有密码"></label>
+        <label class="field"><span>Local MCP Port</span><input id="localPort" type="number" min="1024" max="65535" value="7676"></label>
+        <div class="row"><button class="fill" onclick="saveConfig()">保存配置</button><button class="fill" onclick="copyMcpUrl()">复制 MCP URL</button></div>
+        <div class="row" style="margin-top:8px"><button class="fill ghost" onclick="clearOAuth()">重置 OAuth 客户端状态</button></div>
+      </div>
+    </section>
+
+    <section id="page-tunnel" class="page">
+      <div class="sectionLabel">公网 Tunnel</div>
+      <div class="card"><div class="cardTitle"><div class="cardIcon">T</div><div class="copy"><h2>Embedded Tunnel Runtime</h2><p>ngrok Android Agent SDK / cloudflared 二选一</p></div></div>
+        <div id="ngrokBox" class="provider"><div class="providerHead"><div class="copy"><b>ngrok</b><small id="ngrokStatus">未配置</small></div><label class="switch"><input id="ngrokEnabled" type="checkbox" onchange="exclusiveTunnel('ngrok')"><span class="slider"></span></label></div>
+          <div class="note">APK 内置 Android ARM64 ngrok Agent SDK，不依赖系统安装 CLI。Authtoken 属于账户凭据；也可以用 API Key 让 APK 调 ngrok API 创建独立 Authtoken。</div>
+          <label class="field"><span>ngrok API Key <em id="apiKeyHint">可选</em></span><input id="ngrokApiKey" type="password" placeholder="留空保持已保存 API Key"></label>
+          <div class="row"><button class="fill" onclick="provisionNgrok()">生成 Authtoken</button><button class="small ghost" onclick="openExternal('ngrok-api-key')">API Key 页面</button></div>
+          <label class="field"><span>ngrok Authtoken <em id="ngrokTokenHint">尚未保存</em></span><input id="ngrokToken" type="password" placeholder="留空保持已保存 Authtoken"></label>
+          <div class="row"><button class="fill" onclick="discoverDomains()">读取保留域名</button><button class="small ghost" onclick="openExternal('ngrok-domains')">Domains</button></div>
+          <div id="domainList" class="domainList"><label class="field"><span>选择域名</span><select id="domainSelect" onchange="useDomain()"></select></label></div>
+          <button class="danger small" onclick="clearNgrok()">清除 ngrok 凭据</button>
+        </div>
+        <div id="cloudflareBox" class="provider"><div class="providerHead"><div class="copy"><b>Cloudflare Tunnel</b><small id="cloudflareStatus">未配置</small></div><label class="switch"><input id="cloudflareEnabled" type="checkbox" onchange="exclusiveTunnel('cloudflare')"><span class="slider"></span></label></div>
+          <label class="field"><span>Named Tunnel Token</span><input id="cloudflareToken" type="password" placeholder="留空保持已保存 Token"></label>
+          <div class="row"><button class="fill ghost" onclick="openExternal('cloudflare')">打开 Cloudflare</button><button class="small danger" onclick="clearCloudflare()">清除 Token</button></div>
+        </div>
+        <div class="note bad">切换 Tunnel 提供商后先保存配置，再重启服务；运行中的服务不会热切换底层 Tunnel 进程。</div>
+      </div>
+    </section>
+
+    <section id="page-permissions" class="page">
+      <div class="sectionLabel">权限边界</div>
+      <div class="card"><div class="cardTitle"><div class="cardIcon">R</div><div class="copy"><h2>Root 权限面</h2><p>开关直接限制 MCP 工具调用，不只是 UI 显示</p></div></div>
+        <div class="switchRow"><div class="switchCopy"><b>Full Root Access</b><small>允许任意 Root shell 与进程工具；关闭时仅使用结构化受限操作。</small></div><label class="switch"><input id="fullAccess" type="checkbox"><span class="slider"></span></label></div>
+        <div class="switchRow"><div class="switchCopy"><b>屏幕 / 输入控制</b><small>截图、tap、swipe、文字输入与按键。</small></div><label class="switch"><input id="allowScreenControl" type="checkbox"><span class="slider"></span></label></div>
+        <div class="switchRow"><div class="switchCopy"><b>应用管理</b><small>pm/am 安装、卸载、启动、停止和清理。</small></div><label class="switch"><input id="allowAppManagement" type="checkbox"><span class="slider"></span></label></div>
+        <div class="switchRow"><div class="switchCopy"><b>结构化文件写入</b><small>write / edit / remove / rename / mkdir。</small></div><label class="switch"><input id="allowFileWrite" type="checkbox"><span class="slider"></span></label></div>
+        <label class="field"><span>Scoped writable roots <em>每行一个绝对路径</em></span><textarea id="writableRoots"></textarea></label>
+        <button class="primary" style="width:100%" onclick="saveConfig()">保存权限设置</button>
+      </div>
+    </section>
+
+    <section id="page-runtime" class="page">
+      <div class="sectionLabel">后台与诊断</div>
+      <div class="card"><div class="cardTitle"><div class="cardIcon">L</div><div class="copy"><h2>Lifecycle</h2><p>决定服务能否脱离界面常驻</p></div></div>
+        <div class="switchRow"><div class="switchCopy"><b>开机自动启动</b><small>关闭：划掉 App 后服务必须停止；开启：允许开机启动和脱离任务常驻。</small></div><label class="switch"><input id="startOnBoot" type="checkbox"><span class="slider"></span></label></div>
+        <div class="switchRow"><div class="switchCopy"><b>保持 CPU WakeLock</b><small>息屏后保持 MCP/Tunnel 连续运行，会增加耗电。</small></div><label class="switch"><input id="keepWakeLock" type="checkbox"><span class="slider"></span></label></div>
+        <div class="switchRow"><div class="switchCopy"><b>Tunnel 自动重连</b><small>网络切换或 runtime 退出后指数退避重连。</small></div><label class="switch"><input id="tunnelAutoReconnect" type="checkbox"><span class="slider"></span></label></div>
+        <div class="switchRow"><div class="switchCopy"><b>详细 Tunnel 日志</b><small>将底层 runtime 诊断写入前台状态；排错完成后可关闭。</small></div><label class="switch"><input id="verboseTunnelLogs" type="checkbox"><span class="slider"></span></label></div>
+        <button class="primary" style="width:100%;margin-top:10px" onclick="saveConfig()">保存后台设置</button>
+      </div>
+      <div class="card"><div class="cardTitle"><div class="cardIcon">D</div><div class="copy"><h2>Runtime diagnostics</h2><p>六态状态机 + MCP/Tunnel/Root 独立状态</p></div></div><div id="console" class="console">等待 Native 状态…</div><div class="row" style="margin-top:10px"><button class="fill" onclick="checkRoot()">重新检测 Root</button><button class="fill" onclick="copyMcpUrl()">复制 MCP URL</button></div></div>
+    </section>
+  </main>
+
+  <nav class="nav">
+    <button id="nav-overview" class="active" onclick="showPage('overview')"><b>◉</b>概览</button>
+    <button id="nav-mcp" onclick="showPage('mcp')"><b>M</b>MCP</button>
+    <button id="nav-tunnel" onclick="showPage('tunnel')"><b>↗</b>Tunnel</button>
+    <button id="nav-permissions" onclick="showPage('permissions')"><b>R</b>权限</button>
+    <button id="nav-runtime" onclick="showPage('runtime')"><b>≡</b>后台</button>
+  </nav>
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const $=id=>document.getElementById(id);let initialized=false,lastState={};
+    const bool=id=>$(id).checked,val=id=>$(id).value.trim();
+    function call(name,...args){try{return JSON.parse(DevSpaceNative[name](...args))}catch(e){return {ok:false,message:String(e)}}}
+    function toast(message,ok=true){const t=$('toast');t.textContent=message||'';t.className='toast show'+(ok?'':' bad');clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.className='toast',2600)}
+    function showPage(name){document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id==='page-'+name));document.querySelectorAll('.nav button').forEach(x=>x.classList.toggle('active',x.id==='nav-'+name));window.scrollTo(0,0)}
+    function collect(){return {publicBaseUrl:val('publicBaseUrl'),ownerPassword:val('ownerPassword'),localPort:Number(val('localPort')||7676),fullAccess:bool('fullAccess'),allowScreenControl:bool('allowScreenControl'),allowAppManagement:bool('allowAppManagement'),allowFileWrite:bool('allowFileWrite'),startOnBoot:bool('startOnBoot'),keepWakeLock:bool('keepWakeLock'),tunnelAutoReconnect:bool('tunnelAutoReconnect'),verboseTunnelLogs:bool('verboseTunnelLogs'),writableRoots:$('writableRoots').value,ngrokEnabled:bool('ngrokEnabled'),cloudflareEnabled:bool('cloudflareEnabled'),ngrokToken:val('ngrokToken'),ngrokApiKey:val('ngrokApiKey'),cloudflareToken:val('cloudflareToken')}}
+    function saveConfig(silent=false){const r=call('saveConfig',JSON.stringify(collect()));if(!silent)toast(r.message,r.ok);if(r.ok){$('ownerPassword').value='';$('ngrokToken').value='';$('ngrokApiKey').value='';$('cloudflareToken').value=''}return r}
+    function startServer(){const s=saveConfig(true);if(!s.ok){toast(s.message,false);return}const r=call('startServer');toast(r.message,r.ok)}
+    function stopServer(){const r=call('stopServer');toast(r.message,r.ok)}
+    function checkRoot(){const r=call('checkRoot');toast(r.message,r.ok)}
+    function clearNgrok(){const r=call('clearNgrok');toast(r.message,r.ok)}
+    function clearCloudflare(){const r=call('clearCloudflare');toast(r.message,r.ok)}
+    function clearOAuth(){const r=call('clearOAuth');toast(r.message,r.ok)}
+    function openExternal(x){DevSpaceNative.openExternal(x)}
+    function copyMcpUrl(){const base=val('publicBaseUrl').replace(/\/+$/,'');const r=call('copyText',base?base+'/mcp':'http://127.0.0.1:'+(val('localPort')||7676)+'/mcp');toast(r.message,r.ok)}
+    function provisionNgrok(){const apiKey=val('ngrokApiKey');if(apiKey)call('saveConfig',JSON.stringify(collect()));const r=call('provisionNgrok',JSON.stringify({apiKey}));toast(r.message,r.ok)}
+    function discoverDomains(){const r=call('discoverNgrokDomains',JSON.stringify({apiKey:val('ngrokApiKey')}));toast(r.message,r.ok)}
+    function useDomain(){const d=$('domainSelect').value;if(d)$('publicBaseUrl').value='https://'+d}
+    function exclusiveTunnel(which){if(which==='ngrok'&&bool('ngrokEnabled'))$('cloudflareEnabled').checked=false;if(which==='cloudflare'&&bool('cloudflareEnabled'))$('ngrokEnabled').checked=false;paintProviders()}
+    function paintProviders(){$('ngrokBox').classList.toggle('active',bool('ngrokEnabled'));$('cloudflareBox').classList.toggle('active',bool('cloudflareEnabled'))}
+    function setInitial(s){$('publicBaseUrl').value=s.publicBaseUrl||'';$('localPort').value=s.localPort||7676;$('fullAccess').checked=!!s.fullAccess;$('allowScreenControl').checked=!!s.allowScreenControl;$('allowAppManagement').checked=!!s.allowAppManagement;$('allowFileWrite').checked=!!s.allowFileWrite;$('startOnBoot').checked=!!s.startOnBoot;$('keepWakeLock').checked=!!s.keepWakeLock;$('tunnelAutoReconnect').checked=!!s.tunnelAutoReconnect;$('verboseTunnelLogs').checked=!!s.verboseTunnelLogs;$('writableRoots').value=s.writableRoots||'';$('ngrokEnabled').checked=!!s.ngrokEnabled;$('cloudflareEnabled').checked=!!s.cloudflareEnabled;paintProviders();initialized=true}
+    function statusClass(v){v=String(v||'').toLowerCase();if(/running|ready|online|granted/.test(v))return'ok';if(/starting|stopping|degraded/.test(v))return'warn';if(/error|missing|failed/.test(v))return'bad';return''}
+    function prettyState(v){return ({STOPPED:'已停止',STARTING:'启动中',RUNNING:'运行正常',DEGRADED:'部分异常',ERROR:'运行异常',STOPPING:'停止中'})[v]||v||'未知'}
+    function formatUptime(ms){ms=Number(ms||0);if(ms<1000)return'Uptime 0s';const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return'Uptime '+(h?h+'h ':'')+(m?m+'m ':'')+(s%60)+'s'}
+    function renderStatus(s){lastState=s||{};const sc=statusClass(s.state);$('version').textContent=(s.appVersion||'DevSpace Mobile')+' · '+(s.ngrokRuntime||'ngrok')+' · cloudflared '+(s.cloudflaredRuntime||'');$('headline').textContent=s.headline||prettyState(s.state);$('detail').textContent=s.detail||'MCP 与公网 Tunnel 均未运行';$('stateBadge').textContent=s.state||'STOPPED';$('stateBadge').className='stateBadge '+sc;$('liveDot').className='liveDot '+sc;$('serviceDot').className='tinyDot '+sc;$('serviceText').textContent=prettyState(s.state);$('uptimeText').textContent=formatUptime(s.uptimeMs);
+      const mc=statusClass(s.mcpState);$('mcpDot').className='tinyDot '+mc;$('mcpText').textContent=s.mcpState||'stopped';$('mcpUrlText').textContent='127.0.0.1:'+(s.localPort||7676)+'/mcp';const tc=statusClass(s.tunnelState);$('tunnelDot').className='tinyDot '+tc;$('tunnelText').textContent=s.tunnelState||'stopped';$('providerText').textContent='provider: '+(s.tunnelProvider||'none');$('rootDot').className='tinyDot '+(s.rootGranted?'ok':'bad');$('rootText').textContent=s.rootGranted?'已授权':'未授权';$('ownerHint').textContent=s.ownerPasswordConfigured?'已安全保存':'尚未保存';$('ngrokStatus').textContent=s.ngrokConfigured?'Authtoken 已保存':'Authtoken 未配置';$('ngrokTokenHint').textContent=s.ngrokConfigured?'已安全保存':'尚未保存';$('apiKeyHint').textContent=s.ngrokApiKeyConfigured?'API Key 已安全保存':'可选';$('cloudflareStatus').textContent=s.cloudflareConfigured?'Token 已保存':'Token 未配置';
+      $('console').textContent='STATE    '+(s.state||'STOPPED')+'\nHEADLINE '+(s.headline||'')+'\nMODE     '+(s.runMode||'manual')+'\nROOT     '+(s.rootGranted?'ready':'missing')+'\nMCP      '+(s.mcpState||'stopped')+'\nTUNNEL   '+(s.tunnelState||'stopped')+'\nPROVIDER '+(s.tunnelProvider||'none')+'\nPUBLIC   '+(s.publicBaseUrl||'未配置')+'\nLOCAL    http://127.0.0.1:'+(s.localPort||7676)+'/mcp\nUPTIME   '+formatUptime(s.uptimeMs).replace('Uptime ','')+(s.lastError?'\nERROR    '+s.lastError:'')+(s.detail?'\n\n'+s.detail:'')}
+    window.DevSpaceUI={onState(s){if(!initialized)setInitial(s);renderStatus(s)},onEvent(name,data){if(name==='ngrokDomains'&&data.ok){const a=data.domains||[],sel=$('domainSelect');sel.innerHTML='';a.forEach(d=>{const o=document.createElement('option');o.value=d;o.textContent=d;sel.appendChild(o)});$('domainList').classList.toggle('show',a.length>0);if(a.length){useDomain();toast('已读取 '+a.length+' 个 ngrok 域名')}else toast('账户没有返回可用 reserved domain',false)}else toast(data.message||name,!!data.ok)}};
+    window.addEventListener('load',()=>{try{const s=JSON.parse(DevSpaceNative.getState());setInitial(s);renderStatus(s)}catch(e){toast('Native bridge 初始化失败: '+e,false)}setInterval(()=>{try{renderStatus(JSON.parse(DevSpaceNative.getState()))}catch(e){}},1200)});
+  </script>
+</body>
+</html>

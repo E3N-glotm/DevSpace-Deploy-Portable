@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DevSpace Mobile</string>
+    <string name="channel_name">DevSpace Mobile MCP</string>
+    <string name="channel_description">在手机本机运行独立 DevSpace MCP Server</string>
+</resources>

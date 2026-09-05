@@ -1,0 +1,18 @@
+ngrok Agent SDK notice
+======================
+
+DevSpace Mobile embeds a small Android-native forwarding runtime built from
+the official ngrok Go Agent SDK. It does not bundle or execute the upstream
+Linux ngrok CLI binary.
+
+Component: golang.ngrok.com/ngrok/v2
+Version: 2.1.4
+License: MIT
+Copyright 2022 ngrok, Inc.
+
+The runtime is compiled for GOOS=android, GOARCH=arm64 and communicates with
+the surrounding APK over stdin/stdout. ngrok account use and cloud service
+usage remain subject to ngrok's service terms and the user's ngrok account.
+
+Embedded runtime SHA-256:
+6e7495dbf4f2031bd6d36f5935bf9a97aefa15d6b1c48805b0064b46a0d787bd
