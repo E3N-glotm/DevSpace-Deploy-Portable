@@ -755,12 +755,31 @@ export function installContinuationCoordinator(app, options = {}) {
 
   async function recordHostSignal(hostSignal, note) {
     if (!state.task?.id || terminal(state.task)) return undefined;
-    const outcome = await callTask("host-signal", {
+    const payload = {
       hostProfileId: state.hostProfileId ?? buildHostProfileId(),
-      hostSignal,
       elapsedMs: Math.round(taskElapsedMs(state.task)),
       note,
-    }).catch(() => undefined);
+    };
+    const verifiedVisibleCoordinator = Boolean(state.task?.anchorMountVerifiedAt)
+      && state.anchorSurface && !state.anchorSuperseded && state.anchorMountAcked;
+    // ChatGPT does not always instantiate a newly issued milestone-card iframe.
+    // Keep mount verification truthful: never turn a sender relay into a fake
+    // visible-card ACK. Explicit timeout is a separate Host lifecycle fact, so
+    // when the visible coordinator is unavailable let only the already-bound
+    // current-generation sender report it. The server additionally requires the
+    // exact current turn lease, which prevents a stale relay/old turn from
+    // timing out a later manual or synthetic turn. Generic teardown has no such
+    // fallback because ordinary relay disposal is not evidence that the model
+    // turn ended.
+    const outcome = hostSignal === "timeout" && !verifiedVisibleCoordinator
+      ? await callSender("host-timeout", {
+          ...payload,
+          turnLeaseId: state.task.turnLeaseId,
+        }).catch(() => undefined)
+      : await callTask("host-signal", {
+          ...payload,
+          hostSignal,
+        }).catch(() => undefined);
     if (outcome?.task) state.task = outcome.task;
     return outcome;
   }

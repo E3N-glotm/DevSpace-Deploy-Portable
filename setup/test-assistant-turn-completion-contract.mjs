@@ -87,6 +87,29 @@ try {
     "assistant_turn_completion_note",
   ]) assert.ok(columns.has(column), `missing ATCC column ${column}`);
 
+  // A new conversation starts with status before any workspace exists.
+  // The first manual handshake must already own a durable GENERATING turn.
+  const firstManualScope = "v1/atcc-first-manual-status";
+  const firstManual = runtime.continuationTask({ action: "status",
+    conversationScopeId: firstManualScope, manualTakeover: true,
+    objective: "First user request", requiredMilestones: ["finish"] });
+  assert.ok(firstManual.task?.id, "first manual status must persist a lifetime task");
+  assert.equal(firstManual.task.assistantTurnOwner, "manual");
+  assert.equal(firstManual.task.assistantTurnState, "GENERATING");
+  assert.ok(firstManual.task.manualTakeoverAt);
+  assert.equal(firstManual.manualRoundCardRequired, true);
+  const firstCard = runtime.prepareContinuationAnchorMount({
+    taskId: firstManual.task.id, conversationScopeId: firstManualScope });
+  assert.ok(firstCard.anchorMountToken);
+  const firstRebound = runtime.continuationTask({ action: "begin",
+    taskId: firstManual.task.id, conversationScopeId: firstManualScope,
+    workspaceId: "ws_first_manual", requiredMilestones: ["finish"] });
+  assert.equal(firstRebound.task.id, firstManual.task.id);
+  assert.equal(firstRebound.task.turnLeaseId, firstManual.task.turnLeaseId);
+  assert.equal(firstRebound.task.anchorMountGeneration, firstCard.anchorMountGeneration,
+    "binding the first workspace must not issue a second manual card");
+  assert.equal(firstRebound.task.assistantTurnOwner, "manual");
+
   // Long reasoning/request silence is telemetry only. Neither an expired
   // activity lease nor an old learned Host cutoff may create another turn.
   const longThinkScope = "conversation-atcc-long-think";
@@ -279,6 +302,112 @@ try {
     action: "claim-continuation",
     taskId: timeout.task.id,
   }).accepted, true);
+
+  // ChatGPT may render the continuation_anchor tool result without ever
+  // instantiating the new milestone-card iframe. Keep that mount fact truthful:
+  // a current hidden sender relay may report only an explicit Host timeout, and
+  // only when its conversation/task/card/sender/exact-turn capability all match.
+  // Generic teardown deliberately has no sender fallback.
+  const senderTimeoutScope = "v1/atcc-sender-timeout-pending-anchor";
+  const senderTimeout = begin(senderTimeoutScope);
+  const senderTimeoutMount = runtime.prepareContinuationAnchorMount({
+    taskId: senderTimeout.task.id,
+    conversationScopeId: senderTimeoutScope,
+  });
+  assert.ok(senderTimeoutMount.anchorMountToken);
+  assert.notEqual(senderTimeoutMount.anchorMountVerified, true,
+    "a requested-but-unmounted card must not be reported as verified");
+  const senderTimeoutBind = runtime.bindContinuationSender({
+    claimedConversationScopeId: senderTimeoutScope,
+    taskId: senderTimeout.task.id,
+    senderInstanceId: "ui_atcc_sender_timeout",
+    anchorMountGeneration: senderTimeoutMount.anchorMountGeneration,
+  });
+  assert.equal(senderTimeoutBind.accepted, true, JSON.stringify(senderTimeoutBind));
+  const senderTimeoutBefore = runtime.continuationTask({ action: "status", taskId: senderTimeout.task.id });
+  assert.equal(senderTimeoutBefore.task.anchorMountVerificationPending, true);
+  assert.equal(senderTimeoutBefore.task.anchorMountVerifiedAt, undefined);
+  const staleSenderTurn = runtime.recordContinuationSenderHostTimeout({
+    conversationScopeId: senderTimeoutScope,
+    taskId: senderTimeout.task.id,
+    senderInstanceId: "ui_atcc_sender_timeout",
+    anchorMountToken: senderTimeoutMount.anchorMountToken,
+    anchorMountGeneration: senderTimeoutMount.anchorMountGeneration,
+    turnLeaseId: "turn_stale_sender_timeout",
+    hostProfileId: "chatgpt@atcc-sender-timeout",
+    elapsedMs: 60_000,
+  });
+  assert.equal(staleSenderTurn.accepted, false);
+  assert.equal(staleSenderTurn.reason, "stale-sender-turn-lease");
+  const staleSenderGeneration = runtime.recordContinuationSenderHostTimeout({
+    conversationScopeId: senderTimeoutScope,
+    taskId: senderTimeout.task.id,
+    senderInstanceId: "ui_atcc_sender_timeout",
+    anchorMountToken: senderTimeoutMount.anchorMountToken,
+    anchorMountGeneration: senderTimeoutMount.anchorMountGeneration + 1,
+    turnLeaseId: senderTimeoutBefore.task.turnLeaseId,
+    hostProfileId: "chatgpt@atcc-sender-timeout",
+    elapsedMs: 60_000,
+  });
+  assert.equal(staleSenderGeneration.accepted, false);
+  assert.equal(staleSenderGeneration.reason, "sender-mount-generation-mismatch");
+  const staleSenderInstance = runtime.recordContinuationSenderHostTimeout({
+    conversationScopeId: senderTimeoutScope,
+    taskId: senderTimeout.task.id,
+    senderInstanceId: "ui_atcc_sender_timeout_stale",
+    anchorMountToken: senderTimeoutMount.anchorMountToken,
+    anchorMountGeneration: senderTimeoutMount.anchorMountGeneration,
+    turnLeaseId: senderTimeoutBefore.task.turnLeaseId,
+    hostProfileId: "chatgpt@atcc-sender-timeout",
+    elapsedMs: 60_000,
+  });
+  assert.equal(staleSenderInstance.accepted, false);
+  assert.equal(staleSenderInstance.reason, "sender-instance-superseded");
+  const pendingAnchorTeardown = runtime.continuationTask({
+    action: "host-signal",
+    taskId: senderTimeout.task.id,
+    hostProfileId: "chatgpt@atcc-sender-timeout",
+    hostSignal: "teardown",
+    elapsedMs: 60_000,
+    note: "relay-disposal-is-not-turn-end",
+  });
+  assert.equal(pendingAnchorTeardown.accepted, false);
+  assert.equal(pendingAnchorTeardown.reason, "verified-anchor-coordinator-required");
+  const senderHostTimeout = runtime.recordContinuationSenderHostTimeout({
+    conversationScopeId: senderTimeoutScope,
+    taskId: senderTimeout.task.id,
+    senderInstanceId: "ui_atcc_sender_timeout",
+    anchorMountToken: senderTimeoutMount.anchorMountToken,
+    anchorMountGeneration: senderTimeoutMount.anchorMountGeneration,
+    turnLeaseId: senderTimeoutBefore.task.turnLeaseId,
+    hostProfileId: "chatgpt@atcc-sender-timeout",
+    elapsedMs: 60_000,
+    note: "actual-host-timeout-without-current-card-iframe",
+  });
+  assert.equal(senderHostTimeout.accepted, true);
+  assert.equal(senderHostTimeout.task.assistantTurnState, "TIMED_OUT");
+  assert.equal(senderHostTimeout.task.assistantTurnCompletionLeaseId, senderTimeoutBefore.task.turnLeaseId);
+  assert.equal(senderHostTimeout.task.stallState, "CONTINUATION_ARMED");
+  assert.equal(senderHostTimeout.task.anchorMountVerifiedAt, undefined,
+    "sender timeout fallback must never fabricate visible-card mount verification");
+  assert.equal(senderHostTimeout.task.anchorMountVerificationPending, true,
+    "the card must remain honestly pending when ChatGPT never mounted its iframe");
+  const senderTimeoutSamples = senderHostTimeout.task.hostTimeoutSamples;
+  const duplicateSenderTimeout = runtime.recordContinuationSenderHostTimeout({
+    conversationScopeId: senderTimeoutScope,
+    taskId: senderTimeout.task.id,
+    senderInstanceId: "ui_atcc_sender_timeout",
+    anchorMountToken: senderTimeoutMount.anchorMountToken,
+    anchorMountGeneration: senderTimeoutMount.anchorMountGeneration,
+    turnLeaseId: senderTimeoutBefore.task.turnLeaseId,
+    hostProfileId: "chatgpt@atcc-sender-timeout",
+    elapsedMs: 60_000,
+    note: "duplicate-host-timeout",
+  });
+  assert.equal(duplicateSenderTimeout.accepted, true);
+  assert.equal(duplicateSenderTimeout.reason, "assistant-turn-timeout-already-confirmed");
+  assert.equal(duplicateSenderTimeout.task.hostTimeoutSamples, senderTimeoutSamples,
+    "duplicate timeout delivery must be idempotent and must not double-count Host calibration samples");
 
   // Synthetic resumed turns use a stricter substantive-work floor so a status
   // ACK plus a couple of trivial operations cannot immediately end the new
@@ -806,6 +935,11 @@ try {
     handoffBlocksWhileModelRequestInFlight: true,
     laterSubstantiveWorkRevokesIntent: true,
     explicitHostTimeoutContinues: true,
+    pendingAnchorSenderTimeoutFallback: true,
+    senderTimeoutRequiresExactTurnLease: true,
+    senderTimeoutKeepsMountVerificationTruthful: true,
+    senderTimeoutIsIdempotent: true,
+    genericTeardownHasNoSenderFallback: true,
     syntheticMinimumSubstantiveWorkDelta: 4,
     syntheticVoluntaryBoundaryTracksConfirmedHostBudget: true,
     verifiedHostTimeoutBypassesSyntheticVoluntaryDurationGate: true,

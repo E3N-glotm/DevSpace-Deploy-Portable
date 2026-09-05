@@ -367,6 +367,18 @@ assert.match(runtimeStateSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0
   "sender bind must surface an already-durable READY generation so a newly mounted ordinary App can consume it immediately");
 assert.match(runtimeStateSource, /recordContinuationHostTelemetry\(input = \{\}\)[\s\S]{0,6200}continuation-host-telemetry/,
   "Host-surface telemetry must remain an event-journal diagnostic instead of becoming continuation authorization state");
+assert.match(runtimeStateSource, /recordContinuationSenderHostTimeout\(input = \{\}\)[\s\S]{0,3600}stale-sender-turn-lease[\s\S]{0,2600}sender-mount-generation-mismatch/,
+  "a missing current card iframe may fall back only to a sender capability bound to the exact current turn and card generation");
+assert.match(runtimeStateSource, /senderTimeoutCapabilityVerified[\s\S]{0,500}expectedTurnLeaseId[\s\S]{0,600}exactTurnSenderTimeout/,
+  "runtime Host-signal authorization must distinguish an internally verified exact-turn sender timeout from model-visible lifecycle calls");
+assert.match(server, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"host-timeout",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
+  "the app-only sender bridge must expose the exact-turn host-timeout action without making it a model-visible continuation_task action");
+assert.match(server, /input\.action === "host-timeout"[\s\S]{0,700}recordContinuationSenderHostTimeout/,
+  "the hidden sender host-timeout route must terminate in the runtime capability validator");
+assert.match(coordinator, /hostSignal === "timeout"[\s\S]{0,1200}callSender\("host-timeout"[\s\S]{0,500}turnLeaseId:\s*state\.task\.turnLeaseId/,
+  "when ChatGPT omits a current card iframe, explicit timeout must retain exact-turn Host authority through the current sender relay");
+assert.doesNotMatch(coordinator, /callSender\("host-(?:teardown|signal)"/,
+  "generic teardown must remain excluded from the sender fallback so iframe disposal cannot become a false continuation trigger");
 assert.match(coordinator, /function safeTelemetryName\(value\)[\s\S]{0,260}A-Za-z0-9\._:\/-/,
   "the coordinator must bound telemetry to safe Host API key/method names instead of arbitrary content");
 assert.match(coordinator, /window\.addEventListener\("openai:set_globals",\s*onOpenAiGlobals\)/,
@@ -3238,20 +3250,36 @@ try {
     "a second material downward change must remain learnable rather than being blocked by monotonic confirmedTurnLimit logic");
   assert.ok(shorterBudget.task.cutoffEpoch > learnedReuse.task.cutoffEpoch);
   const shorterEpoch = shorterBudget.task.cutoffEpoch;
+  const duplicateShorterBudget = runtime.continuationTask({
+    action: "host-signal", taskId: learnedReuseTask.task.id,
+    coordinatorInstanceId: "ui_reuse", hostProfileId: "chatgpt@test",
+    hostSignal: "timeout", elapsedMs: 600000,
+  });
+  assert.equal(duplicateShorterBudget.reason, "assistant-turn-timeout-already-confirmed");
+  assert.equal(duplicateShorterBudget.task.hostTimeoutSamples, shorterBudget.task.hostTimeoutSamples,
+    "repeated delivery for one turn must not become another calibration sample");
+  // Independent actual turns supply the longer samples; retransmitting one
+  // timeout must never count twice just to satisfy the upward-regime test.
+  const longerTask1 = runtime.continuationTask({ action: "begin-auto",
+    conversationScopeId: "conversation-budget-longer-1", workspaceId: "ws_budget_longer_1" });
+  verifyRuntimeAnchor(longerTask1, "conversation-budget-longer-1", "ui_longer_1");
   const longerProbe1 = runtime.continuationTask({
     action: "host-signal",
-    taskId: learnedReuseTask.task.id,
-    coordinatorInstanceId: "ui_reuse",
+    taskId: longerTask1.task.id,
+    coordinatorInstanceId: "ui_longer_1",
     hostProfileId: "chatgpt@test",
     hostSignal: "timeout",
     elapsedMs: 600000,
   });
   assert.equal(longerProbe1.task.confirmedTurnLimitMs, 300000,
     "one longer timeout must not immediately double the adaptive Host budget on a single outlier");
+  const longerTask2 = runtime.continuationTask({ action: "begin-auto",
+    conversationScopeId: "conversation-budget-longer-2", workspaceId: "ws_budget_longer_2" });
+  verifyRuntimeAnchor(longerTask2, "conversation-budget-longer-2", "ui_longer_2");
   const longerProbe2 = runtime.continuationTask({
     action: "host-signal",
-    taskId: learnedReuseTask.task.id,
-    coordinatorInstanceId: "ui_reuse",
+    taskId: longerTask2.task.id,
+    coordinatorInstanceId: "ui_longer_2",
     hostProfileId: "chatgpt@test",
     hostSignal: "timeout",
     elapsedMs: 600000,

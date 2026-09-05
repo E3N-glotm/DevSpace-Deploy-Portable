@@ -30,6 +30,35 @@ let reviewLoadTimer;
 let renderScheduled = false;
 let rendering = false;
 
+// Explicit user disclosure choices survive status updates and iframe rehydration.
+// Storage is scoped to the immutable card identity, never just the workspace.
+const disclosureChoices = new Map();
+function preserveDisclosure(panel, key, defaultOpen) {
+  const storageKey = `devspace:disclosure:${key}`;
+  if (!disclosureChoices.has(key)) {
+    try {
+      const saved = window.sessionStorage.getItem(storageKey);
+      if (saved === "open" || saved === "closed") disclosureChoices.set(key, saved === "open");
+    } catch { /* Storage may be unavailable in a sandboxed App. */ }
+  }
+  panel.open = disclosureChoices.has(key) ? disclosureChoices.get(key) : defaultOpen;
+  // Record the native summary action synchronously, before an arriving update
+  // can replace the node; asynchronous toggle events alone can lose this race.
+  panel.addEventListener("click", (event) => {
+    const summary = event.target?.closest?.("summary");
+    if (!summary || summary.parentElement !== panel || event.defaultPrevented) return;
+    const nextOpen = !panel.open;
+    disclosureChoices.set(key, nextOpen);
+    try { window.sessionStorage.setItem(storageKey, nextOpen ? "open" : "closed"); } catch {}
+  });
+}
+
+function replaceCardIfChanged(card) {
+  // Ignore duplicate notifications without touching live DOM or its height.
+  const current = root.firstElementChild;
+  if (!current || current.outerHTML !== card.outerHTML) root.replaceChildren(card);
+}
+
 function element(tag, options = {}) {
   const node = document.createElement(tag);
   if (options.className) node.className = options.className;
@@ -195,7 +224,7 @@ function buildRuntimeCard() {
   const shell = element("main", { className: "shell" });
   const panel = element("details", { className: `tool-card shell codex-runtime-card compact-log ${status.tone}` });
   panel.dataset.devspaceRuntime = "true";
-  panel.open = status.tone === "running" || status.tone === "failed";
+  preserveDisclosure(panel, `runtime:${state.tool}:${runtime.processHandle ?? card?.summary?.processHandle ?? input.processHandle ?? command}`, status.tone === "running" || status.tone === "failed");
 
   const header = element("summary", { className: "compact-log-summary" });
   header.append(
@@ -264,7 +293,7 @@ function buildContinuationCard() {
   const shell = element("main", { className: "shell" });
   const panel = element("details", { className: `tool-card shell codex-runtime-card compact-log continuation-card ${tone}` });
   panel.dataset.devspaceContinuation = "true";
-  panel.open = true;
+  preserveDisclosure(panel, `continuation:${task.id ?? state.input?.taskId ?? "pending"}:${task.anchorMountGeneration ?? state.result?.structuredContent?.anchorMountGeneration ?? "pending"}`, tone !== "success");
   const header = element("summary", { className: "compact-log-summary" });
   const lockLabel = task.ownerLocked ? (ZH ? " · 已锁定" : " · Locked") : "";
   header.append(
@@ -321,9 +350,9 @@ function buildContinuationCard() {
       : task.continuationMode === "resident"
         ? (ZH ? "常驻/监控任务只有在 Host 明确超时，或模型显式声明阶段完成 / 显式 watch 的进程结束时才会续轮。" : "Resident/monitor tasks continue only on an explicit Host timeout or an explicit stage/process wake.")
         : task.continuationMode === "completion-driven"
-          ? (ZH ? "里程碑驱动任务默认没有总时限和最大续轮上限。模型每次实际 DevSpace 工作都会续租 Turn Lease；只要里程碑未完成，模型提前结束、Turn Lease 到期或资源 teardown 时都可恢复同一任务，直到显式 complete。" : "Completion-driven tasks default to unlimited wall-clock duration and continuation count. Substantive DevSpace work renews the model Turn Lease; while milestones remain, premature turn end, lease expiry, or resource teardown can resume the same task until explicit complete.")
+          ? (ZH ? "里程碑未完成时，只有已验证的宿主时长截断，或模型明确签署本阶段结束后，才可自动继续。思考、回复、工具运行及普通静默不会触发续轮，手动输入优先。" : "Incomplete milestones resume only after a verified Host timeout or explicit model stage completion. Thinking, replies, active tools and ordinary silence do not trigger continuation; manual input takes priority.")
         : task.continuationMode === "timeout-recovery"
-          ? (ZH ? "仅截断恢复不会使用学习预算、普通静默、早期 teardown 或普通进程结束抢跑。若用户已确认真实 Host cutoff 下界，越过下界与宽限期后可由仍存活的 Anchor Lease 做保守恢复探测。" : "Timeout recovery never pre-empts on learned budgets, generic silence, early teardown, or ordinary process completion. After a user-confirmed real Host cutoff lower bound plus its grace period, a surviving Anchor Lease may make a conservative recovery probe.")
+          ? (ZH ? "仅截断恢复要求已验证的真实宿主超时；历史时长、租约到期和页面关闭都不能单独触发续轮。" : "Timeout recovery requires a verified actual Host timeout; historical duration, lease expiry and page disposal cannot independently trigger continuation.")
         : (ZH ? "兼容任务不会自动创建下一轮；需要截断恢复时使用 timeout-recovery，需要常驻/监控时由用户明确选择 resident。" : "Compatibility tasks never auto-create a new turn; use timeout-recovery for truncation recovery and explicitly choose resident for user-authorized persistent monitoring.");
   body.append(element("div", { className: "runtime-output-empty", text: note }));
   panel.append(body);
@@ -336,7 +365,7 @@ function buildPatchPendingCard() {
   const shell = element("main", { className: "shell" });
   const panel = element("details", { className: "tool-card edit codex-runtime-card compact-log running" });
   panel.dataset.devspaceRuntime = "true";
-  panel.open = true;
+  preserveDisclosure(panel, "patch-pending", true);
   const header = element("summary", { className: "compact-log-summary" });
   header.append(
     element("span", { className: "compact-log-icon running", text: "✎" }),
@@ -626,7 +655,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-text: "DevSpace Portable 1.1.59 dev19 · Protocol 1.5",
+text: "DevSpace Portable 1.1.59 dev20 · Protocol 1.5",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);
@@ -636,7 +665,7 @@ function renderRuntime() {
   if (!root || rendering || !RUNTIME_TOOLS.has(state.tool)) return;
   rendering = true;
   try {
-    root.replaceChildren(buildRuntimeCard());
+    replaceCardIfChanged(buildRuntimeCard());
     ensureVersionFooter();
   } finally {
     rendering = false;
@@ -647,7 +676,7 @@ function renderPatchPending() {
   if (!root || rendering || state.tool !== "apply_patch" || state.result) return;
   rendering = true;
   try {
-    root.replaceChildren(buildPatchPendingCard());
+    replaceCardIfChanged(buildPatchPendingCard());
     ensureVersionFooter();
   } finally {
     rendering = false;
@@ -658,7 +687,7 @@ function renderContinuation() {
   if (!root || rendering || !CONTINUATION_TOOLS.has(state.tool)) return;
   rendering = true;
   try {
-    root.replaceChildren(buildContinuationCard());
+    replaceCardIfChanged(buildContinuationCard());
     ensureVersionFooter();
   } finally {
     rendering = false;

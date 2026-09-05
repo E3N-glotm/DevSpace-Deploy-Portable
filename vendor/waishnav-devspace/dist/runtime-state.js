@@ -1491,6 +1491,47 @@ export class StructuredRuntimeState {
         // never participate in that ownership transition.
         return { accepted: true, lastUiHeartbeatAt: nowIso };
     }
+    recordContinuationSenderHostTimeout(input = {}) {
+        const conversationScopeId = String(input.conversationScopeId ?? "").trim();
+        const taskId = String(input.taskId ?? "").trim();
+        const senderInstanceId = String(input.senderInstanceId ?? "").trim();
+        const anchorMountToken = String(input.anchorMountToken ?? "").trim();
+        const anchorMountGeneration = Number(input.anchorMountGeneration || 0);
+        const turnLeaseId = String(input.turnLeaseId ?? "").trim();
+        if (!conversationScopeId || !taskId || !senderInstanceId || !anchorMountToken || !turnLeaseId
+            || !Number.isInteger(anchorMountGeneration) || anchorMountGeneration <= 0) {
+            return { accepted: false, reason: "sender-timeout-capability-required" };
+        }
+        const task = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
+        if (!task || String(task.conversation_scope_id || "") !== conversationScopeId)
+            return { accepted: false, reason: task ? "conversation-task-mismatch" : "task-not-found" };
+        if (TERMINAL_CONTINUATION_STATES.has(String(task.state || "")))
+            return { accepted: false, reason: "task-terminal" };
+        const currentTurnLeaseId = String(task.turn_lease_id || "").trim();
+        if (!currentTurnLeaseId || currentTurnLeaseId !== turnLeaseId)
+            return { accepted: false, reason: "stale-sender-turn-lease" };
+        const card = this.database.sqlite.prepare(`
+          select * from continuation_conversation_cards where conversation_scope_id=?
+        `).get(conversationScopeId);
+        if (!card || !card.mount_requested_at || !card.mount_token || Number(card.mount_generation || 0) <= 0)
+            return { accepted: false, reason: "card-not-issued" };
+        if (String(card.sender_instance_id || "") !== senderInstanceId)
+            return { accepted: false, reason: "sender-instance-superseded" };
+        if (String(card.mount_token || "") !== anchorMountToken)
+            return { accepted: false, reason: "sender-mount-token-mismatch" };
+        if (Number(card.mount_generation || 0) !== anchorMountGeneration)
+            return { accepted: false, reason: "sender-mount-generation-mismatch" };
+        return this.continuationTask({
+            action: "host-signal",
+            taskId,
+            hostProfileId: input.hostProfileId,
+            hostSignal: "timeout",
+            elapsedMs: input.elapsedMs,
+            note: input.note,
+            senderTimeoutCapabilityVerified: true,
+            expectedTurnLeaseId: turnLeaseId,
+        });
+    }
     recordContinuationHostTelemetry(input = {}) {
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
         const taskId = String(input.taskId ?? "").trim();
@@ -2414,6 +2455,19 @@ export class StructuredRuntimeState {
             const deliveryToken = input.deliveryToken ? String(input.deliveryToken) : "";
             const manualTakeover = input.manualTakeover === true
                 || String(input.note ?? "").trim() === "manual-user-turn-takeover";
+            // First-ever status precedes open_workspace/anchor issuance. Persist
+            // the manual turn now; otherwise later projection recovery creates
+            // an UNKNOWN owner and silently loses the first-status handshake.
+            if (!row && manualTakeover && !deliveryToken && !input.taskId
+                && input.internalAnchorPreparation !== true
+                && isCanonicalConversationScope(input.conversationScopeId)) {
+                return this.database.sqlite.transaction(() => {
+                    const begun = this.continuationTask({ ...input, action: "begin",
+                        manualTakeover: false, sourceTool: "manual-first-status" });
+                    if (!begun.task?.id) return begun;
+                    return this.continuationTask({ ...input, taskId: begun.task.id });
+                })();
+            }
             // dev12 manual-round priority contract: when the first status of a
             // real user message supplies a new milestone plan, commit that plan
             // before issuing the message's fresh card.  This keeps "manual
@@ -3490,13 +3544,33 @@ export class StructuredRuntimeState {
             const authoritativeLifecycleCoordinator = Boolean(row.anchor_mount_verified_at)
                 && Boolean(requestingCoordinatorId)
                 && requestingCoordinatorId === String(row.anchor_mount_coordinator_id || "");
+            const currentTurnLeaseId = String(row.turn_lease_id || "").trim();
+            const exactTurnSenderTimeout = hostSignal === "timeout"
+                && input.senderTimeoutCapabilityVerified === true
+                && Boolean(currentTurnLeaseId)
+                && String(input.expectedTurnLeaseId ?? "").trim() === currentTurnLeaseId;
             if (["completion-driven", "timeout-recovery"].includes(mode) && ["timeout", "teardown"].includes(hostSignal)
-                && !authoritativeLifecycleCoordinator) {
+                && !authoritativeLifecycleCoordinator && !exactTurnSenderTimeout) {
                 // A model can call continuation_task too, so a lifecycle signal
                 // without the verified current Workspace App coordinator is not
                 // Host evidence. This prevents a short model turn from forging
-                // its own timeout/teardown in order to obtain another turn.
+                // its own timeout/teardown in order to obtain another turn. A
+                // hidden App-only timeout fallback is allowed only after the
+                // sender path authenticated current card token/generation,
+                // current sender instance and the exact turn lease. Generic
+                // teardown deliberately has no sender fallback because relay
+                // iframe disposal is ordinary UI lifecycle, not a turn end.
                 return { task: rowToTask(row), accepted: false, reason: "verified-anchor-coordinator-required" };
+            }
+            // Both authenticated timeout paths share the same idempotency gate.
+            // Keep row conversion inside continuationTask's lexical scope.
+            if (hostSignal === "timeout"
+                && String(row.assistant_turn_state || "") === "TIMED_OUT"
+                && String(row.assistant_turn_completion_lease_id || "") === currentTurnLeaseId) {
+                const timedOutTask = rowToTask(row);
+                return { task: timedOutTask, accepted: true,
+                    reason: "assistant-turn-timeout-already-confirmed",
+                    ...continuationDirective(timedOutTask) };
             }
             const elapsedRaw = Number(input.elapsedMs ?? 0);
             const elapsedMs = Number.isFinite(elapsedRaw) ? Math.max(0, Math.min(Math.round(elapsedRaw), 24 * 60 * 60 * 1000)) : 0;
@@ -3563,7 +3637,6 @@ export class StructuredRuntimeState {
                     confirmedTurnLimitMs, confirmedTurnLimitAt, confirmedTurnLimitSource,
                     JSON.stringify(cutoffSamples), cutoffEpoch, cutoffRegimeChangedAt, nowIso, nowIso);
             }
-            const currentTurnLeaseId = String(row.turn_lease_id || "").trim();
             const completionIntentMatchesCurrentTurn = hostSignal === "teardown"
                 && mode === "completion-driven"
                 && row.state === "RUNNING"

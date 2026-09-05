@@ -25,8 +25,16 @@ try {
     "the verified card App must use the dedicated sender bridge");
   assert.match(coordinatorSource, /callSender\("claim"/,
     "Host delivery must claim a server ContinuationGeneration through the sender bridge");
-  assert.match(serverSource, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
-    "continuation_sender must expose context-derived bind, relay heartbeat, observational Host telemetry, and final authorize-delivery before Host user-role transport");
+  assert.match(serverSource, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"host-timeout",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
+    "continuation_sender must expose context-derived bind, relay heartbeat, observational Host telemetry, exact-turn timeout fallback, and final authorize-delivery before Host user-role transport");
+  assert.match(serverSource, /input\.action === "host-timeout"[\s\S]{0,700}recordContinuationSenderHostTimeout/,
+    "the hidden sender bridge must route Host timeout fallback through the runtime exact-turn capability validator");
+  assert.match(runtimeSource, /recordContinuationSenderHostTimeout\(input = \{\}\)[\s\S]{0,3600}stale-sender-turn-lease[\s\S]{0,2600}sender-mount-generation-mismatch/,
+    "sender timeout fallback must require the exact current turn lease and current card generation");
+  assert.match(coordinatorSource, /hostSignal === "timeout"[\s\S]{0,1200}callSender\("host-timeout"[\s\S]{0,500}turnLeaseId:\s*state\.task\.turnLeaseId/,
+    "the coordinator must use hidden exact-turn sender fallback only for explicit timeout when a verified visible coordinator is unavailable");
+  assert.doesNotMatch(coordinatorSource, /callSender\("host-(?:teardown|signal)"/,
+    "generic teardown must never gain a sender fallback");
   assert.match(runtimeSource, /recordContinuationHostTelemetry\(input = \{\}\)[\s\S]{0,6200}continuation-host-telemetry/,
     "Host telemetry must be stored separately from Assistant Turn / continuation authorization state");
   assert.match(coordinatorSource, /window\.addEventListener\("openai:set_globals",\s*onOpenAiGlobals\)/,
