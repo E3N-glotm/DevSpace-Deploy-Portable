@@ -98,7 +98,22 @@ for (const pattern of [
   /delivery_ack_retry_after_at/,
   /version: 31/,
   /continuation-1\.1\.56-runtime-reset/,
+  /version: 33/,
+  /continuation-permanent-lifetime-singleton/,
+  /continuation_tasks_conversation_lifetime_unique/,
 ]) assert.match(migrations, pattern);
+assert.match(migrations,
+  /create unique index if not exists continuation_tasks_conversation_lifetime_unique[\s\S]{0,240}conversation_scope_id glob 'v1\/\*'/,
+  "canonical conversations must have one permanent lifetime task even after that task reaches a terminal state");
+assert.match(runtimeStateSource,
+  /if \(input\.conversationScopeId && isCanonicalConversationScope\(input\.conversationScopeId\)\)[\s\S]{0,500}order by created_at asc,id asc[\s\S]{0,120}limit 1/,
+  "first manual status must recover the lifetime task by conversation scope even before a workspace or card exists");
+assert.match(runtimeStateSource,
+  /conversationLifetimeSingleton:\s*isCanonicalConversationScope\(/,
+  "canonical conversation status must truthfully report the permanent lifetime singleton guarantee");
+assert.doesNotMatch(runtimeStateSource,
+  /conversationLifetimeSingleton:\s*false/,
+  "runtime responses must derive the singleton guarantee from conversation scope instead of emitting a stale hard-coded false");
 assert.match(migrations, /delete from continuation_tasks[\s\S]{0,120}conversation_scope_id not glob 'v1\/\*'/,
   "1.1.56 migration must remove non-canonical shadow tasks created by stripped Host metadata");
 assert.match(migrations, /migrated-1\.1\.49/,

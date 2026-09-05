@@ -70,7 +70,7 @@ try {
   const migration = runtime.database.sqlite
     .prepare("select max(version) as version from devspace_schema_migrations")
     .get();
-  assert.equal(migration.version, 32, "ATCC must be schema migration 32");
+  assert.equal(migration.version, 33, "ATCC plus the permanent lifetime singleton repair must reach schema migration 33");
   const columns = new Set(
     runtime.database.sqlite
       .prepare("pragma table_info('continuation_tasks')")

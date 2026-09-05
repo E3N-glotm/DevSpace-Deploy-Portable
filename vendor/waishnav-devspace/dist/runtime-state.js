@@ -654,6 +654,8 @@ export class StructuredRuntimeState {
         `).get(conversationScopeId);
         const canonicalTaskId = String(lineage?.legacy_task_id ?? "").trim();
         if (!canonicalTaskId) return undefined;
+        let canonical = this.database.sqlite.prepare('select * from continuation_tasks where id=? and conversation_scope_id=?')
+            .get(canonicalTaskId, conversationScopeId);
         const hintedRequired = Array.isArray(input.requiredMilestones)
             ? [...new Set(input.requiredMilestones.map((value) => String(value).trim()).filter(Boolean))].slice(0, 64)
             : [];
@@ -698,14 +700,22 @@ export class StructuredRuntimeState {
                 `).run(canonicalTaskId, nowIso, preferredActiveWorkset.id);
             }
             if (activeShadowTasks.length > 0) {
-                this.database.sqlite.prepare(`
-                  update continuation_tasks set state='ABANDONED_AUTO_TASK',
-                    terminal_reason='recovered-canonical-conversation-contract',continuation_pending=0,
-                    delivery_token=null,delivery_owner=null,delivery_owner_expires_at=null,
-                    watch_process_handles_json='[]',updated_at=?
-                  where conversation_scope_id=? and id<>?
-                    and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
-                `).run(nowIso, conversationScopeId, canonicalTaskId);
+                if (canonical) {
+                    this.database.sqlite.prepare(`
+                      delete from continuation_tasks
+                      where conversation_scope_id=? and id<>?
+                    `).run(conversationScopeId, canonicalTaskId);
+                }
+                else {
+                    // Migration 33 enforces a permanent unique lifetime row,
+                    // including terminal states. If the canonical compatibility
+                    // projection itself was deleted but a later shadow remains,
+                    // capture the shadow above and remove it before reconstructing
+                    // the original canonical id from Workset lineage.
+                    this.database.sqlite.prepare(`
+                      delete from continuation_tasks where conversation_scope_id=?
+                    `).run(conversationScopeId);
+                }
             }
             for (const shadowWorkset of activeShadowWorksets) {
                 if (preferredActiveWorkset?.id === shadowWorkset.id) continue;
@@ -734,7 +744,7 @@ export class StructuredRuntimeState {
                   ) then null else active_workset_id end,
                 updated_at=? where conversation_scope_id=?
             `).run(conversationScopeId, canonicalTaskId, nowIso, conversationScopeId);
-            let canonical = this.database.sqlite.prepare('select * from continuation_tasks where id=? and conversation_scope_id=?')
+            canonical = this.database.sqlite.prepare('select * from continuation_tasks where id=? and conversation_scope_id=?')
                 .get(canonicalTaskId, conversationScopeId);
             const latestWorkset = this.database.sqlite.prepare(`
               select w.* from continuation_worksets w
@@ -992,6 +1002,33 @@ export class StructuredRuntimeState {
             const card = this.database.sqlite.prepare(`
               select * from continuation_conversation_cards where conversation_scope_id=?
             `).get(task.conversation_scope_id);
+            // ConversationCard is the authoritative mount identity.  A restart
+            // or an older shadow task can leave the compatibility task row on a
+            // stale generation (for example task g1/VERIFIED while the card is
+            // g21/UNMOUNTED).  Once the card upsert above has resolved the
+            // monotonic generation/state winner, immediately project that truth
+            // back into the lifetime task row so every subsequent capability
+            // check observes the same generation and mount state.
+            if (card && (
+                Number(card.mount_generation || 0) > Number(task.anchor_mount_generation || 0)
+                || (Number(card.mount_generation || 0) === Number(task.anchor_mount_generation || 0)
+                    && ((card.mount_verified_at && !task.anchor_mount_verified_at)
+                        || (card.mount_requested_at && !task.anchor_mount_requested_at)))
+            )) {
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set
+                    anchor_mount_generation=?,anchor_mount_token=?,anchor_mount_requested_at=?,
+                    anchor_mount_verified_at=?,anchor_mount_coordinator_id=?,
+                    coordinator_instance_id=?,last_anchor_mounted_at=?,updated_at=?
+                  where id=?
+                `).run(
+                    Math.max(1, Number(card.mount_generation || 1)),
+                    card.mount_token ?? null, card.mount_requested_at ?? null,
+                    card.mount_verified_at ?? null, card.coordinator_instance_id ?? null,
+                    card.coordinator_instance_id ?? null, card.mount_verified_at ?? null,
+                    nowIso, task.id,
+                );
+            }
             let workset = card?.active_workset_id
                 ? this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(card.active_workset_id)
                 : undefined;
@@ -2110,7 +2147,7 @@ export class StructuredRuntimeState {
                 created: false,
                 taskContract: true,
                 conversationLifetimeTaskContract: isCanonicalConversationScope(conversationScopeId),
-                conversationLifetimeSingleton: false,
+                conversationLifetimeSingleton: isCanonicalConversationScope(conversationScopeId),
                 manualRoundCardRequired: anchorMountRecoveryRequired(existing, now.getTime(), input.hostTurnFingerprint),
                 newMilestoneRequired: TERMINAL_CONTINUATION_STATES.has(String(status.task?.state ?? "")),
                 initialAnchorRequired: anchorMountRecoveryRequired(existing, now.getTime(), input.hostTurnFingerprint),
@@ -2150,7 +2187,7 @@ export class StructuredRuntimeState {
             taskContract: true,
             needsRefinement: required.length === 0,
             conversationLifetimeTaskContract: isCanonicalConversationScope(conversationScopeId),
-            conversationLifetimeSingleton: false,
+            conversationLifetimeSingleton: isCanonicalConversationScope(conversationScopeId),
             manualRoundCardRequired: true,
             initialAnchorRequired: true,
         };
@@ -2429,18 +2466,23 @@ export class StructuredRuntimeState {
                 }
                 return this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
             }
+            // The first status of a manual user turn intentionally happens
+            // before open_workspace, so it normally has a canonical
+            // conversationScopeId but no workspaceId.  Requiring both values
+            // here made a completed lifetime ledger invisible during exactly
+            // that call and allocated a second task row.  Canonical conversation
+            // identity is workspace-independent: migrations enforce one row,
+            // and the oldest-row ordering is a safe bridge while an upgraded
+            // database is being reconciled.
+            if (input.conversationScopeId && isCanonicalConversationScope(input.conversationScopeId)) {
+                return this.database.sqlite.prepare(`
+                  select * from continuation_tasks
+                  where conversation_scope_id=?
+                  order by created_at asc,id asc
+                  limit 1
+                `).get(String(input.conversationScopeId));
+            }
             if (input.workspaceId && input.conversationScopeId) {
-                if (isCanonicalConversationScope(input.conversationScopeId)) {
-                    return this.database.sqlite.prepare(`
-                      select * from continuation_tasks
-                      where conversation_scope_id=?
-                      order by
-                        case when state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK') then 0 else 1 end,
-                        case when anchor_mount_verified_at is not null then 0 else 1 end,
-                        updated_at desc
-                      limit 1
-                    `).get(String(input.conversationScopeId));
-                }
                 return this.database.sqlite.prepare(`
                   select * from continuation_tasks
                   where workspace_id=? and conversation_scope_id=?
@@ -2550,7 +2592,7 @@ export class StructuredRuntimeState {
                         milestoneCardRequired: true,
                         initialAnchorRequired: true,
                         reanchorRequired: true,
-                        conversationLifetimeSingleton: false,
+                        conversationLifetimeSingleton: true,
                         ...continuationDirective(task),
                     };
                 }
@@ -2751,7 +2793,7 @@ export class StructuredRuntimeState {
                         milestoneCardRequired: true,
                         initialAnchorRequired: true,
                         reanchorRequired: true,
-                        conversationLifetimeSingleton: false,
+                        conversationLifetimeSingleton: isCanonicalConversationScope(refreshedTask.conversationScopeId),
                         ...(manualPlan.milestoneSetChanged ? { manualMilestoneSetChanged: true } : {}),
                         ...continuationDirective(refreshedTask),
                     };
@@ -2822,7 +2864,7 @@ export class StructuredRuntimeState {
                     milestoneCardRequired: true,
                     initialAnchorRequired: true,
                     reanchorRequired: true,
-                    conversationLifetimeSingleton: false,
+                    conversationLifetimeSingleton: isCanonicalConversationScope(refreshedTask.conversationScopeId),
                     ...(manualPlan.milestoneSetChanged ? { manualMilestoneSetChanged: true } : {}),
                     ...continuationDirective(refreshedTask),
                 };
@@ -2862,7 +2904,7 @@ export class StructuredRuntimeState {
                     milestoneCardRequired: true,
                     initialAnchorRequired: true,
                     reanchorRequired: true,
-                    conversationLifetimeSingleton: false,
+                    conversationLifetimeSingleton: isCanonicalConversationScope(refreshedTask.conversationScopeId),
                     ...(manualPlan.milestoneSetChanged ? { manualMilestoneSetChanged: true } : {}),
                     ...continuationDirective(refreshedTask),
                 };
@@ -3209,7 +3251,7 @@ export class StructuredRuntimeState {
                             milestoneCardRequired: true,
                             initialAnchorRequired: true,
                             reanchorRequired: true,
-                            conversationLifetimeSingleton: false,
+                            conversationLifetimeSingleton: true,
                         } : {}),
                         ...continuationDirective(task),
                     };
@@ -3986,7 +4028,7 @@ export class StructuredRuntimeState {
                     milestoneCardRequired: true,
                     initialAnchorRequired: true,
                     reanchorRequired: true,
-                    conversationLifetimeSingleton: false,
+                    conversationLifetimeSingleton: isCanonicalConversationScope(task.conversationScopeId),
                 } : {}),
                 ...continuationDirective(task),
             };

@@ -125,7 +125,7 @@ try {
     "generation delivery must update the canonical continuation_tasks.last_send_result column");
 
   const migration = db.prepare("select max(version) as version from devspace_schema_migrations").get();
-  assert.equal(Number(migration.version), 32, "1.1.59 dev11 Assistant Turn Completion Contract migration must be applied");
+  assert.equal(Number(migration.version), 33, "dev21 permanent lifetime singleton migration must be applied after ATCC");
   assert.equal(db.prepare("select value from continuation_runtime_meta where key='schema_epoch'").get().value, "2");
 
   const expectedTables = [
@@ -902,6 +902,8 @@ try {
   assert.equal(readyManualTakeover.accepted, true);
   assert.equal(readyManualTakeover.reason, "manual-turn-took-over-ready-generation",
     "the old-schema-compatible manual status marker must atomically win even before any sender has claimed the READY generation");
+  assert.equal(readyManualTakeover.conversationLifetimeSingleton, true,
+    "READY-generation manual takeover must truthfully report the permanent conversation singleton");
   const supersededReady = db.prepare("select state,failure_reason from continuation_generations where id=?")
     .get(readyGenerationBeforeManualStatus.id);
   assert.equal(supersededReady.state, "SUPERSEDED");
@@ -982,6 +984,8 @@ try {
   });
   assert.equal(manualTakeover.accepted, true);
   assert.equal(manualTakeover.reason, "manual-turn-took-over");
+  assert.equal(manualTakeover.conversationLifetimeSingleton, true,
+    "claimed-generation manual takeover must truthfully report the permanent conversation singleton");
   const staleAuthorization = runtime.authorizeContinuationGenerationDelivery({
     conversationScopeId: scope,
     senderInstanceId: "sender-manual-race",
@@ -1201,8 +1205,8 @@ try {
     "unfinished work held only by the compatibility shadow must migrate into the canonical lifetime projection before shadow retirement");
   assert.ok(directlyRecoveredCompleted.includes("recover-a"));
   assert.ok(!directlyRecoveredCompleted.includes("recover-b"));
-  assert.equal(db.prepare("select state from continuation_tasks where id=?").get(shadowId).state, "ABANDONED_AUTO_TASK",
-    "projection recovery must retire the shadow only after its current unfinished contract has been captured");
+  assert.equal(db.prepare("select state from continuation_tasks where id=?").get(shadowId), undefined,
+    "projection recovery must remove the shadow only after its current unfinished contract has been captured");
   const recoverySecond = runtime.continuationTask({
     action: "begin",
     taskId: recoveryFirst.task.id,
@@ -1349,6 +1353,82 @@ try {
   assert.ok(!afterPendingAckSubstantiveTouch.task.requiredMilestones.includes(genericB));
   assert.equal(Number(afterPendingAckSubstantiveTouch.task.anchorMountGeneration), completedPendingGeneration,
     "recovery must not rotate a second card while the requested generation is waiting for ACK");
+
+  // Regression (dev21): the first DevSpace call in a real manual message is a
+  // status call before open_workspace, so it has no workspaceId and the next
+  // card has not been requested yet. It must still find the completed lifetime
+  // ledger, take manual ownership, and rotate exactly one card instead of
+  // allocating a second task row.
+  const activeManualScope = "v1/active-manual-round-singleton";
+  const activeManualFirst = runtime.continuationTask({
+    action: "begin", conversationScopeId: activeManualScope, workspaceId: "ws_active_manual",
+    continuationMode: "completion-driven", objective: "active epoch", requiredMilestones: ["active-pending"],
+  });
+  const activeManualStatus = runtime.continuationTask({
+    action: "status", conversationScopeId: activeManualScope, manualTakeover: true,
+    objective: "next manual round", requiredMilestones: ["active-pending"],
+  });
+  assert.equal(activeManualStatus.reason, "manual-round-started");
+  assert.equal(activeManualStatus.task.id, activeManualFirst.task.id);
+  assert.equal(activeManualStatus.conversationLifetimeSingleton, true,
+    "ordinary active manual status must report the same permanent singleton guarantee as terminal reactivation");
+  assert.equal(Number(db.prepare(`select count(*) as count from continuation_tasks where conversation_scope_id=?`).get(activeManualScope).count), 1);
+
+  const preWorkspaceScope = "v1/manual-status-before-workspace";
+  const preWorkspaceFirst = runtime.continuationTask({
+    action: "begin", conversationScopeId: preWorkspaceScope, workspaceId: "ws_first",
+    continuationMode: "completion-driven", objective: "first epoch", requiredMilestones: ["first-done"],
+  });
+  const preWorkspaceMount = runtime.prepareContinuationAnchorMount({
+    taskId: preWorkspaceFirst.task.id, conversationScopeId: preWorkspaceScope,
+  });
+  runtime.continuationTask({
+    action: "anchor-mounted", taskId: preWorkspaceFirst.task.id, conversationScopeId: preWorkspaceScope,
+    coordinatorInstanceId: "ui_pre_workspace_first", anchorMountToken: preWorkspaceMount.anchorMountToken,
+    anchorMountGeneration: preWorkspaceMount.anchorMountGeneration,
+  });
+  runtime.continuationTask({
+    action: "complete", taskId: preWorkspaceFirst.task.id, conversationScopeId: preWorkspaceScope,
+    completedMilestones: ["first-done"],
+  });
+  const preWorkspaceGeneration = Number(runtime.continuationArchitectureSnapshot(preWorkspaceScope).card.mount_generation);
+  const preWorkspaceManual = runtime.continuationTask({
+    action: "status", conversationScopeId: preWorkspaceScope, manualTakeover: true,
+    objective: "second epoch", requiredMilestones: ["second-pending"],
+  });
+  assert.equal(preWorkspaceManual.task.id, preWorkspaceFirst.task.id,
+    "manual first-status without workspace/card issuance must reuse the lifetime task id");
+  assert.equal(preWorkspaceManual.task.assistantTurnOwner, "manual");
+  assert.equal(preWorkspaceManual.task.assistantTurnState, "GENERATING");
+  assert.equal(preWorkspaceManual.conversationLifetimeSingleton, true);
+  assert.equal(Number(preWorkspaceManual.task.anchorMountGeneration), preWorkspaceGeneration + 1,
+    "manual first-status must rotate exactly one fresh card generation");
+  assert.equal(Number(db.prepare(`select count(*) as count from continuation_tasks where conversation_scope_id=?`).get(preWorkspaceScope).count), 1);
+  assert.throws(() => db.prepare(`
+    insert into continuation_tasks(id,conversation_scope_id,objective,state,continuation_mode,required_milestones_json,created_at,updated_at)
+    values('task_illegal_shadow',?,'illegal shadow','SUCCEEDED','completion-driven','[]',?,?)
+  `).run(preWorkspaceScope, shadowNow, shadowNow), /UNIQUE constraint failed/,
+    "the database must reject a second lifetime row even when both rows are terminal");
+
+  // ConversationCard wins any stale task-local mount projection after restart.
+  const projectionGeneration = Number(preWorkspaceManual.task.anchorMountGeneration) + 7;
+  db.prepare(`
+    update continuation_conversation_cards set card_id=?,mount_generation=?,mount_state='UNMOUNTED',
+      mount_token=null,mount_requested_at=null,mount_verified_at=null,coordinator_instance_id=null,updated_at=?
+    where conversation_scope_id=?
+  `).run(`card:${preWorkspaceScope}:g${projectionGeneration}`, projectionGeneration, shadowNow, preWorkspaceScope);
+  db.prepare(`
+    update continuation_tasks set anchor_mount_generation=1,anchor_mount_token='stale-token',
+      anchor_mount_requested_at=?,anchor_mount_verified_at=?,anchor_mount_coordinator_id='stale-ui'
+    where id=?
+  `).run(shadowNow, shadowNow, preWorkspaceFirst.task.id);
+  runtime.syncContinuationArchitectureForLegacyTask(preWorkspaceFirst.task.id);
+  const projectedTask = db.prepare(`select * from continuation_tasks where id=?`).get(preWorkspaceFirst.task.id);
+  const projectedCard = runtime.continuationArchitectureSnapshot(preWorkspaceScope).card;
+  assert.equal(Number(projectedTask.anchor_mount_generation), Number(projectedCard.mount_generation));
+  assert.equal(projectedTask.anchor_mount_token, projectedCard.mount_token);
+  assert.equal(projectedTask.anchor_mount_requested_at, projectedCard.mount_requested_at);
+  assert.equal(projectedTask.anchor_mount_verified_at, projectedCard.mount_verified_at);
 
   const cardInvariantRows = db.prepare(`
     select conversation_scope_id,count(*) as count

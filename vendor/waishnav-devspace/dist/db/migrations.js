@@ -159,6 +159,11 @@ const migrations = [
         name: "continuation-assistant-turn-completion-contract",
         up: migrateContinuationAssistantTurnCompletionContract,
     },
+    {
+        version: 33,
+        name: "continuation-permanent-lifetime-singleton",
+        up: migrateContinuationPermanentLifetimeSingleton,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -1248,6 +1253,92 @@ function migrateContinuationAssistantTurnCompletionContract(sqlite) {
 
       create index if not exists continuation_tasks_assistant_turn_state_idx
         on continuation_tasks(continuation_mode, state, assistant_turn_state, updated_at desc);
+    `);
+}
+function migrateContinuationPermanentLifetimeSingleton(sqlite) {
+    // dev21: one real ChatGPT conversation owns one permanent lifetime task
+    // row, including while that row is terminal.  The former partial unique
+    // index only protected active rows, so the first status after SUCCEEDED
+    // could create a second task before a card/workspace existed.
+    const scopes = sqlite.prepare(`
+      select conversation_scope_id
+      from continuation_tasks
+      where conversation_scope_id glob 'v1/*'
+      group by conversation_scope_id
+      having count(*) > 1
+    `).all();
+    const taskColumns = sqlite.prepare("pragma table_info(continuation_tasks)").all()
+        .map((column) => String(column.name));
+    const transferableColumns = taskColumns.filter((column) => ![
+        "id", "conversation_scope_id", "created_at",
+    ].includes(column));
+    const copyProjection = transferableColumns.map((column) =>
+        `\"${column}\"=(select \"${column}\" from continuation_tasks where id=@sourceId)`).join(",");
+    const mergeScope = sqlite.transaction((conversationScopeId) => {
+        const lineage = sqlite.prepare(`
+          select legacy_task_id
+          from continuation_worksets
+          where conversation_scope_id=? and legacy_task_id is not null and trim(legacy_task_id)<>''
+            and exists(select 1 from continuation_tasks t where t.id=continuation_worksets.legacy_task_id)
+          order by sequence asc,created_at asc,id asc limit 1
+        `).get(conversationScopeId);
+        const fallback = sqlite.prepare(`
+          select id from continuation_tasks
+          where conversation_scope_id=?
+          order by
+            case when state='ABANDONED_AUTO_TASK' then 1 else 0 end,
+            created_at asc,id asc limit 1
+        `).get(conversationScopeId);
+        const canonicalId = String(lineage?.legacy_task_id ?? fallback?.id ?? "");
+        if (!canonicalId) return;
+        const card = sqlite.prepare(`
+          select * from continuation_conversation_cards where conversation_scope_id=?
+        `).get(conversationScopeId);
+        const activeWorkset = card?.active_workset_id
+            ? sqlite.prepare("select * from continuation_worksets where id=?").get(card.active_workset_id)
+            : undefined;
+        const activeTask = activeWorkset?.legacy_task_id
+            ? sqlite.prepare("select * from continuation_tasks where id=?").get(activeWorkset.legacy_task_id)
+            : sqlite.prepare(`
+                select * from continuation_tasks where conversation_scope_id=?
+                  and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
+                order by updated_at desc,created_at desc limit 1
+              `).get(conversationScopeId);
+        const latestTask = activeTask ?? sqlite.prepare(`
+          select * from continuation_tasks where conversation_scope_id=?
+          order by updated_at desc,created_at desc limit 1
+        `).get(conversationScopeId);
+        if (latestTask && latestTask.id !== canonicalId) {
+            sqlite.prepare(`update continuation_tasks set ${copyProjection} where id=@canonicalId`)
+                .run({ sourceId: latestTask.id, canonicalId });
+        }
+        sqlite.prepare(`
+          update continuation_worksets set legacy_task_id=?
+          where conversation_scope_id=? and coalesce(legacy_task_id,'')<>?
+        `).run(canonicalId, conversationScopeId, canonicalId);
+        sqlite.prepare(`delete from continuation_tasks where conversation_scope_id=? and id<>?`)
+            .run(conversationScopeId, canonicalId);
+        if (card) {
+            sqlite.prepare(`
+              update continuation_tasks set
+                anchor_mount_generation=max(1,?),anchor_mount_token=?,anchor_mount_requested_at=?,
+                anchor_mount_verified_at=?,anchor_mount_coordinator_id=?,coordinator_instance_id=?,
+                last_anchor_mounted_at=?,updated_at=?
+              where id=?
+            `).run(
+                Number(card.mount_generation || 1), card.mount_token ?? null,
+                card.mount_requested_at ?? null, card.mount_verified_at ?? null,
+                card.coordinator_instance_id ?? null, card.coordinator_instance_id ?? null,
+                card.mount_verified_at ?? null, new Date().toISOString(), canonicalId,
+            );
+        }
+    });
+    for (const row of scopes) mergeScope(String(row.conversation_scope_id));
+    sqlite.exec(`
+      drop index if exists continuation_tasks_conversation_active_unique;
+      create unique index if not exists continuation_tasks_conversation_lifetime_unique
+        on continuation_tasks(conversation_scope_id)
+        where conversation_scope_id glob 'v1/*';
     `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {
