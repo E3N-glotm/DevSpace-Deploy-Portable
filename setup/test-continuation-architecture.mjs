@@ -9,6 +9,7 @@ const runtimePath = join(ROOT, "app", "node_modules", "@waishnav", "devspace", "
 const serverSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "server.js"), "utf8");
 const runtimeSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "runtime-state.js"), "utf8");
 const coordinatorSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js"), "utf8");
+const supervisorSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "continuation-supervisor.js"), "utf8");
 const { StructuredRuntimeState } = await import(pathToFileURL(runtimePath).href);
 
 const stateDir = mkdtempSync(join(tmpdir(), "devspace-continuation-architecture-"));
@@ -143,8 +144,18 @@ try {
     "Host delivery results must return to the Generation FSM through the sender bridge");
   assert.doesNotMatch(coordinatorSource, /callTask\("claim-continuation"/,
     "the App delivery path must not fall back to the legacy coordinator claim API");
-  assert.match(serverSource, /const continuationSupervisorTimer = setInterval\(\(\) => \{[\s\S]*?runtimeState\.continuationSupervisorSweep\(\)[\s\S]*?\},\s*5_000\);/,
-    "the continuation watchdog must stay resident in the server process");
+  assert.match(serverSource, /createContinuationSupervisorScheduler\(\{[\s\S]{0,2200}continuationSupervisor\.start\(\)/,
+    "the continuation watchdog must stay resident in the server process through the durable supervisor scheduler");
+  assert.match(serverSource, /input\.action === "claim" && outcome\?\.accepted[\s\S]{0,300}scheduleClaimRecovery\?\.\(outcome\)/,
+    "a successful sender claim must register its exact lease recovery with the resident supervisor");
+  assert.match(supervisorSource, /run\("startup"\)[\s\S]{0,500}setInterval\(\(\) => run\("interval"\), intervalMs\)/,
+    "the resident supervisor must recover durable state immediately at startup and continue periodically");
+  assert.match(supervisorSource, /setTimeout\(\(\) => \{[\s\S]{0,300}run\("sender-claim-lease"\)/,
+    "a claimed generation must have an independent exact lease recovery timer");
+  assert.match(coordinatorSource, /MODEL_CONTEXT_UPDATE_TIMEOUT_MS = 1_500/,
+    "Host model-context updates must have a bounded advisory timeout");
+  assert.match(coordinatorSource, /async function updateModelContextBestEffort[\s\S]{0,900}Promise\.race\(\[update, timeout\]\)/,
+    "an unresponsive Host updateModelContext call must not hold a generation in CLAIMED indefinitely");
   assert.doesNotMatch(runtimeSource, /last_send_result_json/,
     "generation delivery must update the canonical continuation_tasks.last_send_result column");
 

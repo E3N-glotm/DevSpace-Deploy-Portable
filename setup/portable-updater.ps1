@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("Check", "Stage", "Apply")]
+    [ValidateSet("Check", "Stage", "Apply", "SelfTestLongPath")]
     [string]$Action,
 
     [Parameter(Mandatory = $true)]
@@ -210,9 +210,28 @@ function Write-UpdateProgress {
         transport = $Transport
         updatedAt = (Get-Date).ToUniversalTime().ToString("o")
     }
-    $temporary = "$ProgressFile.tmp-$PID"
-    $value | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding UTF8
-    Move-Item -LiteralPath $temporary -Destination $ProgressFile -Force
+    $payload = $value | ConvertTo-Json -Depth 6
+    for ($attempt = 1; $attempt -le 8; $attempt++) {
+        $temporary = "$ProgressFile.tmp-$PID-$attempt-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        try {
+            Set-Content -LiteralPath $temporary -Value $payload -Encoding UTF8 -ErrorAction Stop
+            try {
+                Move-Item -LiteralPath $temporary -Destination $ProgressFile -Force -ErrorAction Stop
+            } catch {
+                # The native UI, indexer, or antivirus may briefly hold the
+                # destination. Progress is advisory, so overwrite-copy is a
+                # safe fallback while the staged payload remains authoritative.
+                Copy-Item -LiteralPath $temporary -Destination $ProgressFile -Force -ErrorAction Stop
+                Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+            }
+            return
+        } catch {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+            if ($attempt -lt 8) { Start-Sleep -Milliseconds ([Math]::Min(800, 25 * [Math]::Pow(2, $attempt - 1))) }
+        }
+    }
+    # A locked UI progress snapshot must not invalidate a verified download or
+    # trigger a full-package fallback. Later progress writes will retry.
 }
 
 function Remove-TransientUpdateTask {
@@ -252,6 +271,93 @@ function Invoke-WithRetry {
     }
     if ($lastError) { throw $lastError }
     throw "$Description failed without an exception."
+}
+
+function ConvertTo-ExtendedLengthPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full.StartsWith('\\?\', [StringComparison]::Ordinal)) { return $full }
+    if ($full.StartsWith('\\', [StringComparison]::Ordinal)) {
+        return '\\?\UNC\' + $full.Substring(2)
+    }
+    return '\\?\' + $full
+}
+
+function Expand-SafeZipArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$RequiredRoot
+    )
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $destinationFull = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
+    $destinationPrefix = $destinationFull + '\'
+    [IO.Directory]::CreateDirectory((ConvertTo-ExtendedLengthPath $destinationFull)) | Out-Null
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $name = ([string]$entry.FullName).Replace('\','/')
+            if (-not $name.StartsWith(($RequiredRoot.TrimEnd('/') + '/'), [StringComparison]::Ordinal)) {
+                throw "Archive entry is outside ${RequiredRoot}/: $name"
+            }
+            if ($name.StartsWith('/', [StringComparison]::Ordinal) -or $name -match '(^|/)\.\.(/|$)' -or $name -match '^[A-Za-z]:') {
+                throw "Unsafe archive entry: $name"
+            }
+            $target = [IO.Path]::GetFullPath((Join-Path $destinationFull $name.Replace('/','\')))
+            if (-not $target.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Unsafe archive extraction target: $name"
+            }
+            $extendedTarget = ConvertTo-ExtendedLengthPath $target
+            if ($name.EndsWith('/', [StringComparison]::Ordinal) -or [string]::IsNullOrEmpty([string]$entry.Name)) {
+                [IO.Directory]::CreateDirectory($extendedTarget) | Out-Null
+                continue
+            }
+            $parent = [IO.Path]::GetDirectoryName($target)
+            [IO.Directory]::CreateDirectory((ConvertTo-ExtendedLengthPath $parent)) | Out-Null
+            $input = $entry.Open()
+            try {
+                $output = New-Object IO.FileStream($extendedTarget, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try { $input.CopyTo($output) } finally { $output.Dispose() }
+            } finally {
+                $input.Dispose()
+            }
+        }
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+function Test-LongPathZipExtraction {
+    $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("devspace-updater-longpath-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $zip = Join-Path $testRoot 'test.zip'
+    $destination = Join-Path $testRoot 'payload'
+    [IO.Directory]::CreateDirectory($testRoot) | Out-Null
+    $relative = 'DevSpacePortable/app/node_modules/' + (('segment1234567890/' * 14)) + 'payload.txt'
+    try {
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $stream = New-Object IO.FileStream($zip, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try {
+            $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Create, $false)
+            try {
+                $entry = $archive.CreateEntry($relative)
+                $entryStream = $entry.Open()
+                try {
+                    $bytes = [Text.Encoding]::UTF8.GetBytes('long-path-ok')
+                    $entryStream.Write($bytes, 0, $bytes.Length)
+                } finally { $entryStream.Dispose() }
+            } finally { $archive.Dispose() }
+        } finally { $stream.Dispose() }
+        Expand-SafeZipArchive -ZipPath $zip -Destination $destination -RequiredRoot 'DevSpacePortable'
+        $target = Join-Path $destination $relative.Replace('/','\')
+        $extendedTarget = ConvertTo-ExtendedLengthPath $target
+        if (-not [IO.File]::Exists($extendedTarget)) { throw 'Long-path ZIP extraction did not create the expected file.' }
+        if ([IO.File]::ReadAllText($extendedTarget, [Text.Encoding]::UTF8) -ne 'long-path-ok') { throw 'Long-path ZIP extraction content mismatch.' }
+        return [ordered]@{ success = $true; pathLength = $target.Length; longPath = ($target.Length -gt 260) }
+    } finally {
+        try { [IO.Directory]::Delete((ConvertTo-ExtendedLengthPath $testRoot), $true) } catch { }
+    }
 }
 
 function Get-CurlExecutable {
@@ -1337,7 +1443,7 @@ function Stage-FullUpdate([object]$Latest, [string]$FallbackReason = "") {
         } finally {
             $archive.Dispose()
         }
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $payload)
+        Expand-SafeZipArchive -ZipPath $zip -Destination $payload -RequiredRoot "DevSpacePortable"
         $portableRoot = Join-Path $payload "DevSpacePortable"
         foreach ($required in @("DevSpace-Portable.exe", "runtime\node\node.exe", "setup\portable-manager.cjs", "VERSION-MANIFEST.json")) {
             if (-not (Test-Path (Join-Path $portableRoot $required))) { throw "Staged update is incomplete: $required" }
@@ -1513,7 +1619,7 @@ function Stage-IncrementalUpdate([object]$Latest, [object]$Incremental) {
         } finally {
             $archive.Dispose()
         }
-        [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $payload)
+        Expand-SafeZipArchive -ZipPath $zip -Destination $payload -RequiredRoot "DevSpacePortableDelta"
         $deltaRoot = Join-Path $payload "DevSpacePortableDelta"
         $deltaManifestFile = Join-Path $deltaRoot "delta-manifest.json"
         if (-not (Test-Path $deltaManifestFile)) { throw "Incremental package has no delta-manifest.json." }
@@ -1660,7 +1766,7 @@ function Stage-IncrementalChainUpdate([object]$Latest, [object]$Plan) {
             } finally {
                 $archive.Dispose()
             }
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $payload)
+            Expand-SafeZipArchive -ZipPath $zip -Destination $payload -RequiredRoot "DevSpacePortableDelta"
             $deltaRoot = Join-Path $payload "DevSpacePortableDelta"
             $deltaManifestFile = Join-Path $deltaRoot "delta-manifest.json"
             if (-not (Test-Path $deltaManifestFile)) { throw "Incremental chain package has no delta-manifest.json." }
@@ -2357,6 +2463,7 @@ try {
         "Check" { Write-JsonResult (Get-UpdateStatus) }
         "Stage" { Write-JsonResult (Invoke-WithStageMutex { Stage-Update }) }
         "Apply" { Write-JsonResult (Apply-StagedUpdate) }
+        "SelfTestLongPath" { Write-JsonResult (Test-LongPathZipExtraction) }
     }
 } catch {
     $failureMessage = $_.Exception.Message

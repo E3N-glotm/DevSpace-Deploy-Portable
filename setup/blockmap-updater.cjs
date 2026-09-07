@@ -95,12 +95,43 @@ function mkdirp(directory) {
   fs.mkdirSync(directory, { recursive: true });
 }
 
+const TRANSIENT_WINDOWS_FILE_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
+
+function waitSync(milliseconds) {
+  if (!(milliseconds > 0)) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
 function atomicJson(file, value) {
-  if (!file) return;
+  if (!file) return false;
   mkdirp(path.dirname(file));
-  const temporary = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  fs.renameSync(temporary, file);
+  const payload = `${JSON.stringify(value, null, 2)}\n`;
+  let lastError;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const temporary = `${file}.tmp-${process.pid}-${attempt}-${crypto.randomUUID().slice(0, 8)}`;
+    try {
+      fs.writeFileSync(temporary, payload, "utf8");
+      try {
+        fs.renameSync(temporary, file);
+      } catch (error) {
+        if (!TRANSIENT_WINDOWS_FILE_ERRORS.has(error?.code)) throw error;
+        // Windows can temporarily reject rename-over-existing while the UI,
+        // indexer, or antivirus has the destination open. A progress snapshot
+        // is advisory, so an overwrite copy is an acceptable atomicity fallback.
+        fs.copyFileSync(temporary, file);
+        fs.rmSync(temporary, { force: true });
+      }
+      return true;
+    } catch (error) {
+      lastError = error;
+      fs.rmSync(temporary, { force: true });
+      if (!TRANSIENT_WINDOWS_FILE_ERRORS.has(error?.code)) throw error;
+      waitSync(Math.min(800, 25 * (2 ** attempt)));
+    }
+  }
+  // Never discard a verified blockmap download because its UI-only progress
+  // snapshot remained transiently locked. The next update will retry it.
+  return false;
 }
 
 function createProgressWriter(file) {

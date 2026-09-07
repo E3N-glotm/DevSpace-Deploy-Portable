@@ -11,6 +11,7 @@ const packagedConfigPath = join(ROOT, "app", "node_modules", "@waishnav", "devsp
 const migrations = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "db", "migrations.js"), "utf8");
 const server = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "server.js"), "utf8");
 const runtimeStateSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "runtime-state.js"), "utf8");
+const supervisorSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "continuation-supervisor.js"), "utf8");
 const syntheticAdaptiveGateSource = runtimeStateSource.match(/function syntheticAdaptiveActiveWorkGate\(row\) \{[\s\S]*?\n\}/)?.[0] ?? "";
 const featureTools = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "feature-tools.js"), "utf8");
 const coordinatorPath = join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js");
@@ -412,8 +413,16 @@ assert.match(server, /const continuationWakeClients = new Set\(\)/,
   "the resident server must keep a bounded wake-only subscriber set instead of relying exclusively on a background iframe timer");
 assert.match(server, /res\.write\(`event: wake\\ndata: \$\{JSON\.stringify\(\{ reason \}\)\}\\n\\n`\)/,
   "the resident wake channel must emit only a wake reason payload rather than continuation authority");
-assert.match(server, /const sweep = runtimeState\.continuationSupervisorSweep\(\)[\s\S]{0,500}if \(sweep\.ready\.length > 0\)[\s\S]{0,1200}broadcastContinuationWake\("ready-generation"\)/,
+assert.match(server, /createContinuationSupervisorScheduler\(\{[\s\S]{0,1600}if \(sweep\.ready\.length > 0\)[\s\S]{0,1200}broadcastContinuationWake\("ready-generation"\)/,
   "the resident server must push a wake-only event specifically when the authoritative supervisor persists a READY generation");
+assert.match(supervisorSource, /runtimeState\.continuationSupervisorSweep\(\)/,
+  "the durable supervisor scheduler must execute the authoritative runtime sweep rather than invent continuation state");
+assert.match(supervisorSource, /run\("startup"\)[\s\S]{0,300}setInterval\(\(\) => run\("interval"\), intervalMs\)/,
+  "the durable supervisor scheduler must immediately recover persisted state at startup and remain resident independently of Workspace App timers");
+assert.match(server, /input\.action === "claim" && outcome\?\.accepted[\s\S]{0,320}scheduleClaimRecovery\?\.\(outcome\)/,
+  "the server must register a sender-claim recovery timer as soon as the generation CAS succeeds");
+assert.match(supervisorSource, /claim\.claimDueAt[\s\S]{0,1000}run\("sender-claim-lease"\)/,
+  "a CLAIMED generation must receive a lease-exact recovery sweep even if the ordinary resident interval is delayed");
 assert.match(server, /sweep\.deliveryAckRetryDue[\s\S]{0,1200}broadcastContinuationWake\("delivery-ack-retry-due"\)/,
   "the resident server must also wake surviving sender Apps when a persisted pre-ACK startup retry deadline matures without manufacturing a new generation");
 assert.match(server, /app\.get\("\/mcp-app-assets\/continuation-wake"[\s\S]{0,500}text\/event-stream[\s\S]{0,700}writeContinuationWake\(res, "connected"\)/,

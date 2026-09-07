@@ -7,6 +7,9 @@ const DEFAULT_SUPERVISOR_TICK_MS = 2_000;
 const CONTINUATION_WAKE_URL = new URL("./continuation-wake", import.meta.url).toString();
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 60_000;
 const DEFAULT_TERMINAL_REFRESH_MS = 60_000;
+// Host model-context updates are advisory. They must never hold a synthetic
+// generation in CLAIMED indefinitely before the authoritative delivery CAS.
+const MODEL_CONTEXT_UPDATE_TIMEOUT_MS = 1_500;
 // A resumed ChatGPT turn can be created before its MCP connector has fully
 // rehydrated. Keep retrying the same idempotent control call across roughly a
 // 30-second readiness window instead of giving up after ~8 seconds.
@@ -222,6 +225,22 @@ function compactContinuationField(value, maxLength = 520) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!text) return "";
   return text.length <= maxLength ? text : `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+async function updateModelContextBestEffort(app, content) {
+  if (!app || typeof app.updateModelContext !== "function") return false;
+  let timer;
+  try {
+    const update = Promise.resolve()
+      .then(() => app.updateModelContext({ content }))
+      .then(() => true, () => false);
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(false), MODEL_CONTEXT_UPDATE_TIMEOUT_MS);
+    });
+    return await Promise.race([update, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function visibleContinuationTrigger(task) {
@@ -797,11 +816,9 @@ export function installContinuationCoordinator(app, options = {}) {
       }
       if (!state.task || terminal(state.task) || automationSuppressed(state.task)) return false;
       await heartbeat(reason);
-      if (typeof app.updateModelContext === "function") {
-        await app.updateModelContext({
-          content: [{ type: "text", text: continuationContext(state.task, state.workspaceId, reason) }],
-        }).catch(() => undefined);
-      }
+      await updateModelContextBestEffort(app, [
+        { type: "text", text: continuationContext(state.task, state.workspaceId, reason) },
+      ]);
       return true;
     } catch {
       return false;
@@ -872,11 +889,9 @@ export function installContinuationCoordinator(app, options = {}) {
         // Keep task ids, workspace ids, delivery tokens, recovery reasons, and
         // execution policy in model context rather than leaking the synthetic
         // recovery envelope into the visible conversation history.
-        if (typeof app.updateModelContext === "function") {
-          await app.updateModelContext({
-            content: [{ type: "text", text: continuationContext(state.task, state.workspaceId, reason) }],
-          }).catch(() => undefined);
-        }
+        await updateModelContextBestEffort(app, [
+          { type: "text", text: continuationContext(state.task, state.workspaceId, reason) },
+        ]);
 
         // A manual user turn may revoke this synthetic owner while the Host
         // context update above is in flight. Re-check the exact sender
