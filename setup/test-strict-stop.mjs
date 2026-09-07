@@ -9,6 +9,23 @@ import { fileURLToPath } from "node:url";
 const setupDir = dirname(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(setupDir, "..");
 const sourceManager = join(setupDir, "portable-manager.cjs");
+const sourceManagerText = await readFile(sourceManager, "utf8");
+assert.match(sourceManagerText, /function invokedFromLocalMcpServiceTree\(\)/,
+  "restart-local must detect whether it is running inside the MCP service process tree");
+assert.match(sourceManagerText, /DevSpace Portable Local Restart /,
+  "self-restart must use a distinct one-shot Task Scheduler controller");
+assert.match(sourceManagerText, /restart-local-worker/,
+  "the one-shot controller must enter a dedicated restart worker command");
+assert.match(sourceManagerText, /publicTunnelTouched:\s*false/,
+  "local restart controller state must explicitly preserve the public tunnel");
+const restartAckIndex = sourceManagerText.indexOf('status: "acknowledged"');
+const restartGraceIndex = sourceManagerText.indexOf("sleepSync(3_000);");
+const restartStopIndex = sourceManagerText.indexOf("const stopped = stopLocalServiceOnly();");
+assert.ok(restartAckIndex >= 0 && restartGraceIndex > restartAckIndex && restartStopIndex > restartGraceIndex,
+  "restart worker must acknowledge before its flush grace and only then stop the MCP task tree");
+assert.match(sourceManagerText,
+  /if \(invokedFromLocalMcpServiceTree\(\)\)[\s\S]*scheduleLocalRestartController\(\)[\s\S]*else \{[\s\S]*stopLocalServiceOnly\(\);[\s\S]*startLocalOnly\(\)/,
+  "restart-local must delegate only for MCP-internal callers and retain synchronous external semantics");
 const temporary = await mkdtemp(join(tmpdir(), "devspace-strict-stop-"));
 // Run the destructive stop test from a disposable Portable root. Running the
 // real worktree manager would make ROOT point at the active source checkout and
@@ -171,6 +188,7 @@ try {
 
   console.log(JSON.stringify({
     strictStop: true,
+    selfRestartDelegatesOutsideMcpTaskJob: true,
     orphanPid: pid,
     unrelatedDescendantPreserved: true,
     externalPid,

@@ -626,6 +626,7 @@ export class StructuredRuntimeState {
             action: "status",
             taskId: task.id,
             conversationScopeId,
+            readOnlyStatus: true,
         }).task;
         return {
             accepted: true,
@@ -2476,6 +2477,8 @@ export class StructuredRuntimeState {
                 continueRequired: false,
                 continueInSameTurn: false,
                 syntheticWorkMustContinue: false,
+                preFinalControlRequired: false,
+                requiredBeforeFinal: undefined,
                 nextRequiredMilestones: [],
                 taskIncomplete: false,
                 remainingMilestones: [],
@@ -2492,10 +2495,22 @@ export class StructuredRuntimeState {
                 && task.assistantTurnState !== "COMPLETION_REQUESTED";
             const normalTurnCompletionRequested = continueRequired
                 && task.assistantTurnState === "COMPLETION_REQUESTED";
+            // Do not infer model completion from inactivity. A live ChatGPT
+            // turn can go quiet while it is still reasoning or composing. If
+            // an incomplete RUNNING turn is going to produce a visible final,
+            // require an explicit model control action instead: keep working,
+            // sign turn-complete, or persist a genuine external wait.
+            const preFinalControlRequired = continueRequired
+                && !blocked
+                && !normalTurnCompletionRequested;
             return {
                 continueRequired,
                 continueInSameTurn: syntheticWorkMustContinue,
                 syntheticWorkMustContinue,
+                preFinalControlRequired,
+                requiredBeforeFinal: preFinalControlRequired
+                    ? "continue substantive work; or call turn-complete for an intentional incomplete stage boundary; or checkpoint with waitingExternal=true only for a genuine external blocker"
+                    : undefined,
                 nextRequiredMilestones: continueRequired ? remainingMilestones : [],
                 taskIncomplete,
                 remainingMilestones,
@@ -2587,6 +2602,7 @@ export class StructuredRuntimeState {
         if (action === "status") {
             let row = find();
             const deliveryToken = input.deliveryToken ? String(input.deliveryToken) : "";
+            const readOnlyStatus = input.readOnlyStatus === true;
             const manualTakeover = input.manualTakeover === true
                 || String(input.note ?? "").trim() === "manual-user-turn-takeover";
             // First-ever status precedes open_workspace/anchor issuance. Persist
@@ -2697,6 +2713,35 @@ export class StructuredRuntimeState {
                     ...continuationDirective(task),
                 };
             }
+            // App/server bookkeeping must be able to inspect continuation state
+            // without impersonating the resumed model's first status handshake.
+            // Otherwise a control-plane probe immediately after Host delivery can
+            // consume delivery_token and manufacture TURN_ACKED even when ChatGPT
+            // only inserted the synthetic user text and never started a model turn.
+            // This flag is capability-reducing only: no owner/card/lease/generation
+            // state is changed, but READY/pending state remains observable.
+            if (row && readOnlyStatus) {
+                const activeCard = this.database.sqlite.prepare(`
+                  select active_workset_id from continuation_conversation_cards where conversation_scope_id=?
+                `).get(row.conversation_scope_id);
+                const readySynthetic = activeCard?.active_workset_id
+                    ? this.database.sqlite.prepare(`
+                        select generation from continuation_generations
+                        where workset_id=? and owner_type='synthetic' and state='READY'
+                        order by generation asc limit 1
+                      `).get(activeCard.active_workset_id)
+                    : undefined;
+                const task = rowToTask(row);
+                return {
+                    task,
+                    accepted: true,
+                    reason: "read-only-status",
+                    ...(readySynthetic ? { readyGeneration: Number(readySynthetic.generation) } : {}),
+                    syntheticOwnerActive: String(row.delivery_owner || "") === "synthetic-active",
+                    syntheticTokenPending: Boolean(row.delivery_token),
+                    ...continuationDirective(task),
+                };
+            }
             // The Workspace App supervisor already polls status on every tick.
             // Only the verified coordinator for the current anchor generation is
             // authoritative UI liveness. Old/review/patch iframes may still call
@@ -2740,6 +2785,7 @@ export class StructuredRuntimeState {
                   `).get(String(row.delivery_token))
                 : undefined;
             const expectedSyntheticClaim = Boolean(row
+                && !readOnlyStatus
                 && !deliveryToken
                 && !manualTakeover
                 && [4, 5].includes(Number(row.continuation_pending))
@@ -3048,9 +3094,9 @@ export class StructuredRuntimeState {
                     `).get(fresh.id, claimToken);
                     if (generation) {
                         this.database.sqlite.prepare(`
-                          update continuation_generations set state='TURN_ACKED',due_at=?,updated_at=?
+                          update continuation_generations set state='TURN_ACKED',turn_acked_at=coalesce(turn_acked_at,?),due_at=?,updated_at=?
                           where id=? and state in ('DELIVERED','WORK_REQUIRED','TURN_ACKED')
-                        `).run(syntheticOwnerExpiresAt, nowIso, generation.id);
+                        `).run(nowIso, syntheticOwnerExpiresAt, nowIso, generation.id);
                     }
                     const changed = this.database.sqlite.prepare(`
                       update continuation_tasks set continuation_pending=0,
@@ -3569,6 +3615,14 @@ export class StructuredRuntimeState {
               where id=? and state='RUNNING' and turn_lease_id=?
                 and assistant_turn_state in ('GENERATING','UNKNOWN')
             `).run(owner, nowIso, completionNote, nowIso, taskId, turnLeaseId);
+            // recoverCanonicalConversationTaskProjection() may have accepted
+            // required/completed milestone hints from this turn-complete call.
+            // Persist that canonical delta into the active Workset before the
+            // resident supervisor can deliver a synthetic turn. Otherwise the
+            // synthetic turn's first status recovery correctly treats the
+            // Workset as authoritative and briefly projects the pre-completion
+            // milestone state back onto the lifetime task.
+            this.syncContinuationArchitectureForLegacyTask(taskId);
             // Make the resident supervisor revisit this exact workset when the
             // explicit completion handoff grace matures. This does not arm a
             // continuation: the sweep still must atomically promote the exact
@@ -4263,6 +4317,31 @@ export class StructuredRuntimeState {
                 if (!current || terminalStates.has(current.state)) return { accepted: false, reason: "task-terminal", task: rowToTask(current) };
                 if (current.state === "PAUSED_BY_USER") return { accepted: false, reason: "task-paused-by-user", task: rowToTask(current) };
                 if (current.state === "WAITING_EXTERNAL") return { accepted: false, reason: "waiting-external", task: rowToTask(current) };
+                // The architecture generation row is authoritative once a
+                // delivery token has been minted by continuation_sender.  An
+                // already-open pre-generation Workspace App may still call the
+                // legacy continuation_task claim path after a live upgrade.
+                // Letting that compatibility path consume pending=4/5 mutates
+                // only continuation_tasks and tears the ACK-retry lease away
+                // from the still-DELIVERED generation.  Fail closed instead;
+                // the current app-only sender CAS must reclaim/release the same
+                // generation and token atomically.
+                const generationBackedDelivery = current.delivery_token
+                    ? this.database.sqlite.prepare(`
+                        select g.state,g.generation,g.delivery_token
+                        from continuation_generations g
+                        join continuation_worksets w on w.id=g.workset_id
+                        where g.delivery_token=? and w.legacy_task_id=?
+                        order by g.generation desc limit 1
+                      `).get(String(current.delivery_token), taskId)
+                    : undefined;
+                if (generationBackedDelivery) {
+                    return {
+                        accepted: false,
+                        reason: "generation-sender-required",
+                        task: rowToTask(current),
+                    };
+                }
                 const requestingCoordinatorId = String(input.coordinatorInstanceId ?? "").trim();
                 if (requestingCoordinatorId) {
                     const verifiedCoordinatorId = String(current.anchor_mount_coordinator_id ?? "").trim();
@@ -4386,6 +4465,22 @@ export class StructuredRuntimeState {
             return transaction();
         }
         if (action === "release-continuation") {
+            const generationBackedDelivery = row.delivery_token
+                ? this.database.sqlite.prepare(`
+                    select g.state,g.generation,g.delivery_token
+                    from continuation_generations g
+                    join continuation_worksets w on w.id=g.workset_id
+                    where g.delivery_token=? and w.legacy_task_id=?
+                    order by g.generation desc limit 1
+                  `).get(String(row.delivery_token), taskId)
+                : undefined;
+            if (generationBackedDelivery) {
+                return {
+                    accepted: false,
+                    reason: "generation-sender-required",
+                    task: rowToTask(row),
+                };
+            }
             const pendingState = Number(row.continuation_pending);
             const pending = [3, 4].includes(pendingState) ? 2 : 0;
             this.database.sqlite.prepare("update continuation_tasks set continuation_pending=?, updated_at=? where id=?").run(pending, nowIso, taskId);

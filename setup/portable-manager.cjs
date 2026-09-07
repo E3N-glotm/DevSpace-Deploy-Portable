@@ -31,6 +31,7 @@ const TUNNEL_SUPERVISOR_PID_FILE = path.join(RUN_DIR, "tunnel-supervisor.pid");
 const TUNNEL_NETWORK_STATE_FILE = path.join(RUN_DIR, "tunnel-network.json");
 const TUNNEL_STOP_FILE = path.join(RUN_DIR, "tunnel.stop");
 const DASHBOARD_PUBLIC_PROBE_FILE = path.join(RUN_DIR, "dashboard-public-probe.json");
+const LOCAL_RESTART_STATE_FILE = path.join(RUN_DIR, "local-restart-controller.json");
 const PROXY_REPAIR_BACKUP_FILE = path.join(STATE_DIR, "network-proxy-repair-backup.json");
 const UI_LEASE_FILE = path.join(RUN_DIR, "ui-session.json");
 const COMPUTER_USE_DIR = path.join(RUN_DIR, "computer-use");
@@ -67,8 +68,9 @@ const INSTALLED_PLUGIN_ROOT = path.join(DATA_DIR, "plugins", "installed");
 const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
+const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.59";
-const PORTABLE_DEV_ITERATION = "dev24";
+const PORTABLE_DEV_ITERATION = "dev31";
 const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
@@ -2045,6 +2047,193 @@ function portableProcessSnapshot() {
   })).filter((item) => Number.isInteger(item.pid) && item.pid > 0);
 }
 
+function invokedFromLocalMcpServiceTree() {
+  const processes = portableProcessSnapshot();
+  const byPid = new Map(processes.map((item) => [item.pid, item]));
+  let pid = process.pid;
+  const visited = new Set();
+  while (Number.isInteger(pid) && pid > 0 && !visited.has(pid)) {
+    visited.add(pid);
+    const item = byPid.get(pid);
+    if (!item) break;
+    if (pid !== process.pid && isLocalMcpServiceProcess(item)) return true;
+    pid = Number(item.parentPid || 0);
+  }
+  return false;
+}
+
+function validLocalRestartTaskName(value) {
+  return String(value || "").startsWith(LOCAL_RESTART_TASK_PREFIX)
+    && /^[0-9a-f]{32}$/i.test(String(value || "").slice(LOCAL_RESTART_TASK_PREFIX.length));
+}
+
+function cleanupLocalRestartController(state) {
+  const taskName = String(state?.taskName || "");
+  const taskXmlFile = path.resolve(String(state?.taskXmlFile || path.join(RUN_DIR, "invalid")));
+  const runPrefix = `${path.resolve(RUN_DIR)}${path.sep}`.toLowerCase();
+  if (validLocalRestartTaskName(taskName)) {
+    runProgram("schtasks.exe", ["/end", "/tn", taskName], { ignoreExitCode: true });
+    runProgram("schtasks.exe", ["/delete", "/tn", taskName, "/f"], { ignoreExitCode: true });
+  }
+  if (taskXmlFile.toLowerCase().startsWith(runPrefix)) fs.rmSync(taskXmlFile, { force: true });
+}
+
+function localRestartControllerXml(taskName, requestId, taskXmlFile) {
+  const manager = path.join(ROOT, "setup", "portable-manager.cjs");
+  const args = [
+    manager,
+    "restart-local-worker",
+    "--request-id", requestId,
+    "--restart-task-name", taskName,
+    "--restart-task-xml", taskXmlFile,
+  ];
+  const quoteArgument = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
+  const argumentText = args.map(quoteArgument).join(" ");
+  const sid = currentUserSid();
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Author>${xmlEscape(currentWindowsUser())}</Author><Description>One-shot DevSpace Portable local MCP restart controller.</Description></RegistrationInfo>
+  <Triggers />
+  <Principals><Principal id="Author"><UserId>${xmlEscape(sid)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+    <Priority>6</Priority>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>${xmlEscape(NODE_EXE)}</Command><Arguments>${xmlEscape(argumentText)}</Arguments><WorkingDirectory>${xmlEscape(ROOT)}</WorkingDirectory></Exec></Actions>
+</Task>`;
+}
+
+function scheduleLocalRestartController() {
+  ensureLocalRuntime();
+  requireOwnedTask(TASK_MCP);
+  fs.mkdirSync(RUN_DIR, { recursive: true });
+
+  const existing = readJson(LOCAL_RESTART_STATE_FILE, null);
+  const existingAgeMs = existing?.createdAt ? Date.now() - Date.parse(existing.createdAt) : Number.POSITIVE_INFINITY;
+  if (existing && new Set(["scheduled", "acknowledged", "restarting"]).has(existing.status)
+      && existingAgeMs >= 0 && existingAgeMs < 120_000
+      && validLocalRestartTaskName(existing.taskName) && taskExists(existing.taskName)) {
+    return `Local MCP restart is already delegated to independent controller PID ${Number(existing.workerPid || 0) || "pending"}. Public tunnel will not be touched.`;
+  }
+  if (existing) cleanupLocalRestartController(existing);
+
+  const requestId = crypto.randomUUID();
+  const taskName = `${LOCAL_RESTART_TASK_PREFIX}${crypto.randomBytes(16).toString("hex")}`;
+  const taskXmlFile = path.join(RUN_DIR, `local-restart-${requestId}.xml`);
+  writeAtomic(taskXmlFile, `\uFEFF${localRestartControllerXml(taskName, requestId, taskXmlFile)}`, "utf16le");
+  writeJson(LOCAL_RESTART_STATE_FILE, {
+    requestId,
+    taskName,
+    taskXmlFile,
+    requesterPid: process.pid,
+    status: "scheduled",
+    createdAt: new Date().toISOString(),
+    publicTunnelTouched: false,
+  });
+  try {
+    runProgram("schtasks.exe", ["/create", "/tn", taskName, "/xml", taskXmlFile, "/f"]);
+    runProgram("schtasks.exe", ["/run", "/tn", taskName]);
+  } catch (error) {
+    cleanupLocalRestartController({ taskName, taskXmlFile });
+    writeJson(LOCAL_RESTART_STATE_FILE, {
+      requestId, taskName, taskXmlFile, status: "failed", failedAt: new Date().toISOString(),
+      error: String(error?.message || error), publicTunnelTouched: false,
+    });
+    throw error;
+  }
+
+  const deadline = Date.now() + 10_000;
+  let acknowledgement = null;
+  while (Date.now() < deadline) {
+    const state = readJson(LOCAL_RESTART_STATE_FILE, null);
+    if (state?.requestId === requestId
+        && new Set(["acknowledged", "restarting", "completed"]).has(state.status)
+        && Number(state.workerPid) > 0) {
+      acknowledgement = state;
+      break;
+    }
+    sleepSync(100);
+  }
+  if (!acknowledgement) {
+    cleanupLocalRestartController({ taskName, taskXmlFile });
+    writeJson(LOCAL_RESTART_STATE_FILE, {
+      requestId, taskName, taskXmlFile, status: "failed", failedAt: new Date().toISOString(),
+      error: "one-shot local restart controller did not acknowledge launch", publicTunnelTouched: false,
+    });
+    throw new Error("Detached local MCP restart controller failed to acknowledge launch; current MCP was left running and the public tunnel was not touched.");
+  }
+  return `Local MCP restart delegated to independent one-shot controller PID ${acknowledgement.workerPid}. The current MCP request may disconnect briefly after acknowledgement; public tunnel will not be touched.`;
+}
+
+async function runLocalRestartWorker() {
+  const requestId = argumentValue("--request-id");
+  const taskName = argumentValue("--restart-task-name");
+  const taskXmlFile = path.resolve(argumentValue("--restart-task-xml") || path.join(RUN_DIR, "invalid"));
+  const state = readJson(LOCAL_RESTART_STATE_FILE, null);
+  if (!requestId || state?.requestId !== requestId || state?.taskName !== taskName || !validLocalRestartTaskName(taskName)) {
+    throw new Error("Local restart worker capability does not match the active controller state.");
+  }
+  writeJson(LOCAL_RESTART_STATE_FILE, {
+    ...state,
+    status: "acknowledged",
+    workerPid: process.pid,
+    acknowledgedAt: new Date().toISOString(),
+    publicTunnelTouched: false,
+  });
+
+  // Give the original MCP tool response enough time to flush before ending the
+  // Scheduled Task that owns its process tree. This worker is in a different
+  // one-shot Task Scheduler job and therefore survives that /End operation.
+  sleepSync(3_000);
+  try {
+    const current = readJson(LOCAL_RESTART_STATE_FILE, state);
+    writeJson(LOCAL_RESTART_STATE_FILE, {
+      ...current,
+      status: "restarting",
+      restartingAt: new Date().toISOString(),
+      publicTunnelTouched: false,
+    });
+    const stopped = stopLocalServiceOnly();
+    const started = await startLocalOnly();
+    writeJson(LOCAL_RESTART_STATE_FILE, {
+      ...readJson(LOCAL_RESTART_STATE_FILE, current),
+      status: "completed",
+      completedAt: new Date().toISOString(),
+      stopped,
+      started,
+      publicTunnelTouched: false,
+    });
+  } catch (error) {
+    try {
+      if (taskOwnedByRoot(TASK_MCP) && !taskEnabled(TASK_MCP)) setOwnedTaskEnabled(TASK_MCP, true);
+    } catch {}
+    writeJson(LOCAL_RESTART_STATE_FILE, {
+      ...readJson(LOCAL_RESTART_STATE_FILE, state),
+      status: "failed",
+      failedAt: new Date().toISOString(),
+      error: String(error?.stack || error),
+      publicTunnelTouched: false,
+    });
+    throw error;
+  } finally {
+    const runPrefix = `${path.resolve(RUN_DIR)}${path.sep}`.toLowerCase();
+    if (taskXmlFile.toLowerCase().startsWith(runPrefix)) fs.rmSync(taskXmlFile, { force: true });
+    runProgram("schtasks.exe", ["/delete", "/tn", taskName, "/f"], { ignoreExitCode: true });
+  }
+}
+
 function cleanupRunState() {
   for (const file of [
     MCP_PID_FILE,
@@ -3745,8 +3934,14 @@ async function main() {
       stopServices();
       writeOutput(`${await startServices()}\n`);
     } else if (command === "restart-local") {
-      stopLocalServiceOnly();
-      writeOutput(`${await startLocalOnly()}\n`);
+      if (invokedFromLocalMcpServiceTree()) {
+        writeOutput(scheduleLocalRestartController() + "\n");
+      } else {
+        stopLocalServiceOnly();
+        writeOutput(`${await startLocalOnly()}\n`);
+      }
+    } else if (command === "restart-local-worker") {
+      await runLocalRestartWorker();
     } else if (command === "restart-tunnel") {
       stopPublicTunnelOnly();
       writeOutput(`${await startTunnelOnly()}\n`);

@@ -59,6 +59,11 @@ const MCP_SESSION_MIN_RETENTION_MS = 2 * 60 * 1_000;
 const WORKSPACE_APP_URI_PREFIX = "ui://devspace/workspace-app";
 const LEGACY_CONTINUATION_GUARD_URI = "ui://devspace/continuation-guard.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+// Hidden sender protocol compatibility gate. Increment only when the App-only
+// sender contract changes incompatibly. Requiring the current epoch on every
+// sender action prevents a superseded pre-upgrade iframe from retaining sender
+// authority after a live Portable update.
+const CONTINUATION_SENDER_PROTOCOL_EPOCH = 4;
 let structuredRuntimeState;
 let continuationTaskContractsEnabled = false;
 function resultWorkspaceId(result) {
@@ -75,15 +80,20 @@ function taskContractText(outcome) {
         ? outcome.remainingMilestones
         : Array.isArray(outcome.nextRequiredMilestones) ? outcome.nextRequiredMilestones : [];
     const finalResponseAllowed = outcome.finalResponseAllowed !== false;
+    const preFinalControlRequired = outcome.preFinalControlRequired === true;
+    const requiredBeforeFinal = String(outcome.requiredBeforeFinal ?? "").trim();
     return [
         "DevSpace Task Contract:",
         `taskId=${task.id}; source=${task.taskSource ?? "legacy"}; mode=${task.continuationMode ?? "unknown"}; workspaceId=${task.workspaceId ?? "unknown"}; milestones=${(task.completedMilestones ?? []).length}/${(task.requiredMilestones ?? []).length}.`,
         `continuationBudget=${task.unlimitedContinuations || Number(task.maxContinuations || 0) <= 0 ? "unlimited" : task.maxContinuations}; wallClock=${task.unlimitedWallClock || !task.deadlineAt ? "unlimited" : task.deadlineAt}.`,
-        `taskIncomplete=${Boolean(outcome.taskIncomplete)}; continueInSameTurn=${Boolean(outcome.continueInSameTurn)}; syntheticWorkMustContinue=${Boolean(outcome.syntheticWorkMustContinue)}; finalResponseAllowed=${finalResponseAllowed}; remainingMilestones=${remaining.join(" | ") || "none"}.`,
+        `taskIncomplete=${Boolean(outcome.taskIncomplete)}; continueInSameTurn=${Boolean(outcome.continueInSameTurn)}; syntheticWorkMustContinue=${Boolean(outcome.syntheticWorkMustContinue)}; preFinalControlRequired=${preFinalControlRequired}; finalResponseAllowed=${finalResponseAllowed}; remainingMilestones=${remaining.join(" | ") || "none"}.`,
+        preFinalControlRequired
+            ? `requiredBeforeFinal=${requiredBeforeFinal || "continue substantive work; or sign turn-complete for an intentional incomplete stage boundary; or persist a genuine external wait"}.`
+            : "requiredBeforeFinal=none.",
         `anchorMountVerified=${Boolean(task.anchorMountVerifiedAt)}; anchorMountVerificationPending=${Boolean(task.anchorMountVerificationPending)}.`,
         finalResponseAllowed
             ? "The current assistant turn may end only because the task is complete or is explicitly blocked/paused."
-            : "Do not end with an ACK, progress report, status summary, checkpoint, or promise to continue. Keep doing substantive DevSpace work in this same assistant turn until the runnable milestone set is actually complete or genuinely blocked. A successful checkpoint persists progress but does not make a final response legal while remainingMilestones is non-empty. If this task owns a long-running process, keep attaching/polling it to exit and consume the result in this turn. Automatic continuation uses the same sustained-work stopping rule as a manual user 'continue'. Host-enforced truncation remains outside MCP control and will be handled by the recovery lease.",
+            : "A plain user-visible final is forbidden while preFinalControlRequired=true/finalResponseAllowed=false. Keep doing substantive DevSpace work in this same assistant turn. If this is a genuine intentional stage boundary after sufficient work while milestones remain, make continuation_task action=turn-complete the FINAL DevSpace control call before the visible response so completion-driven auto continuation can start. If progress truly depends on an unavailable external condition, checkpoint with waitingExternal=true instead. Do not use silence, lease expiry, SUSPECTED_STALL, a connector error, one completed milestone, a progress summary, or a promise to continue as a substitute for either legal control action. A successful ordinary checkpoint persists progress but does not make a final response legal while runnable remainingMilestones are non-empty. If this task owns a long-running process, keep attaching/polling it to exit and consume the result in this turn. Synthetic continuation uses the same sustained-work stopping rule as manual continue and may complete multiple milestones in one turn. Host-enforced truncation remains outside MCP control and is handled only by verified timeout recovery.",
     ].join("\n");
 }
 function withContinuationSenderCapability(result, taskContractOutcome) {
@@ -423,7 +433,9 @@ function toolWidgetDescriptorMeta(config, kind) {
             _meta: baseMeta,
         };
     }
-    const appUri = workspaceAppUri(config);
+    const appUri = kind === "continuation-anchor"
+        ? workspaceAppAnchorUri(config)
+        : workspaceAppUri(config);
     return {
         securitySchemes,
         _meta: {
@@ -550,9 +562,9 @@ function serverInstructions(config) {
             ? " show_changes also reports aggregate changes since the persisted workspace session captured its first structured-mutation baseline. Session rollback restores the tracked structured paths, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result. The same bounded sparse-journal model is used for local and remote-agent workspaces; arbitrary shell side effects outside tracked paths are not claimed as rollback-safe."
             : "",
         config.features?.continuationGuard
-        ? " Every real ChatGPT thread owns one lifetime DevSpace Task Contract/taskId. Every manual user message that actually uses DevSpace owns exactly one fresh visible continuation_anchor milestone card. At the start of every assistant turn that will use DevSpace, first call continuation_task action=status. The first status of a manual user turn sets manualTakeover=true exactly once (or, only on an older cached schema, note=manual-user-turn-takeover); when that manual message defines a different task, include its objective and requiredMilestones in the same first status so the manual takeover, active milestone set, workset switch and fresh card are one atomic priority transition. This manual transition supersedes READY/CLAIMED/DELIVERING/synthetic ownership before any manual side effect. When status reports manualRoundCardRequired/milestoneCardRequired/initialAnchorRequired/reanchorRequired, call continuation_anchor exactly once before substantive DevSpace work. Synthetic resumed turns omit manualTakeover, atomically claim the server-owned expected generation, and reuse the current card while requiredMilestones is unchanged. If a synthetic checkpoint changes requiredMilestones, the runtime rotates one new generation and reports milestoneCardRequired/initialAnchorRequired/reanchorRequired; issue continuation_anchor exactly once for that generation. Repeated same-set checkpoints, progress/evidence updates, reconnects, page refreshes, service restarts, workspace switches, iframe rehydrates, heartbeat and lease refresh reuse the current generation and must not render duplicates. If anchorMountVerificationPending is true, never issue a duplicate for that generation. All card generations reuse the same lifetime taskId. Later new work reactivates that taskId with continuation_task action=begin; continue/resume reuses unfinished milestones. completion-driven means required milestones and evidence, not elapsed time, own completion. 1.1.59 dev14 uses the Assistant Turn Completion Contract (ATCC): long reasoning, response generation, request silence, activity-lease expiry, iframe heartbeat, synthetic ownership expiry and historical Host cutoff samples are diagnostic only and can never end the current assistant turn. The only completion-driven automatic continuation authorities are (1) a verified explicit Host timeout for the exact current turn, or (2) an explicit model-signed stage boundary while milestones remain. A normal model-driven stage boundary requires the model, after substantive current-turn work, to call continuation_task action=turn-complete as its final DevSpace control action; this records COMPLETION_REQUESTED for the exact current turn lease but does not itself interrupt the response. If the verified current Workspace App observes lifecycle teardown for that same request, teardown is an immediate confirmation fast path. Because the current ChatGPT Apps Host does not reliably emit teardown after an ordinary assistant final, the runtime also promotes only that exact model-signed COMPLETION_REQUESTED lease after a bounded 8-second completion-handoff grace, provided no model-originated DevSpace request is still in flight. GENERATING silence, replying/thinking, lease expiry, heartbeat and historical cutoff samples can never enter this handoff path. If the model performs any later substantive DevSpace work after turn-complete, the completion request is revoked back to GENERATING and the old handoff permanently loses authority. Manual takeover likewise rotates the turn lease and invalidates stale completion intent. Manual turns require substantive current-turn work before turn-complete; synthetic resumed turns have the same full reasoning/turn budget as manual continue, a long ownership lease, at least four post-ACK substantive operations, and—only after real timeout samples have calibrated the current Host profile—must sustain work until the adaptive confirmed-Host-budget gate before they may voluntarily end an incomplete runnable stage. There is no fixed-minute synthetic completion gate; without live Host calibration an unfinished synthetic voluntary boundary fails closed. Neither quality gate is a timer that creates a continuation. Automatic resumes must receive the same sustained-execution rule as manual input. When finalResponseAllowed=false, do not stop after ACK/status/progress/checkpoint; continue substantive work until the milestone is complete, genuinely blocked, explicitly paused/cancelled, the Host truncates the turn, or you intentionally sign turn-complete after sufficient work because this stage is genuinely ready to end. Retry transient transport failures over bounded readiness backoff before declaring failure. Before replaying uncertain side effects, inspect durable state. Use complete only after the current required milestone-card generation is issued/verified and all required milestones are verified with evidence."
+        ? " Every real ChatGPT thread owns one lifetime DevSpace Task Contract/taskId. Every manual user message that actually uses DevSpace owns exactly one fresh visible continuation_anchor milestone card. At the start of every assistant turn that will use DevSpace, first call continuation_task action=status. The first status of a manual user turn sets manualTakeover=true exactly once (or, only on an older cached schema, note=manual-user-turn-takeover); when that manual message defines a different task, include its objective and requiredMilestones in the same first status so the manual takeover, active milestone set, workset switch and fresh card are one atomic priority transition. This manual transition supersedes READY/CLAIMED/DELIVERING/synthetic ownership before any manual side effect. When status reports manualRoundCardRequired/milestoneCardRequired/initialAnchorRequired/reanchorRequired, call continuation_anchor exactly once before substantive DevSpace work. Synthetic resumed turns omit manualTakeover, atomically claim the server-owned expected generation, and reuse the current card while requiredMilestones is unchanged. If a synthetic checkpoint changes requiredMilestones, the runtime rotates one new generation and reports milestoneCardRequired/initialAnchorRequired/reanchorRequired; issue continuation_anchor exactly once for that generation. Repeated same-set checkpoints, progress/evidence updates, reconnects, page refreshes, service restarts, workspace switches, iframe rehydrates, heartbeat and lease refresh reuse the current generation and must not render duplicates. If anchorMountVerificationPending is true, never issue a duplicate for that generation. All card generations reuse the same lifetime taskId. Later new work reactivates that taskId with continuation_task action=begin; continue/resume reuses unfinished milestones. completion-driven means required milestones and evidence, not elapsed time, own completion. 1.1.59 dev14 uses the Assistant Turn Completion Contract (ATCC): long reasoning, response generation, request silence, activity-lease expiry, iframe heartbeat, synthetic ownership expiry and historical Host cutoff samples are diagnostic only and can never end the current assistant turn. The only completion-driven automatic continuation authorities are (1) a verified explicit Host timeout for the exact current turn, or (2) an explicit model-signed stage boundary while milestones remain. A normal model-driven stage boundary requires the model, after substantive current-turn work, to call continuation_task action=turn-complete as its final DevSpace control action; this records COMPLETION_REQUESTED for the exact current turn lease but does not itself interrupt the response. If the verified current Workspace App observes lifecycle teardown for that same request, teardown is an immediate confirmation fast path. Because the current ChatGPT Apps Host does not reliably emit teardown after an ordinary assistant final, the runtime also promotes only that exact model-signed COMPLETION_REQUESTED lease after a bounded 8-second completion-handoff grace, provided no model-originated DevSpace request is still in flight. GENERATING silence, replying/thinking, lease expiry, heartbeat and historical cutoff samples can never enter this handoff path. If the model performs any later substantive DevSpace work after turn-complete, the completion request is revoked back to GENERATING and the old handoff permanently loses authority. Manual takeover likewise rotates the turn lease and invalidates stale completion intent. Manual turns require substantive current-turn work before turn-complete; synthetic resumed turns have the same full reasoning/turn budget as manual continue, a long ownership lease, at least four post-ACK substantive operations, and—only after real timeout samples have calibrated the current Host profile—must sustain work until the adaptive confirmed-Host-budget gate before they may voluntarily end an incomplete runnable stage. There is no fixed-minute synthetic completion gate; without live Host calibration an unfinished synthetic voluntary boundary fails closed. Neither quality gate is a timer that creates a continuation. Automatic resumes must receive the same sustained-execution rule as manual input. A resumed turn is milestone-driven, not one-milestone-per-turn: after completing one milestone it must immediately continue into later runnable milestones in the same Host turn and may voluntarily end incomplete work only at a genuine stage boundary that passes the ATCC gates. Before ANY user-visible final response in a DevSpace-using turn, inspect the latest taskContract. If preFinalControlRequired=true or finalResponseAllowed=false, a plain final is forbidden: continue substantive work; or, for an intentional incomplete stage boundary, make continuation_task action=turn-complete the final DevSpace control call; or, only when progress truly depends on an unavailable external condition, persist that state with checkpoint waitingExternal=true so the task becomes WAITING_EXTERNAL rather than leaving RUNNING/GENERATING. Never leave an incomplete RUNNING task in GENERATING merely because a tool failed, a connector disconnected, or the current response is ready to be worded. When finalResponseAllowed=false, do not stop after ACK/status/progress/checkpoint; continue substantive work until the milestone is complete, genuinely blocked, explicitly paused/cancelled, the Host truncates the turn, or you intentionally sign turn-complete after sufficient work because this stage is genuinely ready to end. Retry transient transport failures over bounded readiness backoff before declaring failure. Before replaying uncertain side effects, inspect durable state. Use complete only after the current required milestone-card generation is issued/verified and all required milestones are verified with evidence."
             : "",
-].join("").replace("1.1.59 dev14", "1.1.59 dev24");
+].join("").replace("1.1.59 dev14", "1.1.59 dev31");
     const compactActivityInstruction = " Keep tool calls task-driven and minimal because the client may expose every MCP invocation and its JSON arguments in a native activity panel. Do not call capabilities, doctor, session_list, session_resume, or show_changes merely to demonstrate or test the UI. Do not issue no-op diagnostics after the required result is already known. Use show_changes only once after actual file modifications.";
     if (config.toolMode === "codex") {
         return `Use DevSpace as a local-or-remote coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Remote Linux projects use devspace://<agent-id-or-name>/absolute/linux/path and then use the same tools as local projects; do not fall back to SSH merely because the workspace is remote. Use ${toolNames.read} for direct file reads, apply_patch for structured multi-file modifications, exec_command for commands, and write_stdin to poll or interact with running processes. ${permissions} Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction files before working in their scope.${featureInstruction}${artifactInstruction}${showChangesInstruction}${compactActivityInstruction}`;
@@ -953,7 +965,7 @@ function workspaceAppRevision(config) {
         .update("\0")
         .update(publicBaseUrl)
         .update("\0")
-        .update("workspace-app-self-contained-bootstrap-v5")
+        .update("workspace-app-self-contained-bootstrap-v6")
         .digest("hex")
         .slice(0, 16);
 }
@@ -966,8 +978,11 @@ function workspaceAppUri(config) {
     }
     return uri;
 }
+function workspaceAppAnchorUri(config) {
+    return workspaceAppUri(config).replace(/\.html$/, "-continuation-anchor.html");
+}
 function workspaceAppGenerationUri(config, generation) {
-    const baseUri = workspaceAppUri(config);
+    const baseUri = workspaceAppAnchorUri(config);
     const normalizedGeneration = Number(generation);
     if (!Number.isInteger(normalizedGeneration) || normalizedGeneration <= 0)
         return baseUri;
@@ -998,7 +1013,16 @@ function enablePortableContinuationAnchorRenderer(source) {
     }
     return raw.replace(marker, (_match, argumentName) => `return ${argumentName}===\`continuation_anchor\`||${argumentName}===\`open_workspace\``);
 }
-function workspaceAppHtml(config) {
+function workspaceAppSurfaceBootstrap(resourceUri) {
+    const uri = String(resourceUri ?? "");
+    const anchorMatch = /-continuation-anchor(?:-g(\d+))?\.html$/.exec(uri);
+    const generation = Number(anchorMatch?.[1] || 0);
+    return {
+        kind: anchorMatch ? "continuation-anchor" : "workspace",
+        ...(Number.isInteger(generation) && generation > 0 ? { anchorMountGeneration: generation } : {}),
+    };
+}
+function workspaceAppHtml(config, resourceUri = workspaceAppUri(config)) {
     const baseUrl = assetBaseUrl(config);
     const entry = getWorkspaceAppManifestEntry();
     const escapeInlineScript = (source) => String(source).replace(/<\/script/gi, "<\\/script");
@@ -1019,6 +1043,7 @@ function workspaceAppHtml(config) {
         .map((stylesheet) => readFileSync(new URL(`../dist/ui/${stylesheet}`, import.meta.url), "utf8"))
         .join("\n")
         .replace(/<\/style/gi, "<\\/style");
+    const surfaceBootstrap = JSON.stringify(workspaceAppSurfaceBootstrap(resourceUri));
     return `<!doctype html>
 <html lang="en">
   <head>
@@ -1029,6 +1054,11 @@ function workspaceAppHtml(config) {
 ${inlineStyles}
     </style>
     <script>
+      // Tool-input/tool-result notifications are optional Host lifecycle
+      // messages. Keep the surface identity in the immutable MCP resource URI
+      // so a continuation_anchor iframe can authenticate and ACK its card even
+      // when the Host mounts the App without either one-shot notification.
+      window.__DEVSPACE_CONTINUATION_SURFACE__ = Object.freeze(${surfaceBootstrap});
       // ChatGPT can deliver the initial tool-input/tool-result notification as
       // soon as the iframe exists, while module scripts are still being parsed.
       // Buffer those early host messages synchronously and replay them only
@@ -1107,7 +1137,7 @@ function workspaceAppResourceResult(config, resourceUri = workspaceAppUri(config
             {
                 uri: String(resourceUri),
                 mimeType: RESOURCE_MIME_TYPE,
-                text: workspaceAppHtml(config),
+                text: workspaceAppHtml(config, resourceUri),
                 _meta: appResourceMeta(config),
             },
         ],
@@ -1848,7 +1878,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 workspaces.getWorkspace(input.workspaceId);
             const requestConversationScopeId = openAiConversationScopeId(context?._meta);
             const boundTask = input.taskId
-                ? runtimeState.continuationTask({ action: "status", taskId: input.taskId }).task
+                ? runtimeState.continuationTask({ action: "status", taskId: input.taskId, readOnlyStatus: true }).task
                 : undefined;
             const conversationScopeId = requestConversationScopeId ?? boundTask?.conversationScopeId;
             if (!conversationScopeId) {
@@ -1895,7 +1925,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
         });
         registerAppTool(server, "continuation_task", {
             title: "Continuation task state",
-            description: "Persist and verify the single ChatGPT-thread lifetime DevSpace Task Contract across assistant turns, sequential user tasks, card generations and workspace switches. The first DevSpace call in every assistant turn must be status. On the first status of each manual/user turn, set manualTakeover=true exactly once; synthetic/App turns omit it and claim only the server-owned expected generation. completion-driven uses the Assistant Turn Completion Contract (ATCC): activity lease expiry may record SUSPECTED_STALL, but request silence, iframe heartbeat, ownership-lease expiry and historical cutoff samples never authorize another Host turn. A normal assistant stage that intentionally ends while milestones remain must call action=turn-complete after substantive work; if an already-open ChatGPT Host has cached an older schema that does not expose turn-complete, call action=checkpoint with the exact note atcc-turn-complete instead. That compatibility signature is routed through the identical ATCC current-turn and substantive-work gates and does not change ordinary checkpoint behavior. Do not sign completion merely because one command/test failed or because only a few quick tool calls have run: diagnose failures and continue runnable work in the same assistant turn. A matching verified Host teardown is an optional immediate confirmation fast path, not a requirement for ordinary ChatGPT finals. When teardown is absent, only an exact model-signed COMPLETION_REQUESTED turn lease may promote to COMPLETED after the bounded 10-second handoff grace and only when no model-originated DevSpace request is in flight. GENERATING silence cannot enter that path. Any later substantive DevSpace call revokes the pending request back to GENERATING, and manual takeover rotates the turn lease, so stale completion intent cannot fire later. A verified explicit Host timeout may independently record TIMED_OUT. Manual completion intent requires at least one substantive operation in the current turn; synthetic resumed completion intent requires at least four post-ACK substantive operations. timeout/teardown Host signals are accepted only from the verified current anchor coordinator. timeout-recovery remains strict proven-cutoff mode. resident is reserved for explicit monitoring work and stage/process wakes.",
+            description: "Persist and verify the single ChatGPT-thread lifetime DevSpace Task Contract across assistant turns, sequential user tasks, card generations and workspace switches. The first DevSpace call in every assistant turn must be status. On the first status of each manual/user turn, set manualTakeover=true exactly once; synthetic/App turns omit it and claim only the server-owned expected generation. completion-driven uses the Assistant Turn Completion Contract (ATCC): activity lease expiry may record SUSPECTED_STALL, but request silence, iframe heartbeat, ownership-lease expiry and historical cutoff samples never authorize another Host turn. Every status/control result may expose preFinalControlRequired and requiredBeforeFinal. Before ANY visible final in a DevSpace-using turn, inspect the latest Task Contract: when preFinalControlRequired=true or finalResponseAllowed=false, a plain final is forbidden. Continue substantive work; or, only at a genuine intentional stage boundary after sufficient work while milestones remain, make action=turn-complete the final DevSpace control call; or persist a real external blocker with checkpoint waitingExternal=true. Never leave an incomplete RUNNING task in GENERATING because a connector failed, one milestone completed, a summary is ready, or the activity lease became SUSPECTED_STALL. A normal assistant stage that intentionally ends while milestones remain must call action=turn-complete after substantive work; if an already-open ChatGPT Host has cached an older schema that does not expose turn-complete, call action=checkpoint with the exact note atcc-turn-complete instead. That compatibility signature is routed through the identical ATCC current-turn and substantive-work gates and does not change ordinary checkpoint behavior. Do not sign completion merely because one command/test failed or because only a few quick tool calls have run: diagnose failures and continue runnable work in the same assistant turn. A matching verified Host teardown is an optional immediate confirmation fast path, not a requirement for ordinary ChatGPT finals. When teardown is absent, only an exact model-signed COMPLETION_REQUESTED turn lease may promote to COMPLETED after the bounded 10-second handoff grace and only when no model-originated DevSpace request is in flight. GENERATING silence cannot enter that path. Any later substantive DevSpace call revokes the pending request back to GENERATING, and manual takeover rotates the turn lease, so stale completion intent cannot fire later. A verified explicit Host timeout may independently record TIMED_OUT. Manual completion intent requires at least one substantive operation in the current turn; synthetic resumed completion intent requires at least four post-ACK substantive operations. Synthetic resumed work is milestone-driven rather than one-milestone-per-turn: completing one milestone does not justify ending the turn while later runnable milestones remain. timeout/teardown Host signals are accepted only from the verified current anchor coordinator. timeout-recovery remains strict proven-cutoff mode. resident is reserved for explicit monitoring work and stage/process wakes.",
             inputSchema: {
                 action: z.enum(["begin", "begin-auto", "status", "turn-complete", "heartbeat", "anchor-mounted", "host-signal", "confirm-turn-limit", "watch-process", "unwatch-process", "watch-status", "stage-complete", "checkpoint", "wait", "resume", "complete", "fail", "cancel", "claim-continuation", "delivery-result", "release-continuation"]),
                 taskId: z.string().optional(),
@@ -1925,6 +1955,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 deliveryMethod: z.string().max(160).optional(),
                 deliveryToken: z.string().uuid().optional().describe("Legacy compatibility only: an old synthetic prompt may use this one time on its first status claim. New synthetic turns claim the server-owned expected generation without carrying a UUID."),
                 manualTakeover: z.boolean().optional().describe("First-status manual/user-message marker. Set true exactly once on the first DevSpace status call for every manual user message that uses DevSpace; it supersedes any READY/active automatic generation and rotates one fresh visible milestone-card generation. Omit for synthetic/App turns and later status calls in the same manual message."),
+                readOnlyStatus: z.boolean().optional().describe("Capability-reducing App/server status probe. When true, status may inspect READY/pending state but cannot claim or ACK a synthetic generation, change turn ownership, or rotate a manual card."),
             },
             outputSchema: resultOutputSchema({
                 task: z.unknown().optional(),
@@ -1938,6 +1969,8 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 continueRequired: z.boolean().optional(),
                 continueInSameTurn: z.boolean().optional(),
                 syntheticWorkMustContinue: z.boolean().optional(),
+                preFinalControlRequired: z.boolean().optional(),
+                requiredBeforeFinal: z.string().optional(),
                 nextRequiredMilestones: z.array(z.string()).optional(),
                 taskIncomplete: z.boolean().optional(),
                 remainingMilestones: z.array(z.string()).optional(),
@@ -1966,7 +1999,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 workspaces.getWorkspace(input.workspaceId);
             const requestConversationScopeId = openAiConversationScopeId(context?._meta);
             const boundTaskConversationScopeId = input.taskId
-                ? runtimeState.continuationTask({ action: "status", taskId: input.taskId }).task?.conversationScopeId
+                ? runtimeState.continuationTask({ action: "status", taskId: input.taskId, readOnlyStatus: true }).task?.conversationScopeId
                 : undefined;
             // App-originated coordinator calls are proxied by the Host and may not
             // preserve OpenAI's model request metadata. Never fabricate a foreign
@@ -1988,7 +2021,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                     taskId: input.taskId,
                     workspaceId: input.workspaceId,
                     conversationScopeId,
-                    coordinatorInstanceId: input.coordinatorInstanceId,
+                    readOnlyStatus: true,
                 });
                 const task = status.task;
                 const workspaceId = task?.workspaceId ?? input.workspaceId;
@@ -2034,7 +2067,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                     }
                 }
                 const refreshed = task
-                    ? runtimeState.continuationTask({ action: "status", taskId: task.id, conversationScopeId }).task
+                    ? runtimeState.continuationTask({ action: "status", taskId: task.id, conversationScopeId, readOnlyStatus: true }).task
                     : undefined;
                 const payload = {
                     task: refreshed,
@@ -2059,6 +2092,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
             description: "App-only continuation delivery bridge. A verified current milestone-card capability may heartbeat from any mounted DevSpace App transport, report an exact-current-turn Host timeout when ChatGPT omits the current card iframe, atomically claim one READY ContinuationGeneration, re-authorize that exact synthetic owner immediately before Host ui/message delivery, then report the delivery result. Transport ownership may move to a newer iframe without rendering another card when requiredMilestones is unchanged. A later manual user message or synthetic required-milestone revision rotates the card generation and invalidates stale prior-generation sender capabilities. host-timeout requires current card token/generation, current sender instance and exact turn lease; generic teardown has no sender fallback. This tool is intentionally hidden from the model.",
             inputSchema: {
                 action: z.enum(["bind", "heartbeat", "telemetry", "host-timeout", "claim", "authorize-delivery", "delivery-result"]),
+                senderProtocolEpoch: z.number().int().positive().optional(),
                 taskId: z.string().optional(),
                 conversationScopeId: z.string().optional(),
                 senderInstanceId: z.string().max(160).optional(),
@@ -2098,10 +2132,20 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 claimDueAt: z.string().optional(),
                 retryAfterMs: z.number().int().nonnegative().optional(),
                 eventSequence: z.number().int().nonnegative().optional(),
+                expectedSenderProtocolEpoch: z.number().int().positive().optional(),
             }),
             ...appOnlyToolMeta(config, "shell"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async (input, context = {}) => {
+            if (Number(input.senderProtocolEpoch) !== CONTINUATION_SENDER_PROTOCOL_EPOCH) {
+                const outcome = {
+                    accepted: false,
+                    reason: "sender-protocol-epoch-mismatch",
+                    expectedSenderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH,
+                };
+                const result = JSON.stringify(outcome, null, 2);
+                return { content: [textBlock(result)], structuredContent: { result, ...outcome } };
+            }
             const conversationScopeId = openAiConversationScopeId(context?._meta);
             const outcome = input.action === "bind"
                 ? runtimeState.bindContinuationSender({
@@ -2337,6 +2381,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         instructions: serverInstructions(config),
     });
     const workspaceResourceUri = workspaceAppUri(config);
+    const continuationAnchorResourceUri = workspaceAppAnchorUri(config);
     const workspaceResourceMetadata = {
         description: "DevSpace workspace UI for operation cards, file diffs, and durable continuation coordination.",
         _meta: appResourceMeta(config),
@@ -2344,6 +2389,10 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     registerAppResource(server, "DevSpace Diff Card", workspaceResourceUri, workspaceResourceMetadata, async () => {
         await assertWorkspaceAppAssets();
         return workspaceAppResourceResult(config, workspaceResourceUri);
+    });
+    registerAppResource(server, "DevSpace Continuation Anchor", continuationAnchorResourceUri, workspaceResourceMetadata, async () => {
+        await assertWorkspaceAppAssets();
+        return workspaceAppResourceResult(config, continuationAnchorResourceUri);
     });
     server.registerResource(
         "DevSpace Diff Card Compatibility",
@@ -4084,4 +4133,4 @@ if (await isMainModule()) {
 
 // Export pure response/preview helpers for packaged smoke tests. They do not
 // bypass workspace path validation or expose server state.
-export { collectWorkspacePreviews, nativeAttachmentContent, processToolResponse, redactDisplayArgv, reviewOperation, shouldAttachWidget, toolInvocationStatus, toolWidgetDescriptorMeta, workspaceAppGenerationUri, workspaceAppHtml, workspaceAppResourceResult, workspaceAppResultMeta, workspaceAppUri };
+export { collectWorkspacePreviews, nativeAttachmentContent, processToolResponse, redactDisplayArgv, reviewOperation, shouldAttachWidget, toolInvocationStatus, toolWidgetDescriptorMeta, workspaceAppAnchorUri, workspaceAppGenerationUri, workspaceAppHtml, workspaceAppResourceResult, workspaceAppResultMeta, workspaceAppUri };

@@ -173,6 +173,16 @@ try {
   const normalScope = "conversation-atcc-normal-completion";
   const normal = begin(normalScope);
   mount(normal, normalScope, "ui_atcc_normal");
+  const normalStatus = runtime.continuationTask({
+    action: "status",
+    taskId: normal.task.id,
+  });
+  assert.equal(normalStatus.preFinalControlRequired, true,
+    "an incomplete RUNNING turn must explicitly advertise its required pre-final control action");
+  assert.match(normalStatus.requiredBeforeFinal, /turn-complete/,
+    "the pre-final directive must tell the model how to sign an intentional stage boundary");
+  assert.match(normalStatus.requiredBeforeFinal, /waitingExternal=true/,
+    "the pre-final directive must distinguish a genuine external wait from a normal stage boundary");
   const tooShort = runtime.continuationTask({
     action: "turn-complete",
     taskId: normal.task.id,
@@ -190,6 +200,8 @@ try {
   });
   assert.equal(requested.accepted, true);
   assert.equal(requested.task.assistantTurnState, "COMPLETION_REQUESTED");
+  assert.equal(requested.preFinalControlRequired, false,
+    "a valid turn-complete lease must satisfy the pre-final control requirement");
   assert.equal(requested.task.assistantTurnCompletionLeaseId, requested.task.turnLeaseId);
   assert.equal(requested.finalResponseAllowed, true,
     "a signed normal stage may return its current assistant response while the overall task remains incomplete");
@@ -197,6 +209,64 @@ try {
     action: "claim-continuation",
     taskId: normal.task.id,
   }).accepted, false, "model intent alone must never create a new Host turn");
+
+  // Real ChatGPT validation exposed a projection rollback when turn-complete
+  // reported an additional completed milestone. The legacy task row received
+  // the hint, but the active Workset still held the old PENDING state, so the
+  // synthetic turn's first status recovery temporarily changed 2/3 back to
+  // 1/3. The accepted completion boundary must make both projections agree
+  // before the continuation handoff can mature.
+  const projectionScope = "v1/atcc-turn-complete-milestone-projection";
+  const projection = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: projectionScope,
+    workspaceId: "ws_atcc_turn_complete_projection",
+    objective: "preserve turn-complete milestone progress",
+    requiredMilestones: ["first", "stage-boundary", "final"],
+  });
+  mount(projection, projectionScope, "ui_atcc_projection");
+  work(projection, projectionScope, 1);
+  const projectionSeed = runtime.continuationTask({
+    action: "checkpoint",
+    taskId: projection.task.id,
+    completedMilestones: ["first"],
+    evidence: { first: "verified" },
+    progressFingerprint: "projection-first-complete",
+  });
+  assert.deepEqual(projectionSeed.task.completedMilestones, ["first"]);
+  const projectionRequested = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: projection.task.id,
+    completedMilestones: ["first", "stage-boundary"],
+    note: "stage-boundary-complete-final-remains",
+  });
+  assert.equal(projectionRequested.accepted, true);
+  assert.deepEqual(projectionRequested.task.completedMilestones, ["first", "stage-boundary"]);
+  const projectionArchitecture = runtime.continuationArchitectureSnapshot(projectionScope);
+  const projectionWorkset = projectionArchitecture.worksets.find(
+    (item) => item.id === projectionArchitecture.card.active_workset_id,
+  );
+  const projectionMilestoneStates = new Map(
+    projectionArchitecture.milestones
+      .filter((item) => item.workset_id === projectionWorkset.id)
+      .map((item) => [item.description, item.state]),
+  );
+  assert.equal(projectionMilestoneStates.get("stage-boundary"), "COMPLETED",
+    "turn-complete must synchronize its milestone delta into the authoritative active Workset");
+  assert.equal(projectionMilestoneStates.get("final"), "PENDING");
+  const projectionSyntheticStatus = runtime.continuationTask({
+    action: "status",
+    taskId: projection.task.id,
+  });
+  assert.deepEqual(projectionSyntheticStatus.task.completedMilestones, ["first", "stage-boundary"],
+    "the synthetic turn's first canonical recovery must not roll completed milestones backward");
+  assert.deepEqual(projectionSyntheticStatus.remainingMilestones, ["final"]);
+  const projectionCleanup = runtime.continuationTask({
+    action: "cancel",
+    taskId: projection.task.id,
+    note: "isolated projection regression complete",
+  });
+  assert.equal(projectionCleanup.accepted, true);
 
   // Any later substantive tool activity proves that the same assistant turn is
   // still alive and automatically revokes the pending completion intent.

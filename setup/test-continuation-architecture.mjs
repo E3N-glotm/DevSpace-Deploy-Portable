@@ -9,8 +9,10 @@ const runtimePath = join(ROOT, "app", "node_modules", "@waishnav", "devspace", "
 const serverSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "server.js"), "utf8");
 const runtimeSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "runtime-state.js"), "utf8");
 const coordinatorSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js"), "utf8");
+const coordinatorPath = join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js");
 const supervisorSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "continuation-supervisor.js"), "utf8");
 const { StructuredRuntimeState } = await import(pathToFileURL(runtimePath).href);
+const { installContinuationCoordinator } = await import(pathToFileURL(coordinatorPath).href);
 
 const stateDir = mkdtempSync(join(tmpdir(), "devspace-continuation-architecture-"));
 const runtime = new StructuredRuntimeState(stateDir);
@@ -44,6 +46,92 @@ try {
     "the Workspace App must report bounded Host-surface names through the app-only sender bridge");
   assert.match(serverSource, /function enablePortableContinuationAnchorRenderer[\s\S]{0,1200}continuation_anchor[\s\S]{0,800}open_workspace/,
     "the Portable server must adapt the upstream Workspace App renderer so continuation_anchor is a real visible result card instead of an ACK-only ghost iframe");
+  assert.match(serverSource, /function workspaceAppAnchorUri[\s\S]{0,300}-continuation-anchor\.html/,
+    "continuation_anchor must own a distinct immutable MCP App resource identity instead of sharing the generic workspace surface URI");
+  assert.match(serverSource, /kind === "continuation-anchor"[\s\S]{0,180}workspaceAppAnchorUri\(config\)/,
+    "the continuation_anchor tool descriptor must select the dedicated anchor resource before Host rendering");
+  assert.match(serverSource, /window\.__DEVSPACE_CONTINUATION_SURFACE__ = Object\.freeze\(\$\{surfaceBootstrap\}\)/,
+    "the self-contained App HTML must carry server-authored surface identity when Host tool notifications are omitted");
+  assert.match(coordinatorSource, /resourceSurface\.kind === "continuation-anchor"[\s\S]{0,700}currentTool: resourceIdentifiesAnchor \? "continuation_anchor"[\s\S]{0,300}anchorSurface: resourceIdentifiesAnchor/,
+    "the coordinator must recover visible-anchor identity from its resource when toolinput/toolresult/toolInfo are all absent");
+  {
+  // Some ChatGPT Hosts mount the resource and complete ui/initialize but omit
+  // toolinput, toolresult, and hostContext.toolInfo. The dedicated resource
+  // identity must still let that exact anchor surface bind the issued card and
+  // perform a truthful authenticated mount ACK.
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const pendingTask = {
+    id: "task_resource_anchor_fallback",
+    conversationScopeId: "v1/resource-anchor-fallback",
+    workspaceId: "ws_resource_anchor_fallback",
+    state: "RUNNING",
+    continuationMode: "completion-driven",
+    requiredMilestones: ["finish fallback regression"],
+    completedMilestones: [],
+    anchorMountRequestedAt: "2026-09-07T00:00:00.000Z",
+    anchorMountGeneration: 7,
+  };
+  let currentTask = pendingTask;
+  const calls = [];
+  const listeners = new Map();
+  globalThis.window = {
+    __DEVSPACE_CONTINUATION_SURFACE__: Object.freeze({ kind: "continuation-anchor", anchorMountGeneration: 7 }),
+    addEventListener(name, handler) { listeners.set(name, handler); },
+    removeEventListener(name) { listeners.delete(name); },
+  };
+  globalThis.document = undefined;
+  const app = {
+    addEventListener(name, handler) { listeners.set(`app:${name}`, handler); },
+    removeEventListener(name) { listeners.delete(`app:${name}`); },
+    getHostVersion() { return { name: "notification-omitting-host", version: "1" }; },
+    getHostContext() { return {}; },
+    async callServerTool(request) {
+      calls.push(request);
+      const action = request.arguments?.action;
+      if (request.name === "continuation_sender" && action === "bind") {
+        return { structuredContent: {
+          accepted: true,
+          taskId: currentTask.id,
+          conversationScopeId: currentTask.conversationScopeId,
+          workspaceId: currentTask.workspaceId,
+          anchorMountToken: "00000000-0000-4000-8000-000000000007",
+          anchorMountGeneration: 7,
+          task: currentTask,
+        } };
+      }
+      if (request.name === "continuation_task" && action === "begin-auto") {
+        return { structuredContent: { accepted: true, task: currentTask } };
+      }
+      if (request.name === "continuation_task" && action === "anchor-mounted") {
+        currentTask = { ...currentTask, anchorMountVerifiedAt: "2026-09-07T00:00:01.000Z" };
+        return { structuredContent: { accepted: true, task: currentTask } };
+      }
+      if (request.name === "continuation_task") {
+        return { structuredContent: { accepted: true, task: currentTask } };
+      }
+      return { structuredContent: { accepted: true } };
+    },
+  };
+  try {
+    const controller = installContinuationCoordinator(app, { timers: false });
+    await controller.onConnected();
+    assert.equal(controller.state.anchorSurface, true);
+    assert.equal(controller.state.currentTool, "continuation_anchor");
+    assert.equal(controller.state.anchorMountAcked, true,
+      "the resource-identified anchor must ACK even with no Host tool lifecycle notifications");
+    assert.ok(calls.some((call) => call.name === "continuation_task"
+      && call.arguments?.action === "anchor-mounted"
+      && call.arguments?.anchorMountGeneration === 7),
+    "resource fallback must authenticate the exact issued generation through anchor-mounted");
+    controller.dispose();
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+  }
   assert.match(serverSource, /openAiConversationScopeId\(context\?\._meta\)[\s\S]{0,900}input\.action === "bind"[\s\S]{0,700}bindContinuationSender/,
     "sender bind must derive the real conversation scope from the authenticated App call context rather than trust Host-forwarded result metadata");
   assert.match(serverSource, /claimedConversationScopeId:\s*input\.conversationScopeId[\s\S]{0,220}anchorMountGeneration:\s*input\.anchorMountGeneration/,
@@ -117,7 +205,7 @@ try {
   {
   // Execute the actual final-send callback: manual takeover can happen after
   // authorize-delivery, and a transport retry must not trust cached RUNNING.
-  const sendBarrierBody = coordinatorSource.match(/sendFollowUp\(visibleContinuationTrigger\(state\.task\), async \(\) => \{([\s\S]*?)\n        \}\);/)[1];
+  const sendBarrierBody = coordinatorSource.match(/sendFollowUp\(visibleContinuationTrigger\(state\.task\), async \(\) => \{([\s\S]*?)\n        \},\s*\{\s*deliveryToken\s*\}\);/)[1];
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const sendBarrier = new AsyncFunction("callTask", "acceptTask", "terminal", "automationSuppressed", "deliveryToken", sendBarrierBody);
   const pendingDelivery = { state: "RUNNING", deliveryToken: "expected", deliveryOwner: "synthetic-pending", continuationDeliveryAwaitingAck: true };
@@ -732,6 +820,34 @@ try {
   assert.equal(deliveredLegacy.delivery_owner, "synthetic-pending");
   assert.equal(deliveredLegacy.delivery_token, senderDelivered.deliveryToken);
 
+  // App/server control-plane status probes may run immediately after Host
+  // transport acceptance. They must not impersonate the resumed model's first
+  // continuation_task status and manufacture a false TURN_ACKED generation.
+  const readOnlyDeliveredStatus = runtime.continuationTask({
+    action: "status",
+    taskId: first.task.id,
+    conversationScopeId: scope,
+    workspaceId: "ws_architecture",
+    readOnlyStatus: true,
+  });
+  assert.equal(readOnlyDeliveredStatus.accepted, true, JSON.stringify(readOnlyDeliveredStatus));
+  assert.equal(readOnlyDeliveredStatus.reason, "read-only-status");
+  assert.equal(readOnlyDeliveredStatus.syntheticTokenPending, true,
+    "a read-only control-plane probe must preserve the pending synthetic delivery capability");
+  const afterReadOnlyProbeGeneration = db.prepare(
+    "select state,turn_acked_at from continuation_generations where delivery_token=?",
+  ).get(senderDelivered.deliveryToken);
+  assert.equal(afterReadOnlyProbeGeneration.state, "DELIVERED",
+    "control-plane status must leave a Host-accepted generation in DELIVERED until the actual model status arrives");
+  assert.equal(afterReadOnlyProbeGeneration.turn_acked_at, null,
+    "control-plane status must never persist a model TURN_ACK timestamp");
+  const afterReadOnlyProbeTask = db.prepare(`
+    select continuation_pending,delivery_owner,delivery_token from continuation_tasks where id=?
+  `).get(first.task.id);
+  assert.ok(Number(afterReadOnlyProbeTask.continuation_pending) > 0);
+  assert.equal(afterReadOnlyProbeTask.delivery_owner, "synthetic-pending");
+  assert.equal(afterReadOnlyProbeTask.delivery_token, senderDelivered.deliveryToken);
+
   const generationCountBeforeAckRetry = Number(db.prepare(`
     select count(*) as count from continuation_generations where workset_id=?
   `).get(active.id).count);
@@ -746,6 +862,43 @@ try {
   assert.equal(dueAckSweep.deliveryAckRetryDue.length, 1,
     "the resident supervisor must surface a wake-only startup retry when the persisted ACK deadline matures");
   assert.equal(Number(dueAckSweep.deliveryAckRetryDue[0].generation), Number(senderDelivered.generation));
+  const modernGenerationBeforeLegacyClaim = db.prepare(`
+    select state,claimed_at,delivery_token from continuation_generations where delivery_token=?
+  `).get(senderDelivered.deliveryToken);
+  const legacyClaimAgainstModernDelivery = runtime.continuationTask({
+    action: "claim-continuation",
+    taskId: first.task.id,
+    note: "delivery ACK retry",
+  });
+  assert.equal(legacyClaimAgainstModernDelivery.accepted, false,
+    "legacy task-level claim must not consume a generation-backed ACK retry; modern sender CAS owns that delivery");
+  assert.equal(legacyClaimAgainstModernDelivery.reason, "generation-sender-required");
+  const modernGenerationAfterLegacyClaim = db.prepare(`
+    select state,claimed_at,delivery_token from continuation_generations where delivery_token=?
+  `).get(senderDelivered.deliveryToken);
+  assert.deepEqual(modernGenerationAfterLegacyClaim, modernGenerationBeforeLegacyClaim,
+    "a stale legacy App must not mutate the modern DELIVERED generation while attempting an ACK retry");
+  const legacyTaskAfterLegacyClaim = db.prepare(`
+    select continuation_pending,delivery_owner,delivery_token,delivery_ack_retry_after_at
+    from continuation_tasks where id=?
+  `).get(first.task.id);
+  assert.equal(Number(legacyTaskAfterLegacyClaim.continuation_pending), 5,
+    "generation-backed ACK retry must remain durable after a legacy claim attempt");
+  assert.equal(legacyTaskAfterLegacyClaim.delivery_owner, "synthetic-pending");
+  assert.equal(legacyTaskAfterLegacyClaim.delivery_token, senderDelivered.deliveryToken);
+  const legacyReleaseAgainstModernDelivery = runtime.continuationTask({
+    action: "release-continuation",
+    taskId: first.task.id,
+  });
+  assert.equal(legacyReleaseAgainstModernDelivery.accepted, false,
+    "legacy task-level release must not clear a generation-backed ACK retry");
+  assert.equal(legacyReleaseAgainstModernDelivery.reason, "generation-sender-required");
+  const legacyTaskAfterLegacyRelease = db.prepare(`
+    select continuation_pending,delivery_owner,delivery_token,delivery_ack_retry_after_at
+    from continuation_tasks where id=?
+  `).get(first.task.id);
+  assert.deepEqual(legacyTaskAfterLegacyRelease, legacyTaskAfterLegacyClaim,
+    "stale legacy release must leave the modern generation-backed retry lease unchanged");
   const senderAckRetry = runtime.claimReadyContinuationGeneration({
     conversationScopeId: scope,
     senderInstanceId: "sender-delivered-ack-retry",
@@ -807,9 +960,11 @@ try {
   assert.equal(syntheticAck.task.deliveryOwner, "synthetic-active");
   assert.equal(syntheticAck.task.deliveryToken, undefined,
     "the one-time delivery capability must be consumed from Task state immediately after claim");
-  const claimedGeneration = db.prepare("select state from continuation_generations where delivery_token=?").get(senderDelivered.deliveryToken);
+  const claimedGeneration = db.prepare("select state,turn_acked_at from continuation_generations where delivery_token=?").get(senderDelivered.deliveryToken);
   assert.equal(claimedGeneration.state, "TURN_ACKED",
     "the generation FSM must persist the server-owned expected-turn claim");
+  assert.ok(claimedGeneration.turn_acked_at,
+    "the generation FSM must persist the exact time when the resumed synthetic turn performs its first status ACK");
   const authorizedSyntheticTool = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
   assert.equal(authorizedSyntheticTool.accepted, true,
     "after status claim, an ordinary substantive call must be authorized without a delivery token");

@@ -1,5 +1,10 @@
 const TASK_TOOL = "continuation_task";
 const SENDER_TOOL = "continuation_sender";
+// Increment only when the hidden sender contract changes incompatibly. The
+// server rejects all sender actions from older in-memory iframes, so an App
+// surface loaded before a live Portable upgrade cannot continue delivering
+// continuations using stale semantics.
+const CONTINUATION_SENDER_PROTOCOL_EPOCH = 4;
 // Keep completion delivery responsive after the guarded ATCC handoff without
 // turning polling into a completion signal.  The runtime still authorizes only
 // exact-turn COMPLETED/TIMED_OUT state; this tick merely notices it promptly.
@@ -10,6 +15,7 @@ const DEFAULT_TERMINAL_REFRESH_MS = 60_000;
 // Host model-context updates are advisory. They must never hold a synthetic
 // generation in CLAIMED indefinitely before the authoritative delivery CAS.
 const MODEL_CONTEXT_UPDATE_TIMEOUT_MS = 1_500;
+const NATIVE_FOLLOW_UP_TOKEN_HISTORY_LIMIT = 128;
 // A resumed ChatGPT turn can be created before its MCP connector has fully
 // rehydrated. Keep retrying the same idempotent control call across roughly a
 // 30-second readiness window instead of giving up after ~8 seconds.
@@ -355,17 +361,27 @@ function publishTaskForCard(task) {
 export function installContinuationCoordinator(app, options = {}) {
   if (!app || typeof app.addEventListener !== "function") throw new Error("A connected MCP Apps App instance is required.");
 
+  const resourceSurface = typeof window !== "undefined"
+    && window.__DEVSPACE_CONTINUATION_SURFACE__
+    && typeof window.__DEVSPACE_CONTINUATION_SURFACE__ === "object"
+    ? window.__DEVSPACE_CONTINUATION_SURFACE__
+    : {};
+  const resourceIdentifiesAnchor = resourceSurface.kind === "continuation-anchor";
+  const resourceGeneration = Number(resourceSurface.anchorMountGeneration || 0);
+
   const state = {
     instanceId: options.instanceId ?? uniqueId(),
     connected: false,
     disposed: false,
-    currentTool: undefined,
+    currentTool: resourceIdentifiesAnchor ? "continuation_anchor" : undefined,
     currentInput: {},
     workspaceId: undefined,
     task: undefined,
-    anchorSurface: false,
+    anchorSurface: resourceIdentifiesAnchor,
     anchorMountToken: undefined,
-    anchorMountGeneration: undefined,
+    anchorMountGeneration: Number.isInteger(resourceGeneration) && resourceGeneration > 0
+      ? resourceGeneration
+      : undefined,
     anchorMountAcked: false,
     anchorSuperseded: false,
     // A historical visible card may outlive the manual round that created it.
@@ -565,6 +581,10 @@ export function installContinuationCoordinator(app, options = {}) {
             ...(state.workspaceId ? { workspaceId: state.workspaceId } : {}),
             coordinatorInstanceId: state.instanceId,
             ...extra,
+            // `extra` is intentionally before this marker. No internal caller
+            // may turn a coordinator control-plane status back into the model's
+            // mutating first-turn ACK by passing readOnlyStatus:false.
+            ...(action === "status" ? { readOnlyStatus: true } : {}),
           },
         });
         if (result?.isError && transientTransportFailure(textFromToolResult(result))) {
@@ -595,12 +615,16 @@ export function installContinuationCoordinator(app, options = {}) {
           name: SENDER_TOOL,
           arguments: {
             action,
+            senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH,
             taskId: capability.taskId,
             conversationScopeId: capability.conversationScopeId,
             senderInstanceId: state.instanceId,
             anchorMountToken: capability.anchorMountToken,
             anchorMountGeneration: capability.anchorMountGeneration,
             ...extra,
+            // The epoch is a server-owned compatibility boundary, not an
+            // overridable caller option.
+            senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH,
           },
         });
         if (result?.isError && transientTransportFailure(textFromToolResult(result))) {
@@ -626,6 +650,7 @@ export function installContinuationCoordinator(app, options = {}) {
           name: SENDER_TOOL,
           arguments: {
             action: "bind",
+            senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH,
             senderInstanceId: state.instanceId,
             ...(state.task?.id ? { taskId: state.task.id } : {}),
             ...(state.task?.conversationScopeId ? { conversationScopeId: state.task.conversationScopeId } : {}),
@@ -825,11 +850,55 @@ export function installContinuationCoordinator(app, options = {}) {
     }
   }
 
-  async function sendFollowUp(text, beforeSend) {
+  // ChatGPT currently exposes two follow-up transports with observably different
+  // behavior.  The standard MCP Apps ui/message path is portable, but ChatGPT Web
+  // has shipped builds where a widget-originated ui/message is rendered as a user
+  // bubble yet does not enter the same model/tool pipeline as an equivalent manual
+  // user message.  The compatibility sendFollowUpMessage path is closer to a
+  // native ChatGPT follow-up when the Host permits asynchronous invocation.
+  //
+  // Try the native compatibility path once for each exact delivery token.  Some
+  // hosts reject/ignore asynchronous sendFollowUpMessage calls; the durable
+  // delivery-ACK FSM will then retry the SAME logical generation/token, and that
+  // retry deliberately falls through to official app.sendMessage.  This is not a
+  // silence/turn-end heuristic and cannot create an overlapping continuation.
+  const nativeFollowUpAttemptedTokens = new Set();
+
+  function rememberNativeFollowUpToken(token) {
+    if (!token) return;
+    nativeFollowUpAttemptedTokens.add(token);
+    while (nativeFollowUpAttemptedTokens.size > NATIVE_FOLLOW_UP_TOKEN_HISTORY_LIMIT) {
+      const oldest = nativeFollowUpAttemptedTokens.values().next().value;
+      if (oldest === undefined) break;
+      nativeFollowUpAttemptedTokens.delete(oldest);
+    }
+  }
+
+  async function sendFollowUp(text, beforeSend, { deliveryToken } = {}) {
     const ensureStillRunnable = async () => {
       if (typeof beforeSend !== "function") return;
       if (!(await beforeSend())) throw new Error("terminal-continuation-cancelled");
     };
+    const nativeFollowUp = typeof window !== "undefined" ? window.openai?.sendFollowUpMessage : undefined;
+    const tokenKey = deliveryToken ? String(deliveryToken) : "";
+    const tryNativeFirst = typeof nativeFollowUp === "function"
+      && Boolean(tokenKey)
+      && !nativeFollowUpAttemptedTokens.has(tokenKey);
+    let nativeError;
+    if (tryNativeFirst) {
+      rememberNativeFollowUpToken(tokenKey);
+      await ensureStillRunnable();
+      try {
+        try {
+          await nativeFollowUp({ prompt: text });
+        } catch {
+          await nativeFollowUp({ role: "user", content: [{ type: "text", text }] });
+        }
+        return { method: "window.openai.sendFollowUpMessage", result: "fallback-accepted" };
+      } catch (error) {
+        nativeError = error;
+      }
+    }
     let officialError;
     if (typeof app.sendMessage === "function") {
       for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
@@ -850,17 +919,16 @@ export function installContinuationCoordinator(app, options = {}) {
         }
       }
     }
-    const fallback = typeof window !== "undefined" ? window.openai?.sendFollowUpMessage : undefined;
-    if (typeof fallback === "function") {
+    if (typeof nativeFollowUp === "function") {
       await ensureStillRunnable();
       try {
-        await fallback({ prompt: text });
+        await nativeFollowUp({ prompt: text });
       } catch {
-        await fallback({ role: "user", content: [{ type: "text", text }] });
+        await nativeFollowUp({ role: "user", content: [{ type: "text", text }] });
       }
       return { method: "window.openai.sendFollowUpMessage", result: "fallback-accepted" };
     }
-    throw officialError ?? new Error("The host exposes no supported follow-up messaging path.");
+    throw officialError ?? nativeError ?? new Error("The host exposes no supported follow-up messaging path.");
   }
 
   async function attemptContinuation(reason, { force = false, skipPrepare = false } = {}) {
@@ -912,7 +980,7 @@ export function installContinuationCoordinator(app, options = {}) {
             && latest.task.deliveryToken === deliveryToken
             && latest.task.deliveryOwner === "synthetic-pending"
             && latest.task.continuationDeliveryAwaitingAck);
-        });
+        }, { deliveryToken });
         const recorded = await callSender("delivery-result", {
           deliveryToken,
           result: delivery.result,

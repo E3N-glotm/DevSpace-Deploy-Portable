@@ -178,8 +178,13 @@ try {
     throw new Error("workspace invocation status is incorrect");
   }
   const anchorMeta = toolWidgetDescriptorMeta(changesConfig, "continuation-anchor");
-  if (anchorMeta._meta?.ui?.resourceUri !== renderUri || anchorMeta._meta?.["openai/outputTemplate"] !== renderUri) {
-    throw new Error("continuation_anchor must render the same revisioned Workspace App through the one explicit card entry point");
+  const anchorUri = anchorMeta._meta?.ui?.resourceUri;
+  if (
+    !/^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}-continuation-anchor\.html$/.test(anchorUri ?? "")
+    || anchorMeta._meta?.["openai/outputTemplate"] !== anchorUri
+    || anchorUri === renderUri
+  ) {
+    throw new Error("continuation_anchor must use the dedicated revisioned surface identity through the one explicit card entry point");
   }
   const enhancementSource = await readFile(
     new URL("../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js", import.meta.url),

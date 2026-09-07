@@ -195,6 +195,12 @@ for (const pattern of [
 ]) assert.match(coordinator, pattern);
 assert.doesNotMatch(coordinator, /claim-continuation|release-continuation/,
   "legacy continuation_task claim/release sender paths must stay removed");
+assert.match(runtimeStateSource,
+  /action === "claim-continuation"[\s\S]{0,2200}continuation_generations[\s\S]{0,900}generation-sender-required/,
+  "legacy task-level claim must fail closed when the current delivery token belongs to a modern ContinuationGeneration");
+assert.match(runtimeStateSource,
+  /action === "release-continuation"[\s\S]{0,1800}continuation_generations[\s\S]{0,900}generation-sender-required/,
+  "legacy task-level release must not clear a modern generation-backed delivery/ACK-retry lease");
 assert.doesNotMatch(coordinator, /model activity idle watchdog|DEFAULT_MODEL_IDLE_CONTINUE_MS|modelIdleContinueMs|adaptive host-budget watchdog|explicit long-task silent truncation guard|DEFAULT_EXPLICIT_SILENT_CONTINUE_MS/,
   "legacy generic inactivity and learned-budget watchdogs must stay removed");
 assert.match(coordinator, /completionActivityLeaseExpired[\s\S]{0,1800}SUSPECTED_STALL/,
@@ -240,6 +246,14 @@ assert.doesNotMatch(runtimeStateSource, /QUIET_BACKSTOP_SENDER_GRACE_MS|quiet-ba
   "dev12 must keep the last quiet-backstop sender compatibility path removed instead of retaining a timer-owned pre-delivery race");
 assert.match(runtimeStateSource, /assistant_turn_state[\s\S]{0,2200}COMPLETION_REQUESTED/,
   "runtime must persist the Assistant Turn Completion Contract rather than infer completion from request silence");
+assert.match(runtimeStateSource, /preFinalControlRequired[\s\S]{0,1800}turn-complete[\s\S]{0,700}waitingExternal=true/,
+  "task directives must fail closed when an incomplete RUNNING turn has not recorded a legal pre-final control action");
+assert.match(server, /Before ANY user-visible final response[\s\S]{0,1800}preFinalControlRequired=true[\s\S]{0,2200}waitingExternal=true[\s\S]{0,1600}RUNNING\/GENERATING/,
+  "server instructions must forbid a bare final from leaving an incomplete DevSpace turn in RUNNING/GENERATING");
+assert.match(server, /function taskContractText[\s\S]{0,2600}preFinalControlRequired[\s\S]{0,2600}action=turn-complete[\s\S]{0,1200}waitingExternal=true/,
+  "every enriched DevSpace tool result must surface the legal pre-final control action instead of relying on one status call");
+assert.match(server, /outputSchema: resultOutputSchema\(\{[\s\S]{0,1800}preFinalControlRequired: z\.boolean\(\)\.optional\(\)[\s\S]{0,500}requiredBeforeFinal: z\.string\(\)\.optional\(\)/,
+  "continuation_task output schema must preserve the pre-final directive fields across the MCP boundary");
 assert.match(runtimeStateSource, /action === "turn-complete"[\s\S]{0,3600}assistant_turn_completion_lease_id/,
   "normal assistant completion intent must be explicitly signed and bound to the current turn lease");
 assert.match(runtimeStateSource, /MODEL_COMPLETION_HANDOFF_GRACE_MS = 8_000/,
@@ -290,6 +304,36 @@ assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryTo
   "the coordinator must keep generation capabilities inside App/runtime transport instead of exposing them to the model");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
+assert.match(coordinator, /NATIVE_FOLLOW_UP_TOKEN_HISTORY_LIMIT = 128/,
+  "native ChatGPT follow-up transport history must stay bounded in long-lived milestone cards");
+assert.match(coordinator, /nativeFollowUpAttemptedTokens[\s\S]{0,1200}rememberNativeFollowUpToken[\s\S]{0,900}size > NATIVE_FOLLOW_UP_TOKEN_HISTORY_LIMIT/,
+  "each exact delivery token may try the native ChatGPT follow-up path once without creating an unbounded token registry");
+assert.match(coordinator, /tryNativeFirst[\s\S]{0,1800}sendFollowUpMessage[\s\S]{0,3000}app\.sendMessage/,
+  "ChatGPT-native follow-up should be attempted before standard ui/message when the Host exposes it, while official app.sendMessage remains the retry/fallback path");
+assert.match(coordinator, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 4/,
+  "the Workspace App sender must carry an explicit compatibility epoch so stale in-memory iframes can be fenced after an upgrade");
+assert.match(coordinator, /action === "status" \? \{ readOnlyStatus: true \} : \{\}/,
+  "every coordinator-owned status probe must be explicitly read-only and unable to ACK a synthetic model turn");
+assert.match(coordinator, /async function callSender[\s\S]{0,1600}senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH/,
+  "every hidden sender action must carry the current protocol epoch");
+assert.match(coordinator, /async function bindSenderTransport[\s\S]{0,1600}senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH/,
+  "sender bind must carry the current protocol epoch");
+assert.match(coordinator, /\.\.\.extra,[\s\S]{0,400}action === "status" \? \{ readOnlyStatus: true \} : \{\}/,
+  "coordinator callers must not be able to override readOnlyStatus on a control-plane status probe");
+assert.match(server, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 4/,
+  "the server must publish the same hidden sender compatibility epoch");
+assert.match(server, /sender-protocol-epoch-mismatch/,
+  "the server must fail closed when a stale or missing sender epoch reaches the hidden sender bridge");
+assert.match(server, /action: "status", taskId: input\.taskId, readOnlyStatus: true/,
+  "server-internal taskId-to-scope lookups must use side-effect-free status rather than consuming synthetic delivery ownership");
+assert.match(server, /if \(input\.action === "watch-status"\)[\s\S]{0,700}readOnlyStatus: true/,
+  "watch-status must inspect task state without using coordinator liveness traffic as a synthetic model ACK");
+assert.match(runtimeStateSource, /reason: "read-only-status"[\s\S]{0,1000}syntheticTokenPending/,
+  "runtime read-only status must preserve pending synthetic ownership while exposing enough state for the coordinator supervisor");
+assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\)[\s\S]{0,2400}\{ deliveryToken \}\)/,
+  "transport selection must be keyed to the durable synthetic delivery token so ACK retransmission cannot mint a second logical continuation");
+assert.match(runtimeStateSource, /state='TURN_ACKED',turn_acked_at=coalesce\(turn_acked_at,\?\)/,
+  "the first synthetic status ACK must persist the exact generation ACK timestamp for later transport and duration diagnostics");
 assert.ok(visibleTriggerSource,
   "the continuation coordinator must expose one visibleContinuationTrigger(task) function for the actual Host user-role turn");
 for (const [pattern, message] of [
@@ -541,9 +585,9 @@ assert.match(server, /anchorMountVerificationPending is true, keep using the req
   "pending iframe verification must keep using the requested generation instead of minting a duplicate card");
 assert.match(server, /const finalResponseAllowed = outcome\.finalResponseAllowed !== false/,
   "Task Contract rendering must preserve the structured finalResponseAllowed gate");
-assert.match(server, /Do not end with an ACK[\s\S]{0,260}checkpoint[\s\S]{0,520}same assistant turn[\s\S]{0,700}runnable milestone set/,
-  "an unfinished Task Contract must forbid status/checkpoint-only final responses and require same-turn work through the runnable milestone set");
-assert.match(server, /successful checkpoint persists progress[\s\S]{0,500}does not make a final response legal[\s\S]{0,650}long-running process[\s\S]{0,500}same sustained-work stopping rule as a manual user 'continue'/,
+assert.match(server, /plain user-visible final is forbidden[\s\S]{0,420}same assistant turn[\s\S]{0,620}turn-complete[\s\S]{0,520}waitingExternal=true/,
+  "an unfinished Task Contract must forbid a bare final and expose only the legal same-turn/stage-boundary/external-wait exits");
+assert.match(server, /successful ordinary checkpoint persists progress[\s\S]{0,520}does not make a final response legal[\s\S]{0,700}long-running process[\s\S]{0,650}Synthetic continuation uses the same sustained-work stopping rule as manual continue/,
   "Task Contract rendering must forbid checkpoint-as-yield and require owned long-process completion in synthetic turns");
 assert.match(server, /nextRequiredMilestones/,
   "Task Contract results must expose remaining milestones as structured state instead of relying on a prose ACK convention");
@@ -577,16 +621,18 @@ assert.match(server, /anchorMountToken:\s*z\.string\(\)\.uuid\(\)\.optional\(\)\
   "the continuation tool contract must retain the immutable-card token capability needed for same-card iframe rehydration");
 assert.match(server, /anchorMountGeneration:\s*z\.number\(\)\.int\(\)\.nonnegative\(\)\.optional\(\)\.describe\("Immutable visible-card generation\. Rehydrated cards must echo the exact current generation/,
   "the continuation tool contract must require the exact visible-card generation when rebinding a rehydrated iframe");
-assert.match(coordinator, /anchorSurface:\s*false/,
-  "the continuation coordinator must distinguish the dedicated anchor iframe from ordinary Workspace App surfaces");
+assert.match(coordinator, /resourceIdentifiesAnchor[\s\S]{0,180}kind === "continuation-anchor"/,
+  "the continuation coordinator must derive anchor identity only from the dedicated immutable App resource");
+assert.match(coordinator, /anchorSurface:\s*resourceIdentifiesAnchor/,
+  "the dedicated anchor resource must recover anchor identity when Host tool lifecycle notifications are omitted");
 assert.match(coordinator, /anchorMountToken:\s*undefined/,
   "the continuation coordinator must still keep the original anchor generation capability separate from ordinary result state");
 assert.match(coordinator, /senderCapability:\s*undefined/,
   "a separate transport capability slot must exist so sender ownership can move without changing the visible anchor-card identity");
 assert.match(coordinator, /senderCapabilityFromResult[\s\S]{0,1800}devspace\/continuation-sender/,
   "transport sender authority must come from private tool-result metadata rather than a second continuation_anchor invocation");
-assert.match(coordinator, /anchorMountGeneration:\s*undefined[\s\S]{0,200}anchorSuperseded:\s*false/,
-  "the anchor surface must track its issuance generation and whether a newer recovery card superseded it");
+assert.match(coordinator, /anchorMountGeneration:\s*Number\.isInteger\(resourceGeneration\)[\s\S]{0,260}anchorSuperseded:\s*false/,
+  "the anchor surface must recover its immutable resource generation and track whether a newer recovery card superseded it");
 assert.match(coordinator, /authoritativeGeneration[\s\S]{0,500}surfaceGeneration[\s\S]{0,500}markAnchorSuperseded\(\)/,
   "a lazily mounted old ghost generation must retire its visible-card authority before it can ACK the newer card");
 assert.match(coordinator, /data-devspace-anchor-superseded[\s\S]{0,500}replaceChildren\(\)/,
@@ -690,7 +736,7 @@ assert.match(workspaceBundle, /window\.__DEVSPACE_ATTACH_CONTINUATION__\?\.\(Y_\
 assert.match(workspaceBundle, /window\.__DEVSPACE_CONTINUATION_CONNECTED__\?\.\(Y_\)/);
 assert.match(workspaceBundle, /window\.__DEVSPACE_CONTINUATION_TEARDOWN__\?\.\(Y_,e,t\)/);
 
-const { toolWidgetDescriptorMeta, workspaceAppGenerationUri, workspaceAppHtml, workspaceAppResourceResult, workspaceAppResultMeta, workspaceAppUri } = await import(`${pathToFileURL(packagedServerPath).href}?descriptor=${Date.now()}`);
+const { toolWidgetDescriptorMeta, workspaceAppAnchorUri, workspaceAppGenerationUri, workspaceAppHtml, workspaceAppResourceResult, workspaceAppResultMeta, workspaceAppUri } = await import(`${pathToFileURL(packagedServerPath).href}?descriptor=${Date.now()}`);
 const descriptorConfig = {
   widgets: "changes",
   features: { continuationGuard: true },
@@ -703,17 +749,21 @@ for (const kind of ["runtime", "shell", "write", "edit", "read", "search", "dire
   assert.equal(meta?._meta?.["openai/outputTemplate"], undefined, `${kind} must not render a continuation card`);
 }
 const anchorMeta = toolWidgetDescriptorMeta(descriptorConfig, "continuation-anchor");
-const anchorUri = workspaceAppUri(descriptorConfig);
+const workspaceUri = workspaceAppUri(descriptorConfig);
+const anchorUri = workspaceAppAnchorUri(descriptorConfig);
 const workspaceMeta = toolWidgetDescriptorMeta(descriptorConfig, "workspace");
 assert.equal(workspaceMeta?._meta?.ui?.resourceUri, undefined,
   "open_workspace must stay headless in widgets=changes so workspace reuse cannot accumulate duplicate recovery cards");
 assert.equal(workspaceMeta?._meta?.["openai/outputTemplate"], undefined);
-assert.match(anchorUri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/);
+assert.match(workspaceUri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/);
+assert.match(anchorUri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}-continuation-anchor\.html$/);
+assert.notEqual(anchorUri, workspaceUri,
+  "the visible continuation anchor must not share the generic Workspace App resource identity");
 assert.equal(anchorMeta?._meta?.ui?.resourceUri, anchorUri);
 assert.equal(anchorMeta?._meta?.["openai/outputTemplate"], anchorUri);
 const generation7Uri = workspaceAppGenerationUri(descriptorConfig, 7);
 const generation8Uri = workspaceAppGenerationUri(descriptorConfig, 8);
-assert.match(generation7Uri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}-g7\.html$/,
+assert.match(generation7Uri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}-continuation-anchor-g7\.html$/,
   "a deliberate milestone-card generation must receive a generation-specific result cache key");
 assert.equal(workspaceAppGenerationUri(descriptorConfig, 7), generation7Uri,
   "replaying the same generation must preserve the same result cache key");
@@ -726,10 +776,10 @@ assert.equal(generation7Meta?.ui?.resourceUri, generation7Uri);
 assert.equal(generation7Meta?.["ui/resourceUri"], generation7Uri);
 assert.equal(generation7Meta?.["openai/outputTemplate"], generation7Uri);
 const fullWorkspaceMeta = toolWidgetDescriptorMeta({ ...descriptorConfig, widgets: "full" }, "workspace");
-assert.equal(fullWorkspaceMeta?._meta?.ui?.resourceUri, anchorUri,
+assert.equal(fullWorkspaceMeta?._meta?.ui?.resourceUri, workspaceUri,
   "widgets=full keeps the explicit compatibility behavior where workspace calls render cards");
-assert.equal(fullWorkspaceMeta?._meta?.["openai/outputTemplate"], anchorUri);
-assert.notEqual(workspaceAppUri({ ...descriptorConfig, publicBaseUrl: "https://other.example.test" }), anchorUri, "changing the public asset origin must produce a fresh Workspace App URI");
+assert.equal(fullWorkspaceMeta?._meta?.["openai/outputTemplate"], workspaceUri);
+assert.notEqual(workspaceAppAnchorUri({ ...descriptorConfig, publicBaseUrl: "https://other.example.test" }), anchorUri, "changing the public asset origin must produce a fresh Workspace App anchor URI");
 const renderedWorkspaceApp = workspaceAppHtml(descriptorConfig);
 assert.match(renderedWorkspaceApp, /return\s+[A-Za-z_$][\w$]*===`continuation_anchor`\|\|[A-Za-z_$][\w$]*===`open_workspace`/,
   "the final self-contained Workspace App resource must really route continuation_anchor into the visible renderer after minification");
