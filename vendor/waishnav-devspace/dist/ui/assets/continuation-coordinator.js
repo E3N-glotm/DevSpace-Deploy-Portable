@@ -888,7 +888,15 @@ export function installContinuationCoordinator(app, options = {}) {
         const delivery = await sendFollowUp(visibleContinuationTrigger(state.task), async () => {
           const latest = await callTask("status").catch(() => undefined);
           if (latest?.task) acceptTask(latest.task);
-          return Boolean(state.task && !terminal(state.task) && !automationSuppressed(state.task));
+          // Check fresh ownership on every transport attempt, including retries
+          // and fallback. A manual takeover keeps the task RUNNING but revokes
+          // this delivery; cached state or a failed status cannot authorize it.
+          return Boolean(latest?.task
+            && !terminal(latest.task)
+            && !automationSuppressed(latest.task)
+            && latest.task.deliveryToken === deliveryToken
+            && latest.task.deliveryOwner === "synthetic-pending"
+            && latest.task.continuationDeliveryAwaitingAck);
         });
         const recorded = await callSender("delivery-result", {
           deliveryToken,

@@ -344,7 +344,7 @@ assert.match(coordinator, /discovery-only\/status-only or one-tool-and-final tur
   "hidden recovery context must make substantive post-status work mandatory whenever runnable milestones remain");
 assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) =>/,
   "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
-assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(state\.task\)/,
+assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(latest\.task\)/,
   "the irreversible Host send must have a final authoritative terminal-state recheck");
 assert.match(coordinator, /function acceptTask\([\s\S]{0,700}terminal\(state\.task\)[\s\S]{0,300}stopSupervisor\(\)[\s\S]{0,200}stopLifecycleRefresh\(\)/,
   "observing terminal state must synchronously cancel supervisor and lifecycle timers");
@@ -883,14 +883,15 @@ class FakeApp {
           continuationPending: true,
           continuationCount: 1,
           deliveryToken,
-          deliveryOwner: "synthetic-claimed",
+          deliveryOwner: "synthetic-pending",
+          continuationDeliveryAwaitingAck: true,
         };
         return { structuredContent: { task: this.task, accepted: true, deliveryToken } };
       }
       if (input.action === "authorize-delivery") {
-        const accepted = this.task?.deliveryOwner === "synthetic-claimed"
+        const accepted = this.task?.deliveryOwner === "synthetic-pending"
           && this.task?.deliveryToken === input.deliveryToken;
-        if (accepted) this.task = { ...this.task, deliveryOwner: "synthetic-delivering" };
+        if (accepted) this.task = { ...this.task, deliveryOwner: "synthetic-pending" };
         return { structuredContent: { task: this.task, accepted } };
       }
       if (input.action === "delivery-result") {
@@ -1147,7 +1148,7 @@ class ManualTakeoverBeforeSendApp extends FakeApp {
     const input = request.arguments;
     if (request.name === "continuation_sender"
       && input.action === "authorize-delivery"
-      && this.task?.deliveryOwner === "synthetic-claimed") {
+      && this.task?.deliveryOwner === "synthetic-pending") {
       this.task = {
         ...this.task,
         continuationPending: false,
