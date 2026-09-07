@@ -22,8 +22,17 @@ const HOST_CUTOFF_MIN_SAMPLE_MS = 30_000;
 const HOST_CUTOFF_REGIME_DOWN_RATIO = 0.80;
 const HOST_CUTOFF_REGIME_UP_RATIO = 1.20;
 const HOST_CUTOFF_SAMPLE_WINDOW = 8;
-const DELIVERY_ACK_RETRY_BASE_MS = 15_000;
-const DELIVERY_ACK_RETRY_MAX_MS = 45_000;
+// Transport/startup recovery is deliberately separate from the model's work
+// budget.  app.sendMessage may be accepted even though the resumed assistant
+// turn never reaches its mandatory first continuation_task status handshake.
+// Give a legitimately-started turn a full minute to reach that handshake so a
+// slow reasoning/tool bootstrap is not pre-empted, but do not strand a dead
+// delivery behind the much longer synthetic work-owner lease.  Subsequent
+// retries back off only to two minutes.  These are delivery-health SLAs, not a
+// fixed ChatGPT reasoning window; the latter remains learned from Host timeout
+// evidence below.
+const DELIVERY_ACK_RETRY_BASE_MS = 60_000;
+const DELIVERY_ACK_RETRY_MAX_MS = 120_000;
 // A synthetic resumed turn must not be considered successful merely because it
 // reached DevSpace once, performed one real tool call, or wrote one material
 // checkpoint. Keep a short, renewable ownership lease for the whole resumed
@@ -1421,7 +1430,40 @@ export class StructuredRuntimeState {
             if (outcome)
                 ready.push(outcome);
         }
-        return { scanned: candidates.length, ready };
+        // A Host-accepted delivery that never executes its mandatory first
+        // status handshake is a transport/startup failure, not evidence that a
+        // running model turn ended.  Surface only a wake hint when its persisted
+        // ACK retry deadline matures.  The sender CAS then reuses the exact same
+        // generation and delivery token; this sweep must never create another
+        // generation/card for that condition.
+        const deliveryAckRetryDue = this.database.sqlite.prepare(`
+          select
+            t.conversation_scope_id as conversationScopeId,
+            w.id as worksetId,
+            g.generation as generation,
+            g.id as generationId,
+            t.delivery_ack_retry_after_at as retryAfterAt
+          from continuation_tasks t
+          join continuation_worksets w on w.legacy_task_id=t.id
+          join continuation_generations g
+            on g.workset_id=w.id and g.delivery_token=t.delivery_token
+          where t.state in ('RUNNING','SUSPECTED_STALL')
+            and t.continuation_pending=5
+            and t.delivery_owner='synthetic-pending'
+            and t.delivery_token is not null
+            and t.delivery_ack_retry_after_at is not null
+            and t.delivery_ack_retry_after_at<=?
+            and g.owner_type='synthetic'
+            and g.state='DELIVERED'
+            and g.turn_acked_at is null
+            and exists(
+              select 1 from continuation_milestones m
+              where m.workset_id=w.id and m.state='PENDING'
+            )
+          order by t.delivery_ack_retry_after_at asc
+          limit 128
+        `).all(nowIso);
+        return { scanned: candidates.length, ready, deliveryAckRetryDue };
     }
     claimReadyContinuationGeneration(input = {}) {
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
@@ -1458,33 +1500,74 @@ export class StructuredRuntimeState {
             const workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(card.active_workset_id);
             if (!workset || String(workset.conversation_scope_id || "") !== conversationScopeId || String(workset.legacy_task_id || "") !== taskId)
                 return { accepted: false, reason: "active-workset-task-mismatch" };
-            const generation = this.database.sqlite.prepare(`
+            let generation = this.database.sqlite.prepare(`
               select * from continuation_generations
               where workset_id=? and owner_type='synthetic' and state='READY'
               order by generation asc limit 1
             `).get(card.active_workset_id);
-            if (!generation)
-                return { accepted: false, reason: "no-ready-generation" };
-            const deliveryToken = randomUUID();
+            let deliveryToken;
+            let retryExisting = false;
+            if (!generation) {
+                // app.sendMessage acceptance is only transport acceptance. A
+                // resumed assistant turn must still perform its first
+                // continuation_task status handshake before substantive work.
+                // If that startup ACK never arrives, retry the same logical
+                // generation/token after the durable ACK retry deadline instead
+                // of parking it behind the synthetic-active ownership lease.
+                // This bounded startup recovery is intentionally independent of
+                // the dynamically learned model work-duration budget.
+                const retryAt = task.delivery_ack_retry_after_at
+                    ? Date.parse(task.delivery_ack_retry_after_at) : NaN;
+                const retryableDelivered = Number(task.continuation_pending || 0) === 5
+                    && String(task.delivery_owner || "") === "synthetic-pending"
+                    && Boolean(task.delivery_token)
+                    && Number.isFinite(retryAt) && retryAt <= nowMs
+                    ? this.database.sqlite.prepare(`
+                        select * from continuation_generations
+                        where workset_id=? and owner_type='synthetic'
+                          and delivery_token=? and state='DELIVERED' and turn_acked_at is null
+                        order by generation desc limit 1
+                      `).get(card.active_workset_id, String(task.delivery_token))
+                    : undefined;
+                if (!retryableDelivered)
+                    return { accepted: false, reason: "no-ready-generation" };
+                generation = retryableDelivered;
+                deliveryToken = String(task.delivery_token);
+                retryExisting = true;
+            }
+            else {
+                deliveryToken = randomUUID();
+            }
             const changed = this.database.sqlite.prepare(`
               update continuation_generations set state='CLAIMED',delivery_token=?,claimed_at=?,due_at=?,updated_at=?
-              where id=? and state='READY'
-            `).run(deliveryToken, nowIso, claimDueAt, nowIso, generation.id);
+              where id=? and state=?
+            `).run(deliveryToken, nowIso, claimDueAt, nowIso, generation.id,
+                retryExisting ? "DELIVERED" : "READY");
             if (Number(changed.changes || 0) !== 1)
                 return { accepted: false, reason: "generation-race-lost" };
             this.database.sqlite.prepare(`
               update continuation_conversation_cards set sender_instance_id=?,updated_at=? where conversation_scope_id=?
             `).run(senderInstanceId, nowIso, conversationScopeId);
-            this.database.sqlite.prepare(`
-              update continuation_tasks set
-                superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
-                delivery_token=?,delivery_generation=coalesce(delivery_generation,0)+1,
-                delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
-                continuation_pending=5,delivery_ack_started_at=null,
-                delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
-                delivery_work_baseline_count=0,updated_at=?
-              where id=? and conversation_scope_id=?
-            `).run(deliveryToken, claimDueAt, nowIso, taskId, conversationScopeId);
+            if (retryExisting) {
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set
+                    delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
+                    continuation_pending=5,delivery_ack_retry_after_at=null,updated_at=?
+                  where id=? and conversation_scope_id=? and delivery_token=?
+                `).run(claimDueAt, nowIso, taskId, conversationScopeId, deliveryToken);
+            }
+            else {
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set
+                    superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+                    delivery_token=?,delivery_generation=coalesce(delivery_generation,0)+1,
+                    delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
+                    continuation_pending=5,delivery_ack_started_at=null,
+                    delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
+                    delivery_work_baseline_count=0,updated_at=?
+                  where id=? and conversation_scope_id=?
+                `).run(deliveryToken, claimDueAt, nowIso, taskId, conversationScopeId);
+            }
             return {
                 accepted: true,
                 conversationScopeId,
@@ -1494,6 +1577,7 @@ export class StructuredRuntimeState {
                 generation: generation.generation,
                 deliveryToken,
                 claimDueAt,
+                retryExisting,
             };
         })();
     }
@@ -1705,7 +1789,6 @@ export class StructuredRuntimeState {
             return { accepted: false, reason: "delivery-result-required" };
         const nowMs = Date.now();
         const nowIso = new Date(nowMs).toISOString();
-        const dueAt = new Date(nowMs + SYNTHETIC_WORK_OWNER_LEASE_MS).toISOString();
         return this.database.sqlite.transaction(() => {
             const generation = this.database.sqlite.prepare(`
               select g.*,w.legacy_task_id,w.conversation_scope_id,w.id as workset_id
@@ -1729,22 +1812,31 @@ export class StructuredRuntimeState {
             }
             const acceptedDelivery = result === "accepted" || result === "fallback-accepted";
             if (acceptedDelivery) {
+                const previousRetryCount = Math.max(0, Math.round(Number(legacyTask?.delivery_ack_retry_count || 0)));
+                const retryCount = previousRetryCount + 1;
+                const retryAfterAt = new Date(nowMs + deliveryAckRetryDelayMs(retryCount)).toISOString();
                 const changed = this.database.sqlite.prepare(`
-                  update continuation_generations set state='WORK_REQUIRED',delivered_at=coalesce(delivered_at,?),
+                  update continuation_generations set state='DELIVERED',delivered_at=coalesce(delivered_at,?),
                     due_at=?,updated_at=? where delivery_token=? and state='DELIVERING'
-                `).run(nowIso, dueAt, nowIso, deliveryToken);
+                `).run(nowIso, retryAfterAt, nowIso, deliveryToken);
                 if (Number(changed.changes || 0) !== 1)
                     return { accepted: false, reason: "delivery-token-not-claimable" };
                 if (generation.legacy_task_id) {
                     this.database.sqlite.prepare(`
                       update continuation_tasks set last_send_attempt_at=?,last_send_result=?,
-                        continuation_pending=5,delivery_owner='synthetic-pending',delivery_owner_expires_at=?,updated_at=?
+                        continuation_pending=5,delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
+                        delivery_ack_started_at=coalesce(delivery_ack_started_at,?),
+                        delivery_ack_retry_count=?,delivery_ack_retry_after_at=?,updated_at=?
                       where id=? and delivery_token=?
                     `).run(nowIso, JSON.stringify({ result, method: input.method ?? undefined, note: input.note ?? undefined }),
-                        dueAt, nowIso, generation.legacy_task_id, deliveryToken);
+                        retryAfterAt, nowIso, retryCount, retryAfterAt, nowIso,
+                        generation.legacy_task_id, deliveryToken);
                 }
                 return {
                     accepted: true,
+                    deliveryAckRetry: true,
+                    retryAfterAt,
+                    retryCount,
                     generation: this.database.sqlite.prepare("select * from continuation_generations where delivery_token=?").get(deliveryToken),
                 };
             }

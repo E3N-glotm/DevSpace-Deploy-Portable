@@ -102,8 +102,10 @@ try {
     "request silence must not be promoted into a replacement Host-turn authorization timer");
   assert.doesNotMatch(runtimeSource, /COMPLETION_QUIET_RECOVERY_MS|COMPLETION_STALL_CONFIRM_MS/,
     "the old heartbeat-confirmation quiet-window implementations must stay removed");
-  assert.match(runtimeSource, /DELIVERY_ACK_RETRY_MAX_MS = 45_000/,
-    "unacknowledged Host delivery must never back off beyond one minute");
+  assert.match(runtimeSource, /DELIVERY_ACK_RETRY_BASE_MS = 60_000/,
+    "a Host-accepted synthetic turn must get a full minute to perform its first DevSpace ACK before startup retransmission");
+  assert.match(runtimeSource, /DELIVERY_ACK_RETRY_MAX_MS = 120_000/,
+    "unacknowledged Host delivery startup recovery must remain bounded at the requested two-minute ceiling");
   assert.ok(runtimeSource.includes("server-turn-lease-expired-no-inflight-model-request")
     && !runtimeSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
     "the resident supervisor must keep weak lease suspicion as telemetry and remove historical-cutoff authorization");
@@ -682,7 +684,75 @@ try {
     method: "app.sendMessage",
   });
   assert.equal(delivered.accepted, true);
-  assert.equal(delivered.generation.state, "WORK_REQUIRED");
+  assert.equal(delivered.generation.state, "DELIVERED",
+    "Host transport acceptance must remain a pre-ACK delivery state rather than pretending resumed model work has started");
+  let deliveredLegacy = db.prepare(`
+    select delivery_generation,delivery_ack_started_at,delivery_ack_retry_count,delivery_ack_retry_after_at,
+           delivery_owner,delivery_token
+    from continuation_tasks where id=?
+  `).get(first.task.id);
+  assert.equal(Number(deliveredLegacy.delivery_ack_retry_count), 1);
+  assert.ok(deliveredLegacy.delivery_ack_started_at);
+  const firstAckRetryDelayMs = Date.parse(deliveredLegacy.delivery_ack_retry_after_at) - Date.now();
+  assert.ok(firstAckRetryDelayMs >= 50_000 && firstAckRetryDelayMs <= 70_000,
+    `first startup ACK recovery must mature at roughly one minute, got ${firstAckRetryDelayMs}ms`);
+  assert.equal(deliveredLegacy.delivery_owner, "synthetic-pending");
+  assert.equal(deliveredLegacy.delivery_token, senderDelivered.deliveryToken);
+
+  const generationCountBeforeAckRetry = Number(db.prepare(`
+    select count(*) as count from continuation_generations where workset_id=?
+  `).get(active.id).count);
+  const earlyAckSweep = runtime.continuationSupervisorSweep();
+  assert.equal(earlyAckSweep.deliveryAckRetryDue.length, 0,
+    "the resident supervisor must not retransmit a Host-accepted turn before its bounded startup ACK deadline");
+  db.prepare("update continuation_tasks set delivery_ack_retry_after_at=? where id=?")
+    .run(past, first.task.id);
+  const dueAckSweep = runtime.continuationSupervisorSweep();
+  assert.equal(dueAckSweep.ready.length, 0,
+    "a missing startup ACK must not manufacture a second logical continuation generation");
+  assert.equal(dueAckSweep.deliveryAckRetryDue.length, 1,
+    "the resident supervisor must surface a wake-only startup retry when the persisted ACK deadline matures");
+  assert.equal(Number(dueAckSweep.deliveryAckRetryDue[0].generation), Number(senderDelivered.generation));
+  const senderAckRetry = runtime.claimReadyContinuationGeneration({
+    conversationScopeId: scope,
+    senderInstanceId: "sender-delivered-ack-retry",
+    ...senderCapability,
+  });
+  assert.equal(senderAckRetry.accepted, true, JSON.stringify(senderAckRetry));
+  assert.equal(senderAckRetry.retryExisting, true,
+    "startup recovery must reclaim the already-delivered logical generation instead of minting a new one");
+  assert.equal(senderAckRetry.deliveryToken, senderDelivered.deliveryToken,
+    "startup recovery must reuse the same delivery token so duplicate generations/cards cannot appear");
+  assert.equal(Number(senderAckRetry.generation), Number(senderDelivered.generation));
+  const generationCountAfterAckRetryClaim = Number(db.prepare(`
+    select count(*) as count from continuation_generations where workset_id=?
+  `).get(active.id).count);
+  assert.equal(generationCountAfterAckRetryClaim, generationCountBeforeAckRetry,
+    "startup recovery must not add a continuation generation");
+  const ackRetryAuthorization = runtime.authorizeContinuationGenerationDelivery({
+    conversationScopeId: scope,
+    senderInstanceId: "sender-delivered-ack-retry",
+    deliveryToken: senderAckRetry.deliveryToken,
+    ...senderCapability,
+  });
+  assert.equal(ackRetryAuthorization.accepted, true);
+  const redelivered = runtime.recordContinuationGenerationDelivery({
+    deliveryToken: senderAckRetry.deliveryToken,
+    result: "accepted",
+    method: "app.sendMessage",
+    note: "delivery ACK retry",
+  });
+  assert.equal(redelivered.accepted, true);
+  assert.equal(redelivered.generation.state, "DELIVERED");
+  deliveredLegacy = db.prepare(`
+    select delivery_generation,delivery_ack_retry_count,delivery_ack_retry_after_at
+    from continuation_tasks where id=?
+  `).get(first.task.id);
+  assert.equal(Number(deliveredLegacy.delivery_generation), Number(senderDelivered.generation),
+    "retransmitting the same startup delivery must not increment logical delivery generation");
+  assert.equal(Number(deliveredLegacy.delivery_ack_retry_count), 2);
+  assert.ok(Date.parse(deliveredLegacy.delivery_ack_retry_after_at) - Date.now() >= 100_000,
+    "a second unacknowledged delivery should back off toward the two-minute startup ceiling");
 
   const preAckManualTool = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
   assert.equal(preAckManualTool.accepted, false,

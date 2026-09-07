@@ -224,8 +224,10 @@ assert.doesNotMatch(runtimeStateSource, /COMPLETION_SERVER_QUIET_BACKSTOP_MS/,
   "request silence must not be promoted into a continuation authorization timer");
 assert.doesNotMatch(runtimeStateSource, /COMPLETION_QUIET_RECOVERY_MS|COMPLETION_STALL_CONFIRM_MS/,
   "the old heartbeat-confirmation quiet-window implementations must stay removed");
-assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_MAX_MS = 45_000/,
-  "delivery ACK retransmission must remain bounded below one minute");
+assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_BASE_MS = 60_000/,
+  "delivery ACK retransmission must allow one minute for the mandatory first synthetic status handshake before retrying");
+assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_MAX_MS = 120_000/,
+  "delivery ACK retransmission backoff must remain bounded at the requested two-minute startup-recovery ceiling");
 assert.ok(runtimeStateSource.includes("server-turn-lease-expired-no-inflight-model-request")
   && !runtimeStateSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
   "resident recovery must keep historical cutoff telemetry out of the authorization evidence set");
@@ -412,6 +414,8 @@ assert.match(server, /res\.write\(`event: wake\\ndata: \$\{JSON\.stringify\(\{ r
   "the resident wake channel must emit only a wake reason payload rather than continuation authority");
 assert.match(server, /const sweep = runtimeState\.continuationSupervisorSweep\(\)[\s\S]{0,500}if \(sweep\.ready\.length > 0\)[\s\S]{0,1200}broadcastContinuationWake\("ready-generation"\)/,
   "the resident server must push a wake-only event specifically when the authoritative supervisor persists a READY generation");
+assert.match(server, /sweep\.deliveryAckRetryDue[\s\S]{0,1200}broadcastContinuationWake\("delivery-ack-retry-due"\)/,
+  "the resident server must also wake surviving sender Apps when a persisted pre-ACK startup retry deadline matures without manufacturing a new generation");
 assert.match(server, /app\.get\("\/mcp-app-assets\/continuation-wake"[\s\S]{0,500}text\/event-stream[\s\S]{0,700}writeContinuationWake\(res, "connected"\)/,
   "a recreated/surviving Workspace App must be able to subscribe to the same-origin READY wake channel and immediately refresh durable state");
 assert.doesNotMatch(server, /writeContinuationWake\([\s\S]{0,180}taskId|writeContinuationWake\([\s\S]{0,180}deliveryToken|writeContinuationWake\([\s\S]{0,180}anchorMountToken/,
