@@ -4,7 +4,7 @@ const SENDER_TOOL = "continuation_sender";
 // server rejects all sender actions from older in-memory iframes, so an App
 // surface loaded before a live Portable upgrade cannot continue delivering
 // continuations using stale semantics.
-const CONTINUATION_SENDER_PROTOCOL_EPOCH = 4;
+const CONTINUATION_SENDER_PROTOCOL_EPOCH = 5;
 // Keep completion delivery responsive after the guarded ATCC handoff without
 // turning polling into a completion signal.  The runtime still authorizes only
 // exact-turn COMPLETED/TIMED_OUT state; this tick merely notices it promptly.

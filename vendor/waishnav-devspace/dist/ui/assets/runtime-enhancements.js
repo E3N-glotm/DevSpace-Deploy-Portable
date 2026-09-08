@@ -324,7 +324,13 @@ function buildContinuationCard() {
         : (ZH ? "兼容任务" : "Compatibility task")),
     metadataRow(ZH ? "里程碑" : "Milestones", `${completed.size}/${required.length}`),
     metadataRow(ZH ? "续轮" : "Continuations", `${task.continuationCount ?? 0}/${Number(task.maxContinuations || 0) <= 0 ? "∞" : task.maxContinuations}`),
-    metadataRow(ZH ? "Turn Lease" : "Turn Lease", task.turnLeaseExpiresAt),
+    // turnLeaseExpiresAt is intentionally omitted from the visible card. The
+    // lease is refreshed by ordinary model/tool activity and is diagnostic
+    // state rather than user-facing progress. Rendering that volatile clock
+    // made every heartbeat/status snapshot produce different HTML, which in
+    // turn replaced the whole <details> node and repeatedly poked the Host
+    // iframe ResizeObserver/scroll anchoring even when milestones were
+    // unchanged.
     metadataRow(ZH ? "总时限" : "Wall clock", task.unlimitedWallClock || !task.deadlineAt ? (ZH ? "无限" : "Unlimited") : task.deadlineAt),
     metadataRow(ZH ? "Owner 锁" : "Owner lock", task.ownerLocked ? (ZH ? "已锁定" : "Locked") : (ZH ? "未锁定" : "Unlocked")),
     metadataRow(ZH ? "等待原因" : "Waiting", task.waitingReason),
@@ -661,7 +667,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-      text: "DevSpace Portable 1.1.59 dev33 · Protocol 1.5",
+      text: "DevSpace Portable 1.1.59 dev35 · Protocol 1.5",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);

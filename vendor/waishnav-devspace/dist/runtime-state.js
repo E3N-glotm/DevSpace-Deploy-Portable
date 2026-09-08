@@ -25,14 +25,13 @@ const HOST_CUTOFF_SAMPLE_WINDOW = 8;
 // Transport/startup recovery is deliberately separate from the model's work
 // budget. A native Host follow-up may be accepted even though the resumed assistant
 // turn never reaches its mandatory first continuation_task status handshake.
-// Give a legitimately-started turn a full minute to reach that handshake so a
-// slow reasoning/tool bootstrap is not pre-empted, but do not strand a dead
-// delivery behind the much longer synthetic work-owner lease.  Subsequent
-// retries back off only to two minutes.  These are delivery-health SLAs, not a
-// fixed ChatGPT reasoning window; the latter remains learned from Host timeout
-// evidence below.
-const DELIVERY_ACK_RETRY_BASE_MS = 60_000;
-const DELIVERY_ACK_RETRY_MAX_MS = 120_000;
+// Give a legitimately-started turn enough time to reach that handshake without
+// allowing a dead Host delivery to consume most of the user's 1–2 minute
+// continuation SLA.  Retries remain same-generation/same-token and are bounded
+// at one minute. These are delivery-health SLAs, not a fixed ChatGPT reasoning
+// window; the latter remains learned from Host timeout evidence below.
+const DELIVERY_ACK_RETRY_BASE_MS = 45_000;
+const DELIVERY_ACK_RETRY_MAX_MS = 60_000;
 // A synthetic resumed turn must not be considered successful merely because it
 // reached DevSpace once, performed one real tool call, or wrote one material
 // checkpoint. Keep a short, renewable ownership lease for the whole resumed
@@ -58,7 +57,12 @@ const SYNTHETIC_WORK_OWNER_LEASE_MS = 30 * 60_000;
 // avoids a stale historical value becoming a permanent shorter turn cap after
 // the Host increases its real window.
 const SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO = 0.95;
-const CONTINUATION_SENDER_CLAIM_LEASE_MS = 15_000;
+// The sender owns CLAIMED while it performs bounded MCP retries, the advisory
+// model-context update and the final server authorization.  Fifteen seconds was
+// shorter than the coordinator's own worst-case retry envelope and caused valid
+// generations to expire before Host send. Keep the lease comfortably above the
+// complete pre-send envelope without turning it into a model-work budget.
+const CONTINUATION_SENDER_CLAIM_LEASE_MS = 45_000;
 // ChatGPT's current Apps host does not emit resource teardown after an ordinary
 // assistant final.  A model-signed ATCC completion intent would therefore stay
 // in COMPLETION_REQUESTED forever if teardown were mandatory.  This short

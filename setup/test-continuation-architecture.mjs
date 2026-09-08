@@ -191,10 +191,12 @@ try {
     "request silence must not be promoted into a replacement Host-turn authorization timer");
   assert.doesNotMatch(runtimeSource, /COMPLETION_QUIET_RECOVERY_MS|COMPLETION_STALL_CONFIRM_MS/,
     "the old heartbeat-confirmation quiet-window implementations must stay removed");
-  assert.match(runtimeSource, /DELIVERY_ACK_RETRY_BASE_MS = 60_000/,
-    "a Host-accepted synthetic turn must get a full minute to perform its first DevSpace ACK before startup retransmission");
-  assert.match(runtimeSource, /DELIVERY_ACK_RETRY_MAX_MS = 120_000/,
-    "unacknowledged Host delivery startup recovery must remain bounded at the requested two-minute ceiling");
+  assert.match(runtimeSource, /DELIVERY_ACK_RETRY_BASE_MS = 45_000/,
+    "a Host-accepted synthetic turn must get a bounded startup ACK window without consuming the 1–2 minute continuation SLA");
+  assert.match(runtimeSource, /DELIVERY_ACK_RETRY_MAX_MS = 60_000/,
+    "unacknowledged Host delivery startup recovery must remain bounded at one minute");
+  assert.match(runtimeSource, /CONTINUATION_SENDER_CLAIM_LEASE_MS = 45_000/,
+    "a sender claim must outlive the coordinator's complete bounded pre-send retry envelope");
   assert.ok(runtimeSource.includes("server-turn-lease-expired-no-inflight-model-request")
     && !runtimeSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
     "the resident supervisor must keep weak lease suspicion as telemetry and remove historical-cutoff authorization");
@@ -815,8 +817,8 @@ try {
   assert.equal(Number(deliveredLegacy.delivery_ack_retry_count), 1);
   assert.ok(deliveredLegacy.delivery_ack_started_at);
   const firstAckRetryDelayMs = Date.parse(deliveredLegacy.delivery_ack_retry_after_at) - Date.now();
-  assert.ok(firstAckRetryDelayMs >= 50_000 && firstAckRetryDelayMs <= 70_000,
-    `first startup ACK recovery must mature at roughly one minute, got ${firstAckRetryDelayMs}ms`);
+  assert.ok(firstAckRetryDelayMs >= 35_000 && firstAckRetryDelayMs <= 55_000,
+    `first startup ACK recovery must mature at roughly 45 seconds, got ${firstAckRetryDelayMs}ms`);
   assert.equal(deliveredLegacy.delivery_owner, "synthetic-pending");
   assert.equal(deliveredLegacy.delivery_token, senderDelivered.deliveryToken);
 
@@ -937,8 +939,9 @@ try {
   assert.equal(Number(deliveredLegacy.delivery_generation), Number(senderDelivered.generation),
     "retransmitting the same startup delivery must not increment logical delivery generation");
   assert.equal(Number(deliveredLegacy.delivery_ack_retry_count), 2);
-  assert.ok(Date.parse(deliveredLegacy.delivery_ack_retry_after_at) - Date.now() >= 100_000,
-    "a second unacknowledged delivery should back off toward the two-minute startup ceiling");
+  const secondAckRetryDelayMs = Date.parse(deliveredLegacy.delivery_ack_retry_after_at) - Date.now();
+  assert.ok(secondAckRetryDelayMs >= 50_000 && secondAckRetryDelayMs <= 70_000,
+    `a second unacknowledged delivery should back off to the one-minute startup ceiling, got ${secondAckRetryDelayMs}ms`);
 
   const preAckManualTool = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
   assert.equal(preAckManualTool.accepted, false,

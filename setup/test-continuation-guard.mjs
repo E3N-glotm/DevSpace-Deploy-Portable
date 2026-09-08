@@ -230,10 +230,12 @@ assert.doesNotMatch(runtimeStateSource, /COMPLETION_SERVER_QUIET_BACKSTOP_MS/,
   "request silence must not be promoted into a continuation authorization timer");
 assert.doesNotMatch(runtimeStateSource, /COMPLETION_QUIET_RECOVERY_MS|COMPLETION_STALL_CONFIRM_MS/,
   "the old heartbeat-confirmation quiet-window implementations must stay removed");
-assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_BASE_MS = 60_000/,
-  "delivery ACK retransmission must allow one minute for the mandatory first synthetic status handshake before retrying");
-assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_MAX_MS = 120_000/,
-  "delivery ACK retransmission backoff must remain bounded at the requested two-minute startup-recovery ceiling");
+assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_BASE_MS = 45_000/,
+  "delivery ACK retransmission must allow a bounded first synthetic status handshake window without consuming the full continuation SLA");
+assert.match(runtimeStateSource, /DELIVERY_ACK_RETRY_MAX_MS = 60_000/,
+  "delivery ACK retransmission backoff must remain bounded at one minute");
+assert.match(runtimeStateSource, /CONTINUATION_SENDER_CLAIM_LEASE_MS = 45_000/,
+  "sender claim ownership must outlive the coordinator's full bounded pre-send retry envelope");
 assert.ok(runtimeStateSource.includes("server-turn-lease-expired-no-inflight-model-request")
   && !runtimeStateSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
   "resident recovery must keep historical cutoff telemetry out of the authorization evidence set");
@@ -309,7 +311,7 @@ assert.match(coordinator, /window\.openai\?\.sendFollowUpMessage[\s\S]{0,600}win
   "automatic delivery must bind the native ChatGPT follow-up path");
 assert.match(coordinator, /await nativeFollowUp\(\{ prompt: text \}\)[\s\S]{0,900}method: "window\.openai\.sendFollowUpMessage"/,
   "both the first delivery and ACK recovery must report the native ChatGPT follow-up transport");
-assert.match(coordinator, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 4/,
+  assert.match(coordinator, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 5/,
   "the Workspace App sender must carry an explicit compatibility epoch so stale in-memory iframes can be fenced after an upgrade");
 assert.match(coordinator, /action === "status" \? \{ readOnlyStatus: true \} : \{\}/,
   "every coordinator-owned status probe must be explicitly read-only and unable to ACK a synthetic model turn");

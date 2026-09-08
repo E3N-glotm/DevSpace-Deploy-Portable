@@ -119,6 +119,20 @@
 - dev33 保留 sender 权限退役语义，但将“headless”限定为控制权限，不再等同于删除可见历史：旧卡冻结自己的最后任务快照，显示“已由后续消息接替”，保持用户原有折叠选择与非零稳定高度，并忽略后续 generation 的 UI 广播。
 - 新 generation 仍拥有唯一有效 anchor/coordinator；旧 iframe 只能重新绑定私有 sender relay，不能 ACK 新卡、不能提供 Host 生命周期证据，也不能绕过 generation CAS。该修复未改动 ATCC、native follow-up、ACK 重试、人工 takeover 或动态 Host budget。
 
+### 15. volatile lease 刷新不再触发整卡 DOM 替换
+
+- 现场继续观察到卡片不再变空后，ChatGPT 页面仍可能在 DevSpace 工具调用期间上下抽搐。根因不是新的卡片 generation，而是可见卡片包含 `turnLeaseExpiresAt`：该字段会随每次模型/工具活动刷新，导致 runtime 的 `outerHTML` 去重永远判定“卡片已变化”，从而反复 `replaceChildren()` 整张 `<details>`。
+- Host 侧 iframe SDK 对 DOM 尺寸使用 `ResizeObserver`；即使最终测量高度相同，连续销毁/重建卡片节点仍会触发布局、尺寸探测和浏览器滚动锚定，产生肉眼可见的上下抖动。`Turn Lease` 本身只是内部防并发诊断信息，并不代表用户进度。
+- dev34 保留权威任务状态里的 lease，但把该高频字段移出可见结构。任务 ID、状态、工作区、模式、里程碑进度、续轮次数、总时限、Owner 锁和真实等待原因仍正常显示；只有这些用户可见语义发生变化时才更新卡片 DOM。
+- 浏览器回归新增 volatile-only 刷新：连续改变 `turnLeaseExpiresAt`、`lastActivityAt`、`lastUiHeartbeatAt`、`updatedAt` 时，要求同一 `<details>` DOM identity 保持不变、折叠选择保持不变，并且集成 SDK 不产生 Host iframe 高度振荡。该 UI 修复不把 lease 到期升级为续轮授权。
+
+### 16. sender claim 与 startup ACK 恢复窗口对齐实际 Host 时序
+
+- DrugCrop 与当前会话的权威 generation 记录表明，15 秒 sender claim lease 可能短于 coordinator 自身的完整发送前路径：有界 MCP transport retry、advisory `updateModelContext` 和最终 `authorize-delivery` 尚未结束时，generation 就可能被 supervisor 判为 `sender-claim-expired`。dev35 将 claim lease 提高到 45 秒，使合法 sender 能覆盖完整发送前重试 envelope；这不是模型 turn budget，人工 takeover 仍可立即撤销旧 synthetic 权限。
+- 对已经得到 Host 接受、但真实 resumed model 尚未通过首个 `continuation_task status` ACK 的 `DELIVERED` generation，恢复仍严格复用同一 generation 与同一 delivery token，不制造新 generation/新卡。首轮 startup ACK 健康窗口由 60 秒调整到 45 秒，后续退避上限由 120 秒调整到 60 秒，减少 transport/startup 层自身造成的多分钟等待。
+- `DELIVERING` 的回调结果如果不确定，仍然不能靠 timer 重发，因为 Host 可能已经收到消息；静默、25 秒 activity lease 与 `SUSPECTED_STALL` 也继续只是诊断信号，不能成为续轮授权。合法自动续轮触发保持不变：当前轮存在已验证 Host 截断，或模型对精确当前 turn lease 签署 `turn-complete`。
+- hidden sender protocol epoch 升到 5，使升级前仍驻留内存的旧 iframe 无法按旧 60/120 秒语义继续发送。architecture/guard 回归同步锁定 45 秒 claim、45/60 秒 startup ACK 以及 same-generation/token 恢复语义。
+
 ## 回归覆盖
 
 1. `test-remote-agent-ssh-rescue.mjs` 断言显式更新读取 `_fullAccess.Checked` 与 `_roots.Lines`，Full Access 时 roots 归零，并且 existing Agent 仍传入原 `agentId` repair enrollment。

@@ -57,6 +57,25 @@ try {
   await panel().evaluate(node => { window.savedPanel = node; });
   for (let i = 0; i < 10; i++) await update(task);
   assert.equal(await panel().evaluate(node => node === window.savedPanel), true);
+  // Volatile runtime bookkeeping must not replace the visible card. These
+  // fields change on ordinary model/tool activity but do not represent a
+  // user-visible milestone/state transition. Replacing the whole <details>
+  // node for them wakes Host resize/scroll anchoring and causes page jitter.
+  await panel().evaluate(node => { window.volatilePanel = node; });
+  const volatileHeight = await panel().evaluate(node => node.getBoundingClientRect().height);
+  for (let i = 0; i < 20; i++) {
+    await update({
+      ...task,
+      turnLeaseExpiresAt: `lease-${i}`,
+      lastActivityAt: `activity-${i}`,
+      lastUiHeartbeatAt: `heartbeat-${i}`,
+      updatedAt: `updated-${i}`,
+    });
+    assert.equal(await panel().evaluate(node => node === window.volatilePanel), true,
+      "volatile-only continuation refresh must preserve the card DOM node");
+    assert.equal(await panel().evaluate(node => node.open), false);
+    assert.equal(await panel().evaluate(node => node.getBoundingClientRect().height), volatileHeight);
+  }
   // A later manual round supersedes this immutable card's coordinator
   // authority, but the historical card must remain visible instead of being
   // replaced by an empty Host shell. It freezes its own last snapshot and
@@ -171,6 +190,27 @@ try {
   await page.waitForTimeout(300);
   const sizes = await page.evaluate(() => window.sizeHistory);
   assert.ok(new Set(sizes).size <= 1, "collapsed integrated card must not oscillate Host iframe height: " + JSON.stringify(sizes));
+  await embeddedPanel.evaluate(node => { window.integratedVolatilePanel = node; });
+  await page.evaluate(() => { window.sizeHistory = []; });
+  for (let i = 0; i < 20; i++) {
+    await hostNotify({
+      ...task,
+      anchorMountGeneration: 5,
+      continuationCount: 9,
+      turnLeaseExpiresAt: `lease-${i}`,
+      lastActivityAt: `activity-${i}`,
+      lastUiHeartbeatAt: `heartbeat-${i}`,
+      updatedAt: `updated-${i}`,
+    });
+    await page.waitForTimeout(25);
+    assert.equal(await embeddedPanel.evaluate(node => node === window.integratedVolatilePanel), true,
+      "integrated volatile-only refresh must preserve the card DOM node");
+  }
+  await page.waitForTimeout(300);
+  const volatileSizes = await page.evaluate(() => window.sizeHistory);
+  assert.ok(new Set(volatileSizes).size <= 1,
+    "volatile-only integrated refresh must not oscillate Host iframe height: " + JSON.stringify(volatileSizes));
   assert.deepEqual(errors, []);
-  console.log("PASS integrated iframe SDK bootstrap, repeated results and stable Host size notifications", JSON.stringify(sizes));
+  console.log("PASS integrated iframe SDK bootstrap, repeated/volatile results and stable Host size notifications",
+    JSON.stringify({ sizes, volatileSizes }));
 } finally { await browser.close(); }
