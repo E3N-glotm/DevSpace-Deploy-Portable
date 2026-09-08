@@ -15,7 +15,6 @@ const DEFAULT_TERMINAL_REFRESH_MS = 60_000;
 // Host model-context updates are advisory. They must never hold a synthetic
 // generation in CLAIMED indefinitely before the authoritative delivery CAS.
 const MODEL_CONTEXT_UPDATE_TIMEOUT_MS = 1_500;
-const NATIVE_FOLLOW_UP_TOKEN_HISTORY_LIMIT = 128;
 // A resumed ChatGPT turn can be created before its MCP connector has fully
 // rehydrated. Keep retrying the same idempotent control call across roughly a
 // 30-second readiness window instead of giving up after ~8 seconds.
@@ -250,8 +249,8 @@ async function updateModelContextBestEffort(app, content) {
 }
 
 function visibleContinuationTrigger(task) {
-  // app.sendMessage is the Host-supported way to create the resumed model turn,
-  // so the recovery instruction must survive even when updateModelContext is
+  // The native ChatGPT follow-up bridge creates the resumed model turn, so the
+  // recovery instruction must survive even when updateModelContext is
   // ignored or not replayed into the resumed model turn. Real Host evidence
   // showed that a bare "继续" can still produce a status-only assistant final.
   // Keep protocol/task ids hidden, but make sustained execution explicit in the
@@ -850,45 +849,36 @@ export function installContinuationCoordinator(app, options = {}) {
     }
   }
 
-  // ChatGPT currently exposes two follow-up transports with observably different
-  // behavior.  The standard MCP Apps ui/message path is portable, but ChatGPT Web
-  // has shipped builds where a widget-originated ui/message is rendered as a user
-  // bubble yet does not enter the same model/tool pipeline as an equivalent manual
-  // user message.  The compatibility sendFollowUpMessage path is closer to a
-  // native ChatGPT follow-up when the Host permits asynchronous invocation.
-  //
-  // Try the native compatibility path once for each exact delivery token.  Some
-  // hosts reject/ignore asynchronous sendFollowUpMessage calls; the durable
-  // delivery-ACK FSM will then retry the SAME logical generation/token, and that
-  // retry deliberately falls through to official app.sendMessage.  This is not a
-  // silence/turn-end heuristic and cannot create an overlapping continuation.
-  const nativeFollowUpAttemptedTokens = new Set();
-
-  function rememberNativeFollowUpToken(token) {
-    if (!token) return;
-    nativeFollowUpAttemptedTokens.add(token);
-    while (nativeFollowUpAttemptedTokens.size > NATIVE_FOLLOW_UP_TOKEN_HISTORY_LIMIT) {
-      const oldest = nativeFollowUpAttemptedTokens.values().next().value;
-      if (oldest === undefined) break;
-      nativeFollowUpAttemptedTokens.delete(oldest);
-    }
-  }
-
-  async function sendFollowUp(text, beforeSend, { deliveryToken } = {}) {
+  // Automatic continuation is pinned to ChatGPT's native follow-up bridge.
+  // The standards-level MCP Apps ui/message transport can render a user bubble
+  // without starting the same full reasoning/tool pipeline as a manual
+  // "continue", so it is deliberately not a fallback. Host acceptance is not
+  // transport equivalence. ACK recovery repeats the native bridge for the SAME
+  // generation/token and still relies on the resumed model's continuation_task
+  // status as success proof.
+  async function sendFollowUp(text, beforeSend) {
     const ensureStillRunnable = async () => {
       if (typeof beforeSend !== "function") return;
       if (!(await beforeSend())) throw new Error("terminal-continuation-cancelled");
     };
-    const nativeFollowUp = typeof window !== "undefined" ? window.openai?.sendFollowUpMessage : undefined;
-    const tokenKey = deliveryToken ? String(deliveryToken) : "";
-    const tryNativeFirst = typeof nativeFollowUp === "function"
-      && Boolean(tokenKey)
-      && !nativeFollowUpAttemptedTokens.has(tokenKey);
-    let nativeError;
-    if (tryNativeFirst) {
-      rememberNativeFollowUpToken(tokenKey);
-      await ensureStillRunnable();
+    const optionNativeFollowUp = typeof options.nativeFollowUp === "function"
+      ? options.nativeFollowUp
+      : undefined;
+    const appTestFollowUp = typeof app.sendFollowUpMessage === "function"
+      ? app.sendFollowUpMessage.bind(app)
+      : undefined;
+    const hostNativeFollowUp = typeof window !== "undefined" && typeof window.openai?.sendFollowUpMessage === "function"
+      ? window.openai.sendFollowUpMessage.bind(window.openai)
+      : undefined;
+    const nativeFollowUp = optionNativeFollowUp ?? appTestFollowUp ?? hostNativeFollowUp;
+    if (typeof nativeFollowUp !== "function") {
+      throw new Error("The host exposes no native ChatGPT follow-up messaging path.");
+    }
+    let lastError;
+    for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
+      if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
       try {
+        await ensureStillRunnable();
         try {
           await nativeFollowUp({ prompt: text });
         } catch {
@@ -896,39 +886,11 @@ export function installContinuationCoordinator(app, options = {}) {
         }
         return { method: "window.openai.sendFollowUpMessage", result: "fallback-accepted" };
       } catch (error) {
-        nativeError = error;
+        lastError = error;
+        if (!transientTransportFailure(error) || attempt === TRANSIENT_RETRY_DELAYS_MS.length - 1) break;
       }
     }
-    let officialError;
-    if (typeof app.sendMessage === "function") {
-      for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
-        if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
-        try {
-          await ensureStillRunnable();
-          const result = await app.sendMessage(
-            { role: "user", content: [{ type: "text", text }] },
-            typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-              ? { signal: AbortSignal.timeout(15000) }
-              : undefined,
-          );
-          if (result?.isError) throw new Error("Host rejected ui/message.");
-          return { method: "app.sendMessage", result: "accepted" };
-        } catch (error) {
-          officialError = error;
-          if (!transientTransportFailure(error) || attempt === TRANSIENT_RETRY_DELAYS_MS.length - 1) break;
-        }
-      }
-    }
-    if (typeof nativeFollowUp === "function") {
-      await ensureStillRunnable();
-      try {
-        await nativeFollowUp({ prompt: text });
-      } catch {
-        await nativeFollowUp({ role: "user", content: [{ type: "text", text }] });
-      }
-      return { method: "window.openai.sendFollowUpMessage", result: "fallback-accepted" };
-    }
-    throw officialError ?? nativeError ?? new Error("The host exposes no supported follow-up messaging path.");
+    throw lastError ?? new Error("Native ChatGPT follow-up delivery failed.");
   }
 
   async function attemptContinuation(reason, { force = false, skipPrepare = false } = {}) {
@@ -980,7 +942,7 @@ export function installContinuationCoordinator(app, options = {}) {
             && latest.task.deliveryToken === deliveryToken
             && latest.task.deliveryOwner === "synthetic-pending"
             && latest.task.continuationDeliveryAwaitingAck);
-        }, { deliveryToken });
+        });
         const recorded = await callSender("delivery-result", {
           deliveryToken,
           result: delivery.result,
@@ -997,7 +959,7 @@ export function installContinuationCoordinator(app, options = {}) {
           );
           // The server-resident Generation FSM owns retries from this point.
           // Keep the App supervisor alive so this verified card can act as the
-          // Host ui/message transport whenever the server exposes a new READY
+          // native Host follow-up transport whenever the server exposes a new READY
           // generation.
           return true;
         }
@@ -1008,7 +970,7 @@ export function installContinuationCoordinator(app, options = {}) {
           await callSender("delivery-result", {
             deliveryToken,
             result: "failed",
-            method: "app.sendMessage",
+            method: "window.openai.sendFollowUpMessage",
             note: "task became terminal before Host send",
           }).catch(() => undefined);
           return false;
@@ -1016,7 +978,7 @@ export function installContinuationCoordinator(app, options = {}) {
         await callSender("delivery-result", {
           deliveryToken,
           result: /reject/i.test(note) ? "rejected" : "failed",
-          method: "app.sendMessage",
+          method: "window.openai.sendFollowUpMessage",
           note,
         }).catch(() => undefined);
         renderRecoveryStatus(
@@ -1091,7 +1053,7 @@ export function installContinuationCoordinator(app, options = {}) {
       return;
     }
 
-    // app.sendMessage acceptance is not proof that a resumed assistant turn
+    // Native follow-up acceptance is not proof that a resumed assistant turn
     // reached DevSpace. Keep retrying the same persisted continuation after its
     // ACK lease expires, for both process-wake and proactive continuations.
     if (state.task.continuationDeliveryAwaitingAck) {
@@ -1102,7 +1064,7 @@ export function installContinuationCoordinator(app, options = {}) {
 
     // Persisted process wakes are claimable by any surviving/recreated iframe.
     // This prevents a single watch-status winner from consuming the wake and
-    // disappearing before claim/sendMessage while sibling App cards see nothing.
+    // disappearing before the native Host send while sibling App cards see nothing.
     if (state.task.continuationWakePending) {
       if (!residentTask(state.task)) return;
       const reason = /stage completed/i.test(String(state.task.waitingReason || ""))

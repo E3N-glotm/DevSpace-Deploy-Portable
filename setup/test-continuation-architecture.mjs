@@ -205,7 +205,7 @@ try {
   {
   // Execute the actual final-send callback: manual takeover can happen after
   // authorize-delivery, and a transport retry must not trust cached RUNNING.
-  const sendBarrierBody = coordinatorSource.match(/sendFollowUp\(visibleContinuationTrigger\(state\.task\), async \(\) => \{([\s\S]*?)\n        \},\s*\{\s*deliveryToken\s*\}\);/)[1];
+  const sendBarrierBody = coordinatorSource.match(/sendFollowUp\(visibleContinuationTrigger\(state\.task\), async \(\) => \{([\s\S]*?)\n        \}\);/)[1];
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
   const sendBarrier = new AsyncFunction("callTask", "acceptTask", "terminal", "automationSuppressed", "deliveryToken", sendBarrierBody);
   const pendingDelivery = { state: "RUNNING", deliveryToken: "expected", deliveryOwner: "synthetic-pending", continuationDeliveryAwaitingAck: true };
@@ -701,7 +701,7 @@ try {
   assert.ok(senderA.deliveryToken);
   let legacyTask = db.prepare("select * from continuation_tasks where id=?").get(first.task.id);
   assert.equal(legacyTask.delivery_token, senderA.deliveryToken,
-    "the delivery token must be mirrored before app.sendMessage so a fast resumed turn can ACK it immediately");
+    "the delivery token must be mirrored before native Host follow-up so a fast resumed turn can ACK it immediately");
   assert.equal(legacyTask.delivery_owner, "synthetic-pending");
   assert.equal(Number(legacyTask.continuation_pending), 5);
 
@@ -763,7 +763,7 @@ try {
   const unknownDelivery = runtime.recordContinuationGenerationDelivery({
     deliveryToken: senderRetry.deliveryToken,
     result: "unknown",
-    method: "app.sendMessage-callback-lost",
+    method: "window.openai.sendFollowUpMessage-callback-lost",
   });
   assert.equal(unknownDelivery.accepted, true);
   assert.equal(unknownDelivery.outcomeUncertain, true,
@@ -802,7 +802,7 @@ try {
   const delivered = runtime.recordContinuationGenerationDelivery({
     deliveryToken: senderDelivered.deliveryToken,
     result: "accepted",
-    method: "app.sendMessage",
+    method: "window.openai.sendFollowUpMessage",
   });
   assert.equal(delivered.accepted, true);
   assert.equal(delivered.generation.state, "DELIVERED",
@@ -1251,7 +1251,7 @@ try {
     ...senderCapability,
   });
   assert.equal(staleAuthorization.accepted, false,
-    "manual user work must revoke a claimed synthetic sender before app.sendMessage can enqueue a stale continuation");
+    "manual user work must revoke a claimed synthetic sender before native Host follow-up can enqueue a stale continuation");
   assert.equal(staleAuthorization.reason, "synthetic-ownership-superseded");
   const supersededRace = db.prepare("select state,failure_reason from continuation_generations where delivery_token=?").get(raceSender.deliveryToken);
   assert.equal(supersededRace.state, "SUPERSEDED");
@@ -1347,7 +1347,7 @@ try {
   assert.equal(terminalGeneration.due_at, null);
   assert.equal(runtime.continuationArchitectureSnapshot(terminalRaceScope).card.active_workset_id, null);
   const staleAcceptedAfterTerminal = runtime.recordContinuationGenerationDelivery({
-    deliveryToken: terminalRaceClaim.deliveryToken, result: "accepted", method: "app.sendMessage",
+    deliveryToken: terminalRaceClaim.deliveryToken, result: "accepted", method: "window.openai.sendFollowUpMessage",
     note: "Host result arrived after terminal transition",
   });
   assert.equal(staleAcceptedAfterTerminal.accepted, false);

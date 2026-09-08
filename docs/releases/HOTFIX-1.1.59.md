@@ -8,7 +8,7 @@
 
 第二，Full Access 本来不应该依赖任何 Writable Root，但 SSH enrollment 的旧 fallback 在 roots 为空时仍把 install root 硬编码为 `/home/ubuntu/workspace`。如果服务器没有该目录，即使 Full Access 已启用，安装链路仍会因为这个无关路径不存在而失败。
 
-第三，自动续轮此前把“模型一段时间没有 DevSpace 活动”与“Host 已经结束当前 assistant turn”混在一起，短 owner lease、普通静默和 `app.sendMessage` 回调不确定状态都有机会被错误解释成可重发条件。这既可能制造重复续轮，也可能在真实 send 已经发生但 ACK 丢失时重复发送。
+第三，自动续轮此前把“模型一段时间没有 DevSpace 活动”与“Host 已经结束当前 assistant turn”混在一起，短 owner lease、普通静默和 Host follow-up 回调不确定状态都有机会被错误解释成可重发条件。这既可能制造重复续轮，也可能在真实 send 已经发生但 ACK 丢失时重复发送。
 
 第四，server resident sweep 可以在 Workspace App sender 已经绑定之后才创建新的 `READY` generation；旧 coordinator 只在 bind/onConnected 当下消费 READY，导致这种“后出现 READY”可以长期无人 claim。真实现场曾出现 READY 约 18 分钟，直到用户手动发送消息才被 supersede。
 
@@ -54,13 +54,14 @@
 - 历史 Host cutoff 现在只保留为遥测/诊断。live 验证已经证明后续 assistant turn 可以合法超过先前观测到的 cutoff，因此它不能在缺少当前 turn 结束信号时授权 READY。
 - completion-driven 自动恢复只接受两类权威结束信号：**当前 turn 的已验证显式 Host timeout**，或**当前模型在充分工作后签署的 `turn-complete`**。`turn-complete` 后若还有任何 substantive DevSpace 调用，签名立即撤销回 `GENERATING`；人工输入同样通过新 `turnLeaseId` 原子废弃旧 synthetic 权限。
 - `CLAIMED` 是发送前状态，可以在 claim lease 到期后安全回收；`DELIVERING` 是结果不确定区，timer 永远不能据此重发。
-- `app.sendMessage` 返回 `unknown` 时保留原 generation 的 `DELIVERING`，不转换成 READY；只有明确 `failed/rejected` 才允许下一次 generation。
+- 原生 `window.openai.sendFollowUpMessage` 返回 `unknown` 时保留原 generation 的 `DELIVERING`，不转换成 READY；只有明确 `failed/rejected` 才允许下一次 generation。
+- 自动续轮首发和同 generation/token 的 ACK 重试都固定使用原生 `window.openai.sendFollowUpMessage`；标准 Apps `ui/message` 不作为首发或回退，因为 Host 接受并显示用户气泡不等价于启动完整模型推理与工具链。
 - synthetic work owner 的 45 秒短 lease 只用于检测 stale ownership，不能凭自身到期制造第二个 ChatGPT turn；后续 synthetic→synthetic 同样必须有显式 Host timeout / teardown 或 confirmed-cutoff 证据。
 
 ### 6. READY-after-bind 不再饿死
 
 - `continuation_task status` 已能暴露当前 durable `readyGeneration`，coordinator supervisor 现在会在常规权威状态刷新时消费它。
-- 因此 READY 无论是在 sender bind 前还是 bind 后由 resident sweep 生成，都会进入同一个原子 `claim -> authorize-delivery -> app.sendMessage -> delivery-result` 路径。
+- 因此 READY 无论是在 sender bind 前还是 bind 后由 resident sweep 生成，都会进入同一个原子 `claim -> authorize-delivery -> window.openai.sendFollowUpMessage -> delivery-result` 路径。
 - 多个可用 Workspace App relay 即使同时看到 READY，也依靠 server CAS 只有一个 sender 能 claim，避免重复消息。
 
 ### 7. 第一次 synthetic turn 必须直接干活

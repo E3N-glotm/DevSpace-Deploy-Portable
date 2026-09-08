@@ -23,7 +23,7 @@ const HOST_CUTOFF_REGIME_DOWN_RATIO = 0.80;
 const HOST_CUTOFF_REGIME_UP_RATIO = 1.20;
 const HOST_CUTOFF_SAMPLE_WINDOW = 8;
 // Transport/startup recovery is deliberately separate from the model's work
-// budget.  app.sendMessage may be accepted even though the resumed assistant
+// budget. A native Host follow-up may be accepted even though the resumed assistant
 // turn never reaches its mandatory first continuation_task status handshake.
 // Give a legitimately-started turn a full minute to reach that handshake so a
 // slow reasoning/tool bootstrap is not pre-empted, but do not strand a dead
@@ -1253,7 +1253,7 @@ export class StructuredRuntimeState {
                         : undefined;
                     const syntheticDue = liveSynthetic.due_at ? Date.parse(liveSynthetic.due_at) : NaN;
                     // CLAIMED is pre-send: if its short claim lease expires,
-                    // no app.sendMessage authorization was ever granted and it
+                    // no native Host-send authorization was ever granted and it
                     // is safe to create a replacement generation. DELIVERING is
                     // ambiguous: Host delivery may already be in flight or may
                     // even have succeeded while the result callback was lost.
@@ -1509,7 +1509,7 @@ export class StructuredRuntimeState {
             let deliveryToken;
             let retryExisting = false;
             if (!generation) {
-                // app.sendMessage acceptance is only transport acceptance. A
+                // Native follow-up acceptance is only transport acceptance. A
                 // resumed assistant turn must still perform its first
                 // continuation_task status handshake before substantive work.
                 // If that startup ACK never arrives, retry the same logical
@@ -1769,6 +1769,17 @@ export class StructuredRuntimeState {
             `).run(deliveryDueAt, nowIso, generation.id, deliveryToken);
             if (Number(changed.changes || 0) !== 1)
                 return { accepted: false, reason: "delivery-authorization-race-lost" };
+            const eventSequence = this.appendEvent({
+                kind: "continuation-generation-delivery-authorized",
+                subject: conversationScopeId,
+                workspaceId: task.workspace_id ?? undefined,
+                payload: {
+                    worksetId: workset.id,
+                    generation: Number(generation.generation || 0),
+                    retryCount: Number(task.delivery_ack_retry_count || 0),
+                    senderInstanceId,
+                },
+            });
             return {
                 accepted: true,
                 conversationScopeId,
@@ -1778,6 +1789,7 @@ export class StructuredRuntimeState {
                 generation: generation.generation,
                 deliveryToken,
                 deliveryDueAt,
+                eventSequence,
             };
         })();
     }
@@ -1833,6 +1845,20 @@ export class StructuredRuntimeState {
                         retryAfterAt, nowIso, retryCount, retryAfterAt, nowIso,
                         generation.legacy_task_id, deliveryToken);
                 }
+                this.appendEvent({
+                    kind: "continuation-generation-delivery",
+                    subject: generation.conversation_scope_id,
+                    workspaceId: legacyTask?.workspace_id,
+                    payload: {
+                        worksetId: generation.workset_id,
+                        generation: Number(generation.generation || 0),
+                        result,
+                        method: input.method ?? undefined,
+                        note: input.note ?? undefined,
+                        retryCount,
+                        retryAfterAt,
+                    },
+                });
                 return {
                     accepted: true,
                     deliveryAckRetry: true,
@@ -1843,7 +1869,7 @@ export class StructuredRuntimeState {
             }
             if (result === "unknown") {
                 // DELIVERING is an outcome-uncertain zone. The Host may have
-                // accepted app.sendMessage even when its result callback was
+                // accepted a native follow-up even when its result callback was
                 // lost. Retrying from an unknown result can visibly duplicate
                 // the continuation, so preserve the same generation and wait
                 // for manual takeover or an explicit accepted/rejected/failed
@@ -3047,7 +3073,7 @@ export class StructuredRuntimeState {
                     ...continuationDirective(refreshedTask),
                 };
             }
-            // A wake-driven app.sendMessage is only transport-level acceptance.
+            // A wake-driven native follow-up is only transport-level acceptance.
             // The resumed model must prove that the new turn can actually reach
             // DevSpace before the durable wake is retired. continuationText asks
             // the resumed turn to make this exact status call first. If the host
@@ -3136,6 +3162,27 @@ export class StructuredRuntimeState {
                         retryRequired: claimed.reason === "expected-next-turn-lease-expired",
                         ...continuationDirective(task),
                     };
+                }
+                const acknowledgedGeneration = row.delivery_token
+                    ? this.database.sqlite.prepare(`
+                        select g.generation,g.workset_id,w.conversation_scope_id
+                        from continuation_generations g
+                        join continuation_worksets w on w.id=g.workset_id
+                        where g.delivery_token=?
+                      `).get(row.delivery_token)
+                    : undefined;
+                if (acknowledgedGeneration) {
+                    this.appendEvent({
+                        kind: "continuation-generation-turn-acked",
+                        subject: acknowledgedGeneration.conversation_scope_id,
+                        workspaceId: row.workspace_id,
+                        payload: {
+                            worksetId: acknowledgedGeneration.workset_id,
+                            generation: Number(acknowledgedGeneration.generation || 0),
+                            deliveryAckStartedAt: row.delivery_ack_started_at ?? undefined,
+                            retryCount: Number(row.delivery_ack_retry_count || 0),
+                        },
+                    });
                 }
                 this.syncContinuationArchitectureForLegacyTask(row.id);
                 const refreshedRow = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id);

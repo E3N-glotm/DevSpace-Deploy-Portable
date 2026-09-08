@@ -814,7 +814,7 @@ function migrateContinuationStallDetectorHostRegimes(sqlite) {
     `);
 }
 function migrateContinuationDeliveryReadinessBackoff(sqlite) {
-    // app.sendMessage acceptance only proves that the Host accepted a synthetic
+    // Native follow-up acceptance only proves that the Host accepted a synthetic
     // continuation message. It does not prove that the newly-created model turn
     // has already rehydrated its MCP connector. Persist the post-delivery ACK
     // retry schedule so a surviving Workspace App can retry the same logical

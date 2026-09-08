@@ -438,7 +438,7 @@ try {
     const delivered = runtime.recordContinuationGenerationDelivery({
       deliveryToken: claimed.deliveryToken,
       result: "accepted",
-      method: "test-app.sendMessage",
+      method: "test-window.openai.sendFollowUpMessage",
     });
     assert.equal(delivered.accepted, true, "synthetic delivery must become WORK_REQUIRED");
 

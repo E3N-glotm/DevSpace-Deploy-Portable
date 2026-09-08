@@ -3682,7 +3682,7 @@ export function createServer(config = loadConfig(), options = {}) {
     // assistant final, so its JavaScript polling timer is not a reliable READY
     // consumer. This channel is wake-only: it never carries task ids/tokens or
     // grants delivery authority. The App must still re-read durable state and
-    // win the existing continuation_sender CAS before app.sendMessage.
+    // win the existing continuation_sender CAS before the native Host follow-up.
     const continuationWakeClients = new Set();
     const writeContinuationWake = (res, reason = "ready") => {
         if (!res || res.writableEnded || res.destroyed)
@@ -3819,7 +3819,7 @@ export function createServer(config = loadConfig(), options = {}) {
     // arriving and the historical Workspace App iframe is frozen/unloaded.
     // This resident sweep only advances the durable execution FSM to READY; it
     // intentionally does not pretend the MCP server can call the Host-only
-    // app.sendMessage bridge. An authoritative sender App claims READY through
+    // native Host follow-up bridge. An authoritative sender App claims READY through
     // generation CAS and performs the actual Host user-role delivery.
     const continuationSupervisor = createContinuationSupervisorScheduler({
         runtimeState,

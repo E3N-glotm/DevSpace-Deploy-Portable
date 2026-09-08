@@ -175,7 +175,6 @@ for (const pattern of [
   /DEFAULT_SUPERVISOR_TICK_MS/,
   /DEFAULT_HEARTBEAT_INTERVAL_MS/,
   /app\.callServerTool/,
-  /app\.sendMessage/,
   /app\.updateModelContext/,
   /addEventListener\("toolcancelled"/,
   /sendFollowUpMessage/,
@@ -304,12 +303,12 @@ assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryTo
   "the coordinator must keep generation capabilities inside App/runtime transport instead of exposing them to the model");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
-assert.match(coordinator, /NATIVE_FOLLOW_UP_TOKEN_HISTORY_LIMIT = 128/,
-  "native ChatGPT follow-up transport history must stay bounded in long-lived milestone cards");
-assert.match(coordinator, /nativeFollowUpAttemptedTokens[\s\S]{0,1200}rememberNativeFollowUpToken[\s\S]{0,900}size > NATIVE_FOLLOW_UP_TOKEN_HISTORY_LIMIT/,
-  "each exact delivery token may try the native ChatGPT follow-up path once without creating an unbounded token registry");
-assert.match(coordinator, /tryNativeFirst[\s\S]{0,1800}sendFollowUpMessage[\s\S]{0,3000}app\.sendMessage/,
-  "ChatGPT-native follow-up should be attempted before standard ui/message when the Host exposes it, while official app.sendMessage remains the retry/fallback path");
+assert.doesNotMatch(coordinator, /(?:await\s+)?app\.sendMessage\s*\(/,
+  "automatic continuation must not use ui-message because Host acceptance does not prove a full reasoning turn started");
+assert.match(coordinator, /window\.openai\?\.sendFollowUpMessage[\s\S]{0,600}window\.openai\.sendFollowUpMessage\.bind\(window\.openai\)/,
+  "automatic delivery must bind the native ChatGPT follow-up path");
+assert.match(coordinator, /await nativeFollowUp\(\{ prompt: text \}\)[\s\S]{0,900}method: "window\.openai\.sendFollowUpMessage"/,
+  "both the first delivery and ACK recovery must report the native ChatGPT follow-up transport");
 assert.match(coordinator, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 4/,
   "the Workspace App sender must carry an explicit compatibility epoch so stale in-memory iframes can be fenced after an upgrade");
 assert.match(coordinator, /action === "status" \? \{ readOnlyStatus: true \} : \{\}/,
@@ -330,10 +329,16 @@ assert.match(server, /if \(input\.action === "watch-status"\)[\s\S]{0,700}readOn
   "watch-status must inspect task state without using coordinator liveness traffic as a synthetic model ACK");
 assert.match(runtimeStateSource, /reason: "read-only-status"[\s\S]{0,1000}syntheticTokenPending/,
   "runtime read-only status must preserve pending synthetic ownership while exposing enough state for the coordinator supervisor");
-assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\)[\s\S]{0,2400}\{ deliveryToken \}\)/,
-  "transport selection must be keyed to the durable synthetic delivery token so ACK retransmission cannot mint a second logical continuation");
+assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\)[\s\S]{0,2400}\}\)/,
+  "native transport must remain behind the exact durable synthetic generation ownership barrier");
 assert.match(runtimeStateSource, /state='TURN_ACKED',turn_acked_at=coalesce\(turn_acked_at,\?\)/,
   "the first synthetic status ACK must persist the exact generation ACK timestamp for later transport and duration diagnostics");
+assert.match(runtimeStateSource, /kind: "continuation-generation-delivery-authorized"[\s\S]{0,900}retryCount[\s\S]{0,600}eventSequence/,
+  "generation authorization must journal the timestamp immediately before native Host invocation so scheduling and Host startup latency remain distinguishable");
+assert.match(runtimeStateSource, /kind: "continuation-generation-delivery"[\s\S]{0,900}method/,
+  "native delivery completion must remain separately journaled for live timing diagnosis");
+assert.match(runtimeStateSource, /kind: "continuation-generation-turn-acked"[\s\S]{0,900}deliveryAckStartedAt/,
+  "genuine resumed-model ACK must remain separately journaled from transport completion");
 assert.ok(visibleTriggerSource,
   "the continuation coordinator must expose one visibleContinuationTrigger(task) function for the actual Host user-role turn");
 for (const [pattern, message] of [
@@ -474,7 +479,7 @@ assert.match(server, /app\.get\("\/mcp-app-assets\/continuation-wake"[\s\S]{0,50
 assert.doesNotMatch(server, /writeContinuationWake\([\s\S]{0,180}taskId|writeContinuationWake\([\s\S]{0,180}deliveryToken|writeContinuationWake\([\s\S]{0,180}anchorMountToken/,
   "wake events must not carry task or delivery authority");
 assert.match(coordinator, /new EventSource\(CONTINUATION_WAKE_URL\)[\s\S]{0,500}addEventListener\("wake"[\s\S]{0,350}supervisorTick\(\{ forceAuthoritative: true \}\)/,
-  "a wake event must force authoritative status/CAS handling rather than directly manufacturing app.sendMessage");
+  "a wake event must force authoritative status/CAS handling rather than directly manufacturing a Host follow-up");
 assert.match(coordinator, /@DevSpace MCP 继续执行未完成任务。/,
   "the synthetic user-role request must preserve the explicit connector activation cue that works for manual continuation");
 assert.match(runtimeStateSource, /manual-user-turn-takeover/,
@@ -1061,6 +1066,13 @@ class FakeApp {
     this.messages.push(value);
     return {};
   }
+  async sendFollowUpMessage(value) {
+    const normalized = value?.prompt
+      ? { role: "user", content: [{ type: "text", text: value.prompt }] }
+      : value;
+    this.messages.push(normalized);
+    return {};
+  }
 }
 
 const fakeApp = new FakeApp();
@@ -1117,6 +1129,42 @@ assert.ok(fakeApp.callInputs.some((entry) => entry.name === "continuation_sender
 assert.ok(fakeApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "authorize-delivery"));
 assert.ok(fakeApp.calls.includes("delivery-result"));
 fakeController.dispose();
+
+// Both the first delivery and a same-generation ACK retry must use the native
+// ChatGPT follow-up path. ui/message acceptance is not proof that a full model
+// reasoning/tool turn started, so it must never become an automatic fallback.
+const transportOrder = [];
+class NativeOnlyTransportApp extends FakeApp {
+  async sendMessage() {
+    throw new Error("app.sendMessage must not be called for automatic continuation");
+  }
+  async sendFollowUpMessage(value) {
+    transportOrder.push("native");
+    return super.sendFollowUpMessage(value);
+  }
+}
+const transportApp = new NativeOnlyTransportApp();
+const transportController = installContinuationCoordinator(transportApp, { timers: false, instanceId: "ui_transport_order" });
+transportApp.emit("toolinput", { arguments: { workspaceId: "ws_transport_order" } });
+await transportController.onConnected();
+assert.equal(await transportController.attemptContinuation("first delivery", { force: true }), true);
+assert.deepEqual(transportOrder, ["native"],
+  "the first delivery must use the native ChatGPT follow-up transport");
+transportApp.task = {
+  ...transportApp.task,
+  deliveryAckRetryCount: 1,
+  continuationDeliveryAwaitingAck: true,
+  deliveryAckRetryAfterAt: new Date(Date.now() - 1_000).toISOString(),
+};
+transportController.state.task = transportApp.task;
+assert.equal(await transportController.attemptContinuation("delivery ACK retry", { force: true }), true);
+assert.deepEqual(transportOrder, ["native", "native"],
+  "the same-generation ACK retry must remain on the native ChatGPT follow-up transport");
+const deliveryMethods = transportApp.callInputs
+  .filter((entry) => entry.name === "continuation_sender" && entry.action === "delivery-result")
+  .map((entry) => entry.method);
+assert.deepEqual(deliveryMethods, ["window.openai.sendFollowUpMessage", "window.openai.sendFollowUpMessage"]);
+transportController.dispose();
 
 // A server-resident sweep can create READY after the sender has already bound.
 // The old coordinator only consumed READY in onConnected/onToolResult, leaving
@@ -4139,7 +4187,7 @@ try {
     continuationCooldown: true,
     continuationBudget: true,
     integratedWorkspaceApp: true,
-    officialAppSendMessagePath: true,
+    nativeChatGptFollowUpPath: true,
     officialAppToolCallPath: true,
     backgroundSupervisorTimer: true,
     hostBudgetTelemetryOnly: true,
@@ -4174,7 +4222,7 @@ try {
     teardownRecoveryPath: true,
     continuationDeliveryDiagnostics: true,
     explicitWallClockExtension: true,
-    followUpCompatibilityFallback: true,
+    nativeOnlyFollowUpRecovery: true,
     persistentProcessWakeTakeover: true,
     staleSupervisorWaitGuard: true,
     coordinatorStatusLivenessTouch: true,
