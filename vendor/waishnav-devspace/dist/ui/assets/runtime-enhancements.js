@@ -21,6 +21,8 @@ const state = {
   mode: undefined,
   cancelled: undefined,
   continuationTask: undefined,
+  continuationSuperseded: false,
+  continuationSupersededByGeneration: undefined,
 };
 
 const pendingServerCalls = new Map();
@@ -287,20 +289,22 @@ function continuationStateTone(task = {}) {
 function buildContinuationCard() {
   const structuredTask = state.result?.structuredContent?.task;
   const task = state.continuationTask ?? structuredTask ?? {};
-  const tone = continuationStateTone(task);
+  const superseded = state.continuationSuperseded === true;
+  const tone = superseded ? "waiting" : continuationStateTone(task);
   const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
   const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
   const shell = element("main", { className: "shell" });
   const panel = element("details", { className: `tool-card shell codex-runtime-card compact-log continuation-card ${tone}` });
   panel.dataset.devspaceContinuation = "true";
+  if (superseded) panel.dataset.devspaceContinuationSuperseded = "true";
   preserveDisclosure(panel, `continuation:${task.id ?? state.input?.taskId ?? "pending"}:${task.anchorMountGeneration ?? state.result?.structuredContent?.anchorMountGeneration ?? "pending"}`, tone !== "success");
   const header = element("summary", { className: "compact-log-summary" });
   const lockLabel = task.ownerLocked ? (ZH ? " · 已锁定" : " · Locked") : "";
   header.append(
-    element("span", { className: `compact-log-icon ${tone}`, text: tone === "success" ? "✓" : tone === "failed" ? "×" : "↻" }),
-    element("span", { className: "compact-log-verb", text: ZH ? "自动续轮任务" : "Continuation task" }),
+    element("span", { className: `compact-log-icon ${tone}`, text: superseded ? "→" : tone === "success" ? "✓" : tone === "failed" ? "×" : "↻" }),
+    element("span", { className: "compact-log-verb", text: superseded ? (ZH ? "历史里程碑" : "Previous milestone") : (ZH ? "自动续轮任务" : "Continuation task") }),
     element("code", { className: "compact-log-command", text: task.objective || state.input?.objective || (ZH ? "等待任务状态" : "Waiting for task state") }),
-    element("span", { className: `runtime-status ${tone}`, text: `${task.state || "STARTING"}${lockLabel}` }),
+    element("span", { className: `runtime-status ${tone}`, text: superseded ? (ZH ? "已由后续消息接替" : "Superseded") : `${task.state || "STARTING"}${lockLabel}` }),
   );
   panel.append(header);
 
@@ -343,7 +347,9 @@ function buildContinuationCard() {
     milestoneSection.append(list);
     body.append(milestoneSection);
   }
-  const note = task.continuationDeliveryAwaitingAck
+  const note = superseded
+    ? (ZH ? "此卡片保留本轮最后状态；后续消息已使用新的里程碑卡继续任务。" : "This card preserves the final state of its round; a later message continues the task in a new milestone card.")
+    : task.continuationDeliveryAwaitingAck
     ? (ZH ? "续轮消息已被宿主接受，正在等待新 assistant 轮重新连接 DevSpace 并 ACK。" : "Follow-up accepted; waiting for the resumed assistant turn to ACK DevSpace connectivity.")
     : task.continuationWakePending
       ? (ZH ? "已产生持久续轮唤醒，Workspace App 将自动 claim 并发送续轮消息。" : "A durable continuation wake is pending and will be claimed automatically.")
@@ -655,7 +661,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-      text: "DevSpace Portable 1.1.59 dev32 · Protocol 1.5",
+      text: "DevSpace Portable 1.1.59 dev33 · Protocol 1.5",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);
@@ -836,7 +842,21 @@ window.addEventListener("message", (event) => {
 
 window.addEventListener("devspace:continuation-task", (event) => {
   if (!event?.detail || typeof event.detail !== "object") return;
+  // An immutable historical card must stay frozen at its own last snapshot.
+  // The coordinator still consumes newer authoritative state for its private
+  // sender relay, but that state must never overwrite this visible card.
+  if (state.continuationSuperseded) return;
   state.continuationTask = event.detail;
+  if (CONTINUATION_TOOLS.has(state.tool)) {
+    state.mode = "continuation";
+    scheduleRender();
+  }
+});
+
+window.addEventListener("devspace:continuation-superseded", (event) => {
+  state.continuationSuperseded = true;
+  const generation = Number(event?.detail?.authoritativeGeneration || 0);
+  state.continuationSupersededByGeneration = Number.isInteger(generation) && generation > 0 ? generation : undefined;
   if (CONTINUATION_TOOLS.has(state.tool)) {
     state.mode = "continuation";
     scheduleRender();

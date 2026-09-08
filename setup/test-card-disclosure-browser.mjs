@@ -57,6 +57,26 @@ try {
   await panel().evaluate(node => { window.savedPanel = node; });
   for (let i = 0; i < 10; i++) await update(task);
   assert.equal(await panel().evaluate(node => node === window.savedPanel), true);
+  // A later manual round supersedes this immutable card's coordinator
+  // authority, but the historical card must remain visible instead of being
+  // replaced by an empty Host shell. It freezes its own last snapshot and
+  // ignores newer-generation task broadcasts.
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("devspace:continuation-superseded", {
+    detail: { surfaceGeneration: 1, authoritativeGeneration: 2 }
+  })));
+  await page.waitForFunction(() => document.querySelector("[data-devspace-continuation-superseded='true']"));
+  const frozenObjective = await panel().locator(".compact-log-command").innerText();
+  const frozenMilestones = await panel().locator(".continuation-milestones").innerText();
+  assert.match(await panel().locator(".runtime-status").innerText(), /Superseded|已由后续消息接替/);
+  assert.ok((await panel().evaluate(node => node.getBoundingClientRect().height)) > 0,
+    "superseded historical card must keep non-zero visible content");
+  await update({ ...task, anchorMountGeneration: 2, objective: "newer round must not overwrite history", requiredMilestones: ["newer"] });
+  assert.equal(await panel().locator(".compact-log-command").innerText(), frozenObjective);
+  assert.equal(await panel().locator(".continuation-milestones").innerText(), frozenMilestones);
+  // Reboot before the remaining disclosure tests so they exercise an active
+  // card rather than the deliberately frozen historical surface.
+  await boot();
+  await notify(task);
   // Exercise the native click/update race before the deferred toggle event.
   await panel().evaluate((node, task) => {
     node.querySelector("summary").click();
@@ -78,7 +98,7 @@ try {
   await page.waitForTimeout(250);
   assert.equal(await panel().evaluate(node => node.open), false);
   assert.deepEqual(errors, []);
-  console.log("PASS browser disclosure: progress, stable height, duplicate DOM identity, click race, rehydrate, generation isolation, terminal default, repeated tool results");
+  console.log("PASS browser disclosure: progress, stable height, duplicate DOM identity, superseded snapshot remains visible and frozen, click race, rehydrate, generation isolation, terminal default, repeated tool results");
 
   // Exercise the shipped SDK, bootstrap and its real size-changed messages in
   // an iframe. The parent is a deterministic test Host, not a live ChatGPT session.

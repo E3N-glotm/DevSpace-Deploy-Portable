@@ -396,7 +396,7 @@ assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\
   "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
 assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(latest\.task\)/,
   "the irreversible Host send must have a final authoritative terminal-state recheck");
-assert.match(coordinator, /function acceptTask\([\s\S]{0,700}terminal\(state\.task\)[\s\S]{0,300}stopSupervisor\(\)[\s\S]{0,200}stopLifecycleRefresh\(\)/,
+assert.match(coordinator, /function acceptTask\([\s\S]{0,1700}terminal\(state\.task\)[\s\S]{0,300}stopSupervisor\(\)[\s\S]{0,200}stopLifecycleRefresh\(\)/,
   "observing terminal state must synchronously cancel supervisor and lifecycle timers");
 assert.match(runtimeStateSource, /closeTerminalContinuationArtifacts\([\s\S]{0,5200}state='NO_WORK'[\s\S]{0,3400}delivery_token=null[\s\S]{0,2200}stall_armed_at=null/,
   "terminal task transitions must seal synthetic generations and clear pending delivery/retry/stall state");
@@ -648,11 +648,15 @@ assert.match(coordinator, /anchorMountGeneration:\s*Number\.isInteger\(resourceG
   "the anchor surface must recover its immutable resource generation and track whether a newer recovery card superseded it");
 assert.match(coordinator, /authoritativeGeneration[\s\S]{0,500}surfaceGeneration[\s\S]{0,500}markAnchorSuperseded\(\)/,
   "a lazily mounted old ghost generation must retire its visible-card authority before it can ACK the newer card");
-assert.match(coordinator, /data-devspace-anchor-superseded[\s\S]{0,500}replaceChildren\(\)/,
-  "a superseded immutable historical card must collapse its own iframe surface instead of remaining a second active milestone UI");
+assert.match(coordinator, /data-devspace-anchor-superseded[\s\S]{0,700}devspace:continuation-superseded/,
+  "a superseded immutable historical card must freeze its own visible snapshot instead of leaving a blank Host widget shell");
+assert.doesNotMatch(coordinator, /function markAnchorSuperseded\([\s\S]{0,1400}document\.body\.replaceChildren\(\)/,
+  "superseding a historical card must never erase the iframe body while the Host keeps its outer card shell");
+assert.match(coordinator, /if \(surfaceGeneration > 0 && authoritativeGeneration > surfaceGeneration\) \{[\s\S]{0,900}markAnchorSuperseded\(authoritativeGeneration\);[\s\S]{0,120}\} else \{[\s\S]{0,120}publishTaskForCard/,
+  "an old immutable card must retire before a newer generation can be published into its visible renderer");
 assert.match(coordinator, /headlessSenderRelay:\s*false/,
   "the coordinator state must explicitly track headless sender-relay demotion");
-assert.match(coordinator, /function markAnchorSuperseded\(\)[\s\S]{0,700}state\.headlessSenderRelay = true/,
+assert.match(coordinator, /function markAnchorSuperseded\([^)]*\)[\s\S]{0,700}state\.headlessSenderRelay = true/,
   "a superseded visible card must demote to a headless sender relay instead of killing the only surviving Host transport");
 assert.match(coordinator, /activeSenderCapability\(\)[\s\S]{0,900}anchorMountGeneration[\s\S]{0,700}authoritativeGeneration/,
   "a headless relay must reject its stale sender capability until private bind refreshes it to the authoritative current generation");
@@ -725,7 +729,7 @@ assert.match(runtimeStateSource, /coordinatorInstanceId === row\.anchor_mount_co
   "ordinary liveness maintenance must be bound to the verified milestone coordinator instead of any Workspace App iframe");
 assert.match(runtimeStateSource, /requestingCoordinatorId[\s\S]{0,700}anchor_mount_coordinator_id[\s\S]{0,500}stale-anchor-coordinator/,
   "only the currently verified milestone coordinator may claim an automatic continuation");
-assert.match(coordinator, /authoritativeGeneration > surfaceGeneration\) markAnchorSuperseded\(\)/,
+assert.match(coordinator, /authoritativeGeneration > surfaceGeneration\)[\s\S]{0,900}markAnchorSuperseded\([^)]*\)/,
   "every authoritative coordinator result must immediately retire a historical card whose generation is stale");
 assert.match(coordinator, /preClaim = await callTask\("status"\)[\s\S]{0,800}state\.anchorSuperseded[\s\S]{0,500}bindSenderTransport\(\)[\s\S]{0,500}callSender\("claim"/,
   "the App must re-check authoritative generation and rebind a superseded relay before claiming a continuation");

@@ -421,10 +421,18 @@ export function installContinuationCoordinator(app, options = {}) {
   function acceptTask(task) {
     if (!task || typeof task !== "object") return;
     state.task = task;
-    publishTaskForCard(state.task);
     const authoritativeGeneration = Math.max(0, Number(state.task?.anchorMountGeneration || 0));
     const surfaceGeneration = Math.max(0, Number(state.anchorMountGeneration || 0));
-    if (surfaceGeneration > 0 && authoritativeGeneration > surfaceGeneration) markAnchorSuperseded();
+    if (surfaceGeneration > 0 && authoritativeGeneration > surfaceGeneration) {
+      // Never publish a newer generation into an older immutable card. Doing
+      // so makes the historical card briefly display the next manual round
+      // before it is demoted, which presents as a visible UI twitch. Freeze
+      // this card at its own last snapshot and retire only its coordinator
+      // authority; the App instance may remain alive as a private sender relay.
+      markAnchorSuperseded(authoritativeGeneration);
+    } else {
+      publishTaskForCard(state.task);
+    }
     if (terminal(state.task)) {
       state.lastTerminalRefreshAt = Date.now();
       stopSupervisor();
@@ -767,22 +775,27 @@ export function installContinuationCoordinator(app, options = {}) {
     };
   }
 
-  function markAnchorSuperseded() {
+  function markAnchorSuperseded(authoritativeGeneration) {
     if (state.anchorSuperseded) return;
     state.anchorSuperseded = true;
     state.headlessSenderRelay = true;
     state.anchorMountToken = undefined;
     state.anchorMountAcked = false;
-    // Do not stop the supervisor/lifecycle loop. The old *visible surface* is
-    // retired, but its already-connected App remains a transport relay. The
-    // next authoritative refresh will bind a fresh private sender capability
-    // for the new generation without ever ACKing that new visible card.
+    // Do not stop the supervisor/lifecycle loop. The old *coordinator
+    // authority* is retired, but its already-connected App remains a transport
+    // relay. Keep the immutable historical card visible as a frozen snapshot:
+    // clearing document.body leaves ChatGPT's outer widget shell behind as a
+    // large blank card, and forcing height=0 races the Host's async size cache.
+    // The dedicated event lets the renderer label the frozen snapshot without
+    // accepting the newer generation's task payload.
     if (typeof document !== "undefined") {
       document.documentElement?.setAttribute?.("data-devspace-anchor-superseded", "true");
-      if (document.body) {
-        document.body.replaceChildren();
-        Object.assign(document.body.style, { margin: "0", padding: "0", minHeight: "0", height: "0", overflow: "hidden" });
-      }
+      window.dispatchEvent(new CustomEvent("devspace:continuation-superseded", {
+        detail: {
+          surfaceGeneration: Number(state.anchorMountGeneration || 0),
+          authoritativeGeneration: Number(authoritativeGeneration || state.task?.anchorMountGeneration || 0),
+        },
+      }));
     }
   }
 

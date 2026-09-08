@@ -112,6 +112,13 @@
 - barrier 在 `taskIncomplete=true` 且 `preFinalControlRequired=true` 或 `finalResponseAllowed=false` 时明确禁止用户可见 final：继续本轮实质工作；若本阶段确实应该主动结束，则最后一个 DevSpace 控制调用必须是 `continuation_task action=turn-complete`；只有真实不可用外部依赖才允许 `checkpoint waitingExternal=true`。
 - barrier 只是把已有 ATCC 控制协议提升到普通工具结果的首部和结构化输出，不新增任何静默计时授权。`SUSPECTED_STALL`、lease expiry、heartbeat、historical cutoff、单个工具错误和“已完成一个 milestone”仍然不能自行创建新 Host turn。
 
+### 14. superseded 历史里程碑卡不再变成空白外壳
+
+- 旧实现检测到更高 `anchorMountGeneration` 后，会把旧 iframe 降级为 headless sender relay，同时直接清空 `document.body` 并强制高度为 0。ChatGPT 外层 App 容器不会同步删除，因此用户看到的不是卡片真正消失，而是保留边框和标题的大片空白；Host 异步尺寸缓存还会放大这一现象。
+- coordinator 过去会先把新 generation 的 authoritative task 广播给旧卡，再执行清空，因此旧卡可能短暂显示下一轮内容后突然变白，形成抽搐。
+- dev33 保留 sender 权限退役语义，但将“headless”限定为控制权限，不再等同于删除可见历史：旧卡冻结自己的最后任务快照，显示“已由后续消息接替”，保持用户原有折叠选择与非零稳定高度，并忽略后续 generation 的 UI 广播。
+- 新 generation 仍拥有唯一有效 anchor/coordinator；旧 iframe 只能重新绑定私有 sender relay，不能 ACK 新卡、不能提供 Host 生命周期证据，也不能绕过 generation CAS。该修复未改动 ATCC、native follow-up、ACK 重试、人工 takeover 或动态 Host budget。
+
 ## 回归覆盖
 
 1. `test-remote-agent-ssh-rescue.mjs` 断言显式更新读取 `_fullAccess.Checked` 与 `_roots.Lines`，Full Access 时 roots 归零，并且 existing Agent 仍传入原 `agentId` repair enrollment。
@@ -127,6 +134,7 @@
 11. `test-process-registry-retention.mjs` 验证活动/过渡状态永不清理，终态历史受到 5000 条 + 30 天双重约束。
 12. `test-continuation-guard.mjs` 新增 checkpoint 终态卫生覆盖：具备 durable evidence 且最后 milestone 完成时必须原子 `SUCCEEDED` 并清除 synthetic ownership；缺失 evidence 时必须继续 RUNNING。
 13. `test-continuation-guard.mjs` 进一步锁定普通 DevSpace 工具结果的 `devspace-pre-final-barrier-v1`：短 barrier 必须排在原始工具内容之前、结构化输出必须携带同一 barrier，且 incomplete stage 的合法可见结束必须指向 `turn-complete`，不能退化为普通 checkpoint/静默承诺。
-14. 正式发行仍要求 D 盘 live 同步、真实 ChatGPT Host E2E，以及真实 Remote Agent 的 Scoped / Full Access 更新验收。
+14. `test-card-disclosure-browser.mjs` 在真实浏览器 DOM 中验证 superseded 历史卡保持非零可见高度、冻结原目标和里程碑、不接受新 generation 覆盖，并继续维持折叠选择与 iframe 尺寸稳定；`test-continuation-guard.mjs` 同时禁止恢复 `document.body.replaceChildren()` 清空路径。
+15. 正式发行仍要求 D 盘 live 同步、真实 ChatGPT Host E2E，以及真实 Remote Agent 的 Scoped / Full Access 更新验收。
 
 Protocol 继续为 1.5。
