@@ -178,7 +178,9 @@ try {
   });
   assert.equal(localStopped.status, 0, `${localStopped.stdout}\n${localStopped.stderr}`);
   assert.match(localStopped.stdout, /Local MCP service stopped/);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+  // stop-local itself owns the exit-drain contract. A successful return must
+  // mean the explicitly terminated service PID is already gone; callers must
+  // not need to invent an additional post-stop sleep before restart/start.
   assert.equal(processExists(localServicePid), false,
     `stop-local left orphan MCP service PID ${localServicePid} alive without a PID file`);
   assert.equal(listenerExists(17689), false,

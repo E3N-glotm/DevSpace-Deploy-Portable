@@ -70,8 +70,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.59";
-const PORTABLE_DEV_ITERATION = "dev31";
-const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
+const PORTABLE_DISPLAY_VERSION = PORTABLE_VERSION;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -1971,6 +1970,7 @@ function isLocalMcpServiceProcess(item) {
 
 function stopLocalMcpServiceProcesses(port) {
   const killed = [];
+  const killedPids = new Set();
   const deadline = Date.now() + PORTABLE_STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const snapshot = portableProcessSnapshot();
@@ -1999,12 +1999,25 @@ function stopLocalMcpServiceProcesses(port) {
       // logged-launcher, or the cli.js serve listener.
       runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
       killed.push({ pid: item.pid, name: item.name, executablePath: item.executablePath });
+      killedPids.add(item.pid);
     }
     sleepSync(300);
   }
+
+  // Windows can briefly keep a just-terminated PID observable after its
+  // command line/listener have disappeared. Do not report stop-local success
+  // until every PID that we explicitly terminated has actually left the
+  // process table. Reuse the same overall stop deadline rather than adding a
+  // second fixed grace period: the stop contract stays bounded while avoiding
+  // a false-success race that can otherwise leak into an immediate restart.
+  let remainingKilledPids = [...killedPids].filter((pid) => processExists(pid));
+  while (remainingKilledPids.length && Date.now() < deadline) {
+    sleepSync(Math.min(100, Math.max(1, deadline - Date.now())));
+    remainingKilledPids = remainingKilledPids.filter((pid) => processExists(pid));
+  }
   const remainingProcesses = portableProcessSnapshot().filter(isLocalMcpServiceProcess);
   const remainingListeners = listenerPids(port);
-  return { killed, remainingProcesses, remainingListeners };
+  return { killed, remainingProcesses, remainingListeners, remainingKilledPids };
 }
 
 function powershellLiteral(value) {
@@ -2377,10 +2390,11 @@ function stopLocalServiceOnly(options = {}) {
   stopRecordedProcess(MCP_PID_FILE, "node.exe", port);
   const serviceStop = stopLocalMcpServiceProcesses(port);
   fs.rmSync(MCP_PID_FILE, { force: true });
-  if (serviceStop.remainingProcesses.length || serviceStop.remainingListeners.length) {
+  if (serviceStop.remainingProcesses.length || serviceStop.remainingListeners.length || serviceStop.remainingKilledPids.length) {
     const details = [
       ...serviceStop.remainingProcesses.map((item) => `${item.pid} ${item.name} ${item.commandLine}`),
       ...serviceStop.remainingListeners.map((pid) => `${pid} still listens on 127.0.0.1:${port}`),
+      ...serviceStop.remainingKilledPids.map((pid) => `${pid} was terminated by stop-local but remains observable in the process table`),
     ];
     throw new Error(`Local MCP stop did not fully release 127.0.0.1:${port}:\n${details.join("\n")}`);
   }
@@ -2487,9 +2501,10 @@ async function startLocalService(port) {
     endOwnedTask(TASK_MCP);
     stopRecordedProcess(MCP_PID_FILE, "node.exe", port);
     const beforeStart = stopLocalMcpServiceProcesses(port);
-    if (beforeStart.remainingProcesses.length || beforeStart.remainingListeners.length) {
+    if (beforeStart.remainingProcesses.length || beforeStart.remainingListeners.length || beforeStart.remainingKilledPids.length) {
       const listeners = beforeStart.remainingListeners.join(", ") || "none";
-      throw new Error(`DevSpace local service cannot start because 127.0.0.1:${port} is still occupied after service cleanup (listener PID(s): ${listeners}).`);
+      const exiting = beforeStart.remainingKilledPids.join(", ") || "none";
+      throw new Error(`DevSpace local service cannot start because cleanup is incomplete after ${PORTABLE_STOP_TIMEOUT_MS / 1000} seconds (listener PID(s): ${listeners}; terminated-but-still-observable PID(s): ${exiting}).`);
     }
     taskCommand("run", TASK_MCP);
     const result = await waitForCondition(LOCAL_SERVICE_START_TIMEOUT_MS, async () => ({

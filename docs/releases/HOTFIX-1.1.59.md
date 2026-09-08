@@ -14,7 +14,9 @@
 
 第五，真实 Host 已观察到第一条 synthetic `ui/message` 被模型误判为“只是系统续接说明”，首个 resumed turn 只复述恢复信息、不做实质工具操作，直到第二次续轮才开始工作。synthetic visible/hidden contract 现已明确首轮就是本轮实际用户角色工作请求，并要求 status/discovery 后在同一 turn 继续实质 DevSpace 操作。
 
-第六，进一步 live 验证证明：真实 ChatGPT 网页里的“模型正在长时间纯推理”与“assistant turn 已经结束”在 DevSpace 侧都可能表现为一段没有模型 DevSpace 请求的静默，因此任何固定的 server-quiet 阈值都存在误抢占风险。最终 1.1.59 不再把纯静默升级为 continuation authorization：25 秒 Turn Lease 过期只进入 `SUSPECTED_STALL`，只有显式 Host timeout / teardown 或已经确认的 Host cutoff + grace + model quiet 才能生成下一代。iframe heartbeat 同样只证明卡片存活，不证明 turn 已结束。
+第六，进一步 live 验证证明：真实 ChatGPT 网页里的“模型正在长时间纯推理”与“assistant turn 已经结束”在 DevSpace 侧都可能表现为一段没有模型 DevSpace 请求的静默，因此任何固定的 server-quiet 阈值都存在误抢占风险。最终 1.1.59 不再把纯静默、Turn Lease 过期、`SUSPECTED_STALL` 或 historical cutoff 升级为 continuation authorization。普通模型主动结束一个仍有未完成 milestone 的阶段时，必须由模型在本轮充分实质工作后显式签署 `continuation_task action=turn-complete`；它绑定当前 `turnLeaseId`，后续新实质工作或人工 takeover 都会撤销旧签名。显式、已验证的当前-turn Host timeout 则是另一条独立合法恢复路径。iframe heartbeat 只证明卡片存活，不证明 turn 已结束。
+
+第七，最终全量回归暴露了一个与自动续轮发布可靠性相关的 Windows stop/restart 竞态：服务命令行与监听端口已经消失后，被 `taskkill /F` 的 PID 仍可能在极短窗口内继续出现在进程表。旧 `stop-local` 会在此时提前报告成功，使紧接着的 `restart-local` 或 strict-stop 验收看到“成功返回但旧 PID 尚在”。1.1.59 现在复用既有总 stop deadline，对 manager 自己明确终止过的 PID 做退出 drain；不增加第二套固定 grace，不使用 `/T`，也不扩大到无关后代进程。
 
 ## 关键修复
 
@@ -47,10 +49,10 @@
 ### 5. 自动续轮状态机 fail-closed
 
 - 普通静默、Turn Lease 到期的第一阶段只允许进入 `SUSPECTED_STALL`，不会在 25 秒阈值处直接生成新的 Host turn。
-- 明确 Host timeout / teardown 证据，以及用户已确认的真实 Host cutoff + grace + model quiet，继续作为更强的恢复证据。
+- 明确、已验证的当前-turn Host timeout 继续作为真正 Host 截断的恢复证据；普通模型主动结束未完成阶段则使用当前-turn 的 model-signed `turn-complete` ATCC 路径。
 - **纯 request silence 永远不再作为 continuation authorization。** 25 秒 lease 过期后只记录 `SUSPECTED_STALL`；即使随后持续数分钟没有 DevSpace 请求，也不得据此创建 READY generation。这样模型在长推理、上下文压缩或等待非 DevSpace 工作期间不会被 watchdog 抢占。
 - 历史 Host cutoff 现在只保留为遥测/诊断。live 验证已经证明后续 assistant turn 可以合法超过先前观测到的 cutoff，因此它不能在缺少当前 turn 结束信号时授权 READY。
-- 自动恢复只接受**当前 turn 的显式 Host timeout / teardown 或经过验证的 lifecycle 终止证据**；没有这类证据时宁可保持 `SUSPECTED_STALL`，也不抢占仍在工作的模型。
+- completion-driven 自动恢复只接受两类权威结束信号：**当前 turn 的已验证显式 Host timeout**，或**当前模型在充分工作后签署的 `turn-complete`**。`turn-complete` 后若还有任何 substantive DevSpace 调用，签名立即撤销回 `GENERATING`；人工输入同样通过新 `turnLeaseId` 原子废弃旧 synthetic 权限。
 - `CLAIMED` 是发送前状态，可以在 claim lease 到期后安全回收；`DELIVERING` 是结果不确定区，timer 永远不能据此重发。
 - `app.sendMessage` 返回 `unknown` 时保留原 generation 的 `DELIVERING`，不转换成 READY；只有明确 `failed/rejected` 才允许下一次 generation。
 - synthetic work owner 的 45 秒短 lease 只用于检测 stale ownership，不能凭自身到期制造第二个 ChatGPT turn；后续 synthetic→synthetic 同样必须有显式 Host timeout / teardown 或 confirmed-cutoff 证据。
@@ -102,6 +104,13 @@
 - 原子封口后同时执行 terminal continuation cleanup，清除 synthetic delivery owner/token 等残余控制面状态；因此 late duplicate delivery 会被更强的 `task-terminal-no-work` 门直接拒绝。
 - 没有 evidence、卡片仍待 ACK、仍有 owner lock 或 milestone 未完成时，checkpoint 保持旧的 fail-closed RUNNING 行为，不会通过“自动成功”绕过原有门禁。
 
+### 13. 正式版 pre-final barrier 防止 incomplete 裸 final
+
+- 现场再次复现了一条与 sender 无关的漏续轮：用户已经看到 assistant 回复结束，但数据库仍是 `RUNNING / GENERATING`，没有 `COMPLETION_REQUESTED`，也没有 READY generation。直接原因不是 delivery 延迟，而是模型在最后一个普通 DevSpace 工具结果之后直接输出了可见 final，没有执行合法阶段边界 `turn-complete`。
+- 仅把 `preFinalControlRequired / finalResponseAllowed` 埋在长 Task Contract 文本里仍可能被模型在“结果已经拿到、准备回答”时忽略。现在每个普通 DevSpace 工具结果都会先插入一个短的 `DEVSPACE PRE-FINAL BARRIER`，位置在原始工具 payload **之前**，并同步提供 `devspacePreFinalBarrier` 结构化状态。
+- barrier 在 `taskIncomplete=true` 且 `preFinalControlRequired=true` 或 `finalResponseAllowed=false` 时明确禁止用户可见 final：继续本轮实质工作；若本阶段确实应该主动结束，则最后一个 DevSpace 控制调用必须是 `continuation_task action=turn-complete`；只有真实不可用外部依赖才允许 `checkpoint waitingExternal=true`。
+- barrier 只是把已有 ATCC 控制协议提升到普通工具结果的首部和结构化输出，不新增任何静默计时授权。`SUSPECTED_STALL`、lease expiry、heartbeat、historical cutoff、单个工具错误和“已完成一个 milestone”仍然不能自行创建新 Host turn。
+
 ## 回归覆盖
 
 1. `test-remote-agent-ssh-rescue.mjs` 断言显式更新读取 `_fullAccess.Checked` 与 `_roots.Lines`，Full Access 时 roots 归零，并且 existing Agent 仍传入原 `agentId` repair enrollment。
@@ -116,6 +125,7 @@
 10. canonical-repair retention 专项回归锁定严格文件名匹配、最近 3 份 / 512 MiB 双上限，并验证主库、WAL/SHM 与非目标 SQLite 文件不会被删除。
 11. `test-process-registry-retention.mjs` 验证活动/过渡状态永不清理，终态历史受到 5000 条 + 30 天双重约束。
 12. `test-continuation-guard.mjs` 新增 checkpoint 终态卫生覆盖：具备 durable evidence 且最后 milestone 完成时必须原子 `SUCCEEDED` 并清除 synthetic ownership；缺失 evidence 时必须继续 RUNNING。
-13. 正式发行仍要求 D 盘 live 同步、真实 ChatGPT Host E2E，以及真实 Remote Agent 的 Scoped / Full Access 更新验收。
+13. `test-continuation-guard.mjs` 进一步锁定普通 DevSpace 工具结果的 `devspace-pre-final-barrier-v1`：短 barrier 必须排在原始工具内容之前、结构化输出必须携带同一 barrier，且 incomplete stage 的合法可见结束必须指向 `turn-complete`，不能退化为普通 checkpoint/静默承诺。
+14. 正式发行仍要求 D 盘 live 同步、真实 ChatGPT Host E2E，以及真实 Remote Agent 的 Scoped / Full Access 更新验收。
 
 Protocol 继续为 1.5。

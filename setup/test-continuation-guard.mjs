@@ -585,6 +585,14 @@ assert.match(server, /anchorMountVerificationPending is true, keep using the req
   "pending iframe verification must keep using the requested generation instead of minting a duplicate card");
 assert.match(server, /const finalResponseAllowed = outcome\.finalResponseAllowed !== false/,
   "Task Contract rendering must preserve the structured finalResponseAllowed gate");
+assert.match(server, /protocol:\s*"devspace-pre-final-barrier-v1"[\s\S]{0,900}mustContinueSameTurn/,
+  "ordinary DevSpace results must expose a compact machine-readable pre-final barrier while unfinished work remains");
+assert.match(server, /DEVSPACE PRE-FINAL BARRIER \[MUST OBEY BEFORE ANY USER-VISIBLE FINAL\][\s\S]{0,900}FINAL DevSpace control call MUST be continuation_task action=turn-complete/,
+  "the pre-final barrier must make turn-complete the explicit legal incomplete-stage boundary instead of relying on buried Task Contract prose");
+assert.match(server, /content:\s*\[\.\.\.barrierContent, \.\.\.\(Array\.isArray\(senderCapableResult\?\.content\)/,
+  "the pre-final barrier must precede the ordinary tool payload so the model cannot overlook it after a successful result");
+assert.match(server, /devspacePreFinalBarrier:\s*barrier/,
+  "ordinary structured tool results must expose the same pre-final barrier as machine-readable state");
 assert.match(server, /plain user-visible final is forbidden[\s\S]{0,420}same assistant turn[\s\S]{0,620}turn-complete[\s\S]{0,520}waitingExternal=true/,
   "an unfinished Task Contract must forbid a bare final and expose only the legal same-turn/stage-boundary/external-wait exits");
 assert.match(server, /successful ordinary checkpoint persists progress[\s\S]{0,520}does not make a final response legal[\s\S]{0,700}long-running process[\s\S]{0,650}Synthetic continuation uses the same sustained-work stopping rule as manual continue/,
