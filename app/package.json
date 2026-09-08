@@ -7,14 +7,14 @@
     "@waishnav/devspace": "file:../packages/waishnav-devspace-1.0.7.tgz",
     "brace-expansion": "5.0.9",
     "fast-uri": "^3.1.6",
-    "protobufjs": "7.6.5",
+    "protobufjs": "8.8.0",
     "qs": "^6.16.0",
     "undici": "8.10.0",
     "ws": "8.21.0"
   },
   "overrides": {
     "brace-expansion": "5.0.9",
-    "protobufjs": "7.6.5",
+    "protobufjs": "8.8.0",
     "hono": "4.13.0",
     "undici": "8.10.0"
   }
