@@ -64,8 +64,8 @@ def validate_release_version(version: str, dev_iteration: str | None = None) -> 
     expected_fragments = {
         ROOT / "scripts" / "start-devspace.sh": f'export DEVSPACE_PORTABLE_VERSION="{version}"',
         ROOT / "vendor" / "waishnav-devspace" / "dist" / "capabilities.js": f'DEVSPACE_SERVER_VERSION = "{version}"',
-        ROOT / "vendor" / "waishnav-devspace" / "dist" / "ui" / "assets" / "runtime-enhancements.js": f"DevSpace Portable {display_version} · Protocol 1.5",
-        ROOT / "setup" / "native" / "DevSpacePortableApp.cs": f"DevSpace Portable {display_version} · Protocol 1.5",
+        ROOT / "vendor" / "waishnav-devspace" / "dist" / "ui" / "assets" / "runtime-enhancements.js": f"DevSpace Portable {display_version} · Protocol 1.6",
+        ROOT / "setup" / "native" / "DevSpacePortableApp.cs": f"DevSpace Portable {display_version} · Protocol 1.6",
     }
     mismatches: list[str] = []
     portable_manager_source = (ROOT / "setup" / "portable-manager.cjs").read_text(encoding="utf-8")

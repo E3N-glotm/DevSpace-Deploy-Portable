@@ -2745,6 +2745,61 @@ try {
   assert.equal(senderBClaim.accepted, true,
     "the replacement sender must be able to reclaim the released generation without waiting for the old 45-second claim lease");
   assert.equal(senderBClaim.generation, claimedGeneration);
+  const rebindClaimLegacyAfterReclaim = runtime.database.sqlite.prepare(`
+    select delivery_generation from continuation_tasks where id=?
+  `).get(rebindClaimTask.task.id);
+  assert.equal(Number(rebindClaimLegacyAfterReclaim?.delivery_generation), claimedGeneration,
+    "the lifetime task projection must stay pinned to the architecture generation after repeated sender claims");
+  const senderBAuthorized = runtime.authorizeContinuationGenerationDelivery({
+    conversationScopeId: rebindClaimScope,
+    taskId: rebindClaimTask.task.id,
+    senderInstanceId: "ui_rebind_claim_b",
+    anchorMountToken: rebindClaimAnchor.anchorMountToken,
+    anchorMountGeneration: rebindClaimAnchor.anchorMountGeneration,
+    deliveryToken: senderBClaim.deliveryToken,
+  });
+  assert.equal(senderBAuthorized.accepted, true);
+  const senderBDelivered = runtime.recordContinuationGenerationDelivery({
+    deliveryToken: senderBClaim.deliveryToken,
+    result: "accepted",
+    method: "ui/message",
+  });
+  assert.equal(senderBDelivered.accepted, true);
+  const senderBModelAck = runtime.continuationTask({
+    action: "status",
+    taskId: rebindClaimTask.task.id,
+    deliveryToken: senderBClaim.deliveryToken,
+  });
+  assert.equal(senderBModelAck.accepted, true);
+  assert.equal(senderBModelAck.task.deliveryOwner, "synthetic-active");
+  assert.equal(senderBModelAck.task.deliveryGeneration, claimedGeneration,
+    "the resumed synthetic turn must retain the exact delivered architecture generation after ACK");
+  const rebindSyntheticBeforeWork = runtime.database.sqlite.prepare(`
+    select substantive_activity_count from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and generation=? and owner_type='synthetic'
+  `).get(rebindClaimScope, claimedGeneration);
+  runtime.touchContinuationModelActivity({
+    workspaceId: "ws_sender_rebind_claim",
+    conversationScopeId: rebindClaimScope,
+    substantive: true,
+  });
+  const rebindSyntheticAfterWork = runtime.database.sqlite.prepare(`
+    select state,substantive_activity_count from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and generation=? and owner_type='synthetic'
+  `).get(rebindClaimScope, claimedGeneration);
+  assert.equal(rebindSyntheticAfterWork?.state, "WORK_REQUIRED",
+    "the first post-ACK substantive operation must advance the same synthetic generation to WORK_REQUIRED");
+  assert.ok(Number(rebindSyntheticAfterWork?.substantive_activity_count) > Number(rebindSyntheticBeforeWork?.substantive_activity_count),
+    "post-ACK substantive work must accumulate on the delivered synthetic generation");
+  const rebindShadowManualGenerationCount = runtime.database.sqlite.prepare(`
+    select count(*) as count from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and generation>? and owner_type='manual'
+  `).get(rebindClaimScope, claimedGeneration)?.count ?? 0;
+  assert.equal(rebindShadowManualGenerationCount, 0,
+    "sender rebind and synthetic post-ACK work must never materialize a larger shadow manual generation");
 
   const a = runtime.continuationTask({
     action: "begin-auto",

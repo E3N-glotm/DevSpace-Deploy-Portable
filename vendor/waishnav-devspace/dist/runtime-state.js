@@ -1369,12 +1369,17 @@ export class StructuredRuntimeState {
                     workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(worksetId);
                 }
                 else {
+                    const syntheticOwner = ["synthetic-pending", "synthetic-active"]
+                        .includes(String(task.delivery_owner || ""));
+                    const projectedDeliveryGeneration = syntheticOwner
+                        ? Math.max(1, Number(workset.current_generation || 1))
+                        : Math.max(1, Number(task.delivery_generation || 1));
                     this.database.sqlite.prepare(`
                       update continuation_worksets set legacy_task_id=?,workspace_id=?,objective=?,state=?,
                         continuation_due_at=?,current_generation=max(current_generation,?),last_model_activity_at=?,
                         completed_at=null,updated_at=? where id=?
                     `).run(task.id, task.workspace_id ?? null, task.objective, worksetState,
-                        task.turn_lease_expires_at ?? null, Math.max(1, Number(task.delivery_generation || 1)),
+                        task.turn_lease_expires_at ?? null, projectedDeliveryGeneration,
                         task.last_model_activity_at ?? null, nowIso, workset.id);
                     workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(workset.id);
                 }
@@ -1424,10 +1429,37 @@ export class StructuredRuntimeState {
                     upsertMilestone.run(`milestone_${randomUUID()}`, workset.id, stableKey, description,
                         done ? "COMPLETED" : "PENDING", ordinal, nowIso, nowIso, done ? nowIso : null);
                 });
-                let generation = Math.max(1, Number(workset.current_generation || task.delivery_generation || 1));
-                let existingGeneration = this.database.sqlite.prepare(`
+                const syntheticOwner = ["synthetic-pending", "synthetic-active"]
+                    .includes(String(task.delivery_owner || ""));
+                const ownedSyntheticGeneration = syntheticOwner
+                    ? this.database.sqlite.prepare(`
+                        select * from continuation_generations
+                        where workset_id=? and owner_type='synthetic'
+                          and state in ('READY','CLAIMED','DELIVERING','DELIVERED','TURN_ACKED','WORK_REQUIRED')
+                        order by generation desc limit 1
+                      `).get(workset.id)
+                    : undefined;
+                let generation = ownedSyntheticGeneration
+                    ? Math.max(1, Number(ownedSyntheticGeneration.generation || 1))
+                    : Math.max(1, Number(workset.current_generation || task.delivery_generation || 1));
+                let existingGeneration = ownedSyntheticGeneration ?? this.database.sqlite.prepare(`
                   select * from continuation_generations where workset_id=? and generation=?
                 `).get(workset.id, generation);
+                if (ownedSyntheticGeneration) {
+                    // The architecture generation is canonical. Sender iframe
+                    // rebinds may repeat while the same READY generation is
+                    // being delivered; those transport retries must never make
+                    // the legacy delivery counter advance and materialize a
+                    // shadow manual generation. Repair any historical drift
+                    // before projecting substantive work.
+                    this.database.sqlite.prepare(`
+                      update continuation_worksets set current_generation=?,updated_at=? where id=?
+                    `).run(generation, nowIso, workset.id);
+                    this.database.sqlite.prepare(`
+                      update continuation_tasks set delivery_generation=?,updated_at=? where id=?
+                    `).run(generation, nowIso, task.id);
+                    workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(workset.id);
+                }
                 if (reusablePausedWorkset
                     && existingGeneration
                     && ["CLOSED", "SUPERSEDED", "NO_WORK"].includes(String(existingGeneration.state))) {
@@ -1815,13 +1847,13 @@ export class StructuredRuntimeState {
             this.database.sqlite.prepare(`
               update continuation_tasks set
                 superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
-                delivery_token=?,delivery_generation=coalesce(delivery_generation,0)+1,
+                delivery_token=?,delivery_generation=?,
                 delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
                 continuation_pending=5,delivery_ack_started_at=null,
                 delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
                 delivery_work_baseline_count=0,updated_at=?
               where id=? and conversation_scope_id=?
-            `).run(deliveryToken, claimDueAt, nowIso, taskId, conversationScopeId);
+            `).run(deliveryToken, Number(generation.generation || 0), claimDueAt, nowIso, taskId, conversationScopeId);
             return {
                 accepted: true,
                 conversationScopeId,
