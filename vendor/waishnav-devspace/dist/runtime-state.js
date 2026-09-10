@@ -3486,14 +3486,18 @@ export class StructuredRuntimeState {
                       select g.* from continuation_generations g
                       join continuation_worksets w on w.id=g.workset_id
                       where w.legacy_task_id=? and g.delivery_token=?
-                        and g.state in ('DELIVERED','WORK_REQUIRED','TURN_ACKED')
+                        and g.state in ('DELIVERING','DELIVERED','WORK_REQUIRED','TURN_ACKED')
                       order by g.generation desc limit 1
                     `).get(fresh.id, claimToken);
+                    const deliveryReceiptRecoveredByModelAck = Boolean(generation
+                        && String(generation.state || "") === "DELIVERING"
+                        && !generation.delivered_at);
                     if (generation) {
                         this.database.sqlite.prepare(`
-                          update continuation_generations set state='TURN_ACKED',turn_acked_at=coalesce(turn_acked_at,?),due_at=?,updated_at=?
-                          where id=? and state in ('DELIVERED','WORK_REQUIRED','TURN_ACKED')
-                        `).run(nowIso, syntheticOwnerExpiresAt, nowIso, generation.id);
+                          update continuation_generations set state='TURN_ACKED',
+                            delivered_at=coalesce(delivered_at,?),turn_acked_at=coalesce(turn_acked_at,?),due_at=?,updated_at=?
+                          where id=? and state in ('DELIVERING','DELIVERED','WORK_REQUIRED','TURN_ACKED')
+                        `).run(nowIso, nowIso, syntheticOwnerExpiresAt, nowIso, generation.id);
                     }
                     const changed = this.database.sqlite.prepare(`
                       update continuation_tasks set continuation_pending=0,
@@ -3520,6 +3524,7 @@ export class StructuredRuntimeState {
                     return {
                         accepted: true,
                         claimedWithoutToken: !deliveryToken,
+                        deliveryReceiptRecoveredByModelAck,
                         row: this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(fresh.id),
                     };
                 })();
@@ -3552,6 +3557,7 @@ export class StructuredRuntimeState {
                             generation: Number(acknowledgedGeneration.generation || 0),
                             deliveryAckStartedAt: row.delivery_ack_started_at ?? undefined,
                             retryCount: Number(row.delivery_ack_retry_count || 0),
+                            deliveryReceiptRecoveredByModelAck: Boolean(claimed.deliveryReceiptRecoveredByModelAck),
                         },
                     });
                 }

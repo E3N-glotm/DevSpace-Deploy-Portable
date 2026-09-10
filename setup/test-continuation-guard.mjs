@@ -347,7 +347,7 @@ assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryTo
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
 assert.match(coordinator, /standardUiMessage[\s\S]{0,500}app\.sendMessage\.bind\(app\)/,
-  "automatic continuation must prefer the standards-level MCP Apps ui/message user-role request");
+  "automatic continuation must retain the standards-level MCP Apps ui/message path for non-ChatGPT Hosts");
 assert.match(coordinator, /standardPayload = \{ role: "user", content: \[\{ type: "text", text \}\] \}/,
   "ui/message continuation must use the exact standard user-role content-block shape");
 assert.match(coordinator, /method: "ui\/message"[\s\S]{0,300}result: "accepted"[\s\S]{0,500}model-turn-unconfirmed/,
@@ -355,13 +355,15 @@ assert.match(coordinator, /method: "ui\/message"[\s\S]{0,300}result: "accepted"[
 assert.match(coordinator, /standard\.status === "pending"[\s\S]{0,500}result: "unknown"[\s\S]{0,500}mcp-app-ui-message-settlement-unknown/,
   "an outcome-uncertain ui/message request must never trigger a second transport and risk a duplicate user turn");
 assert.match(coordinator, /window\.openai\?\.sendFollowUpMessage[\s\S]{0,600}window\.openai\.sendFollowUpMessage\.bind\(window\.openai\)/,
-  "legacy Hosts may still use the compatibility ChatGPT follow-up bridge after an explicit ui/message rejection");
-assert.match(coordinator, /standard\.status === "fulfilled"[\s\S]{0,1200}if \(!transportMethodUnsupported\(standard\.error\) \|\| typeof nativeFollowUp !== "function"\)/,
-  "the compatibility bridge must be reachable only after an explicit standards-level rejection, never after fulfillment or timeout");
+  "ChatGPT Hosts must expose the native follow-up bridge as a first-class transport candidate");
+assert.match(coordinator, /if \(typeof hostNativeFollowUp === "function"\)[\s\S]{0,2600}invokeWithSettlementBound\(hostNativeFollowUp, \{ prompt: text \}\)[\s\S]{0,1500}method: "window\.openai\.sendFollowUpMessage"/,
+  "when ChatGPT exposes its native Host bridge it must be attempted before generic ui/message");
+assert.match(coordinator, /nativePrimaryUnsupported[\s\S]{0,3600}if \(typeof standardUiMessage === "function"\)/,
+  "generic ui/message must remain available after an explicitly unsupported ChatGPT native bridge or on non-ChatGPT Hosts");
 assert.doesNotMatch(coordinator, /appTestFollowUp|app\.sendFollowUpMessage\.bind\(app\)/,
   "automatic production delivery must not confuse an App-level lookalike sendFollowUpMessage with a Host user-turn API");
-assert.match(coordinator, /invokeWithSettlementBound\(nativeFollowUp, \{ prompt: text \}\)[\s\S]{0,1600}method: "window\.openai\.sendFollowUpMessage"/,
-  "the legacy compatibility fallback must retain bounded settlement diagnostics");
+assert.match(coordinator, /invokeWithSettlementBound\(hostNativeFollowUp, \{ prompt: text \}\)[\s\S]{0,1600}method: "window\.openai\.sendFollowUpMessage"/,
+  "the ChatGPT native primary path must retain bounded settlement diagnostics");
 assert.match(coordinator, /DEFAULT_NATIVE_FOLLOW_UP_SETTLEMENT_TIMEOUT_MS = 4_000/,
   "native Host follow-up promise settlement must have a bounded production default");
 assert.match(coordinator, /nativeFollowUpSettlementTimeoutMs = Math\.max\(1,[\s\S]{0,240}DEFAULT_NATIVE_FOLLOW_UP_SETTLEMENT_TIMEOUT_MS/,
@@ -372,7 +374,7 @@ assert.match(coordinator, /native-follow-up-call-fulfilled;model-turn-unconfirme
   "a fulfilled native Host API call must remain explicitly distinct from a resumed model ACK");
 assert.match(coordinator, /safeSettlementReturnMetadata[\s\S]{0,1200}returnKeys[\s\S]{0,800}elapsedMs/,
   "transport diagnostics must record only bounded structural return metadata and settlement latency");
-assert.match(coordinator, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 11/,
+assert.match(coordinator, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 12/,
   "the Workspace App sender must carry an explicit compatibility epoch so stale in-memory iframes can be fenced after an upgrade");
 assert.match(coordinator, /action === "status" \? \{ readOnlyStatus: true \} : \{\}/,
   "every coordinator-owned status probe must be explicitly read-only and unable to ACK a synthetic model turn");
@@ -399,7 +401,7 @@ assert.match(coordinator, /async function heartbeat\([\s\S]{0,2600}senderHeartbe
   "a surviving Workspace App must escalate an explicit sender-rebind-required heartbeat to the authenticated bind path and immediately consume recovered READY/ACK work");
 assert.match(coordinator, /\.\.\.extra,[\s\S]{0,400}action === "status" \? \{ readOnlyStatus: true \} : \{\}/,
   "coordinator callers must not be able to override readOnlyStatus on a control-plane status probe");
-assert.match(server, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 11/,
+assert.match(server, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 12/,
   "the server must publish the same hidden sender compatibility epoch");
 assert.match(server, /sender-protocol-epoch-mismatch/,
   "the server must fail closed when a stale or missing sender epoch reaches the hidden sender bridge");
@@ -417,8 +419,8 @@ assert.match(runtimeStateSource, /reason: "read-only-status"[\s\S]{0,1000}synthe
   "runtime read-only status must preserve pending synthetic ownership while exposing enough state for the coordinator supervisor");
 assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\)[\s\S]{0,2400}\}\)/,
   "all Host user-message transports must remain behind the exact durable synthetic generation ownership barrier");
-assert.match(runtimeStateSource, /state='TURN_ACKED',turn_acked_at=coalesce\(turn_acked_at,\?\)/,
-  "the first synthetic status ACK must persist the exact generation ACK timestamp for later transport and duration diagnostics");
+assert.match(runtimeStateSource, /state='TURN_ACKED',[\s\S]{0,180}delivered_at=coalesce\(delivered_at,\?\),turn_acked_at=coalesce\(turn_acked_at,\?\)[\s\S]{0,260}state in \('DELIVERING','DELIVERED','WORK_REQUIRED','TURN_ACKED'\)/,
+  "the first synthetic status ACK must recover a missing iframe receipt from DELIVERING and persist both delivery and exact generation ACK timestamps");
 assert.match(runtimeStateSource, /kind: "continuation-generation-delivery-authorized"[\s\S]{0,900}retryCount[\s\S]{0,600}eventSequence/,
   "generation authorization must journal the timestamp immediately before native Host invocation so scheduling and Host startup latency remain distinguishable");
 assert.match(runtimeStateSource, /kind: "continuation-generation-delivery"[\s\S]{0,900}method/,
@@ -1276,13 +1278,12 @@ assert.equal(senderRebindApp.messages.length, 0,
   "re-establishing sender authority alone must not invent a synthetic continuation when no READY generation exists");
 senderRebindController.dispose();
 
-// Live dev43 production evidence proved that the compatibility
-// window.openai.sendFollowUpMessage API can resolve successfully without
-// creating a model turn. Both the first delivery and a same-generation ACK
-// retry must therefore prefer the standards-level MCP Apps ui/message request.
-// Transport fulfillment still is not model-start proof; the resumed DevSpace
-// status ACK remains authoritative. A missing ACK is outcome-uncertain and
-// must not cause a second visible message.
+// Current ChatGPT production can fulfill generic MCP Apps ui/message without
+// entering the normal model/tool pipeline. The native Host follow-up bridge is
+// therefore primary when window.openai exposes it. ATCC already waits for the
+// prior model turn to complete, avoiding the historical native-while-generating
+// silent-ignore race. Transport fulfillment still is not model-start proof;
+// the resumed DevSpace status ACK remains authoritative.
 const transportOrder = [];
 class NativeOnlyTransportApp extends FakeApp {
   async sendMessage(value) {
@@ -1311,8 +1312,8 @@ try {
   await transportController.onConnected();
   const firstTransportResult = await transportController.attemptContinuation("first delivery", { force: true });
   assert.equal(firstTransportResult, true);
-  assert.deepEqual(transportOrder, ["ui-message"],
-    "when both APIs exist, the first delivery must use the standard ui/message request and must not touch the compatibility Host bridge");
+  assert.deepEqual(transportOrder, ["window-openai"],
+    "when ChatGPT exposes its native bridge, the first delivery must use it instead of generic ui/message");
   transportApp.task = {
     ...transportApp.task,
     deliveryAckRetryCount: 1,
@@ -1321,12 +1322,12 @@ try {
   };
   transportController.state.task = transportApp.task;
   await transportController.refreshNow();
-  assert.deepEqual(transportOrder, ["ui-message"],
+  assert.deepEqual(transportOrder, ["window-openai"],
     "an overdue ACK must remain diagnostic and must not retransmit a visible message");
   const deliveryMethods = transportApp.callInputs
     .filter((entry) => entry.name === "continuation_sender" && entry.action === "delivery-result")
     .map((entry) => entry.method);
-  assert.deepEqual(deliveryMethods, ["ui/message"]);
+  assert.deepEqual(deliveryMethods, ["window.openai.sendFollowUpMessage"]);
   transportController.dispose();
 } finally {
   if (previousWindow === undefined) delete globalThis.window;
@@ -1626,6 +1627,9 @@ class ManualTakeoverBeforeSendApp extends FakeApp {
     if (request.name === "continuation_sender"
       && input.action === "authorize-delivery"
       && this.task?.deliveryOwner === "synthetic-pending") {
+      // A manual user action that wins before the final authorization CAS must
+      // make authorize-delivery reject. After a successful CAS the first Host
+      // call is intentionally immediate; later transport retries recheck state.
       this.task = {
         ...this.task,
         continuationPending: false,
@@ -2775,21 +2779,40 @@ try {
     deliveryToken: senderBClaim.deliveryToken,
   });
   assert.equal(senderBAuthorized.accepted, true);
-  const senderBDelivered = runtime.recordContinuationGenerationDelivery({
-    deliveryToken: senderBClaim.deliveryToken,
-    result: "accepted",
-    method: "ui/message",
-  });
-  assert.equal(senderBDelivered.accepted, true);
+  const deliveringBeforeAck = runtime.database.sqlite.prepare(`
+    select state,delivered_at from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and generation=? and owner_type='synthetic'
+  `).get(rebindClaimScope, claimedGeneration);
+  assert.equal(deliveringBeforeAck?.state, "DELIVERING");
+  assert.equal(deliveringBeforeAck?.delivered_at, null,
+    "the production regression must omit the old iframe delivery receipt before the new model ACK");
   const senderBModelAck = runtime.continuationTask({
     action: "status",
     taskId: rebindClaimTask.task.id,
     deliveryToken: senderBClaim.deliveryToken,
   });
   assert.equal(senderBModelAck.accepted, true);
+  assert.equal(senderBModelAck.reason, "continuation-resume-acknowledged");
   assert.equal(senderBModelAck.task.deliveryOwner, "synthetic-active");
   assert.equal(senderBModelAck.task.deliveryGeneration, claimedGeneration,
     "the resumed synthetic turn must retain the exact delivered architecture generation after ACK");
+  const deliveringRecoveredByAck = runtime.database.sqlite.prepare(`
+    select state,delivered_at,turn_acked_at from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and generation=? and owner_type='synthetic'
+  `).get(rebindClaimScope, claimedGeneration);
+  assert.equal(deliveringRecoveredByAck?.state, "TURN_ACKED");
+  assert.ok(deliveringRecoveredByAck?.delivered_at);
+  assert.ok(deliveringRecoveredByAck?.turn_acked_at,
+    "an exact-token model ACK must recover a lost iframe receipt and establish real Host/tool-layer ownership");
+  const recoveredAckEvents = runtime.pollEvents({
+    kind: "continuation-generation-turn-acked",
+    subject: rebindClaimScope,
+    limit: 20,
+  }).events;
+  assert.equal(recoveredAckEvents.at(-1)?.payload?.deliveryReceiptRecoveredByModelAck, true,
+    "the recovered DELIVERING->TURN_ACKED transition must remain observable in the event journal");
   const rebindSyntheticBeforeWork = runtime.database.sqlite.prepare(`
     select substantive_activity_count from continuation_generations
     where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)

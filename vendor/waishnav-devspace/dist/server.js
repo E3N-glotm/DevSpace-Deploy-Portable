@@ -63,7 +63,7 @@ const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 // sender contract changes incompatibly. Requiring the current epoch on every
 // sender action prevents a superseded pre-upgrade iframe from retaining sender
 // authority after a live Portable update.
-const CONTINUATION_SENDER_PROTOCOL_EPOCH = 11;
+const CONTINUATION_SENDER_PROTOCOL_EPOCH = 12;
 let structuredRuntimeState;
 let continuationTaskContractsEnabled = false;
 function resultWorkspaceId(result) {

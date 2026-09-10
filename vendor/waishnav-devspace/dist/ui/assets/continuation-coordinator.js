@@ -4,7 +4,7 @@ const SENDER_TOOL = "continuation_sender";
 // server rejects all sender actions from older in-memory iframes, so an App
 // surface loaded before a live Portable upgrade cannot continue delivering
 // continuations using stale semantics.
-const CONTINUATION_SENDER_PROTOCOL_EPOCH = 11;
+const CONTINUATION_SENDER_PROTOCOL_EPOCH = 12;
 // The server derives this revision from the exact self-contained Workspace App
 // resource bytes and injects it before this module executes. Sender authority
 // is unavailable when it is missing: silently substituting a server-side value
@@ -1029,8 +1029,19 @@ export function installContinuationCoordinator(app, options = {}) {
       let timer;
       const startedAt = Date.now();
       try {
-        const settled = Promise.resolve()
-          .then(() => invoke(payload))
+        // Invoke the Host API synchronously before yielding back to the iframe
+        // event loop. ChatGPT may replace/tear down the current App surface as
+        // soon as a follow-up is accepted; deferring the irreversible call to
+        // a Promise microtask creates an avoidable gap where an authorized
+        // generation can be stranded in DELIVERING without ever reaching the
+        // Host message API.
+        let invocation;
+        try {
+          invocation = invoke(payload);
+        } catch (error) {
+          return { status: "rejected", error, elapsedMs: Date.now() - startedAt };
+        }
+        const settled = Promise.resolve(invocation)
           .then(
             (value) => {
               const semanticError = semanticTransportError(value);
@@ -1056,6 +1067,45 @@ export function installContinuationCoordinator(app, options = {}) {
         if (timer) clearTimeout(timer);
       }
     };
+    // ChatGPT's native follow-up bridge is the only Host surface that is
+    // specifically documented to start a follow-up model turn. The generic
+    // MCP Apps ui/message request remains the standards path for non-ChatGPT
+    // Hosts, but current ChatGPT builds can fulfill ui/message while posting a
+    // transcript message without starting the normal model/tool pipeline.
+    // ATCC already waits until the previous model turn is complete, avoiding
+    // the historical sendFollowUpMessage-while-generating silent-ignore race.
+    let nativePrimaryUnsupported = false;
+    if (typeof hostNativeFollowUp === "function") {
+      let lastError;
+      for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
+        if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        try {
+          await ensureStillRunnable();
+          const primary = await invokeWithSettlementBound(hostNativeFollowUp, { prompt: text });
+          if (primary.status === "pending") {
+            return {
+              method: "window.openai.sendFollowUpMessage",
+              result: "unknown",
+              note: settlementNote("native-follow-up-settlement-unknown", "prompt", primary),
+            };
+          }
+          if (primary.status === "rejected") throw primary.error;
+          return {
+            method: "window.openai.sendFollowUpMessage",
+            result: "accepted",
+            note: `native-follow-up-call-fulfilled;model-turn-unconfirmed;${settlementNote("transport", "prompt", primary).replace(/^transport;/, "")}`,
+          };
+        } catch (error) {
+          lastError = error;
+          if (transportMethodUnsupported(error)) {
+            nativePrimaryUnsupported = true;
+            break;
+          }
+          if (!transientTransportFailure(error) || attempt === TRANSIENT_RETRY_DELAYS_MS.length - 1) throw error;
+        }
+      }
+      if (!nativePrimaryUnsupported && lastError) throw lastError;
+    }
     if (typeof standardUiMessage === "function") {
       await ensureStillRunnable();
       const standardPayload = { role: "user", content: [{ type: "text", text }] };
@@ -1078,7 +1128,7 @@ export function installContinuationCoordinator(app, options = {}) {
       // bridge. Permission denial, cancellation, validation errors and
       // fulfilled {isError:true} responses are real rejections, not permission
       // to try a second API that could create a duplicate user turn.
-      if (!transportMethodUnsupported(standard.error) || typeof nativeFollowUp !== "function") {
+      if (!transportMethodUnsupported(standard.error) || typeof nativeFollowUp !== "function" || nativePrimaryUnsupported) {
         throw standard.error;
       }
     }
@@ -1149,7 +1199,16 @@ export function installContinuationCoordinator(app, options = {}) {
         const authorized = await callSender("authorize-delivery", { deliveryToken, note: reason }).catch(() => undefined);
         if (!authorized?.accepted) return false;
 
+        let hostSendAttempt = 0;
         const delivery = await sendFollowUp(visibleContinuationTrigger(state.task, deliveryToken), async () => {
+          hostSendAttempt += 1;
+          // authorize-delivery is already the final server-side CAS over the
+          // exact manual/synthetic owner, card generation, sender lease and
+          // delivery token. Do not insert another Host->server request before
+          // the first irreversible send: a background iframe can be frozen or
+          // replaced in that extra round-trip. Retries/fallback attempts still
+          // re-read authoritative state so a later manual takeover always wins.
+          if (hostSendAttempt === 1) return true;
           const latest = await callTask("status").catch(() => undefined);
           if (latest?.task) acceptTask(latest.task);
           // Check fresh ownership on every transport attempt, including retries

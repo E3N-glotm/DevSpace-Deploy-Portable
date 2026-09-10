@@ -237,29 +237,44 @@ try {
     "the resident supervisor must keep weak lease suspicion as telemetry and remove historical-cutoff authorization");
   assert.match(coordinatorSource, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\),\s*async \(\) =>/,
     "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
-  assert.match(coordinatorSource, /authorize-delivery[\s\S]{0,1800}sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\),\s*async \(\) => \{[\s\S]{0,900}callTask\("status"\)/,
-    "the coordinator must re-read authoritative terminal state inside the final Host-send barrier after delivery authorization");
   {
-  // Execute the actual final-send callback: manual takeover can happen after
-  // authorize-delivery, and a transport retry must not trust cached RUNNING.
+    const authorizeIndex = coordinatorSource.indexOf('callSender("authorize-delivery"');
+    const counterIndex = coordinatorSource.indexOf("let hostSendAttempt = 0", authorizeIndex);
+    const incrementIndex = coordinatorSource.indexOf("hostSendAttempt += 1", counterIndex);
+    const firstAttemptIndex = coordinatorSource.indexOf("if (hostSendAttempt === 1) return true", incrementIndex);
+    const retryStatusIndex = coordinatorSource.indexOf('callTask("status")', firstAttemptIndex);
+    assert.ok(authorizeIndex >= 0
+      && counterIndex > authorizeIndex
+      && incrementIndex > counterIndex
+      && firstAttemptIndex > incrementIndex
+      && retryStatusIndex > firstAttemptIndex,
+    "the first Host call must follow the final authorization CAS immediately while retries still re-read authoritative state");
+  }
+  {
+  // Execute the actual final-send callback. The first invocation is protected
+  // by the immediately preceding authorize-delivery CAS and must not insert a
+  // second server round-trip. A retry/fallback is no longer adjacent to that
+  // CAS and therefore must re-read authoritative manual/terminal state.
   const sendBarrierBody = coordinatorSource.match(/sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\), async \(\) => \{([\s\S]*?)\n        \}\);/)[1];
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const sendBarrier = new AsyncFunction("callTask", "acceptTask", "terminal", "automationSuppressed", "deliveryToken", sendBarrierBody);
+  const sendBarrier = new AsyncFunction("callTask", "acceptTask", "terminal", "automationSuppressed", "deliveryToken", "hostSendAttempt", sendBarrierBody);
   const pendingDelivery = { state: "RUNNING", deliveryToken: "expected", deliveryOwner: "synthetic-pending", continuationDeliveryAwaitingAck: true };
-  const barrierAllows = (task, fail = false) => sendBarrier(
+  const barrierAllows = (task, hostSendAttempt = 1, fail = false) => sendBarrier(
     async () => { if (fail) throw new Error("offline"); return task ? { task } : undefined; },
-    () => {}, (task) => task.state === "SUCCEEDED", (task) => task.state === "WAITING_EXTERNAL", "expected");
-  assert.equal(await barrierAllows(pendingDelivery), true);
-  assert.equal(await barrierAllows({ ...pendingDelivery, deliveryOwner: "manual" }), false,
-    "manual takeover after authorization must suppress the old Host message");
-  assert.equal(await barrierAllows({ ...pendingDelivery, deliveryToken: "new-generation" }), false);
-  assert.equal(await barrierAllows({ ...pendingDelivery, continuationDeliveryAwaitingAck: false }), false,
+    () => {}, (task) => task.state === "SUCCEEDED", (task) => task.state === "WAITING_EXTERNAL", "expected", hostSendAttempt);
+  assert.equal(await barrierAllows({ ...pendingDelivery, deliveryOwner: "manual" }, 0), true,
+    "the first invocation must trust the immediately preceding successful authorization CAS and avoid another iframe-host round-trip");
+  assert.equal(await barrierAllows(pendingDelivery, 1), true);
+  assert.equal(await barrierAllows({ ...pendingDelivery, deliveryOwner: "manual" }, 1), false,
+    "a manual takeover before a retry/fallback must suppress the stale Host message");
+  assert.equal(await barrierAllows({ ...pendingDelivery, deliveryToken: "new-generation" }, 1), false);
+  assert.equal(await barrierAllows({ ...pendingDelivery, continuationDeliveryAwaitingAck: false }, 1), false,
     "a resumed turn that ACKed during retry preparation must not receive another message");
-  assert.equal(await barrierAllows(undefined), false);
-  assert.equal(await barrierAllows(undefined, true), false,
+  assert.equal(await barrierAllows(undefined, 1), false);
+  assert.equal(await barrierAllows(undefined, 1, true), false,
     "failed fresh status must never fall back to cached synthetic ownership");
-  assert.equal(await barrierAllows({ ...pendingDelivery, state: "SUCCEEDED" }), false);
-  assert.equal(await barrierAllows({ ...pendingDelivery, state: "WAITING_EXTERNAL" }), false);
+  assert.equal(await barrierAllows({ ...pendingDelivery, state: "SUCCEEDED" }, 1), false);
+  assert.equal(await barrierAllows({ ...pendingDelivery, state: "WAITING_EXTERNAL" }, 1), false);
   }
   assert.match(coordinatorSource, /function startSupervisor\(\)[\s\S]{0,700}terminal\(state\.task\)/,
     "terminal tasks must not retain a retry or quiet-probe supervisor timer");
