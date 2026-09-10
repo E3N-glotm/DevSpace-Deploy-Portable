@@ -47,6 +47,21 @@ const workspaceBundle = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "
 assert.match(finalizeRelease,
   /app\/node_modules\/@waishnav\/devspace\/dist\/ui\/assets\/continuation-coordinator\.js/,
   "release metadata must fingerprint the continuation coordinator so same-version live/source drift is detectable");
+assert.match(server,
+  /\/mcp-app-assets\/continuation-runtime\.js[\s\S]{0,1800}Cache-Control[\s\S]{0,160}no-cache, no-store/,
+  "the continuation coordinator hot-upgrade endpoint must be served from a stable no-store URL");
+assert.match(server,
+  /<script type="module" src=\$\{JSON\.stringify\(continuationRuntimeUrl\)\}><\/script>/,
+  "Host-cacheable Workspace App HTML must load the continuation sender from the no-store runtime endpoint instead of pinning inline coordinator bytes");
+assert.doesNotMatch(server,
+  /const continuationCoordinatorSource = readFileSync/,
+  "the Workspace App HTML generator must not inline protocol-sensitive continuation coordinator bytes");
+assert.match(server,
+  /globalThis\.__DEVSPACE_CONTINUATION_SENDER_ASSET_REVISION__=/,
+  "the live runtime endpoint must stamp the provenance revision for the bytes it actually serves");
+assert.match(runtimeStateSource,
+  /assistant_turn_state='COMPLETION_REQUESTED'[\s\S]{0,420}assistant_turn_completion_lease_id=t\.turn_lease_id[\s\S]{0,260}\+8 seconds/,
+  "resident supervisor candidate discovery must include a mature exact signed completion even before promotion has written workset continuation_due_at");
 
 for (const pattern of [
   /version: 13/,
@@ -162,7 +177,6 @@ for (const pattern of [
   /sendResourceListChanged\(\)/,
   /mcp_metadata_refresh_notification_failed/,
   /createHash\("sha256"\)/,
-  /continuationCoordinatorSource/,
   /appOpenAiWidgetCsp/,
   /"openai\/widgetCSP": appOpenAiWidgetCsp\(config\)/,
   /"openai\/widgetDomain": publicBaseUrl/,
@@ -185,7 +199,8 @@ assert.doesNotMatch(server, /snapshot\.running && effectivePersistent && config\
   "exec_command must not auto-register every still-running persistent process as a continuation wake");
 assert.doesNotMatch(server, /action: "watch-process",[\s\S]{0,220}processHandle: snapshot\.processHandle/,
   "process completion wake must require an explicit continuation_task watch-process call");
-assert.doesNotMatch(server, /<script[^>]+src="\$\{continuationCoordinatorUrl\}"/, "continuation coordinator must be delivered inline with the MCP App resource so same-version host asset caches cannot pin stale logic");
+assert.doesNotMatch(server, /<script[^>]+src="\$\{continuationCoordinatorUrl\}"/,
+  "continuation sender must not use an immutable revisioned asset URL that a Host-cached App document can pin across a live upgrade");
 assert.doesNotMatch(server, /"openai\/outputTemplate"\s*:\s*LEGACY_CONTINUATION_GUARD_URI/, "historical continuation-guard URI may exist only as a resource alias, never as the current output template");
 assert.doesNotMatch(server, /CONTINUATION_APP_KINDS/, "ordinary DevSpace tools must not gain UI metadata merely because continuation is enabled");
 assert.match(server, /const attachWorkspaceApp = shouldAttachWidget\(config, kind\);/, "only explicitly UI-bearing tools may mount the Workspace App");
@@ -290,12 +305,14 @@ assert.match(runtimeStateSource, /action === "turn-complete"[\s\S]{0,3600}assist
   "normal assistant completion intent must be explicitly signed and bound to the current turn lease");
 assert.match(runtimeStateSource, /constructor\(stateDir\)[\s\S]{0,1200}continuation_conversation_cards[\s\S]{0,500}sender_instance_id=null/,
   "a restarted MCP runtime must invalidate persisted Workspace App sender authority before any new continuation can be armed");
-assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,6200}continuation-sender-unavailable/,
-  "ATCC promotion, not the model-owned turn-complete signature, must fail closed when the current MCP process has no live sender transport");
+assert.doesNotMatch(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,6200}continuation-sender-unavailable/,
+  "a mature exact ATCC signature must be allowed to persist durable READY even when no sender is currently available");
 assert.doesNotMatch(runtimeStateSource, /if \(action === "turn-complete"[\s\S]{0,9000}continuation-sender-unavailable/,
   "turn-complete must not deadlock on a browser sender that ChatGPT may initialize only while the assistant final is being committed");
 assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,6200}continuationSenderStatus\(\{[\s\S]{0,500}taskId:[\s\S]{0,500}conversationScopeId:/,
-  "promotion-time sender readiness must delegate to the canonical sender eligibility check rather than trusting a historical sender id");
+  "promotion must still record canonical sender readiness as diagnostics without using it as authority for the model-owned completion boundary");
+assert.match(runtimeStateSource, /authorizeContinuationGenerationDelivery\(input = \{\}\)[\s\S]{0,5000}continuationSenderStatus\(\{[\s\S]{0,1200}!senderStatus\.eligible/,
+  "actual synthetic delivery authorization must still fail closed unless the current sender passes the canonical eligibility check");
 assert.match(runtimeStateSource, /continuationSenderStatus\(input = \{\}, nowMs = Date\.now\(\)\)[\s\S]{0,5200}senderHeartbeatAgeMs[\s\S]{0,900}ANCHOR_LEASE_MS/,
   "the canonical sender eligibility check must enforce a bounded sender heartbeat freshness lease");
 assert.match(runtimeStateSource, /MODEL_COMPLETION_HANDOFF_GRACE_MS = 8_000/,
@@ -864,7 +881,8 @@ assert.notEqual(workspaceAppAnchorUri({ ...descriptorConfig, publicBaseUrl: "htt
 const renderedWorkspaceApp = workspaceAppHtml(descriptorConfig);
 assert.match(renderedWorkspaceApp, /return\s+[A-Za-z_$][\w$]*===`continuation_anchor`\|\|[A-Za-z_$][\w$]*===`open_workspace`/,
   "the final self-contained Workspace App resource must really route continuation_anchor into the visible renderer after minification");
-assert.match(renderedWorkspaceApp, /<script type="module">[\s\S]*installContinuationCoordinator/, "Workspace App HTML must embed the continuation coordinator directly in the versioned MCP App resource");
+assert.match(renderedWorkspaceApp, /<script type="module" src="https:\/\/devspace\.example\.test\/mcp-app-assets\/continuation-runtime\.js"><\/script>/,
+  "Workspace App HTML must load the stable no-store continuation runtime so a Host-cached document can adopt the current sender implementation after upgrade");
 assert.doesNotMatch(renderedWorkspaceApp, /data:text\/javascript;base64,/, "Workspace App HTML must not depend on a data: module that ChatGPT may block before widget CSP compatibility metadata is applied");
 assert.doesNotMatch(renderedWorkspaceApp, /src="[^"]*continuation-coordinator\.js/, "Workspace App HTML must not depend on an externally cached continuation coordinator script");
 assert.match(renderedWorkspaceApp, /window\.__DEVSPACE_MCP_APP__=/, "Workspace App HTML must inline the MCP Apps bootstrap bundle so ChatGPT does not need a second script request before connecting");
@@ -875,7 +893,8 @@ assert.match(renderedWorkspaceApp, /devspace:workspace-app-ready/, "Workspace Ap
 assert.doesNotMatch(renderedWorkspaceApp, /<section class="empty">Waiting for a tool result\.<\/section>/, "the legacy permanently-stuck placeholder must not remain in the Workspace App shell");
 assert.match(renderedWorkspaceApp, /data-devspace-continuation/, "Workspace App must include the dedicated continuation task card renderer");
 assert.match(renderedWorkspaceApp, /<style>[\s\S]*\.shell/, "Workspace App HTML must inline its initial styles so the iframe is self-contained");
-assert.doesNotMatch(renderedWorkspaceApp, /<script[^>]+src=/, "Workspace App bootstrap must not depend on external script requests");
+assert.equal([...renderedWorkspaceApp.matchAll(/<script[^>]+src=/g)].length, 1,
+  "Workspace App may have exactly one external script request: the stable no-store continuation runtime used for hot sender upgrades");
 assert.doesNotMatch(renderedWorkspaceApp, /<link[^>]+rel="stylesheet"/, "Workspace App bootstrap must not depend on external stylesheet requests");
 assert.match(renderedWorkspaceApp, /https:\/\/devspace\.example\.test\/mcp-app-assets\/assets\/heavy-payload-[^"']+\.js/, "inline Vite entry must rewrite lazy chunk URLs to the public asset origin");
 const staleResourceUri = "ui://devspace/workspace-app-deadbeefdeadbeef.html";
@@ -887,12 +906,13 @@ assert.equal(staleResource.contents?.[0]?._meta?.ui?.domain, descriptorConfig.pu
 const generationResource = workspaceAppResourceResult(descriptorConfig, generation7Uri);
 assert.equal(generationResource.contents?.[0]?.uri, generation7Uri,
   "generation-specific compatibility reads must preserve the exact result-level URI requested by the host");
-assert.match(generationResource.contents?.[0]?.text ?? "", /installContinuationCoordinator/,
-  "generation-specific result cache keys must still resolve to the current self-contained Workspace App");
+assert.match(generationResource.contents?.[0]?.text ?? "", /mcp-app-assets\/continuation-runtime\.js/,
+  "generation-specific result cache keys must resolve to an App document that can hot-load the current continuation sender runtime");
 const historicalContinuationGuardUri = "ui://devspace/continuation-guard.html";
 const historicalContinuationGuardResource = workspaceAppResourceResult(descriptorConfig, historicalContinuationGuardUri);
 assert.equal(historicalContinuationGuardResource.contents?.[0]?.uri, historicalContinuationGuardUri);
-assert.match(historicalContinuationGuardResource.contents?.[0]?.text ?? "", /installContinuationCoordinator/, "historical continuation-guard URI must resolve to the current coordinator");
+assert.match(historicalContinuationGuardResource.contents?.[0]?.text ?? "", /mcp-app-assets\/continuation-runtime\.js/,
+  "historical continuation-guard URI must resolve to an App document that hot-loads the current continuation sender runtime");
 assert.match(server, /DevSpace Continuation Guard Legacy Compatibility/);
 assert.match(server, /ui:\/\/devspace\/continuation-guard\.html/);
 
@@ -3939,21 +3959,41 @@ try {
     missingSenderTask.task.id,
     missingSenderPromotionAt,
   );
-  assert.equal(missingSenderPromotion.promoted, false,
-    "promotion must remain fail-closed until a current-process sender exists");
-  assert.equal(missingSenderPromotion.reason, "continuation-sender-unavailable");
+  assert.equal(missingSenderPromotion.promoted, true,
+    "a mature exact-turn ATCC signature must become durable even when the current App sender has not initialized yet");
+  assert.equal(missingSenderPromotion.senderReadyAtPromotion, false,
+    "sender availability is delivery telemetry at promotion time, not permission to discard the signed completion boundary");
   assert.equal(runtime.continuationTask({ action: "status", taskId: missingSenderTask.task.id }).task.assistantTurnState,
-    "COMPLETION_REQUESTED",
-    "missing sender must leave the signed completion intent durable for a later Host/App bind instead of reverting it to GENERATING");
+    "COMPLETED",
+    "missing sender must preserve the signed completion as a completed turn while transport catches up");
+  const missingSenderSweep = runtime.continuationSupervisorSweep({ nowMs: missingSenderPromotionAt + 1 });
+  assert.equal(missingSenderSweep.ready.some(item => item.conversationScopeId === "v1/test-turn-complete-missing-sender"), true,
+    "the resident supervisor must persist READY work independently of browser sender availability");
   const generationBeforeSenderBind = runtime.database.sqlite.prepare(`
-    select count(*) as count from continuation_generations
+    select generation,state from continuation_generations
     where workset_id=(
       select active_workset_id from continuation_conversation_cards
       where conversation_scope_id=?
-    ) and owner_type='synthetic' and state in ('READY','CLAIMED','DELIVERING','DELIVERED','TURN_ACKED','ACTIVE')
-  `).get("v1/test-turn-complete-missing-sender")?.count ?? 0;
-  assert.equal(generationBeforeSenderBind, 0,
-    "waiting for a sender after turn-complete must not leave an orphan automatic generation behind");
+    ) and owner_type='synthetic' and state='READY'
+    order by generation asc limit 1
+  `).get("v1/test-turn-complete-missing-sender");
+  assert.ok(generationBeforeSenderBind,
+    "senderless promotion must leave one discoverable durable READY generation rather than a silent COMPLETION_REQUESTED task");
+  const senderlessClaim = runtime.claimReadyContinuationGeneration({
+    conversationScopeId: "v1/test-turn-complete-missing-sender",
+    taskId: missingSenderTask.task.id,
+    senderInstanceId: "ui_not_bound_yet",
+    anchorMountToken: missingSenderAnchor.anchorMountToken,
+    anchorMountGeneration: missingSenderAnchor.anchorMountGeneration,
+  });
+  assert.equal(senderlessClaim.accepted, false,
+    "durable READY must remain non-deliverable until a current sender owns the exact issued card");
+  assert.equal(runtime.database.sqlite.prepare(`
+    select state from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and generation=? and owner_type='synthetic'
+  `).get("v1/test-turn-complete-missing-sender", generationBeforeSenderBind.generation)?.state, "READY",
+    "a rejected senderless claim must not consume or mutate the durable READY generation");
   const missingSenderBound = runtime.bindContinuationSender(withTestSenderProtocol({
     conversationScopeId: "v1/test-turn-complete-missing-sender",
     taskId: missingSenderTask.task.id,
@@ -3962,15 +4002,25 @@ try {
   }));
   assert.equal(missingSenderBound.accepted, true,
     "the current App may recover by binding its sender without rotating the lifetime card");
+  assert.equal(missingSenderBound.readyGeneration, generationBeforeSenderBind.generation,
+    "late sender bind must discover and reuse the already-persisted READY generation instead of creating a shadow generation");
   const recoveredSenderPromotion = runtime.promoteMatureAssistantCompletionIntent(
     missingSenderTask.task.id,
     missingSenderPromotionAt + 1,
   );
-  assert.equal(recoveredSenderPromotion.promoted, true,
-    "a late Host/App sender bind must promote the already-signed completion lease without requiring another model turn-complete call");
+  assert.equal(recoveredSenderPromotion.promoted, false,
+    "late sender bind must not re-promote an already completed turn or mint a duplicate continuation boundary");
+  assert.equal(recoveredSenderPromotion.reason, "completion-intent-not-pending");
   const recoveredSenderSweep = runtime.continuationSupervisorSweep({ nowMs: missingSenderPromotionAt + 2 });
-  assert.equal(recoveredSenderSweep.ready.some(item => item.conversationScopeId === "v1/test-turn-complete-missing-sender"), true,
-    "once the late sender is bound, the same signed completion must create the READY synthetic generation on the next resident sweep");
+  assert.equal(recoveredSenderSweep.ready.filter(item => item.conversationScopeId === "v1/test-turn-complete-missing-sender").length <= 1, true,
+    "later supervisor sweeps must preserve a singleton runnable generation for the same signed turn completion");
+  const readyCountAfterBind = runtime.database.sqlite.prepare(`
+    select count(*) as count from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and owner_type='synthetic' and state='READY'
+  `).get("v1/test-turn-complete-missing-sender")?.count ?? 0;
+  assert.equal(readyCountAfterBind, 1,
+    "late sender recovery must keep exactly one READY generation before delivery claim");
 
   const verifiedSurfaceTeardownTask = runtime.continuationTask({
     action: "begin",

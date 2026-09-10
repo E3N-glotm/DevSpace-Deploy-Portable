@@ -64,7 +64,7 @@ async function startWithPreference(closeChoice) {
   await waitFor(async () => {
     const current = await lease();
     return current && Number(current.uiPid) === child.pid ? current : null;
-  });
+  }, 60_000);
   await waitFor(() => {
     const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", `(Get-Process -Id ${child.pid} -ErrorAction SilentlyContinue).MainWindowHandle`], {
       encoding: "utf8",
@@ -72,7 +72,7 @@ async function startWithPreference(closeChoice) {
       timeout: 10_000,
     });
     return Number(String(result.stdout || "").trim()) > 0;
-  });
+  }, 60_000);
   return child;
 }
 

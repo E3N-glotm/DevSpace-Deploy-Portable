@@ -1087,11 +1087,10 @@ function workspaceAppSurfaceBootstrap(resourceUri) {
 function workspaceAppHtml(config, resourceUri = workspaceAppUri(config)) {
     const baseUrl = assetBaseUrl(config);
     const continuationWakeUrl = `${baseUrl}/continuation-wake`;
+    const continuationRuntimeUrl = `${baseUrl}/continuation-runtime.js`;
     const continuationSenderAssetRevision = workspaceAppRevision(config);
     const entry = getWorkspaceAppManifestEntry();
     const escapeInlineScript = (source) => String(source).replace(/<\/script/gi, "<\\/script");
-    const continuationCoordinatorSource = readFileSync(new URL("../dist/ui/assets/continuation-coordinator.js", import.meta.url), "utf8")
-        .replace(/<\/script/gi, "<\\/script");
     const runtimeEnhancementSource = escapeInlineScript(readFileSync(new URL("../dist/ui/assets/runtime-enhancements.js", import.meta.url), "utf8"));
     const workspaceEntrySource = escapeInlineScript(enablePortableContinuationAnchorRenderer(
         readFileSync(new URL(`../dist/ui/${entry.file}`, import.meta.url), "utf8")
@@ -1146,9 +1145,14 @@ ${inlineStyles}
     <script type="module">
 ${runtimeEnhancementSource}
     </script>
-    <script type="module">
-${continuationCoordinatorSource}
-    </script>
+    <!--
+      Keep the continuation sender runtime outside the Host-cacheable MCP HTML.
+      ChatGPT may reuse an already-cached output-template document across a
+      Portable upgrade.  A stable no-store module URL lets that cached
+      bootstrap acquire the *current* sender protocol/runtime bytes on every
+      fresh iframe mount, instead of pinning an obsolete coordinator forever.
+    -->
+    <script type="module" src=${JSON.stringify(continuationRuntimeUrl)}></script>
     <script type="module">
 ${workspaceEntrySource}
     </script>
@@ -4016,6 +4020,25 @@ export function createServer(config = loadConfig(), options = {}) {
         req.once("close", remove);
         res.once("close", remove);
         res.once("finish", remove);
+    });
+    app.get("/mcp-app-assets/continuation-runtime.js", (_req, res) => {
+        // This endpoint is deliberately registered before the immutable static
+        // asset middleware.  Its stable URL is the hot-upgrade boundary for a
+        // Host-cached Workspace App HTML bootstrap: every newly mounted iframe
+        // must execute the current continuation coordinator even if ChatGPT
+        // reused an older ui:// output-template document.
+        const source = readFileSync(new URL("../dist/ui/assets/continuation-coordinator.js", import.meta.url), "utf8");
+        const revision = workspaceAppRevision(config);
+        const prelude = `globalThis.__DEVSPACE_CONTINUATION_SENDER_ASSET_REVISION__=${JSON.stringify(revision)};\n`;
+        const body = `${prelude}${source}`;
+        res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate");
+        res.setHeader("Pragma", "no-cache");
+        res.setHeader("Expires", "0");
+        res.setHeader("X-DevSpace-Sender-Protocol-Epoch", String(CONTINUATION_SENDER_PROTOCOL_EPOCH));
+        res.setHeader("X-DevSpace-Sender-Asset-Revision", revision);
+        res.setHeader("X-Content-SHA256", createHash("sha256").update(body).digest("hex"));
+        res.send(body);
     });
     app.use("/mcp-app-assets", express.static(uiBuildDirectory(), {
         immutable: true,

@@ -115,15 +115,20 @@ try {
   }
 
   const html = workspaceAppHtml({ publicBaseUrl: "https://example.test" });
+  const externalScriptSources = Array.from(
+    html.matchAll(/<script\b[^>]*\bsrc=(["'])(.*?)\1[^>]*>/g),
+    (match) => match[2],
+  );
   if (
     !html.includes("const RUNTIME_TOOLS = new Set([")
     || !html.includes(".codex-runtime-card{")
     || !html.includes(".devspace-session-review{")
     || !html.includes(".devspace-operation-timeline {")
-    || /<script[^>]+src=/.test(html)
+    || externalScriptSources.length !== 1
+    || externalScriptSources[0] !== "https://example.test/mcp-app-assets/continuation-runtime.js"
     || /<link[^>]+rel="stylesheet"/.test(html)
   ) {
-    throw new Error("runtime enhancement assets are not self-contained in the workspace app");
+    throw new Error("runtime enhancement assets must remain inline while only the stable continuation runtime may load externally");
   }
 
   for (const relativePath of [

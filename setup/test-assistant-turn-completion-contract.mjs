@@ -364,6 +364,49 @@ try {
   assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 20_000 }), handoffScope).length, 0,
     "the handoff promotion must be idempotent and may create only one READY generation");
 
+  // dev52 regression: browser sender availability is a delivery prerequisite,
+  // not authority for the model-owned completion boundary.  A protocol upgrade
+  // can leave an old cached iframe unable to bind.  The exact signed completion
+  // must still mature into one durable READY generation so a later compatible
+  // sender can discover it instead of leaving the conversation silently parked
+  // in COMPLETION_REQUESTED forever.
+  const senderlessScope = "v1/atcc-dev52-senderless-handoff";
+  const senderless = begin(senderlessScope, "ws_atcc_dev52_senderless_handoff");
+  const senderlessMount = runtime.prepareContinuationAnchorMount({
+    taskId: senderless.task.id,
+    conversationScopeId: senderlessScope,
+  });
+  assert.ok(senderlessMount.anchorMountToken,
+    "the manual round may issue a card even if no compatible sender ever binds");
+  work(senderless, senderlessScope, 1);
+  const senderlessRequested = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: senderless.task.id,
+    note: "dev52-signed-final-with-incompatible-cached-sender",
+  });
+  assert.equal(senderlessRequested.accepted, true);
+  const senderlessRequestedAt = Date.parse(senderlessRequested.task.assistantTurnCompletionRequestedAt);
+  const senderlessReady = runtime.continuationSupervisorSweep({ nowMs: senderlessRequestedAt + 9_001 });
+  assert.equal(readyForScope(senderlessReady, senderlessScope).length, 1,
+    "a mature signed completion must create READY even when senderStatus is unavailable");
+  const senderlessCompleted = runtime.continuationTask({ action: "status", taskId: senderless.task.id });
+  assert.equal(senderlessCompleted.task.assistantTurnState, "COMPLETED");
+  const senderlessArchitecture = runtime.continuationArchitectureSnapshot(senderlessScope);
+  const senderlessGeneration = senderlessArchitecture.generations.find(
+    (entry) => entry.workset_id === senderlessArchitecture.card.active_workset_id && entry.owner_type === "synthetic",
+  );
+  assert.equal(senderlessGeneration?.state, "READY");
+  const senderlessManualTakeover = runtime.continuationTask({
+    action: "status",
+    taskId: senderless.task.id,
+    manualTakeover: true,
+  });
+  assert.equal(senderlessManualTakeover.accepted, true);
+  assert.equal(senderlessManualTakeover.task.assistantTurnOwner, "manual");
+  assert.equal(senderlessManualTakeover.task.assistantTurnState, "GENERATING");
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: senderlessRequestedAt + 20_000 }), senderlessScope).length, 0,
+    "manual takeover must supersede a senderless READY generation before any later relay can deliver it");
+
   // timeout/teardown are Host-owned evidence. A model call without the current
   // verified App coordinator cannot forge them.
   const timeoutScope = "v1/atcc-timeout";

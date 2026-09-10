@@ -61,6 +61,23 @@ Invoke-NativeChecked -FilePath $Node -ArgumentList @("scripts\pack-devspace-core
 
 if (-not $SkipInstall) {
     Invoke-NativeChecked -FilePath $Npm -ArgumentList @("ci", "--prefix", "app") -FailureMessage "npm ci failed."
+} else {
+    # Tests import the installed app/node_modules copy, not vendor/ directly.
+    # A freshly packed core with a stale installed copy can therefore produce
+    # convincing but completely invalid continuation regressions.  SkipInstall
+    # is allowed only when the installed core is byte-identical to the current
+    # canonical runtime; otherwise fail before any test is executed.
+    $CanonicalCore = Join-Path $Root "vendor\waishnav-devspace\dist\runtime-state.js"
+    $InstalledCore = Join-Path $Root "app\node_modules\@waishnav\devspace\dist\runtime-state.js"
+    if (-not (Test-Path $InstalledCore)) {
+        throw "-SkipInstall requested but the installed Portable core is missing. Run once without -SkipInstall."
+    }
+    $CanonicalCoreHash = (Get-FileHash $CanonicalCore -Algorithm SHA256).Hash
+    $InstalledCoreHash = (Get-FileHash $InstalledCore -Algorithm SHA256).Hash
+    if ($CanonicalCoreHash -ne $InstalledCoreHash) {
+        throw "-SkipInstall requested but app/node_modules contains a stale Portable core. Run once without -SkipInstall before testing."
+    }
+    Write-TestProgress "PASS installed Portable core matches canonical source for -SkipInstall"
 }
 
 Invoke-NativeChecked -FilePath $Node -ArgumentList @("setup\harden-nested-dependencies.mjs") -FailureMessage "Dependency hardening failed."

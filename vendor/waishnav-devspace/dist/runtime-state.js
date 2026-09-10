@@ -445,26 +445,24 @@ export class StructuredRuntimeState {
             // *before* accepting turn-complete creates a circular dependency and
             // prevents that boundary from ever being reached.
             //
-            // Keep the dev39 orphan-READY protection here instead.  A signed
-            // COMPLETION_REQUESTED lease may wait durably without creating any
-            // synthetic generation.  Promotion to COMPLETED/READY is allowed
-            // only after a current-process sender is both bound and fresh.  If
-            // the App appears after the model final, the resident sweep retries
-            // this exact lease and proceeds; if it never appears, no READY
-            // generation is manufactured or stranded.
+            // A signed COMPLETION_REQUESTED lease is itself the model-owned
+            // authority to end this exact turn after the handoff grace.  Do not
+            // make that durable state transition depend on the browser sender.
+            // Live dev51 proved that an incompatible Host-cached iframe can
+            // otherwise leave the task parked in COMPLETION_REQUESTED forever:
+            // no READY generation exists, so a later compatible sender has
+            // nothing durable to discover and the UI appears silently stuck.
+            //
+            // READY is intentionally safe to persist without a sender. Sender
+            // claim/authorize re-check the current protocol, card generation,
+            // instance and lease before any Host message is emitted, while a
+            // manual takeover atomically supersedes READY/CLAIMED/DELIVERING.
+            // Therefore sender availability is a delivery prerequisite, not a
+            // completion-promotion prerequisite.
             const senderStatus = this.continuationSenderStatus({
                 taskId: current.id,
                 conversationScopeId: current.conversation_scope_id,
             }, effectiveNowMs);
-            if (!senderStatus.eligible) {
-                return {
-                    promoted: false,
-                    reason: "continuation-sender-unavailable",
-                    senderBound: Boolean(senderStatus.senderInstanceId),
-                    senderStatus,
-                    task: current,
-                };
-            }
             const changed = this.database.sqlite.prepare(`
               update continuation_tasks set
                 assistant_turn_state='COMPLETED',assistant_turn_completed_at=?,
@@ -491,6 +489,8 @@ export class StructuredRuntimeState {
             return {
                 promoted: true,
                 reason: "assistant-turn-completion-promoted-after-handoff-grace",
+                senderReadyAtPromotion: Boolean(senderStatus.eligible),
+                senderStatus,
                 task: this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(id),
             };
         })();
@@ -1532,6 +1532,16 @@ export class StructuredRuntimeState {
             and (
               (w.continuation_due_at is not null and w.continuation_due_at<=?)
               or exists(
+                select 1 from continuation_tasks t
+                where t.id=w.legacy_task_id
+                  and t.state='RUNNING'
+                  and t.continuation_mode='completion-driven'
+                  and t.assistant_turn_state='COMPLETION_REQUESTED'
+                  and t.assistant_turn_completion_requested_at is not null
+                  and t.assistant_turn_completion_lease_id=t.turn_lease_id
+                  and datetime(t.assistant_turn_completion_requested_at, '+8 seconds')<=datetime(?)
+              )
+              or exists(
                 select 1 from continuation_generations g
                 where g.workset_id=w.id and g.owner_type='synthetic'
                   and g.state='CLAIMED' and g.due_at is not null and g.due_at<=?
@@ -1539,7 +1549,7 @@ export class StructuredRuntimeState {
             )
           order by coalesce(w.continuation_due_at, ?) asc
           limit 128
-        `).all(nowIso, nowIso, nowIso);
+        `).all(nowIso, nowIso, nowIso, nowIso);
         const ready = [];
         for (const candidate of candidates) {
             const outcome = this.database.sqlite.transaction(() => {
