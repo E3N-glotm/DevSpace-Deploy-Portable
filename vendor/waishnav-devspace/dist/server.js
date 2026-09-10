@@ -2247,8 +2247,15 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 const result = JSON.stringify(outcome, null, 2);
                 return { content: [textBlock(result)], structuredContent: { result, ...outcome } };
             }
-            if (!expectedSenderAssetRevision || String(input.senderAssetRevision ?? "") !== expectedSenderAssetRevision) {
-                const outcome = senderCompatibilityFailure("sender-asset-revision-mismatch");
+            // The resource revision proves which Workspace App bytes are
+            // calling, but it is not itself a compatibility boundary.  That
+            // hash includes presentation-only assets and therefore may differ
+            // for a cached iframe after a live Portable upgrade even when the
+            // continuation sender protocol is unchanged.  Protocol epoch is
+            // the explicit compatibility fence; keep requiring a non-empty
+            // revision so provenance remains observable.
+            if (!String(input.senderAssetRevision ?? "").trim()) {
+                const outcome = senderCompatibilityFailure("sender-asset-revision-required");
                 const result = JSON.stringify(outcome, null, 2);
                 return { content: [textBlock(result)], structuredContent: { result, ...outcome } };
             }

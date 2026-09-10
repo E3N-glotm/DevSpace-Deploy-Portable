@@ -17,10 +17,16 @@ const coordinatorPath = join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", 
 const coordinator = readFileSync(coordinatorPath, "utf8");
 const senderEpoch = (source) => Number(source.match(/const CONTINUATION_SENDER_PROTOCOL_EPOCH = (\d+);/)?.[1]);
 const TEST_SENDER_ASSET_REVISION = "0123456789abcdef";
+const STALE_TEST_SENDER_ASSET_REVISION = "fedcba9876543210";
 const withTestSenderProtocol = (input = {}) => ({
   ...input,
   senderProtocolEpoch: senderEpoch(server),
   senderAssetRevision: TEST_SENDER_ASSET_REVISION,
+});
+const withStaleTestSenderProtocol = (input = {}) => ({
+  ...input,
+  senderProtocolEpoch: senderEpoch(server),
+  senderAssetRevision: STALE_TEST_SENDER_ASSET_REVISION,
 });
 const configureTestSenderTransport = (runtimeState) => runtimeState.configureContinuationSenderTransport({
   protocolEpoch: senderEpoch(server),
@@ -290,7 +296,7 @@ assert.doesNotMatch(runtimeStateSource, /if \(action === "turn-complete"[\s\S]{0
   "turn-complete must not deadlock on a browser sender that ChatGPT may initialize only while the assistant final is being committed");
 assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,6200}continuationSenderStatus\(\{[\s\S]{0,500}taskId:[\s\S]{0,500}conversationScopeId:/,
   "promotion-time sender readiness must delegate to the canonical sender eligibility check rather than trusting a historical sender id");
-assert.match(runtimeStateSource, /continuationSenderStatus\(input = \{\}, nowMs = Date\.now\(\)\)[\s\S]{0,3600}senderHeartbeatAgeMs[\s\S]{0,900}ANCHOR_LEASE_MS/,
+assert.match(runtimeStateSource, /continuationSenderStatus\(input = \{\}, nowMs = Date\.now\(\)\)[\s\S]{0,5200}senderHeartbeatAgeMs[\s\S]{0,900}ANCHOR_LEASE_MS/,
   "the canonical sender eligibility check must enforce a bounded sender heartbeat freshness lease");
 assert.match(runtimeStateSource, /MODEL_COMPLETION_HANDOFF_GRACE_MS = 8_000/,
   "normal ChatGPT finals without Apps teardown must use a prompt bounded handoff grace only after explicit ATCC intent");
@@ -397,6 +403,12 @@ assert.match(server, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 11/,
   "the server must publish the same hidden sender compatibility epoch");
 assert.match(server, /sender-protocol-epoch-mismatch/,
   "the server must fail closed when a stale or missing sender epoch reaches the hidden sender bridge");
+assert.match(server, /sender-asset-revision-required/,
+  "the hidden sender bridge must still require the iframe to identify its concrete resource revision");
+assert.doesNotMatch(server, /senderCompatibilityFailure\("sender-asset-revision-mismatch"\)/,
+  "whole-Workspace-App resource drift must not be treated as a sender protocol incompatibility");
+assert.match(runtimeStateSource, /assetRevisionDrift:/,
+  "resource revision drift must remain observable even though protocol epoch owns compatibility");
 assert.match(server, /action: "status", taskId: input\.taskId, readOnlyStatus: true/,
   "server-internal taskId-to-scope lookups must use side-effect-free status rather than consuming synthetic delivery ownership");
 assert.match(server, /if \(input\.action === "watch-status"\)[\s\S]{0,700}readOnlyStatus: true/,
@@ -2499,12 +2511,12 @@ try {
     });
     assert.equal(mounted.accepted, true);
     assert.ok(mounted.task.anchorMountVerifiedAt, "the actual iframe ACK must persist verified mount truth");
-    const senderBound = runtime.bindContinuationSender({
+    const senderBound = runtime.bindContinuationSender(withTestSenderProtocol({
       conversationScopeId,
       taskId: outcome.task.id,
       senderInstanceId: coordinatorInstanceId,
       anchorMountGeneration: requested.anchorMountGeneration,
-    });
+    }));
     assert.equal(senderBound.accepted, true,
       "a verified test App surface must also bind the current-process continuation sender just like the real coordinator does");
     return mounted;
@@ -2535,12 +2547,12 @@ try {
     anchorMountToken: senderRestartAnchor.anchorMountToken,
   });
   assert.equal(senderRestartMounted.accepted, true);
-  const senderRestartBound = senderRestartRuntimeA.bindContinuationSender({
+  const senderRestartBound = senderRestartRuntimeA.bindContinuationSender(withTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,
     senderInstanceId: "ui_sender_restart",
     anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
-  });
+  }));
   assert.equal(senderRestartBound.accepted, true, JSON.stringify(senderRestartBound));
   assert.equal(
     senderRestartRuntimeA.database.sqlite.prepare(
@@ -2614,21 +2626,25 @@ try {
     null,
     "restart recovery must remain unbound until the Workspace App performs a new sender bind",
   );
-  const senderRestartRebound = senderRestartRuntimeB.bindContinuationSender(withTestSenderProtocol({
+  const senderRestartRebound = senderRestartRuntimeB.bindContinuationSender(withStaleTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,
     senderInstanceId: "ui_sender_restart",
     anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
   }));
   assert.equal(senderRestartRebound.accepted, true, JSON.stringify(senderRestartRebound));
+  assert.equal(senderRestartRebound.senderStatus?.assetRevisionDrift, true,
+    "a cached iframe with the same protocol epoch but an older resource revision must rebind while exposing revision drift");
+  assert.equal(senderRestartRebound.senderStatus?.assetRevisionMatches, false,
+    "resource provenance must still report that the cached iframe differs from the current Workspace App bytes");
   assert.equal(
     senderRestartRuntimeB.database.sqlite.prepare(
       "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
     ).get(senderRestartScope)?.sender_instance_id,
     "ui_sender_restart",
-    "a fresh bind using the current protocol/asset contract must recover sender authority without rotating the lifetime card",
+    "a compatible cached iframe must recover sender authority without rotating the lifetime card",
   );
-  const senderRestartHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withTestSenderProtocol({
+  const senderRestartHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withStaleTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,
     senderInstanceId: "ui_sender_restart",
@@ -2637,7 +2653,7 @@ try {
   }));
   assert.equal(senderRestartHeartbeat.accepted, true,
     "after a fresh bind, sender heartbeat may refresh the current-process lease");
-  const senderRestartCompetingHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withTestSenderProtocol({
+  const senderRestartCompetingHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withStaleTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,
     senderInstanceId: "ui_sender_restart_competitor",
@@ -2687,12 +2703,12 @@ try {
     coordinatorInstanceId: "ui_rebind_claim_a",
     anchorMountToken: rebindClaimAnchor.anchorMountToken,
   }).accepted, true);
-  assert.equal(runtime.bindContinuationSender({
+  assert.equal(runtime.bindContinuationSender(withTestSenderProtocol({
     conversationScopeId: rebindClaimScope,
     taskId: rebindClaimTask.task.id,
     senderInstanceId: "ui_rebind_claim_a",
     anchorMountGeneration: rebindClaimAnchor.anchorMountGeneration,
-  }).accepted, true);
+  })).accepted, true);
   runtime.touchContinuationModelActivity({
     workspaceId: "ws_sender_rebind_claim",
     conversationScopeId: rebindClaimScope,
@@ -2716,12 +2732,12 @@ try {
   });
   assert.equal(senderAClaim.accepted, true);
   const claimedGeneration = senderAClaim.generation;
-  const senderBRebind = runtime.bindContinuationSender({
+  const senderBRebind = runtime.bindContinuationSender(withTestSenderProtocol({
     conversationScopeId: rebindClaimScope,
     taskId: rebindClaimTask.task.id,
     senderInstanceId: "ui_rebind_claim_b",
     anchorMountGeneration: rebindClaimAnchor.anchorMountGeneration,
-  });
+  }));
   assert.equal(senderBRebind.accepted, true);
   assert.equal(senderBRebind.senderRebindReleasedClaim, true,
     "a replacement sender must release a superseded pre-delivery claim immediately");
@@ -3915,12 +3931,12 @@ try {
   `).get("v1/test-turn-complete-missing-sender")?.count ?? 0;
   assert.equal(generationBeforeSenderBind, 0,
     "waiting for a sender after turn-complete must not leave an orphan automatic generation behind");
-  const missingSenderBound = runtime.bindContinuationSender({
+  const missingSenderBound = runtime.bindContinuationSender(withTestSenderProtocol({
     conversationScopeId: "v1/test-turn-complete-missing-sender",
     taskId: missingSenderTask.task.id,
     senderInstanceId: "ui_turn_complete_missing_sender",
     anchorMountGeneration: missingSenderAnchor.anchorMountGeneration,
-  });
+  }));
   assert.equal(missingSenderBound.accepted, true,
     "the current App may recover by binding its sender without rotating the lifetime card");
   const recoveredSenderPromotion = runtime.promoteMatureAssistantCompletionIntent(

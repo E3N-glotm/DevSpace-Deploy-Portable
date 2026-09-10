@@ -239,8 +239,13 @@ export class StructuredRuntimeState {
         if (!conversationScopeId)
             return { accepted: false, reason: "conversation-scope-required" };
         const nowIso = new Date().toISOString();
-        const upgradeRequired = reason === "sender-protocol-epoch-mismatch"
-            || reason === "sender-asset-revision-mismatch";
+        // Protocol epoch is the compatibility boundary.  The Workspace App
+        // resource revision is still recorded as immutable provenance, but it
+        // also changes for presentation-only assets (for example a footer
+        // version label). Treating that whole-resource hash as a protocol
+        // fence makes a still-compatible cached ChatGPT iframe unusable after
+        // every live Portable upgrade.
+        const upgradeRequired = reason === "sender-protocol-epoch-mismatch";
         const changed = this.database.sqlite.prepare(`
           update continuation_conversation_cards
           set sender_lease_state=?,sender_last_failure_reason=?,sender_last_failure_at=?,updated_at=?
@@ -281,6 +286,8 @@ export class StructuredRuntimeState {
         const expectedProtocolEpoch = Number(this.continuationSenderProtocolEpoch || 0);
         const observedAssetRevision = String(card?.sender_asset_revision || "").trim();
         const expectedAssetRevision = String(this.continuationSenderAssetRevision || "").trim();
+        const assetRevisionMatches = Boolean(observedAssetRevision && expectedAssetRevision
+            && observedAssetRevision === expectedAssetRevision);
         const observedBootId = String(card?.sender_server_boot_id || "").trim();
         const observedGeneration = Number(card?.sender_mount_generation || 0);
         const cardGeneration = Number(card?.mount_generation || 0);
@@ -294,8 +301,6 @@ export class StructuredRuntimeState {
             reason = "sender-not-bound";
         else if (expectedProtocolEpoch > 0 && observedProtocolEpoch !== expectedProtocolEpoch)
             reason = "sender-protocol-epoch-mismatch";
-        else if (expectedAssetRevision && observedAssetRevision !== expectedAssetRevision)
-            reason = "sender-asset-revision-mismatch";
         else if (!observedBootId || observedBootId !== this.continuationSenderServerBootId)
             reason = "sender-server-boot-mismatch";
         else if (observedGeneration !== cardGeneration)
@@ -313,6 +318,8 @@ export class StructuredRuntimeState {
             expectedProtocolEpoch: expectedProtocolEpoch || undefined,
             assetRevision: observedAssetRevision || undefined,
             expectedAssetRevision: expectedAssetRevision || undefined,
+            assetRevisionMatches,
+            assetRevisionDrift: Boolean(observedAssetRevision && expectedAssetRevision && !assetRevisionMatches),
             serverBootId: observedBootId || undefined,
             expectedServerBootId: this.continuationSenderServerBootId,
             cardGeneration: cardGeneration || undefined,
@@ -745,6 +752,10 @@ export class StructuredRuntimeState {
         const taskId = String(input.taskId ?? "").trim();
         const senderInstanceId = String(input.senderInstanceId ?? "").trim();
         const senderProtocolEpoch = Number(input.senderProtocolEpoch || this.continuationSenderProtocolEpoch || 0);
+        // Internal runtime callers may omit provenance and inherit the
+        // configured current resource revision. The public App bridge rejects
+        // an omitted senderAssetRevision before reaching this method, so a
+        // real iframe can never use this fallback to masquerade as current.
         const senderAssetRevision = String(input.senderAssetRevision ?? this.continuationSenderAssetRevision ?? "").trim();
         if (!senderInstanceId)
             return { accepted: false, reason: "sender-required" };
@@ -752,8 +763,6 @@ export class StructuredRuntimeState {
             return { accepted: false, reason: "sender-protocol-epoch-required" };
         if (this.continuationSenderProtocolEpoch > 0 && senderProtocolEpoch !== this.continuationSenderProtocolEpoch)
             return { accepted: false, reason: "sender-protocol-epoch-mismatch" };
-        if (this.continuationSenderAssetRevision && senderAssetRevision !== this.continuationSenderAssetRevision)
-            return { accepted: false, reason: "sender-asset-revision-mismatch" };
         // Prefer the authenticated Host request scope. Some App->MCP calls do
         // not preserve it, so allow a narrow app-only fallback bound to the
         // exact random taskId + canonical conversation scope + current manual-
@@ -1887,12 +1896,9 @@ export class StructuredRuntimeState {
             return { accepted: false, reason: "sender-protocol-epoch-mismatch",
                 senderStatus: this.continuationSenderStatus({ taskId, conversationScopeId }) };
         }
-        if (this.continuationSenderAssetRevision && senderAssetRevision !== this.continuationSenderAssetRevision) {
-            this.recordContinuationSenderFailure({ conversationScopeId, senderInstanceId, senderProtocolEpoch, senderAssetRevision,
-                reason: "sender-asset-revision-mismatch" });
-            return { accepted: false, reason: "sender-asset-revision-mismatch",
+        if (!senderAssetRevision)
+            return { accepted: false, reason: "sender-asset-revision-required",
                 senderStatus: this.continuationSenderStatus({ taskId, conversationScopeId }) };
-        }
         const task = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
         if (!task || String(task.conversation_scope_id || "") !== conversationScopeId)
             return { accepted: false, reason: task ? "conversation-task-mismatch" : "task-not-found" };
