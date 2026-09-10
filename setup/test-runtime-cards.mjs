@@ -190,6 +190,10 @@ try {
     new URL("../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js", import.meta.url),
     "utf8",
   );
+  const coordinatorSource = await readFile(
+    new URL("../app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-coordinator.js", import.meta.url),
+    "utf8",
+  );
   const enhancementCss = await readFile(
     new URL("../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.css", import.meta.url),
     "utf8",
@@ -205,13 +209,27 @@ try {
   const portableVersion = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")).version;
   const versionManifest = JSON.parse(await readFile(new URL("../VERSION-MANIFEST.json", import.meta.url), "utf8"));
   const portableDisplayVersion = String(versionManifest.displayVersion || portableVersion);
-  if (!enhancementSource.includes(`DevSpace Portable ${portableDisplayVersion} · Protocol 1.5`)
+  if (
+    !html.includes('window.__DEVSPACE_CONTINUATION_WAKE_URL__ = "https://example.test/mcp-app-assets/continuation-wake"')
+    || /new URL\([^\n]*import\.meta\.url/.test(coordinatorSource)
+    || !coordinatorSource.includes("__DEVSPACE_CONTINUATION_WAKE_URL__")
+  ) {
+    throw new Error("the inlined continuation coordinator must receive an absolute server-injected wake URL and remain safe in srcdoc/about sandboxes");
+  }
+  if (!enhancementSource.includes(`DevSpace Portable ${portableDisplayVersion} · Protocol 1.6`)
       || !enhancementSource.includes("session_rollback")
       || !enhancementSource.includes("session_changes")) {
     throw new Error("session review, rollback, or version footer is missing from the Workspace App");
   }
   if (!enhancementSource.includes('const CONTINUATION_TOOLS = new Set(["continuation_anchor"]);')) {
     throw new Error("only continuation_anchor may render the continuation milestone mode");
+  }
+  if (
+    !enhancementSource.includes("function reconcileCardNode")
+    || enhancementSource.includes("setTimeout(scheduleRender, 25)")
+    || enhancementSource.includes("setTimeout(scheduleRender, 150)")
+  ) {
+    throw new Error("milestone cards must reconcile in place without competing delayed whole-root renders");
   }
   if (!enhancementSource.includes('devspace-review-collapsed')) {
     throw new Error("review cards must support a compact collapsed state rather than leaving Applied patch permanently expanded");
@@ -256,6 +274,8 @@ try {
       runtimeResponseRedacted: true,
       operationTimeline: true,
       runtimeAssets: true,
+      srcdocSafeCoordinator: true,
+      stableCardReconciliation: true,
       decoupledRenderTool: true,
       singleContinuationCardEntry: true,
       invocationStatusMetadata: true,

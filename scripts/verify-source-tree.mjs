@@ -148,6 +148,21 @@ if (eol.mismatches.length) {
 }
 
 const manifest = JSON.parse(readFileSync(join(root, "VERSION-MANIFEST.json"), "utf8"));
+// Protocol interoperability is stronger than independent version assertions:
+// dev35 shipped a sender at epoch 5 with a server that accepted only epoch 4.
+const senderProtocolPaths = [
+  "vendor/waishnav-devspace/dist/server.js",
+  "vendor/waishnav-devspace/dist/ui/assets/continuation-coordinator.js",
+];
+const senderProtocolEpochs = senderProtocolPaths.map((file) => {
+  const source = readFileSync(join(root, file), "utf8");
+  const epoch = Number(source.match(/const CONTINUATION_SENDER_PROTOCOL_EPOCH = (\d+);/)?.[1]);
+  if (!Number.isInteger(epoch) || epoch <= 0) throw new Error(`Invalid sender protocol epoch: ${file}`);
+  return epoch;
+});
+if (new Set(senderProtocolEpochs).size !== 1) {
+  throw new Error(`Sender protocol mismatch: ${senderProtocolPaths.map((file, index) => `${file}=${senderProtocolEpochs[index]}`).join(", ")}`);
+}
 if (!String(manifest.release || "").startsWith("DevSpacePortable-Windows-x64-")) {
   throw new Error("VERSION-MANIFEST.json contains an invalid release name.");
 }
@@ -208,8 +223,8 @@ const versionIdentitySources = [
   ["vendor/waishnav-devspace/dist/capabilities.js", `DEVSPACE_SERVER_VERSION = "${packageVersion}"`],
   // The executable/service identity stays strict semver, while user-visible
   // surfaces intentionally include the current development iteration label (devN).
-  ["vendor/waishnav-devspace/dist/ui/assets/runtime-enhancements.js", `DevSpace Portable ${displayVersion} · Protocol 1.5`],
-  ["setup/native/DevSpacePortableApp.cs", `DevSpace Portable ${displayVersion} · Protocol 1.5`],
+  ["vendor/waishnav-devspace/dist/ui/assets/runtime-enhancements.js", `DevSpace Portable ${displayVersion} · Protocol 1.6`],
+  ["setup/native/DevSpacePortableApp.cs", `DevSpace Portable ${displayVersion} · Protocol 1.6`],
 ];
 for (const [file, expected] of versionIdentitySources) {
   const source = readFileSync(join(root, file), "utf8");

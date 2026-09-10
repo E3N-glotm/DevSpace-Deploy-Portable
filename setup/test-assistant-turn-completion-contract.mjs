@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,6 +14,11 @@ const runtimeStatePath = join(
   "dist",
   "runtime-state.js",
 );
+const serverSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "server.js"), "utf8");
+const TEST_SENDER_PROTOCOL_EPOCH = Number(serverSource.match(/const CONTINUATION_SENDER_PROTOCOL_EPOCH = (\d+);/)?.[1]);
+const TEST_SENDER_ASSET_REVISION = "0123456789abcdef";
+assert.ok(Number.isInteger(TEST_SENDER_PROTOCOL_EPOCH) && TEST_SENDER_PROTOCOL_EPOCH > 0,
+  "ATCC regression must use the server's current sender protocol epoch");
 
 const { StructuredRuntimeState } = await import(
   `${pathToFileURL(runtimeStatePath).href}?atcc=${Date.now()}`
@@ -21,6 +26,10 @@ const { StructuredRuntimeState } = await import(
 
 const stateDir = mkdtempSync(join(tmpdir(), "devspace-atcc-test-"));
 const runtime = new StructuredRuntimeState(stateDir);
+runtime.configureContinuationSenderTransport({
+  protocolEpoch: TEST_SENDER_PROTOCOL_EPOCH,
+  assetRevision: TEST_SENDER_ASSET_REVISION,
+});
 
 function begin(scope, workspace = `ws_${scope}`) {
   const outcome = runtime.continuationTask({
@@ -52,6 +61,14 @@ function mount(outcome, scope, coordinator) {
   });
   assert.equal(mounted.accepted, true);
   assert.ok(mounted.task.anchorMountVerifiedAt);
+  const senderBound = runtime.bindContinuationSender({
+    conversationScopeId: scope,
+    taskId: outcome.task.id,
+    senderInstanceId: coordinator,
+    anchorMountGeneration: requested.anchorMountGeneration,
+  });
+  assert.equal(senderBound.accepted, true,
+    "a verified positive-path ATCC fixture must also model the current-process Workspace App sender required to deliver a future synthetic turn");
   return mounted;
 }
 
@@ -66,11 +83,16 @@ function work(outcome, scope, count = 1) {
   return runtime.continuationTask({ action: "status", taskId: outcome.task.id });
 }
 
+function readyForScope(sweep, scope) {
+  return (sweep?.ready ?? []).filter((item) => item.conversationScopeId === scope);
+}
+
 try {
   const migration = runtime.database.sqlite
     .prepare("select max(version) as version from devspace_schema_migrations")
     .get();
-  assert.equal(migration.version, 33, "ATCC plus the permanent lifetime singleton repair must reach schema migration 33");
+  assert.equal(migration.version, 34,
+    "ATCC, the lifetime singleton repair, and the dev48 sender-lease migration must reach schema migration 34");
   const columns = new Set(
     runtime.database.sqlite
       .prepare("pragma table_info('continuation_tasks')")
@@ -112,7 +134,7 @@ try {
 
   // Long reasoning/request silence is telemetry only. Neither an expired
   // activity lease nor an old learned Host cutoff may create another turn.
-  const longThinkScope = "conversation-atcc-long-think";
+  const longThinkScope = "v1/atcc-long-think";
   const longThink = begin(longThinkScope);
   mount(longThink, longThinkScope, "ui_atcc_long_think");
   runtime.continuationTask({
@@ -148,7 +170,7 @@ try {
 
   // Generic teardown is not an assistant completion signal because the MCP
   // Apps SDK exposes resource teardown without a response-done reason.
-  const genericScope = "conversation-atcc-generic-teardown";
+  const genericScope = "v1/atcc-generic-teardown";
   const generic = begin(genericScope);
   mount(generic, genericScope, "ui_atcc_generic");
   const genericTeardown = runtime.continuationTask({
@@ -170,7 +192,7 @@ try {
 
   // The model cannot sign a stage completion before it has actually performed
   // substantive work in the current manual turn.
-  const normalScope = "conversation-atcc-normal-completion";
+  const normalScope = "v1/atcc-normal-completion";
   const normal = begin(normalScope);
   mount(normal, normalScope, "ui_atcc_normal");
   const normalStatus = runtime.continuationTask({
@@ -275,7 +297,7 @@ try {
   assert.equal(revoked.task.assistantTurnState, "GENERATING");
   assert.equal(revoked.task.assistantTurnCompletionLeaseId, undefined);
   assert.equal(revoked.finalResponseAllowed, false);
-  assert.equal(runtime.continuationSupervisorSweep({ nowMs: firstRequestedAt + 30_000 }).ready.length, 0,
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: firstRequestedAt + 30_000 }), normalScope).length, 0,
     "a completion intent revoked by later substantive work must stay non-authorizing even after the old handoff deadline");
 
   const requestedAgain = runtime.continuationTask({
@@ -323,28 +345,28 @@ try {
   assert.equal(handoffRequested.accepted, true);
   assert.equal(handoffRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
   const handoffRequestedAt = Date.parse(handoffRequested.task.assistantTurnCompletionRequestedAt);
-  assert.equal(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 7_000 }).ready.length, 0,
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 7_000 }), handoffScope).length, 0,
     "the explicit completion handoff must not create a continuation before its rendering grace matures");
   const releaseInFlight = runtime.beginContinuationModelRequest(handoffScope);
-  assert.equal(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 9_000 }).ready.length, 0,
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 9_000 }), handoffScope).length, 0,
     "even a mature explicit completion intent must fail closed while a model-originated DevSpace request is still in flight");
   assert.equal(runtime.continuationTask({ action: "status", taskId: handoff.task.id }).task.assistantTurnState,
     "COMPLETION_REQUESTED");
   releaseInFlight();
   const handoffReady = runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 9_001 });
-  assert.equal(handoffReady.ready.length, 1,
+  assert.equal(readyForScope(handoffReady, handoffScope).length, 1,
     "a mature exact-turn completion intent must create one timely READY continuation even when normal Host teardown never arrives");
   const handoffCompleted = runtime.continuationTask({ action: "status", taskId: handoff.task.id });
   assert.equal(handoffCompleted.task.assistantTurnState, "COMPLETED");
   assert.equal(handoffCompleted.task.assistantTurnCompletionLeaseId, handoffCompleted.task.turnLeaseId);
   assert.equal(handoffCompleted.task.assistantTurnCompletionSource, "model-completion-handoff-grace");
   assert.equal(handoffCompleted.task.stallState, "CONTINUATION_ARMED");
-  assert.equal(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 20_000 }).ready.length, 0,
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 20_000 }), handoffScope).length, 0,
     "the handoff promotion must be idempotent and may create only one READY generation");
 
   // timeout/teardown are Host-owned evidence. A model call without the current
   // verified App coordinator cannot forge them.
-  const timeoutScope = "conversation-atcc-timeout";
+  const timeoutScope = "v1/atcc-timeout";
   const timeout = begin(timeoutScope);
   mount(timeout, timeoutScope, "ui_atcc_timeout");
   const forgedTimeout = runtime.continuationTask({
@@ -479,155 +501,70 @@ try {
   assert.equal(duplicateSenderTimeout.task.hostTimeoutSamples, senderTimeoutSamples,
     "duplicate timeout delivery must be idempotent and must not double-count Host calibration samples");
 
-  // Synthetic resumed turns use a stricter substantive-work floor so a status
-  // ACK plus a couple of trivial operations cannot immediately end the new
-  // model turn. This specifically guards the short 20-60 second synthetic
-  // loops observed in live ChatGPT runs.
-  const syntheticScope = "conversation-atcc-synthetic-quality";
+  // Synthetic resumed turns use the same anti-empty completion floor as a
+  // manual continue. Operation count and elapsed time are not a second turn
+  // budget: the milestone contract and model-owned stage boundary decide when
+  // a runnable turn may yield.
+  const syntheticScope = "v1/atcc-synthetic-quality";
   const synthetic = begin(syntheticScope);
+  mount(synthetic, syntheticScope, "ui_atcc_synthetic_quality");
   runtime.database.sqlite.prepare(`
     update continuation_tasks set
       delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
       delivery_work_baseline_count=coalesce(substantive_activity_count,0)
     where id=?
   `).run(synthetic.task.id);
-  work(synthetic, syntheticScope, 1);
   const syntheticTooShort = runtime.continuationTask({
     action: "turn-complete",
     taskId: synthetic.task.id,
-    note: "one-tool-short-loop",
+    note: "empty-handshake-loop",
   });
   assert.equal(syntheticTooShort.accepted, false);
-  assert.equal(syntheticTooShort.minimumSubstantiveWorkDelta, 4);
-  work(synthetic, syntheticScope, 2);
-  const syntheticStillTooShort = runtime.continuationTask({
-    action: "turn-complete",
-    taskId: synthetic.task.id,
-    note: "three-tool-short-loop",
-  });
-  assert.equal(syntheticStillTooShort.accepted, false);
-  assert.equal(syntheticStillTooShort.substantiveWorkDelta, 3);
-  assert.equal(syntheticStillTooShort.minimumSubstantiveWorkDelta, 4);
+  assert.equal(syntheticTooShort.minimumSubstantiveWorkDelta, 1);
   work(synthetic, syntheticScope, 1);
-  const syntheticTooEarly = runtime.continuationTask({
+  const syntheticRequested = runtime.continuationTask({
     action: "turn-complete",
     taskId: synthetic.task.id,
-    note: "synthetic-stage-had-four-ops-but-host-budget-is-uncalibrated",
+    note: "model-owned-stage-boundary-after-real-work",
   });
-  assert.equal(syntheticTooEarly.accepted, false);
-  assert.equal(syntheticTooEarly.reason, "synthetic-host-budget-calibration-required");
-  assert.equal(syntheticTooEarly.minimumActiveWorkMs, undefined,
-    "an uncalibrated Host must not fall back to a hard-coded synthetic duration");
-  assert.equal(syntheticTooEarly.retryAfterMs, undefined,
-    "an uncalibrated Host must not manufacture a fixed wait before completion");
-  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
-    .run(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), synthetic.task.id);
-  const syntheticStillUncalibrated = runtime.continuationTask({
-    action: "turn-complete",
-    taskId: synthetic.task.id,
-    note: "elapsed-time-alone-must-never-become-a-fixed-fallback",
-  });
-  assert.equal(syntheticStillUncalibrated.accepted, false);
-  assert.equal(syntheticStillUncalibrated.reason, "synthetic-host-budget-calibration-required");
+  assert.equal(syntheticRequested.accepted, true);
+  assert.equal(syntheticRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
+  assert.equal(syntheticRequested.minimumActiveWorkMs, undefined);
+  assert.equal(syntheticRequested.retryAfterMs, undefined);
 
-  // dev19: an Owner/manual seed is telemetry only. It must never become a
-  // permanent synthetic turn cap because a later Host deployment may expose a
-  // different window. Only verified timeout samples calibrate the gate.
-  const seedScope = "conversation-atcc-synthetic-owner-seed";
-  const seedSynthetic = begin(seedScope);
-  mount(seedSynthetic, seedScope, "ui_atcc_synthetic_owner_seed");
+  // Confirmed or learned Host windows remain timeout diagnostics. They must
+  // never create a shorter synthetic completion budget or percentage gate.
+  const budgetScope = "v1/atcc-synthetic-time-telemetry-only";
+  const budgetSynthetic = begin(budgetScope);
+  mount(budgetSynthetic, budgetScope, "ui_atcc_synthetic_time_telemetry");
   runtime.continuationTask({
     action: "confirm-turn-limit",
-    taskId: seedSynthetic.task.id,
-    elapsedMs: 420_000,
-    note: "owner-telemetry-seed-only",
-  });
-  runtime.database.sqlite.prepare(`
-    update continuation_tasks set
-      delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
-      delivery_work_baseline_count=coalesce(substantive_activity_count,0)
-    where id=?
-  `).run(seedSynthetic.task.id);
-  work(seedSynthetic, seedScope, 4);
-  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
-    .run(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), seedSynthetic.task.id);
-  const seedCannotAuthorizeBoundary = runtime.continuationTask({
-    action: "turn-complete",
-    taskId: seedSynthetic.task.id,
-    note: "owner-seed-must-not-be-a-hard-coded-cap",
-  });
-  assert.equal(seedCannotAuthorizeBoundary.accepted, false);
-  assert.equal(seedCannotAuthorizeBoundary.reason, "synthetic-host-budget-calibration-required");
-  assert.equal(seedCannotAuthorizeBoundary.hostTimeoutSamples, 0);
-  assert.equal(seedCannotAuthorizeBoundary.confirmedHostTurnLimitMs, 420_000,
-    "the telemetry seed may be reported but must not authorize a boundary");
-
-  // A verified timeout sample calibrates the current Host profile. The numbers
-  // below are arbitrary fixtures: changing the sample changes the derived gate
-  // without changing runtime source constants.
-  const calibrationProfile = "chatgpt@atcc-adaptive-budget";
-  const calibrationScope = "conversation-atcc-host-budget-calibration";
-  const calibration = begin(calibrationScope);
-  mount(calibration, calibrationScope, "ui_atcc_budget_calibration");
-  const calibratedByTimeout = runtime.continuationTask({
-    action: "host-signal",
-    taskId: calibration.task.id,
-    coordinatorInstanceId: "ui_atcc_budget_calibration",
-    hostProfileId: calibrationProfile,
-    hostSignal: "timeout",
-    elapsedMs: 600_000,
-    note: "verified-host-timeout-sample",
-  });
-  assert.equal(calibratedByTimeout.accepted, true);
-  assert.equal(calibratedByTimeout.task.hostTimeoutSamples, 1);
-
-  const budgetScope = "conversation-atcc-synthetic-host-budget";
-  const budgetSynthetic = begin(budgetScope);
-  mount(budgetSynthetic, budgetScope, "ui_atcc_synthetic_host_budget");
-  const inheritedProfile = runtime.continuationTask({
-    action: "host-signal",
     taskId: budgetSynthetic.task.id,
-    hostProfileId: calibrationProfile,
-    hostSignal: "connected",
-    elapsedMs: 0,
-    note: "inherit-live-host-profile",
+    elapsedMs: 420_000,
+    note: "owner-telemetry-only",
   });
-  assert.equal(inheritedProfile.accepted, true);
-  assert.equal(inheritedProfile.task.hostTimeoutSamples, 1);
   runtime.database.sqlite.prepare(`
     update continuation_tasks set
       delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
       delivery_work_baseline_count=coalesce(substantive_activity_count,0)
     where id=?
   `).run(budgetSynthetic.task.id);
-  work(budgetSynthetic, budgetScope, 4);
+  work(budgetSynthetic, budgetScope, 1);
   runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
-    .run(new Date(Date.now() - 120_000).toISOString(), budgetSynthetic.task.id);
-  const budgetTooEarly = runtime.continuationTask({
+    .run(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), budgetSynthetic.task.id);
+  const budgetRequested = runtime.continuationTask({
     action: "turn-complete",
     taskId: budgetSynthetic.task.id,
-    note: "live-calibrated-budget-not-yet-consumed",
+    note: "elapsed-time-and-owner-telemetry-do-not-gate-model-boundary",
   });
-  assert.equal(budgetTooEarly.accepted, false);
-  assert.equal(budgetTooEarly.reason, "synthetic-turn-min-active-work-required");
-  assert.equal(budgetTooEarly.confirmedHostTurnLimitMs, 600_000);
-  assert.equal(budgetTooEarly.hostTimeoutSamples, 1);
-  assert.equal(budgetTooEarly.syntheticHostBudgetRatio, 0.95);
-  assert.equal(budgetTooEarly.minimumActiveWorkMs, Math.floor(600_000 * 0.95));
-  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
-    .run(new Date(Date.now() - budgetTooEarly.minimumActiveWorkMs - 1_000).toISOString(), budgetSynthetic.task.id);
-  const budgetReady = runtime.continuationTask({
-    action: "turn-complete",
-    taskId: budgetSynthetic.task.id,
-    note: "synthetic-stage-consumed-manual-equivalent-budget",
-  });
-  assert.equal(budgetReady.accepted, true);
-  assert.equal(budgetReady.task.assistantTurnState, "COMPLETION_REQUESTED");
+  assert.equal(budgetRequested.accepted, true);
+  assert.equal(budgetRequested.minimumActiveWorkMs, undefined);
+  assert.equal(budgetRequested.syntheticHostBudgetRatio, undefined);
 
   // The adaptive duration gate owns only a voluntary incomplete-stage boundary. A real
   // verified Host cutoff remains independently authoritative and must recover
   // even if it occurs before any profile calibration or learned work target.
-  const budgetTimeoutScope = "conversation-atcc-synthetic-host-budget-timeout";
+  const budgetTimeoutScope = "v1/atcc-synthetic-host-budget-timeout";
   const budgetTimeout = begin(budgetTimeoutScope);
   mount(budgetTimeout, budgetTimeoutScope, "ui_atcc_synthetic_budget_timeout");
   runtime.database.sqlite.prepare(`
@@ -645,22 +582,22 @@ try {
   });
   assert.equal(earlyRealTimeout.accepted, true);
   assert.equal(earlyRealTimeout.task.assistantTurnState, "TIMED_OUT",
-    "a verified Host cutoff must bypass the voluntary synthetic duration gate");
+    "a verified Host cutoff remains independently authoritative");
 
   // An already-open ChatGPT Host can cache the pre-dev11 action enum even
   // after the MCP service has upgraded.  The exact reserved checkpoint note
   // is therefore a model-owned compatibility signature for turn-complete.
-  // It must use the identical four-operation synthetic quality gate and Host
+  // It must use the identical one-operation anti-empty gate and Host
   // ownership restrictions; ordinary checkpoint notes remain checkpoints.
   const cachedSchemaScope = "v1/atcc-cached-schema";
   const cachedSchema = begin(cachedSchemaScope, "ws_atcc_cached_schema");
+  mount(cachedSchema, cachedSchemaScope, "ui_atcc_cached_schema");
   runtime.database.sqlite.prepare(`
     update continuation_tasks set
       delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
       delivery_work_baseline_count=coalesce(substantive_activity_count,0)
     where id=?
   `).run(cachedSchema.task.id);
-  work(cachedSchema, cachedSchemaScope, 3);
   const cachedTooShort = runtime.continuationTask({
     action: "checkpoint",
     taskId: cachedSchema.task.id,
@@ -668,8 +605,8 @@ try {
   });
   assert.equal(cachedTooShort.accepted, false);
   assert.equal(cachedTooShort.reason, "assistant-turn-substantive-work-required");
-  assert.equal(cachedTooShort.substantiveWorkDelta, 3);
-  assert.equal(cachedTooShort.minimumSubstantiveWorkDelta, 4);
+  assert.equal(cachedTooShort.substantiveWorkDelta, 0);
+  assert.equal(cachedTooShort.minimumSubstantiveWorkDelta, 1);
   work(cachedSchema, cachedSchemaScope, 1);
   const cachedHostForgery = runtime.continuationTask({
     action: "checkpoint",
@@ -679,28 +616,6 @@ try {
   });
   assert.equal(cachedHostForgery.accepted, false);
   assert.equal(cachedHostForgery.reason, "turn-complete-model-only");
-  // Cached-schema compatibility uses the same adaptive gate. Seed this row as
-  // if the Host profile had already observed one verified timeout; this is a
-  // test fixture, not a product duration constant.
-  const cachedHostSampleMs = 300_000;
-  runtime.database.sqlite.prepare(`
-    update continuation_tasks set
-      host_timeout_samples=1,
-      confirmed_turn_limit_ms=?,
-      confirmed_turn_limit_source='host-timeout-initial-regime',
-      cutoff_samples_json=?,cutoff_epoch=0
-    where id=?
-  `).run(cachedHostSampleMs, JSON.stringify([cachedHostSampleMs]), cachedSchema.task.id);
-  const cachedTooEarly = runtime.continuationTask({
-    action: "checkpoint",
-    taskId: cachedSchema.task.id,
-    note: "atcc-turn-complete",
-  });
-  assert.equal(cachedTooEarly.accepted, false);
-  assert.equal(cachedTooEarly.reason, "synthetic-turn-min-active-work-required");
-  assert.equal(cachedTooEarly.minimumActiveWorkMs, Math.floor(cachedHostSampleMs * 0.95));
-  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
-    .run(new Date(Date.now() - cachedTooEarly.minimumActiveWorkMs - 1_000).toISOString(), cachedSchema.task.id);
   const cachedRequested = runtime.continuationTask({
     action: "checkpoint",
     taskId: cachedSchema.task.id,
@@ -711,16 +626,16 @@ try {
   assert.equal(cachedRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
   assert.equal(cachedRequested.finalResponseAllowed, true);
   const cachedRequestedAt = Date.parse(cachedRequested.task.assistantTurnCompletionRequestedAt);
-  assert.equal(runtime.continuationSupervisorSweep({ nowMs: cachedRequestedAt + 7_000 }).ready.length, 0,
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: cachedRequestedAt + 7_000 }), cachedSchemaScope).length, 0,
     "cached-schema completion compatibility must use the same bounded handoff grace");
   const cachedReady = runtime.continuationSupervisorSweep({ nowMs: cachedRequestedAt + 9_000 });
-  assert.equal(cachedReady.ready.length, 1,
+  assert.equal(readyForScope(cachedReady, cachedSchemaScope).length, 1,
     "cached-schema checkpoint completion must recover a normal final without requiring Host teardown");
   const cachedCompleted = runtime.continuationTask({ action: "status", taskId: cachedSchema.task.id });
   assert.equal(cachedCompleted.task.assistantTurnState, "COMPLETED");
   assert.equal(cachedCompleted.task.assistantTurnCompletionSource, "model-completion-handoff-grace");
 
-  const ordinaryCheckpointScope = "conversation-atcc-ordinary-checkpoint";
+  const ordinaryCheckpointScope = "v1/atcc-ordinary-checkpoint";
   const ordinaryCheckpoint = begin(ordinaryCheckpointScope);
   work(ordinaryCheckpoint, ordinaryCheckpointScope, 1);
   const ordinaryCheckpointResult = runtime.continuationTask({
@@ -751,7 +666,7 @@ try {
 
   // A new manual turn creates a new lease and invalidates stale completion
   // intent from the previous assistant turn before any side effect is allowed.
-  const takeoverScope = "conversation-atcc-manual-takeover";
+  const takeoverScope = "v1/atcc-manual-takeover";
   const takeover = begin(takeoverScope);
   mount(takeover, takeoverScope, "ui_atcc_takeover");
   work(takeover, takeoverScope, 1);
@@ -933,7 +848,7 @@ try {
   // Strict timeout-recovery remains a supported compatibility mode, but its
   // only automatic turn-end authority is a verified Host timeout. Normal
   // teardown and model turn-complete intent must not broaden that contract.
-  const strictScope = "conversation-atcc-timeout-recovery";
+  const strictScope = "v1/atcc-timeout-recovery";
   const strict = runtime.continuationTask({
     action: "begin",
     conversationScopeId: strictScope,
@@ -1010,9 +925,9 @@ try {
     senderTimeoutKeepsMountVerificationTruthful: true,
     senderTimeoutIsIdempotent: true,
     genericTeardownHasNoSenderFallback: true,
-    syntheticMinimumSubstantiveWorkDelta: 4,
-    syntheticVoluntaryBoundaryTracksConfirmedHostBudget: true,
-    verifiedHostTimeoutBypassesSyntheticVoluntaryDurationGate: true,
+    manualAndSyntheticMinimumSubstantiveWorkDelta: 1,
+    confirmedHostBudgetIsTelemetryOnly: true,
+    verifiedHostTimeoutRemainsAuthoritative: true,
     cachedSchemaCheckpointCompletionCompatibility: true,
     syntheticOwnerLeaseExpiryDoesNotContinue: true,
     manualTakeoverInvalidatesOldTurnIntent: true,

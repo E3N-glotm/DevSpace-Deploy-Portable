@@ -164,6 +164,11 @@ const migrations = [
         name: "continuation-permanent-lifetime-singleton",
         up: migrateContinuationPermanentLifetimeSingleton,
     },
+    {
+        version: 34,
+        name: "continuation-sender-lease-separation",
+        up: migrateContinuationSenderLeaseSeparation,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -1339,6 +1344,40 @@ function migrateContinuationPermanentLifetimeSingleton(sqlite) {
       create unique index if not exists continuation_tasks_conversation_lifetime_unique
         on continuation_tasks(conversation_scope_id)
         where conversation_scope_id glob 'v1/*';
+    `);
+}
+function migrateContinuationSenderLeaseSeparation(sqlite) {
+    // dev48: visible-card/coordinator liveness is not sender authority.  Keep
+    // sender transport identity, protocol/asset revision, server boot and its
+    // own heartbeat lease on the Conversation Card, but never allow a normal
+    // continuation_task heartbeat to mint or refresh these fields.
+    addColumnIfMissing(sqlite, "continuation_conversation_cards", "sender_protocol_epoch", "integer");
+    addColumnIfMissing(sqlite, "continuation_conversation_cards", "sender_asset_revision", "text");
+    addColumnIfMissing(sqlite, "continuation_conversation_cards", "sender_server_boot_id", "text");
+    addColumnIfMissing(sqlite, "continuation_conversation_cards", "sender_mount_generation", "integer");
+    addColumnIfMissing(sqlite, "continuation_conversation_cards", "sender_last_heartbeat_at", "text");
+    addColumnIfMissing(sqlite, "continuation_conversation_cards", "sender_lease_state", "text not null default 'NEED_REBIND'");
+    addColumnIfMissing(sqlite, "continuation_conversation_cards", "sender_last_failure_reason", "text");
+    addColumnIfMissing(sqlite, "continuation_conversation_cards", "sender_last_failure_at", "text");
+    // Existing sender_instance_id values may have been fabricated by the old
+    // verified-anchor compatibility heartbeat and therefore cannot be trusted
+    // at this schema boundary. A current-protocol App-only bind/heartbeat must
+    // establish the first dev48 sender lease.
+    sqlite.exec(`
+      update continuation_conversation_cards
+      set sender_instance_id=null,
+          sender_protocol_epoch=null,
+          sender_asset_revision=null,
+          sender_server_boot_id=null,
+          sender_mount_generation=null,
+          sender_last_heartbeat_at=null,
+          sender_lease_state=case
+            when mount_requested_at is not null and mount_token is not null and mount_generation>0 then 'NEED_REBIND'
+            else 'UNBOUND'
+          end,
+          sender_last_failure_reason=null,
+          sender_last_failure_at=null,
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');
     `);
 }
 function addColumnIfMissing(sqlite, table, column, definition) {

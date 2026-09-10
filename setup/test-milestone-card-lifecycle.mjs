@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const runtimePath = join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "runtime-state.js");
+const serverSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "server.js"), "utf8");
+const TEST_SENDER_PROTOCOL_EPOCH = Number(serverSource.match(/const CONTINUATION_SENDER_PROTOCOL_EPOCH = (\d+);/)?.[1]);
+const TEST_SENDER_ASSET_REVISION = "0123456789abcdef";
 const { StructuredRuntimeState } = await import(pathToFileURL(runtimePath).href);
 
 const stateDir = mkdtempSync(join(tmpdir(), "devspace-milestone-card-lifecycle-"));
 const runtime = new StructuredRuntimeState(stateDir);
+runtime.configureContinuationSenderTransport({
+  protocolEpoch: TEST_SENDER_PROTOCOL_EPOCH,
+  assetRevision: TEST_SENDER_ASSET_REVISION,
+});
 const db = runtime.database.sqlite;
 
 function mountAndVerify(taskId, conversationScopeId, coordinatorInstanceId) {
@@ -203,6 +210,7 @@ try {
     runtime.database.sqlite.prepare(`
       update continuation_tasks set required_milestones_json=? where id=?
     `).run(JSON.stringify([customOriginal, customPending]), custom.taskId);
+    runtime.syncContinuationArchitectureForLegacyTask(custom.taskId);
     const refused = runtime.continuationTask({
       action: "complete",
       taskId: custom.taskId,
@@ -415,6 +423,15 @@ try {
     });
     const swept = runtime.continuationSupervisorSweep();
     assert.ok(swept.ready?.length > 0, "explicit Host timeout must create a READY synthetic generation");
+
+    const senderBound = runtime.bindContinuationSender({
+      conversationScopeId: scope,
+      taskId,
+      senderInstanceId: "ui_synthetic_revision",
+      anchorMountGeneration: Number(activeCard.mount_generation),
+    });
+    assert.equal(senderBound.accepted, true,
+      "the current Workspace App transport must explicitly bind before claiming READY work");
 
     const claimed = runtime.claimReadyContinuationGeneration({
       conversationScopeId: scope,

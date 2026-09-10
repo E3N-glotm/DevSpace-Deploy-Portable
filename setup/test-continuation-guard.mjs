@@ -12,11 +12,27 @@ const migrations = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist"
 const server = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "server.js"), "utf8");
 const runtimeStateSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "runtime-state.js"), "utf8");
 const supervisorSource = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "continuation-supervisor.js"), "utf8");
-const syntheticAdaptiveGateSource = runtimeStateSource.match(/function syntheticAdaptiveActiveWorkGate\(row\) \{[\s\S]*?\n\}/)?.[0] ?? "";
 const featureTools = readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "feature-tools.js"), "utf8");
 const coordinatorPath = join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", "assets", "continuation-coordinator.js");
 const coordinator = readFileSync(coordinatorPath, "utf8");
-const visibleTriggerSource = coordinator.match(/function visibleContinuationTrigger\(task\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+const senderEpoch = (source) => Number(source.match(/const CONTINUATION_SENDER_PROTOCOL_EPOCH = (\d+);/)?.[1]);
+const TEST_SENDER_ASSET_REVISION = "0123456789abcdef";
+const withTestSenderProtocol = (input = {}) => ({
+  ...input,
+  senderProtocolEpoch: senderEpoch(server),
+  senderAssetRevision: TEST_SENDER_ASSET_REVISION,
+});
+const configureTestSenderTransport = (runtimeState) => runtimeState.configureContinuationSenderTransport({
+  protocolEpoch: senderEpoch(server),
+  assetRevision: TEST_SENDER_ASSET_REVISION,
+});
+assert.ok(Number.isInteger(senderEpoch(server)) && senderEpoch(server) > 0,
+  "server must declare a valid sender protocol epoch");
+assert.equal(senderEpoch(coordinator), senderEpoch(server),
+  "the actual coordinator and server must agree on the sender protocol epoch; individually valid constants cannot prove interoperability");
+assert.equal(senderEpoch(readFileSync(packagedServerPath, "utf8")), senderEpoch(server),
+  "installed core must enforce the same sender protocol as source");
+const visibleTriggerSource = coordinator.match(/function visibleContinuationTrigger\(task, deliveryToken\) \{[\s\S]*?\n\}/)?.[0] ?? "";
 const finalizeRelease = readFileSync(join(ROOT, "setup", "finalize-release.py"), "utf8");
 const uiManifest = JSON.parse(readFileSync(join(ROOT, "vendor", "waishnav-devspace", "dist", "ui", ".vite", "manifest.json"), "utf8"));
 const workspaceEntry = uiManifest["workspace-app.html"];
@@ -188,12 +204,21 @@ for (const pattern of [
   /delivery-result/,
   /WAITING_EXTERNAL/,
   /PAUSED_BY_USER/,
-  /continuationPending/,
   /manual recovery/,
   /onTeardown/,
 ]) assert.match(coordinator, pattern);
 assert.doesNotMatch(coordinator, /claim-continuation|release-continuation/,
   "legacy continuation_task claim/release sender paths must stay removed");
+assert.match(visibleTriggerSource, /DevSpace 一次性续轮握手 deliveryToken/,
+  "the live synthetic user-role handoff must carry the sender-issued one-time delivery token so Host turn-origin binding can complete before substantive work");
+assert.match(visibleTriggerSource, /continuation_task action=status[\s\S]{0,260}deliveryToken[\s\S]{0,260}不要设置 manualTakeover/,
+  "the resumed turn must be instructed to echo the exact one-time delivery token on its first status without impersonating a manual takeover");
+assert.match(coordinator, /visibleContinuationTrigger\(state\.task, deliveryToken\)/,
+  "the exact token returned by continuation_sender claim must flow into the Host-visible synthetic handoff");
+assert.doesNotMatch(coordinator, /do not search for, expose, or pass a continuation token/,
+  "the dev45 tokenless-only instruction must not survive after live Host turn-origin handshake evidence proved an explicit first-status capability is required");
+assert.match(server, /deliveryToken:[\s\S]{0,220}One-time synthetic turn-origin capability/,
+  "continuation_task schema guidance must describe the current one-time turn-origin ACK contract rather than labeling it legacy-only");
 assert.match(runtimeStateSource,
   /action === "claim-continuation"[\s\S]{0,2200}continuation_generations[\s\S]{0,900}generation-sender-required/,
   "legacy task-level claim must fail closed when the current delivery token belongs to a modern ContinuationGeneration");
@@ -257,11 +282,21 @@ assert.match(server, /outputSchema: resultOutputSchema\(\{[\s\S]{0,1800}preFinal
   "continuation_task output schema must preserve the pre-final directive fields across the MCP boundary");
 assert.match(runtimeStateSource, /action === "turn-complete"[\s\S]{0,3600}assistant_turn_completion_lease_id/,
   "normal assistant completion intent must be explicitly signed and bound to the current turn lease");
+assert.match(runtimeStateSource, /constructor\(stateDir\)[\s\S]{0,1200}continuation_conversation_cards[\s\S]{0,500}sender_instance_id=null/,
+  "a restarted MCP runtime must invalidate persisted Workspace App sender authority before any new continuation can be armed");
+assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,6200}continuation-sender-unavailable/,
+  "ATCC promotion, not the model-owned turn-complete signature, must fail closed when the current MCP process has no live sender transport");
+assert.doesNotMatch(runtimeStateSource, /if \(action === "turn-complete"[\s\S]{0,9000}continuation-sender-unavailable/,
+  "turn-complete must not deadlock on a browser sender that ChatGPT may initialize only while the assistant final is being committed");
+assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,6200}continuationSenderStatus\(\{[\s\S]{0,500}taskId:[\s\S]{0,500}conversationScopeId:/,
+  "promotion-time sender readiness must delegate to the canonical sender eligibility check rather than trusting a historical sender id");
+assert.match(runtimeStateSource, /continuationSenderStatus\(input = \{\}, nowMs = Date\.now\(\)\)[\s\S]{0,3600}senderHeartbeatAgeMs[\s\S]{0,900}ANCHOR_LEASE_MS/,
+  "the canonical sender eligibility check must enforce a bounded sender heartbeat freshness lease");
 assert.match(runtimeStateSource, /MODEL_COMPLETION_HANDOFF_GRACE_MS = 8_000/,
   "normal ChatGPT finals without Apps teardown must use a prompt bounded handoff grace only after explicit ATCC intent");
-assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,4200}assistant_turn_state='COMPLETED'[\s\S]{0,1200}model-completion-handoff-grace/,
+assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,9000}assistant_turn_state='COMPLETED'[\s\S]{0,1200}model-completion-handoff-grace/,
   "the resident runtime must promote only a durable explicit completion request into a completed turn after the handoff grace");
-assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,3000}assistant_turn_state \|\| ""\) !== "COMPLETION_REQUESTED"[\s\S]{0,2400}continuationModelRequestInFlight\(current\.conversation_scope_id\)/,
+assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,4000}assistant_turn_state \|\| ""\) !== "COMPLETION_REQUESTED"[\s\S]{0,3600}continuationModelRequestInFlight\(current\.conversation_scope_id\)/,
   "the handoff grace must be unreachable from GENERATING silence and must fail closed while any model-originated DevSpace request is in flight");
 assert.match(runtimeStateSource, /touchContinuationModelActivity[\s\S]{0,4200}assistant_turn_state='COMPLETION_REQUESTED'[\s\S]{0,300}then 'GENERATING'/,
   "later substantive model activity must revoke a pending completion intent before its handoff deadline can authorize anything");
@@ -297,21 +332,41 @@ assert.match(coordinator, /Always begin from authoritative server state[\s\S]{0,
   "a still-mounted turn card must query authoritative state so it can observe terminal transitions or same-task reactivation while it remains alive");
 assert.doesNotMatch(coordinator, /attemptContinuation\("task contract resource teardown"/,
   "ordinary resource teardown must fail closed instead of creating another model turn");
-assert.match(coordinator, /resource teardown carries no reason payload[\s\S]{0,700}teardown alone[\s\S]{0,700}confirmation fast path[\s\S]{0,700}COMPLETION_REQUESTED lease after its guarded handoff grace/,
+assert.match(coordinator, /resource teardown carries no reason payload[\s\S]{0,500}teardown alone[\s\S]{0,500}confirmation fast path[\s\S]{0,500}never promoted to timeout/,
   "generic teardown must remain non-authorizing by itself while acting only as an optional fast path for an explicit ATCC completion request");
-assert.match(coordinator, /recordHostSignal\(timedOut \? "timeout" : "teardown"[\s\S]{0,700}assistantTurnCompletionArmed\(state\.task\)[\s\S]{0,800}ATCC normal assistant completion confirmed by Host teardown/,
+assert.match(coordinator, /recordHostSignal\("teardown", reason\)[\s\S]{0,500}assistantTurnCompletionArmed\(state\.task\)[\s\S]{0,500}ATCC normal assistant completion confirmed by Host teardown/,
   "verified teardown may still trigger the immediate ATCC fast path when the same exact turn already signed completion");
 assert.doesNotMatch(coordinator, /syntheticDeliveryToken:|continuationDeliveryToken|DevSpace resume token/,
   "the coordinator must keep generation capabilities inside App/runtime transport instead of exposing them to the model");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS[\s\S]{0,2200}transientTransportFailure/,
   "Workspace App server calls must retry transient Connection failed/TLS style transport errors with bounded backoff");
-assert.doesNotMatch(coordinator, /(?:await\s+)?app\.sendMessage\s*\(/,
-  "automatic continuation must not use ui-message because Host acceptance does not prove a full reasoning turn started");
+assert.match(coordinator, /standardUiMessage[\s\S]{0,500}app\.sendMessage\.bind\(app\)/,
+  "automatic continuation must prefer the standards-level MCP Apps ui/message user-role request");
+assert.match(coordinator, /standardPayload = \{ role: "user", content: \[\{ type: "text", text \}\] \}/,
+  "ui/message continuation must use the exact standard user-role content-block shape");
+assert.match(coordinator, /method: "ui\/message"[\s\S]{0,300}result: "accepted"[\s\S]{0,500}model-turn-unconfirmed/,
+  "ui/message fulfillment must remain transport acceptance only until the resumed model ACKs DevSpace");
+assert.match(coordinator, /standard\.status === "pending"[\s\S]{0,500}result: "unknown"[\s\S]{0,500}mcp-app-ui-message-settlement-unknown/,
+  "an outcome-uncertain ui/message request must never trigger a second transport and risk a duplicate user turn");
 assert.match(coordinator, /window\.openai\?\.sendFollowUpMessage[\s\S]{0,600}window\.openai\.sendFollowUpMessage\.bind\(window\.openai\)/,
-  "automatic delivery must bind the native ChatGPT follow-up path");
-assert.match(coordinator, /await nativeFollowUp\(\{ prompt: text \}\)[\s\S]{0,900}method: "window\.openai\.sendFollowUpMessage"/,
-  "both the first delivery and ACK recovery must report the native ChatGPT follow-up transport");
-  assert.match(coordinator, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 5/,
+  "legacy Hosts may still use the compatibility ChatGPT follow-up bridge after an explicit ui/message rejection");
+assert.match(coordinator, /standard\.status === "fulfilled"[\s\S]{0,1200}if \(!transportMethodUnsupported\(standard\.error\) \|\| typeof nativeFollowUp !== "function"\)/,
+  "the compatibility bridge must be reachable only after an explicit standards-level rejection, never after fulfillment or timeout");
+assert.doesNotMatch(coordinator, /appTestFollowUp|app\.sendFollowUpMessage\.bind\(app\)/,
+  "automatic production delivery must not confuse an App-level lookalike sendFollowUpMessage with a Host user-turn API");
+assert.match(coordinator, /invokeWithSettlementBound\(nativeFollowUp, \{ prompt: text \}\)[\s\S]{0,1600}method: "window\.openai\.sendFollowUpMessage"/,
+  "the legacy compatibility fallback must retain bounded settlement diagnostics");
+assert.match(coordinator, /DEFAULT_NATIVE_FOLLOW_UP_SETTLEMENT_TIMEOUT_MS = 4_000/,
+  "native Host follow-up promise settlement must have a bounded production default");
+assert.match(coordinator, /nativeFollowUpSettlementTimeoutMs = Math\.max\(1,[\s\S]{0,240}DEFAULT_NATIVE_FOLLOW_UP_SETTLEMENT_TIMEOUT_MS/,
+  "the coordinator must apply the bounded native Host follow-up settlement timeout so DELIVERING cannot hang forever");
+assert.match(coordinator, /primary\.status === "pending"[\s\S]{0,900}result: "unknown"[\s\S]{0,900}native-follow-up-settlement-unknown/,
+  "a never-settling native Host promise must remain outcome-uncertain instead of being mislabeled as delivered");
+assert.match(coordinator, /native-follow-up-call-fulfilled;model-turn-unconfirmed/,
+  "a fulfilled native Host API call must remain explicitly distinct from a resumed model ACK");
+assert.match(coordinator, /safeSettlementReturnMetadata[\s\S]{0,1200}returnKeys[\s\S]{0,800}elapsedMs/,
+  "transport diagnostics must record only bounded structural return metadata and settlement latency");
+assert.match(coordinator, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 11/,
   "the Workspace App sender must carry an explicit compatibility epoch so stale in-memory iframes can be fenced after an upgrade");
 assert.match(coordinator, /action === "status" \? \{ readOnlyStatus: true \} : \{\}/,
   "every coordinator-owned status probe must be explicitly read-only and unable to ACK a synthetic model turn");
@@ -319,9 +374,26 @@ assert.match(coordinator, /async function callSender[\s\S]{0,1600}senderProtocol
   "every hidden sender action must carry the current protocol epoch");
 assert.match(coordinator, /async function bindSenderTransport[\s\S]{0,1600}senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH/,
   "sender bind must carry the current protocol epoch");
+assert.match(coordinator, /async function heartbeat\(note = "workspace-app"\)[\s\S]{0,1800}senderHeartbeatAuthorized[\s\S]{0,500}state\.anchorMountAcked[\s\S]{0,500}callSender\("heartbeat", \{ note \}\)[\s\S]{0,2200}callTask\("heartbeat", \{ note \}\)/,
+  "a verified visible anchor must renew process-local sender authority as well as the durable task/card lease after MCP restart");
+assert.match(runtimeStateSource, /const requestedCoordinatorInstanceId = input\.coordinatorInstanceId[\s\S]{0,180}const coordinatorInstanceId = requestedCoordinatorInstanceId \|\| row\.coordinator_instance_id/,
+  "task heartbeat may retain legacy display bookkeeping fallback while preserving whether coordinator authority was explicitly presented");
+assert.match(runtimeStateSource, /const verifiedAnchorHeartbeat = Boolean\(row\.anchor_mount_verified_at\)[\s\S]{0,220}Boolean\(requestedCoordinatorInstanceId\)[\s\S]{0,220}requestedCoordinatorInstanceId === row\.anchor_mount_coordinator_id/,
+  "task heartbeat must require an explicitly presented coordinator identity before renewing visible-card liveness");
+const taskHeartbeatSection = runtimeStateSource.match(/if \(action === "heartbeat"\) \{[\s\S]*?\n\s*if \(action === "host-signal"\)/)?.[0] ?? "";
+assert.ok(taskHeartbeatSection,
+  "continuation_task heartbeat implementation must remain discoverable for sender-authority regression checks");
+assert.doesNotMatch(taskHeartbeatSection, /sender_instance_id\s*=|sender_lease_state\s*=|sender_last_heartbeat_at\s*=/,
+  "ordinary task/card heartbeat must never create, restore, or renew sender transport authority");
+assert.match(runtimeStateSource, /heartbeatContinuationSender\(input = \{\}\)[\s\S]{0,5200}sender_instance_id=\?[\s\S]{0,600}sender_protocol_epoch=\?[\s\S]{0,600}sender_asset_revision=\?[\s\S]{0,600}sender_server_boot_id=\?[\s\S]{0,600}sender_mount_generation=\?[\s\S]{0,600}sender_lease_state='ACTIVE'/,
+  "sender heartbeat must renew only the exact already-bound ACTIVE epoch/asset/boot/generation lease");
+assert.match(runtimeStateSource, /heartbeatContinuationSender\(input = \{\}\)[\s\S]{0,5200}sender-rebind-required/,
+  "sender heartbeat after restart or identity drift must require an explicit bind instead of recreating authority");
+assert.match(coordinator, /async function heartbeat\([\s\S]{0,2600}senderHeartbeat\?\.reason === "sender-rebind-required"[\s\S]{0,700}bindSenderTransport\(\)[\s\S]{0,900}consumeRecoveryAfterSenderBind/,
+  "a surviving Workspace App must escalate an explicit sender-rebind-required heartbeat to the authenticated bind path and immediately consume recovered READY/ACK work");
 assert.match(coordinator, /\.\.\.extra,[\s\S]{0,400}action === "status" \? \{ readOnlyStatus: true \} : \{\}/,
   "coordinator callers must not be able to override readOnlyStatus on a control-plane status probe");
-assert.match(server, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 4/,
+assert.match(server, /CONTINUATION_SENDER_PROTOCOL_EPOCH = 11/,
   "the server must publish the same hidden sender compatibility epoch");
 assert.match(server, /sender-protocol-epoch-mismatch/,
   "the server must fail closed when a stale or missing sender epoch reaches the hidden sender bridge");
@@ -331,8 +403,8 @@ assert.match(server, /if \(input\.action === "watch-status"\)[\s\S]{0,700}readOn
   "watch-status must inspect task state without using coordinator liveness traffic as a synthetic model ACK");
 assert.match(runtimeStateSource, /reason: "read-only-status"[\s\S]{0,1000}syntheticTokenPending/,
   "runtime read-only status must preserve pending synthetic ownership while exposing enough state for the coordinator supervisor");
-assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\)[\s\S]{0,2400}\}\)/,
-  "native transport must remain behind the exact durable synthetic generation ownership barrier");
+assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\)[\s\S]{0,2400}\}\)/,
+  "all Host user-message transports must remain behind the exact durable synthetic generation ownership barrier");
 assert.match(runtimeStateSource, /state='TURN_ACKED',turn_acked_at=coalesce\(turn_acked_at,\?\)/,
   "the first synthetic status ACK must persist the exact generation ACK timestamp for later transport and duration diagnostics");
 assert.match(runtimeStateSource, /kind: "continuation-generation-delivery-authorized"[\s\S]{0,900}retryCount[\s\S]{0,600}eventSequence/,
@@ -341,8 +413,14 @@ assert.match(runtimeStateSource, /kind: "continuation-generation-delivery"[\s\S]
   "native delivery completion must remain separately journaled for live timing diagnosis");
 assert.match(runtimeStateSource, /kind: "continuation-generation-turn-acked"[\s\S]{0,900}deliveryAckStartedAt/,
   "genuine resumed-model ACK must remain separately journaled from transport completion");
+assert.match(runtimeStateSource, /if \(result === "unknown"\)[\s\S]{0,1400}outcomeUncertain:\s*true/,
+  "an unknown Host settlement must preserve the same canonical generation instead of manufacturing a retry or success state");
+assert.match(runtimeStateSource, /syntheticDeliveryPending[\s\S]{0,900}synthetic-delivery-resume-forbidden/,
+  "generic resume must fail closed while a generation-backed synthetic delivery still owns pending ACK state");
+assert.match(coordinator, /state\.task\?\.state === "FAILED_RETRYABLE"[\s\S]{0,300}!state\.task\?\.continuationDeliveryAwaitingAck[\s\S]{0,300}!state\.task\?\.deliveryToken[\s\S]{0,300}callTask\("resume"\)/,
+  "coordinator reconnect must never infer model resume from continuationPending or destroy an ACK-waiting synthetic generation");
 assert.ok(visibleTriggerSource,
-  "the continuation coordinator must expose one visibleContinuationTrigger(task) function for the actual Host user-role turn");
+  "the continuation coordinator must expose one visibleContinuationTrigger(task, deliveryToken) function for the actual Host user-role turn");
 for (const [pattern, message] of [
   [/@DevSpace MCP 继续执行未完成任务/, "the Chinese synthetic turn must explicitly activate DevSpace MCP rather than emit a bare continue"],
   [/继续执行未完成的 DevSpace 任务/, "the Chinese synthetic turn must explicitly request unfinished DevSpace execution"],
@@ -355,16 +433,16 @@ for (const [pattern, message] of [
   [/Next unfinished milestone/, "the English synthetic turn must carry the next unresolved milestone"],
   [/do not reply with only a status/, "the English synthetic turn must forbid a status-only premature final"],
   [/still working/, "the English synthetic turn must forbid a still-working-only premature final"],
-  [/一次命令\/测试失败/, "one failed command or test must not terminate a Chinese synthetic turn"],
+  [/单次命令\/测试失败/, "one failed command or test must not terminate a Chinese synthetic turn"],
   [/One failed command\/test/, "one failed command or test must not terminate an English synthetic turn"],
   [/少量快速工具调用/, "a few quick Chinese tool calls must not be treated as sufficient resumed work"],
   [/a few quick tool calls/, "a few quick English tool calls must not be treated as sufficient resumed work"],
   [/action=turn-complete/, "a voluntary incomplete stage boundary must use the ATCC turn-complete handshake"],
   [/finalResponseAllowed=true/, "a voluntary incomplete final must require explicit runtime permission"],
   [/不使用固定分钟数/, "the Chinese synthetic duration policy must explicitly reject a hard-coded number of minutes"],
-  [/缩短或延长窗口/, "the Chinese synthetic duration policy must relearn both shorter and longer Host windows"],
+  [/窗口缩短或延长/, "the Chinese synthetic duration policy must treat changing Host windows as telemetry rather than a stopping gate"],
   [/uses no fixed number of minutes/, "the English synthetic duration policy must explicitly reject a hard-coded number of minutes"],
-  [/shorter or longer Host windows must be relearned/, "the English synthetic duration policy must relearn both shorter and longer Host windows"],
+  [/Observed shorter or longer Host windows may be relearned as telemetry/, "the English synthetic duration policy must treat changing Host windows as telemetry rather than a stopping gate"],
 ]) {
   assert.match(visibleTriggerSource, pattern, message);
 }
@@ -372,12 +450,12 @@ assert.doesNotMatch(coordinator, /继续。直接完成当前未完成的任务�
   "the visible synthetic continuation trigger must not pressure the model to skip state reconstruction or verification");
 assert.match(visibleTriggerSource, /task\?\.objective[\s\S]{0,500}nextUnresolvedMilestone\(task\)/,
   "the visible synthetic message must carry durable task semantics when hidden model context is not replayed by the Host");
-assert.doesNotMatch(visibleTriggerSource, /taskId=|workspaceId=|deliveryToken|generation capability/,
-  "taskId/workspaceId/recovery policy must not be emitted as a visible user message");
+assert.doesNotMatch(visibleTriggerSource, /taskId=|workspaceId=|generation capability/,
+  "taskId/workspaceId/recovery policy must not be emitted as a visible user message; only the exact one-time deliveryToken may cross the live Host turn-origin boundary");
 assert.match(coordinator, /function continuationContext\(/,
   "the coordinator must define hidden continuation context for resumed turns");
-assert.match(coordinator, /runtime atomically claims any server-owned expected synthetic generation/,
-  "hidden context must direct the first status call while leaving UUID transport to the runtime");
+assert.match(coordinator, /Call continuation_task status first\.[\s\S]{0,900}one-time deliveryToken[\s\S]{0,900}echo that exact token[\s\S]{0,900}omit manualTakeover[\s\S]{0,900}runtime consumes it immediately/,
+  "hidden context must require the exact one-time deliveryToken on the first synthetic status while keeping manualTakeover absent");
 assert.match(coordinator, /Tool availability is turn-scoped[\s\S]{0,900}api_tool\.list_resources[\s\S]{0,300}DevSpace_MCP[\s\S]{0,300}continuation_task/,
   "synthetic continuation hidden context must discover DevSpace_MCP through the Host connector path when tool schemas were not preloaded for the resumed turn");
 assert.match(coordinator, /do not stop or claim that DevSpace is unavailable/,
@@ -394,9 +472,9 @@ assert.match(coordinator, /do not produce a final response after discovery\/stat
   "hidden recovery context must forbid early finalization while runnable milestones remain");
 assert.match(coordinator, /discovery-only\/status-only or one-tool-and-final turn is an invalid automatic continuation/,
   "hidden recovery context must make substantive post-status work mandatory whenever runnable milestones remain");
-assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) =>/,
+assert.match(coordinator, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task,\s*deliveryToken\),\s*async \(\) =>/,
   "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
-assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(latest\.task\)/,
+assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task,\s*deliveryToken\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(latest\.task\)/,
   "the irreversible Host send must have a final authoritative terminal-state recheck");
 assert.match(coordinator, /function acceptTask\([\s\S]{0,1700}terminal\(state\.task\)[\s\S]{0,300}stopSupervisor\(\)[\s\S]{0,200}stopLifecycleRefresh\(\)/,
   "observing terminal state must synchronously cancel supervisor and lifecycle timers");
@@ -432,7 +510,7 @@ assert.match(server, /anchorMountVerificationPending[\s\S]{0,900}substantive wor
   "pending iframe verification must be informational after the immutable card issuance, not an execution gate");
 assert.match(runtimeStateSource, /continuationSenderCapability\(input = \{\}\)[\s\S]{0,2200}mount_requested_at[\s\S]{0,1000}anchorMountVerified/,
   "sender capability must exist from the requested card generation even before iframe ACK");
-assert.match(runtimeStateSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0,5200}state='READY'[\s\S]{0,1200}readyGeneration/,
+assert.match(runtimeStateSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0,9800}state='READY'[\s\S]{0,1200}readyGeneration/,
   "sender bind must surface an already-durable READY generation so a newly mounted ordinary App can consume it immediately");
 assert.match(runtimeStateSource, /recordContinuationHostTelemetry\(input = \{\}\)[\s\S]{0,6200}continuation-host-telemetry/,
   "Host-surface telemetry must remain an event-journal diagnostic instead of becoming continuation authorization state");
@@ -454,10 +532,14 @@ assert.match(coordinator, /window\.addEventListener\("openai:set_globals",\s*onO
   "the coordinator must observe Host global-surface changes");
 assert.match(coordinator, /callSender\("telemetry",\s*\{\s*telemetry:\s*payload\s*\}\)/,
   "the coordinator must report Host-surface names through the hidden sender bridge");
-assert.match(coordinator, /async function consumeReadyAfterSenderBind\([\s\S]{0,1300}readyGeneration[\s\S]{0,800}attemptContinuation\(reason, \{ force: true \}\)/,
-  "a newly bound sender transport must immediately consume READY instead of waiting for the old milestone iframe or another supervisor tick");
-assert.match(coordinator, /bindSenderTransport\(\)[\s\S]{0,700}consumeReadyAfterSenderBind\(bound/,
-  "ordinary Workspace App bind/rehydrate must wire directly into deterministic READY delivery");
+assert.match(coordinator, /async function consumeRecoveryAfterSenderBind\([\s\S]{0,1800}readyGeneration[\s\S]{0,900}attemptContinuation\(readyReason, \{ force: true \}\)/,
+  "a newly bound sender transport must still immediately consume READY instead of waiting for another supervisor tick");
+assert.match(coordinator, /continuationDeliveryAwaitingAck\)[\s\S]{0,180}deliveryAckRetryDue\(state\.task\)[\s\S]{0,900}no visible message will be retransmitted/,
+  "an overdue delivery ACK must remain diagnostic and must not retransmit a visible message that could interrupt a slow-starting model");
+assert.doesNotMatch(coordinator, /continuationDeliveryAwaitingAck\)[\s\S]{0,180}deliveryAckRetryDue\(state\.task\)[\s\S]{0,500}attemptContinuation/,
+  "ACK uncertainty must never call the visible continuation transport again");
+assert.match(coordinator, /bindSenderTransport\(\)[\s\S]{0,900}consumeRecoveryAfterSenderBind\(bound/,
+  "ordinary Workspace App bind/rehydrate must wire directly into deterministic READY/ACK-retry recovery");
 assert.match(coordinator, /const current = await callTask\("status"\)[\s\S]{0,3200}current\?\.readyGeneration[\s\S]{0,900}attemptContinuation\("supervisor discovered READY generation", \{ force: true \}\)/,
   "an already-bound or generation-safely rebound sender must consume a READY generation that appears later during an ordinary supervisor status refresh");
 assert.match(server, /const continuationWakeClients = new Set\(\)/,
@@ -496,51 +578,17 @@ assert.match(runtimeStateSource, /syntheticResumeWorkRequired:\s*row\.delivery_o
   "runtime status must retain a durable resumed-turn work obligation after the connectivity ACK");
 assert.match(runtimeStateSource, /SYNTHETIC_WORK_OWNER_LEASE_MS = 30 \* 60_000/,
   "synthetic ownership must remain durable across manual-like reasoning/execution intervals rather than expiring after a few tens of seconds");
-assert.match(runtimeStateSource, /const minimumWorkDelta = owner === "synthetic" \? 4 : 1/,
-  "synthetic turn-complete must require a stronger post-ACK substantive-work floor than the old two-call short-loop contract");
+assert.match(runtimeStateSource, /const minimumWorkDelta = 1/,
+  "manual and synthetic turn-complete must share one anti-empty substantive-work floor");
 assert.doesNotMatch(runtimeStateSource, /SYNTHETIC_MIN_ACTIVE_WORK_MS|syntheticMinimumActiveWorkMs/,
   "synthetic voluntary completion must not retain a fixed-duration fallback");
-assert.match(runtimeStateSource, /SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO = 0\.95/,
-  "a synthetic incomplete-stage boundary must reserve only a small finalization margin from a confirmed Host budget");
-assert.ok(syntheticAdaptiveGateSource,
-  "runtime-state must define one syntheticAdaptiveActiveWorkGate(row) implementation");
-assert.match(syntheticAdaptiveGateSource, /host_timeout_samples/,
-  "synthetic voluntary completion calibration must require persisted live Host timeout sample count");
-assert.match(syntheticAdaptiveGateSource, /\^host-timeout-/,
-  "manual/user confirmed telemetry seeds must not masquerade as a live Host timeout regime");
-assert.match(syntheticAdaptiveGateSource, /cutoff_samples_json/,
-  "synthetic voluntary completion calibration must require live cutoff samples from the current Host regime");
-assert.match(syntheticAdaptiveGateSource, /liveVerified[\s\S]*timeoutSamples > 0[\s\S]*confirmedSource[\s\S]*liveCutoffSamples\.length > 0/,
-  "synthetic voluntary completion must fail closed unless all live Host timeout evidence is present");
-assert.match(syntheticAdaptiveGateSource, /adaptiveHostLimitMs \* SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO/,
-  "the calibrated boundary must be derived from the adaptive Host limit using only the dimensionless reserve ratio");
-const uncalibratedBudgetBranch = runtimeStateSource.match(/if \(owner === "synthetic" && !syntheticBudgetGate\?\.calibrated\) \{[\s\S]*?\n\s*\}/)?.[0] ?? "";
-assert.ok(uncalibratedBudgetBranch,
-  "turn-complete must have an explicit fail-closed branch for an uncalibrated synthetic Host profile");
-assert.match(uncalibratedBudgetBranch, /synthetic-host-budget-calibration-required/,
-  "an uncalibrated synthetic Host profile must reject voluntary incomplete completion");
-assert.match(uncalibratedBudgetBranch, /Deliberately no retryAfterMs/,
-  "the uncalibrated branch must document that it intentionally exposes no fixed retry duration");
-assert.doesNotMatch(uncalibratedBudgetBranch, /^\s*retryAfterMs\s*:/m,
-  "an uncalibrated Host must never manufacture a fixed wait/retry duration");
-
-const calibratedBudgetBranch = runtimeStateSource.match(/if \(owner === "synthetic" && activeWorkMs < minimumActiveWorkMs\) \{[\s\S]*?\n\s*\}/)?.[0] ?? "";
-assert.ok(calibratedBudgetBranch,
-  "turn-complete must have an explicit calibrated minimum-active-work branch");
-assert.match(calibratedBudgetBranch, /synthetic-turn-min-active-work-required/,
-  "a calibrated synthetic Host profile must reject a voluntary boundary before its adaptive earliest point");
-assert.match(calibratedBudgetBranch, /retryAfterMs:\s*Math\.max\(1, minimumActiveWorkMs - activeWorkMs\)/,
-  "a calibrated retry delay must be derived only from the adaptive Host boundary minus actual active work");
-assert.match(runtimeStateSource, /const activeWorkMs =[\s\S]*?syntheticAdaptiveActiveWorkGate\(row\)[\s\S]*?minimumActiveWorkMs = owner === "synthetic"[\s\S]*?synthetic-turn-min-active-work-required/,
-  "synthetic turn-complete must enforce adaptive work quality without turning a fixed elapsed duration into continuation authority");
+assert.doesNotMatch(runtimeStateSource, /SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO|syntheticAdaptiveActiveWorkGate|synthetic-host-budget-calibration-required|synthetic-turn-min-active-work-required/,
+  "Host timing telemetry must not become a synthetic completion budget or percentage gate");
 
 for (const [pattern, message] of [
-  [/Four substantive operations are only a minimum quality floor, not permission to stop/, "hidden synthetic context must treat four substantive operations only as a quality floor"],
-  [/no fixed number of minutes/, "hidden synthetic context must explicitly reject a hard-coded minute duration"],
-  [/earliest permitted voluntary boundary/, "hidden synthetic context must treat the learned budget only as the earliest optional boundary"],
-  [/synthetic-host-budget-calibration-required/, "hidden synthetic context must recognize the uncalibrated rejection reason"],
-  [/synthetic-turn-min-active-work-required/, "hidden synthetic context must recognize the calibrated too-early rejection reason"],
-  [/never invent a fixed wait/, "hidden synthetic context must forbid inventing a hard-coded retry duration"],
+  [/single post-ACK substantive-operation floor only rejects an empty handshake-and-final loop/, "hidden synthetic context must treat the one-operation floor only as anti-empty evidence"],
+  [/never a fixed number of minutes or a learned Host-budget percentage/, "hidden synthetic context must reject both fixed and learned duration budgets"],
+  [/across multiple milestones/, "hidden synthetic context must keep one resumed turn working across multiple milestones"],
 ]) {
   assert.match(coordinator, pattern, message);
 }
@@ -580,8 +628,8 @@ assert.match(runtimeStateSource, /if \(result === "unknown"\)[\s\S]{0,1800}outco
   "an unknown Host delivery result must remain outcome-uncertain instead of being converted into an automatic retry");
 assert.match(runtimeStateSource, /DELIVERING is an outcome-uncertain zone[\s\S]{0,900}preserve the same generation/,
   "the delivery FSM must explicitly document that a lost send callback cannot authorize a duplicate continuation");
-assert.match(coordinator, /deliveryAckRetryDue[\s\S]{0,1500}deliveryAckRetryAfterAt/,
-  "delivery ACK retransmission must honor the persisted retry schedule instead of polling new turns every supervisor tick");
+assert.match(coordinator, /deliveryAckRetryDue[\s\S]{0,1800}no visible message will be retransmitted/,
+  "delivery ACK deadline may drive diagnostics but never visible retransmission");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 500, 1_500, 3_000, 5_000\]/,
   "post-sendMessage MCP readiness must stay inside a ten-second bounded retry window");
 assert.match(server, /call continuation_anchor exactly once before substantive DevSpace work/,
@@ -857,6 +905,11 @@ try {
   rmSync(configRoot, { recursive: true, force: true });
 }
 
+// Production Workspace App HTML injects the immutable sender asset revision
+// before the inlined coordinator module executes. This test imports the module
+// directly, so reproduce that boot contract explicitly; otherwise dev48 must
+// (correctly) fail closed before any FakeApp sender behavior can be exercised.
+globalThis.__DEVSPACE_CONTINUATION_SENDER_ASSET_REVISION__ = TEST_SENDER_ASSET_REVISION;
 const { installContinuationCoordinator } = await import(`${pathToFileURL(coordinatorPath).href}?coordinator=${Date.now()}`);
 class FakeApp {
   constructor() {
@@ -873,6 +926,8 @@ class FakeApp {
     this.anchorMountToken = "00000000-0000-4000-8000-00000000a001";
     this.anchorMountGeneration = 1;
     this.bindReadyGeneration = undefined;
+    this.senderBindCount = 0;
+    this.senderHeartbeatRebindRequiredOnce = false;
   }
   verifyExistingAnchor() {
     if (this.task) {
@@ -933,10 +988,15 @@ class FakeApp {
     this.callInputs.push({ name, ...input });
     this.verifyExistingAnchor();
     if (name === "continuation_sender") {
+      assert.equal(input.senderProtocolEpoch, senderEpoch(server),
+        "the coordinator must send the epoch accepted by the real server, including bind and delivery callbacks");
+      assert.equal(input.senderAssetRevision, TEST_SENDER_ASSET_REVISION,
+        "the coordinator must send the immutable asset revision injected by the real Workspace App resource");
       assert.equal(input.taskId, this.task?.id);
       assert.equal(input.conversationScopeId, this.task?.conversationScopeId);
       assert.equal(input.anchorMountGeneration, this.anchorMountGeneration);
       if (input.action === "bind") {
+        this.senderBindCount += 1;
         return {
           structuredContent: {
             accepted: true,
@@ -952,19 +1012,34 @@ class FakeApp {
       }
       assert.equal(input.anchorMountToken, this.anchorMountToken);
       if (input.action === "heartbeat") {
+        if (this.senderHeartbeatRebindRequiredOnce) {
+          this.senderHeartbeatRebindRequiredOnce = false;
+          return {
+            structuredContent: {
+              accepted: false,
+              reason: "sender-rebind-required",
+            },
+          };
+        }
         return { structuredContent: { accepted: true, lastUiHeartbeatAt: new Date().toISOString() } };
       }
       if (input.action === "claim") {
-        const deliveryToken = "00000000-0000-4000-8000-000000000001";
+        const retryExisting = Boolean(this.task?.continuationDeliveryAwaitingAck
+          && this.task?.deliveryToken
+          && Date.parse(this.task?.deliveryAckRetryAfterAt || "") <= Date.now());
+        const deliveryToken = retryExisting
+          ? this.task.deliveryToken
+          : "00000000-0000-4000-8000-000000000001";
         this.task = {
           ...this.task,
           continuationPending: true,
-          continuationCount: 1,
+          continuationCount: retryExisting ? Number(this.task?.continuationCount || 1) : 1,
           deliveryToken,
           deliveryOwner: "synthetic-pending",
           continuationDeliveryAwaitingAck: true,
+          deliveryAckRetryAfterAt: undefined,
         };
-        return { structuredContent: { task: this.task, accepted: true, deliveryToken } };
+        return { structuredContent: { task: this.task, accepted: true, deliveryToken, retryExisting } };
       }
       if (input.action === "authorize-delivery") {
         const accepted = this.task?.deliveryOwner === "synthetic-pending"
@@ -974,15 +1049,27 @@ class FakeApp {
       }
       if (input.action === "delivery-result") {
         const deliveredAt = new Date();
+        const callFulfilled = input.result === "accepted" || input.result === "fallback-accepted";
+        const outcomeUnknown = input.result === "unknown";
         this.task = {
           ...this.task,
-          continuationPending: input.result === "accepted" || input.result === "fallback-accepted",
-          continuationDeliveryAwaitingAck: input.result === "accepted" || input.result === "fallback-accepted",
+          continuationPending: outcomeUnknown ? this.task?.continuationPending : callFulfilled,
+          continuationDeliveryAwaitingAck: outcomeUnknown
+            ? this.task?.continuationDeliveryAwaitingAck
+            : callFulfilled,
           deliveryOwner: "synthetic-pending",
           lastSendAttemptAt: deliveredAt.toISOString(),
-          deliveryAckRetryAfterAt: new Date(deliveredAt.getTime() + 15_000).toISOString(),
+          ...(callFulfilled
+            ? { deliveryAckRetryAfterAt: new Date(deliveredAt.getTime() + 15_000).toISOString() }
+            : {}),
         };
-        return { structuredContent: { task: this.task, accepted: true } };
+        return {
+          structuredContent: {
+            task: this.task,
+            accepted: true,
+            ...(outcomeUnknown ? { outcomeUncertain: true, retryRequired: false } : {}),
+          },
+        };
       }
       throw new Error(`Unexpected fake sender action ${input.action}`);
     }
@@ -1042,6 +1129,19 @@ class FakeApp {
       }
       return { structuredContent: { task: this.task, accepted: true } };
     }
+    if (input.action === "anchor-mounted") {
+      const accepted = input.anchorMountToken === this.anchorMountToken
+        && Number(input.anchorMountGeneration || 0) === Number(this.anchorMountGeneration || 0);
+      if (accepted) {
+        this.task = {
+          ...this.task,
+          anchorMountVerifiedAt: this.task?.anchorMountVerifiedAt ?? "2026-01-01T00:00:00.000Z",
+          anchorMountCoordinatorId: input.coordinatorInstanceId,
+          anchorMountGeneration: this.anchorMountGeneration,
+        };
+      }
+      return { structuredContent: { task: this.task, accepted, reason: accepted ? "anchor-rebound" : "anchor-capability-mismatch" } };
+    }
     if (input.action === "status" || input.action === "delivery-result" || input.action === "release-continuation") {
       return {
         structuredContent: {
@@ -1098,8 +1198,12 @@ assert.match(visibleSyntheticText, /finish fake task/,
   "the visible continuation trigger must carry the durable objective so a resumed turn does not have to infer which prior task is meant");
 assert.match(visibleSyntheticText, /done/,
   "the visible continuation trigger must carry the next unresolved milestone when hidden Host model context is absent");
-assert.match(visibleSyntheticText, /continuation_task status/i,
+assert.match(visibleSyntheticText, /continuation_task(?:\s+action=)?status/i,
   "the visible continuation trigger must tell the resumed turn how to recover authoritative durable state");
+assert.match(visibleSyntheticText, /deliveryToken[^\n]*00000000-0000-4000-8000-000000000001/i,
+  "the Host-visible synthetic turn must carry the exact one-time sender claim token required by the live turn-origin handshake");
+assert.match(visibleSyntheticText, /不要设置 manualTakeover|without manualTakeover/i,
+  "the first synthetic status must be explicitly distinguished from a manual takeover");
 assert.match(visibleSyntheticText, /DevSpace_MCP/i,
   "the visible continuation trigger must preserve the turn-scoped connector discovery recovery path");
 assert.match(visibleSyntheticText, /不要只回复状态|do not reply with only a status/i,
@@ -1112,8 +1216,8 @@ assert.match(visibleSyntheticText, /不要等待第二次续轮|do not wait for 
   "the first synthetic turn must be told to start substantive work without waiting for another continuation");
 assert.match(visibleSyntheticText, /继续处理中|still working/i,
   "the visible continuation trigger must name the observed placeholder-final failure mode");
-assert.doesNotMatch(visibleSyntheticText, /token|UUID|task_fake|ws_fake|authorized recovery/i,
-  "the visible Host trigger may name safe recovery actions, including the cached-schema checkpoint compatibility action, but must not expose task/workspace identity or generation capabilities");
+assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery/i,
+  "the visible Host trigger may carry only the one-time deliveryToken capability; durable task/workspace identity and broader generation authority must remain hidden");
 assert.match(visibleSyntheticText, /checkpoint[^\n]{0,120}note=atcc-turn-complete/i,
   "the visible Host trigger must expose only the exact reserved checkpoint completion signature needed by Hosts with a cached pre-dev11 schema");
 assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery/,
@@ -1121,14 +1225,14 @@ assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery
 const hiddenSyntheticContext = fakeApp.contextUpdates.at(-1)?.content?.[0]?.text ?? "";
 assert.match(hiddenSyntheticContext, /Call continuation_task status first/,
   "hidden model context must request the status claim before substantive work");
-assert.match(hiddenSyntheticContext, /server-owned expected synthetic generation/,
-  "hidden model context must explain that generation ownership is runtime-managed");
+assert.match(hiddenSyntheticContext, /one-time deliveryToken[\s\S]{0,500}echo that exact token[\s\S]{0,500}omit manualTakeover[\s\S]{0,500}consumes it immediately/,
+  "hidden model context must describe the exact first-status token ACK and immediate one-time consumption semantics");
 assert.match(hiddenSyntheticContext, /reconstruct the current durable state[\s\S]{0,500}latest available DevSpace evidence/,
   "hidden model context must rebuild task state from durable evidence before choosing the next action");
 assert.match(hiddenSyntheticContext, /failure, race, or regression risks[\s\S]{0,500}do not emit a chain-of-thought transcript/,
   "hidden model context must check relevant risks while keeping private reasoning private");
 assert.doesNotMatch(hiddenSyntheticContext, /00000000-0000-4000-8000-000000000001|syntheticDeliveryToken|continuationDeliveryToken/,
-  "hidden model context must not expose or require generation UUID transport");
+  "hidden model context must describe token handling without duplicating the concrete one-time capability outside the Host-visible user-role handoff");
 assert.ok(fakeApp.calls.includes("begin-auto"));
 assert.ok(fakeApp.calls.includes("heartbeat"));
 assert.ok(fakeApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "claim"));
@@ -1136,41 +1240,281 @@ assert.ok(fakeApp.callInputs.some((entry) => entry.name === "continuation_sender
 assert.ok(fakeApp.calls.includes("delivery-result"));
 fakeController.dispose();
 
-// Both the first delivery and a same-generation ACK retry must use the native
-// ChatGPT follow-up path. ui/message acceptance is not proof that a full model
-// reasoning/tool turn started, so it must never become an automatic fallback.
+// Reproduce the live dev48 failure: an already-mounted App survives while its
+// process-local sender lease is invalidated. Heartbeat must remain fail-closed
+// server-side, but the App must react to the explicit rebind requirement by
+// executing the authenticated bind path instead of waiting forever for a new
+// Host onConnected/toolresult event.
+const senderRebindApp = new FakeApp();
+const senderRebindController = installContinuationCoordinator(senderRebindApp, {
+  supervisorTickMs: 250,
+  heartbeatIntervalMs: 250,
+  instanceId: "ui_sender_rebind_recovery",
+});
+senderRebindApp.emit("toolinput", { arguments: { workspaceId: "ws_sender_rebind_recovery" } });
+await senderRebindController.onConnected();
+const senderBindCountBeforeLeaseLoss = senderRebindApp.senderBindCount;
+senderRebindApp.senderHeartbeatRebindRequiredOnce = true;
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 650));
+assert.ok(senderRebindApp.senderBindCount > senderBindCountBeforeLeaseLoss,
+  "an explicit sender-rebind-required heartbeat must cause the surviving App to execute a fresh authenticated sender bind");
+assert.equal(senderRebindApp.senderHeartbeatRebindRequiredOnce, false,
+  "the recovery test must actually exercise the rejected heartbeat rather than pass through the initial bind path");
+assert.equal(senderRebindApp.messages.length, 0,
+  "re-establishing sender authority alone must not invent a synthetic continuation when no READY generation exists");
+senderRebindController.dispose();
+
+// Live dev43 production evidence proved that the compatibility
+// window.openai.sendFollowUpMessage API can resolve successfully without
+// creating a model turn. Both the first delivery and a same-generation ACK
+// retry must therefore prefer the standards-level MCP Apps ui/message request.
+// Transport fulfillment still is not model-start proof; the resumed DevSpace
+// status ACK remains authoritative. A missing ACK is outcome-uncertain and
+// must not cause a second visible message.
 const transportOrder = [];
 class NativeOnlyTransportApp extends FakeApp {
-  async sendMessage() {
-    throw new Error("app.sendMessage must not be called for automatic continuation");
+  async sendMessage(value) {
+    transportOrder.push("ui-message");
+    return super.sendMessage(value);
   }
   async sendFollowUpMessage(value) {
-    transportOrder.push("native");
+    transportOrder.push("app-lookalike");
     return super.sendFollowUpMessage(value);
   }
 }
 const transportApp = new NativeOnlyTransportApp();
-const transportController = installContinuationCoordinator(transportApp, { timers: false, instanceId: "ui_transport_order" });
-transportApp.emit("toolinput", { arguments: { workspaceId: "ws_transport_order" } });
-await transportController.onConnected();
-assert.equal(await transportController.attemptContinuation("first delivery", { force: true }), true);
-assert.deepEqual(transportOrder, ["native"],
-  "the first delivery must use the native ChatGPT follow-up transport");
-transportApp.task = {
-  ...transportApp.task,
-  deliveryAckRetryCount: 1,
+const previousWindow = globalThis.window;
+const browserWindowStub = new EventTarget();
+browserWindowStub.parent = browserWindowStub;
+browserWindowStub.openai = {
+    async sendFollowUpMessage(value) {
+      transportOrder.push("window-openai");
+      return FakeApp.prototype.sendFollowUpMessage.call(transportApp, value);
+    },
+};
+globalThis.window = browserWindowStub;
+try {
+  const transportController = installContinuationCoordinator(transportApp, { timers: false, instanceId: "ui_transport_order" });
+  transportApp.emit("toolinput", { arguments: { workspaceId: "ws_transport_order" } });
+  await transportController.onConnected();
+  const firstTransportResult = await transportController.attemptContinuation("first delivery", { force: true });
+  assert.equal(firstTransportResult, true);
+  assert.deepEqual(transportOrder, ["ui-message"],
+    "when both APIs exist, the first delivery must use the standard ui/message request and must not touch the compatibility Host bridge");
+  transportApp.task = {
+    ...transportApp.task,
+    deliveryAckRetryCount: 1,
+    continuationDeliveryAwaitingAck: true,
+    deliveryAckRetryAfterAt: new Date(Date.now() - 1_000).toISOString(),
+  };
+  transportController.state.task = transportApp.task;
+  await transportController.refreshNow();
+  assert.deepEqual(transportOrder, ["ui-message"],
+    "an overdue ACK must remain diagnostic and must not retransmit a visible message");
+  const deliveryMethods = transportApp.callInputs
+    .filter((entry) => entry.name === "continuation_sender" && entry.action === "delivery-result")
+    .map((entry) => entry.method);
+  assert.deepEqual(deliveryMethods, ["ui/message"]);
+  transportController.dispose();
+} finally {
+  if (previousWindow === undefined) delete globalThis.window;
+  else globalThis.window = previousWindow;
+}
+
+// Any user-message transport can become outcome-uncertain after authorization.
+// If the standard ui/message promise never settles, the coordinator must not
+// immediately fall back to the compatibility API because the standard request
+// may already have crossed the Host boundary and a second request can duplicate
+// the visible continuation.
+let hangingUiMessageCalls = 0;
+let hangingCompatCalls = 0;
+class HangingNativeTransportApp extends FakeApp {
+  async sendMessage() {
+    hangingUiMessageCalls += 1;
+    return new Promise(() => {});
+  }
+}
+const hangingTransportApp = new HangingNativeTransportApp();
+const hangingTransportController = installContinuationCoordinator(hangingTransportApp, {
+  timers: false,
+  instanceId: "ui_hanging_native",
+  nativeFollowUpSettlementTimeoutMs: 5,
+  nativeFollowUp: async () => {
+    hangingCompatCalls += 1;
+    return undefined;
+  },
+});
+hangingTransportApp.emit("toolinput", { arguments: { workspaceId: "ws_hanging_native" } });
+await hangingTransportController.onConnected();
+const hangingStartedAt = Date.now();
+assert.equal(await hangingTransportController.attemptContinuation("hanging native follow-up", { force: true }), true,
+  "a never-settling native Host promise must still finish the sender transaction");
+assert.ok(Date.now() - hangingStartedAt < 500,
+  "the unit override must prove the sender no longer waits indefinitely for Host promise settlement");
+assert.equal(hangingUiMessageCalls, 1,
+  "the standard ui/message request must be attempted exactly once");
+assert.equal(hangingCompatCalls, 0,
+  "an outcome-uncertain ui/message must not invoke the compatibility bridge and risk a duplicate visible continuation");
+const hangingDeliveryResult = hangingTransportApp.callInputs.find((entry) =>
+  entry.name === "continuation_sender" && entry.action === "delivery-result");
+assert.equal(hangingDeliveryResult?.result, "unknown");
+assert.equal(hangingDeliveryResult?.method, "ui/message");
+assert.match(String(hangingDeliveryResult?.note || ""),
+  /mcp-app-ui-message-settlement-unknown;payload=role-content;elapsedMs=\d+;returnType=thenable-pending;returnKeys=none/,
+  "bounded settlement must record outcome-uncertain structural evidence without claiming that a model turn started");
+hangingTransportController.dispose();
+
+// MCP tool results can fulfill their Promise while carrying isError:true.
+// That semantic error is a rejection, not an accepted Host message and not
+// permission to try a second transport.
+let semanticErrorCompatCalls = 0;
+class SemanticErrorTransportApp extends FakeApp {
+  async sendMessage() {
+    return { isError: true, content: [{ type: "text", text: "permission denied" }] };
+  }
+}
+const semanticErrorApp = new SemanticErrorTransportApp();
+const semanticErrorController = installContinuationCoordinator(semanticErrorApp, {
+  timers: false,
+  instanceId: "ui_semantic_error",
+  nativeFollowUp: async () => {
+    semanticErrorCompatCalls += 1;
+    return undefined;
+  },
+});
+semanticErrorApp.emit("toolinput", { arguments: { workspaceId: "ws_semantic_error" } });
+await semanticErrorController.onConnected();
+assert.equal(await semanticErrorController.attemptContinuation("semantic ui/message rejection", { force: true }), false);
+assert.equal(semanticErrorCompatCalls, 0,
+  "fulfilled isError:true must not be recorded as accepted or retried through a second Host API");
+const semanticErrorDeliveryResult = semanticErrorApp.callInputs.find((entry) =>
+  entry.name === "continuation_sender" && entry.action === "delivery-result");
+assert.equal(semanticErrorDeliveryResult?.result, "rejected");
+semanticErrorController.dispose();
+
+// Compatibility remains available only when ui/message explicitly reports
+// that the method itself is unsupported.
+let rejectedStandardCalls = 0;
+let compatibilityFallbackCalls = 0;
+class RejectingStandardTransportApp extends FakeApp {
+  async sendMessage() {
+    rejectedStandardCalls += 1;
+    throw new Error("ui/message unsupported by legacy host");
+  }
+}
+const rejectingStandardApp = new RejectingStandardTransportApp();
+const rejectingStandardController = installContinuationCoordinator(rejectingStandardApp, {
+  timers: false,
+  instanceId: "ui_standard_rejected",
+  nativeFollowUp: async (value) => {
+    compatibilityFallbackCalls += 1;
+    return FakeApp.prototype.sendFollowUpMessage.call(rejectingStandardApp, value);
+  },
+});
+rejectingStandardApp.emit("toolinput", { arguments: { workspaceId: "ws_standard_rejected" } });
+await rejectingStandardController.onConnected();
+assert.equal(await rejectingStandardController.attemptContinuation("legacy ui/message rejection", { force: true }), true);
+assert.equal(rejectedStandardCalls, 1);
+assert.equal(compatibilityFallbackCalls, 1,
+  "an explicit ui/message rejection may use exactly one compatibility Host follow-up attempt");
+const compatibilityDeliveryResult = rejectingStandardApp.callInputs.find((entry) =>
+  entry.name === "continuation_sender" && entry.action === "delivery-result");
+assert.equal(compatibilityDeliveryResult?.method, "window.openai.sendFollowUpMessage");
+rejectingStandardController.dispose();
+
+// dev40 live failure: a coordinator reconnect while the synthetic generation
+// is waiting for its first model ACK must be read-only with respect to model
+// ownership. The old onConnected branch called ordinary resume merely because
+// continuationPending=true, clearing pending state while leaving the delivery
+// token behind. Rehydration must now preserve the exact generation/token and
+// must not issue continuation_task resume.
+const ackWaitingReconnectApp = new FakeApp();
+ackWaitingReconnectApp.task = {
+  id: "task_ack_wait_reconnect",
+  conversationScopeId: "conversation_ack_wait_reconnect",
+  workspaceId: "ws_ack_wait_reconnect",
+  state: "RUNNING",
+  continuationMode: "completion-driven",
+  objective: "keep ACK wait intact",
+  requiredMilestones: ["finish"],
+  completedMilestones: [],
+  continuationPending: true,
+  continuationWakePending: false,
   continuationDeliveryAwaitingAck: true,
+  deliveryToken: "00000000-0000-4000-8000-00000000a041",
+  deliveryOwner: "synthetic-pending",
+  deliveryAckRetryAfterAt: new Date(Date.now() + 60_000).toISOString(),
+  anchorMountGeneration: 1,
+};
+const ackWaitingTokenBeforeReconnect = ackWaitingReconnectApp.task.deliveryToken;
+const ackWaitingReconnectController = installContinuationCoordinator(ackWaitingReconnectApp, {
+  timers: false,
+  instanceId: "ui_ack_wait_reconnect",
+});
+ackWaitingReconnectApp.emit("toolinput", { arguments: { workspaceId: "ws_ack_wait_reconnect" } });
+await ackWaitingReconnectController.onConnected();
+assert.equal(ackWaitingReconnectApp.callInputs.some((entry) =>
+  entry.name === "continuation_task" && entry.action === "resume"), false,
+"reconnect during synthetic ACK wait must never call ordinary model resume");
+assert.equal(ackWaitingReconnectApp.task.deliveryToken, ackWaitingTokenBeforeReconnect,
+  "reconnect must preserve the generation delivery token");
+assert.equal(ackWaitingReconnectApp.task.continuationPending, true,
+  "reconnect must preserve synthetic pending state until ACK, takeover, or generation closure");
+assert.equal(ackWaitingReconnectApp.task.deliveryOwner, "synthetic-pending");
+ackWaitingReconnectController.dispose();
+
+// If the sender that issued a Host message disappears before model ACK, a
+// replacement App must preserve the outcome-uncertain DELIVERED generation.
+// Re-sending can create a duplicate turn or interrupt a slow-starting model.
+const relayLossApp = new NativeOnlyTransportApp();
+const relayLossController = installContinuationCoordinator(relayLossApp, {
+  timers: false,
+  instanceId: "ui_relay_loss_original",
+});
+relayLossApp.emit("toolinput", { arguments: { workspaceId: "ws_relay_loss" } });
+await relayLossController.onConnected();
+assert.equal(await relayLossController.attemptContinuation("relay loss first delivery", { force: true }), true);
+assert.equal(relayLossApp.messages.length, 1);
+const relayLossDeliveryToken = relayLossApp.task.deliveryToken;
+const relayLossContinuationCount = relayLossApp.task.continuationCount;
+relayLossApp.task = {
+  ...relayLossApp.task,
+  continuationDeliveryAwaitingAck: true,
+  deliveryOwner: "synthetic-pending",
+  deliveryToken: relayLossDeliveryToken,
+  deliveryAckRetryCount: 1,
   deliveryAckRetryAfterAt: new Date(Date.now() - 1_000).toISOString(),
 };
-transportController.state.task = transportApp.task;
-assert.equal(await transportController.attemptContinuation("delivery ACK retry", { force: true }), true);
-assert.deepEqual(transportOrder, ["native", "native"],
-  "the same-generation ACK retry must remain on the native ChatGPT follow-up transport");
-const deliveryMethods = transportApp.callInputs
-  .filter((entry) => entry.name === "continuation_sender" && entry.action === "delivery-result")
-  .map((entry) => entry.method);
-assert.deepEqual(deliveryMethods, ["window.openai.sendFollowUpMessage", "window.openai.sendFollowUpMessage"]);
-transportController.dispose();
+relayLossController.state.task = relayLossApp.task;
+relayLossController.dispose();
+
+const reboundAfterRelayLossApp = new NativeOnlyTransportApp();
+reboundAfterRelayLossApp.autoEmitAnchorResult = false;
+reboundAfterRelayLossApp.anchorMountToken = relayLossApp.anchorMountToken;
+reboundAfterRelayLossApp.anchorMountGeneration = relayLossApp.anchorMountGeneration;
+reboundAfterRelayLossApp.task = { ...relayLossApp.task };
+const reboundAfterRelayLossController = installContinuationCoordinator(reboundAfterRelayLossApp, {
+  timers: false,
+  instanceId: "ui_relay_loss_replacement",
+});
+reboundAfterRelayLossApp.emit("toolinput", {
+  name: "continuation_anchor",
+  arguments: {
+    workspaceId: "ws_relay_loss",
+    taskId: reboundAfterRelayLossApp.task.id,
+  },
+});
+await reboundAfterRelayLossController.onConnected();
+assert.equal(reboundAfterRelayLossApp.messages.length, 0,
+  "a replacement App bind must not retransmit an outcome-uncertain unacked delivery");
+assert.equal(reboundAfterRelayLossApp.task.deliveryToken, relayLossDeliveryToken,
+  "replacement bind must preserve the same logical delivery token for an eventual idempotent ACK or manual takeover");
+assert.equal(reboundAfterRelayLossApp.task.continuationCount, relayLossContinuationCount,
+  "observing overdue ACK health must not consume another continuation budget");
+assert.equal(reboundAfterRelayLossApp.callInputs.some((entry) =>
+  entry.name === "continuation_sender" && entry.action === "claim"), false,
+"replacement App bind must not claim an already delivered outcome-uncertain generation");
+reboundAfterRelayLossController.dispose();
 
 // A server-resident sweep can create READY after the sender has already bound.
 // The old coordinator only consumed READY in onConnected/onToolResult, leaving
@@ -1988,7 +2332,13 @@ const teardownController = installContinuationCoordinator(teardownApp, { timers:
 teardownApp.emit("toolinput", { arguments: { workspaceId: "ws_teardown", taskId: "task_teardown" } });
 await teardownController.onConnected();
 await teardownController.onTeardown({ reason: "host timeout" });
-assert.equal(teardownApp.messages.length, 1, "timeout teardown should force one continuation attempt");
+assert.equal(teardownApp.messages.length, 0,
+  "free-form teardown reason text must not impersonate an authenticated exact-turn Host timeout");
+assert.ok(teardownApp.callInputs.some(
+  (entry) => entry.name === "continuation_task"
+    && entry.action === "host-signal"
+    && entry.hostSignal === "teardown",
+), "generic resource teardown must be reported as teardown telemetry even when its reason string contains timeout");
 teardownController.dispose();
 
 const normalTeardownApp = new FakeApp();
@@ -2089,7 +2439,50 @@ finishedTeardownController.dispose();
 const { StructuredRuntimeState } = await import(`${pathToFileURL(runtimeStatePath).href}?continuation=${Date.now()}`);
 const stateDir = mkdtempSync(join(tmpdir(), "devspace-continuation-test-"));
 const runtime = new StructuredRuntimeState(stateDir);
+configureTestSenderTransport(runtime);
 try {
+  const resumeFenceTask = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "conversation-resume-fence",
+    workspaceId: "ws_resume_fence",
+    requiredMilestones: ["finish"],
+  });
+  const resumeFenceDeliveryToken = "00000000-0000-4000-8000-00000000f041";
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set
+      continuation_pending=5,
+      delivery_token=?,
+      delivery_owner='synthetic-pending',
+      assistant_turn_owner='synthetic'
+    where id=?
+  `).run(resumeFenceDeliveryToken, resumeFenceTask.task.id);
+  const resumeFenceBefore = runtime.continuationTask({
+    action: "status",
+    taskId: resumeFenceTask.task.id,
+    readOnlyStatus: true,
+  }).task;
+  const rejectedSyntheticResume = runtime.continuationTask({
+    action: "resume",
+    taskId: resumeFenceTask.task.id,
+    note: "simulated coordinator reconnect",
+  });
+  assert.equal(rejectedSyntheticResume.accepted, false,
+    "generic resume must be rejected while an ACK-waiting generation owns the synthetic delivery token");
+  assert.equal(rejectedSyntheticResume.reason, "synthetic-delivery-resume-forbidden");
+  const resumeFenceAfter = runtime.continuationTask({
+    action: "status",
+    taskId: resumeFenceTask.task.id,
+    readOnlyStatus: true,
+  }).task;
+  assert.equal(resumeFenceAfter.deliveryToken, resumeFenceDeliveryToken,
+    "rejected reconnect resume must preserve the exact delivery token for late model ACK/recovery");
+  assert.equal(resumeFenceAfter.continuationPending, true,
+    "rejected reconnect resume must preserve pending=5 rather than rewriting it as an ordinary manual turn");
+  assert.equal(resumeFenceAfter.deliveryOwner, "synthetic-pending");
+  assert.equal(resumeFenceAfter.assistantTurnOwner, "synthetic");
+  assert.equal(resumeFenceAfter.turnLeaseId, resumeFenceBefore.turnLeaseId,
+    "rejected reconnect resume must not mint a new manual turn lease");
+
   function verifyRuntimeAnchor(outcome, conversationScopeId, coordinatorInstanceId = "ui_runtime_verified_anchor", hostTurnFingerprint) {
     const requested = runtime.prepareContinuationAnchorMount({
       taskId: outcome.task.id,
@@ -2106,12 +2499,256 @@ try {
     });
     assert.equal(mounted.accepted, true);
     assert.ok(mounted.task.anchorMountVerifiedAt, "the actual iframe ACK must persist verified mount truth");
+    const senderBound = runtime.bindContinuationSender({
+      conversationScopeId,
+      taskId: outcome.task.id,
+      senderInstanceId: coordinatorInstanceId,
+      anchorMountGeneration: requested.anchorMountGeneration,
+    });
+    assert.equal(senderBound.accepted, true,
+      "a verified test App surface must also bind the current-process continuation sender just like the real coordinator does");
     return mounted;
   }
 
+  // Sender authority is process-local even though the lifetime card itself is
+  // durable. Reopening the same SQLite state must preserve the card generation
+  // but invalidate the previous process's in-memory sender binding.
+  const senderRestartStateDir = mkdtempSync(join(tmpdir(), "devspace-continuation-sender-restart-"));
+  const senderRestartRuntimeA = new StructuredRuntimeState(senderRestartStateDir);
+  configureTestSenderTransport(senderRestartRuntimeA);
+  const senderRestartScope = "v1/test-sender-restart";
+  const senderRestartTask = senderRestartRuntimeA.continuationTask({
+    action: "begin",
+    conversationScopeId: senderRestartScope,
+    workspaceId: "ws_sender_restart",
+    requiredMilestones: ["finish"],
+  });
+  const senderRestartAnchor = senderRestartRuntimeA.prepareContinuationAnchorMount({
+    taskId: senderRestartTask.task.id,
+    conversationScopeId: senderRestartScope,
+  });
+  const senderRestartMounted = senderRestartRuntimeA.continuationTask({
+    action: "anchor-mounted",
+    taskId: senderRestartTask.task.id,
+    conversationScopeId: senderRestartScope,
+    coordinatorInstanceId: "ui_sender_restart",
+    anchorMountToken: senderRestartAnchor.anchorMountToken,
+  });
+  assert.equal(senderRestartMounted.accepted, true);
+  const senderRestartBound = senderRestartRuntimeA.bindContinuationSender({
+    conversationScopeId: senderRestartScope,
+    taskId: senderRestartTask.task.id,
+    senderInstanceId: "ui_sender_restart",
+    anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
+  });
+  assert.equal(senderRestartBound.accepted, true, JSON.stringify(senderRestartBound));
+  assert.equal(
+    senderRestartRuntimeA.database.sqlite.prepare(
+      "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
+    ).get(senderRestartScope)?.sender_instance_id,
+    "ui_sender_restart",
+  );
+  senderRestartRuntimeA.database.sqlite.close();
+  const senderRestartRuntimeB = new StructuredRuntimeState(senderRestartStateDir);
+  configureTestSenderTransport(senderRestartRuntimeB);
+  assert.equal(
+    senderRestartRuntimeB.database.sqlite.prepare(
+      "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
+    ).get(senderRestartScope)?.sender_instance_id,
+    null,
+    "a newly constructed MCP runtime must discard a sender binding owned by the previous process",
+  );
+  assert.equal(
+    senderRestartRuntimeB.database.sqlite.prepare(
+      "select mount_generation from continuation_conversation_cards where conversation_scope_id=?",
+    ).get(senderRestartScope)?.mount_generation,
+    senderRestartAnchor.anchorMountGeneration,
+    "runtime restart must not rotate or destroy the durable lifetime-card generation while invalidating sender authority",
+  );
+  const staleCoordinatorHeartbeat = senderRestartRuntimeB.continuationTask({
+    action: "heartbeat",
+    taskId: senderRestartTask.task.id,
+    conversationScopeId: senderRestartScope,
+    coordinatorInstanceId: "ui_sender_restart_stale",
+    note: "stale verified-anchor compatibility heartbeat",
+  });
+  assert.equal(staleCoordinatorHeartbeat.accepted, true,
+    "a stale coordinator heartbeat may remain harmless control traffic");
+  assert.equal(
+    senderRestartRuntimeB.database.sqlite.prepare(
+      "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
+    ).get(senderRestartScope)?.sender_instance_id,
+    null,
+    "a stale/non-authoritative coordinator heartbeat must not reclaim sender authority",
+  );
+  const legacyVerifiedAnchorHeartbeat = senderRestartRuntimeB.continuationTask({
+    action: "heartbeat",
+    taskId: senderRestartTask.task.id,
+    conversationScopeId: senderRestartScope,
+    coordinatorInstanceId: "ui_sender_restart",
+    note: "verified anchor heartbeat from pre-upgrade iframe",
+  });
+  assert.equal(legacyVerifiedAnchorHeartbeat.accepted, true,
+    "the previously verified current coordinator must remain a valid lifetime-card heartbeat after MCP restart");
+  assert.equal(
+    senderRestartRuntimeB.database.sqlite.prepare(
+      "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
+    ).get(senderRestartScope)?.sender_instance_id,
+    null,
+    "ordinary lifetime-card heartbeat must never recreate sender authority after MCP restart",
+  );
+  const senderRestartPreBindHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withTestSenderProtocol({
+    conversationScopeId: senderRestartScope,
+    taskId: senderRestartTask.task.id,
+    senderInstanceId: "ui_sender_restart",
+    anchorMountToken: senderRestartAnchor.anchorMountToken,
+    anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
+  }));
+  assert.equal(senderRestartPreBindHeartbeat.accepted, false,
+    "a sender heartbeat from the previous MCP process must not recreate authority in the new process");
+  assert.equal(senderRestartPreBindHeartbeat.reason, "sender-rebind-required");
+  assert.equal(
+    senderRestartRuntimeB.database.sqlite.prepare(
+      "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
+    ).get(senderRestartScope)?.sender_instance_id,
+    null,
+    "restart recovery must remain unbound until the Workspace App performs a new sender bind",
+  );
+  const senderRestartRebound = senderRestartRuntimeB.bindContinuationSender(withTestSenderProtocol({
+    conversationScopeId: senderRestartScope,
+    taskId: senderRestartTask.task.id,
+    senderInstanceId: "ui_sender_restart",
+    anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
+  }));
+  assert.equal(senderRestartRebound.accepted, true, JSON.stringify(senderRestartRebound));
+  assert.equal(
+    senderRestartRuntimeB.database.sqlite.prepare(
+      "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
+    ).get(senderRestartScope)?.sender_instance_id,
+    "ui_sender_restart",
+    "a fresh bind using the current protocol/asset contract must recover sender authority without rotating the lifetime card",
+  );
+  const senderRestartHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withTestSenderProtocol({
+    conversationScopeId: senderRestartScope,
+    taskId: senderRestartTask.task.id,
+    senderInstanceId: "ui_sender_restart",
+    anchorMountToken: senderRestartAnchor.anchorMountToken,
+    anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
+  }));
+  assert.equal(senderRestartHeartbeat.accepted, true,
+    "after a fresh bind, sender heartbeat may refresh the current-process lease");
+  const senderRestartCompetingHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withTestSenderProtocol({
+    conversationScopeId: senderRestartScope,
+    taskId: senderRestartTask.task.id,
+    senderInstanceId: "ui_sender_restart_competitor",
+    anchorMountToken: senderRestartAnchor.anchorMountToken,
+    anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
+  }));
+  assert.equal(senderRestartCompetingHeartbeat.accepted, false,
+    "a heartbeat must never steal an already-restored process-local sender binding");
+  assert.equal(senderRestartCompetingHeartbeat.reason, "sender-instance-superseded");
+  senderRestartRuntimeB.touchContinuationModelActivity({
+    workspaceId: "ws_sender_restart",
+    conversationScopeId: senderRestartScope,
+    substantive: true,
+  });
+  const senderRestartCompletion = senderRestartRuntimeB.continuationTask({
+    action: "turn-complete",
+    taskId: senderRestartTask.task.id,
+    note: "restart fresh bind restored sender",
+  });
+  assert.equal(senderRestartCompletion.accepted, true,
+    "after restart recovery performs a fresh sender bind, turn-complete must no longer fail with continuation-sender-unavailable");
+  assert.equal(senderRestartCompletion.task.assistantTurnState, "COMPLETION_REQUESTED");
+  senderRestartRuntimeB.database.sqlite.close();
+  rmSync(senderRestartStateDir, { recursive: true, force: true });
+
+  // dev43 live generation 2: sender A claimed READY, then another iframe bound
+  // the same card before A could authorize delivery. The bind replaced the
+  // process-local sender id immediately, so A was rejected as superseded while
+  // the generation remained CLAIMED for the full 45-second lease. Rebinding
+  // must atomically release only this pre-delivery claim so sender B can claim
+  // the same runnable generation immediately.
+  const rebindClaimScope = "v1/test-sender-rebind-claim-release";
+  const rebindClaimTask = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: rebindClaimScope,
+    workspaceId: "ws_sender_rebind_claim",
+    requiredMilestones: ["finish"],
+  });
+  const rebindClaimAnchor = runtime.prepareContinuationAnchorMount({
+    taskId: rebindClaimTask.task.id,
+    conversationScopeId: rebindClaimScope,
+  });
+  assert.equal(runtime.continuationTask({
+    action: "anchor-mounted",
+    taskId: rebindClaimTask.task.id,
+    conversationScopeId: rebindClaimScope,
+    coordinatorInstanceId: "ui_rebind_claim_a",
+    anchorMountToken: rebindClaimAnchor.anchorMountToken,
+  }).accepted, true);
+  assert.equal(runtime.bindContinuationSender({
+    conversationScopeId: rebindClaimScope,
+    taskId: rebindClaimTask.task.id,
+    senderInstanceId: "ui_rebind_claim_a",
+    anchorMountGeneration: rebindClaimAnchor.anchorMountGeneration,
+  }).accepted, true);
+  runtime.touchContinuationModelActivity({
+    workspaceId: "ws_sender_rebind_claim",
+    conversationScopeId: rebindClaimScope,
+    substantive: true,
+  });
+  const rebindClaimCompletion = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: rebindClaimTask.task.id,
+    note: "prepare READY for sender rebind race",
+  });
+  assert.equal(rebindClaimCompletion.accepted, true);
+  const rebindClaimRequestedAt = Date.parse(rebindClaimCompletion.task.assistantTurnCompletionRequestedAt);
+  const rebindClaimSweep = runtime.continuationSupervisorSweep({ nowMs: rebindClaimRequestedAt + 9_000 });
+  assert.equal(rebindClaimSweep.ready.some((item) => item.conversationScopeId === rebindClaimScope), true);
+  const senderAClaim = runtime.claimReadyContinuationGeneration({
+    conversationScopeId: rebindClaimScope,
+    taskId: rebindClaimTask.task.id,
+    senderInstanceId: "ui_rebind_claim_a",
+    anchorMountToken: rebindClaimAnchor.anchorMountToken,
+    anchorMountGeneration: rebindClaimAnchor.anchorMountGeneration,
+  });
+  assert.equal(senderAClaim.accepted, true);
+  const claimedGeneration = senderAClaim.generation;
+  const senderBRebind = runtime.bindContinuationSender({
+    conversationScopeId: rebindClaimScope,
+    taskId: rebindClaimTask.task.id,
+    senderInstanceId: "ui_rebind_claim_b",
+    anchorMountGeneration: rebindClaimAnchor.anchorMountGeneration,
+  });
+  assert.equal(senderBRebind.accepted, true);
+  assert.equal(senderBRebind.senderRebindReleasedClaim, true,
+    "a replacement sender must release a superseded pre-delivery claim immediately");
+  assert.equal(senderBRebind.senderRebindReleasedGeneration, claimedGeneration);
+  assert.equal(senderBRebind.readyGeneration, claimedGeneration,
+    "the released generation must be immediately visible to the newly bound sender as READY");
+  const releasedGeneration = runtime.database.sqlite.prepare(`
+    select state,delivery_token from continuation_generations
+    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
+      and generation=?
+  `).get(rebindClaimScope, claimedGeneration);
+  assert.equal(releasedGeneration?.state, "READY");
+  assert.equal(releasedGeneration?.delivery_token, null);
+  const senderBClaim = runtime.claimReadyContinuationGeneration({
+    conversationScopeId: rebindClaimScope,
+    taskId: rebindClaimTask.task.id,
+    senderInstanceId: "ui_rebind_claim_b",
+    anchorMountToken: rebindClaimAnchor.anchorMountToken,
+    anchorMountGeneration: rebindClaimAnchor.anchorMountGeneration,
+  });
+  assert.equal(senderBClaim.accepted, true,
+    "the replacement sender must be able to reclaim the released generation without waiting for the old 45-second claim lease");
+  assert.equal(senderBClaim.generation, claimedGeneration);
+
   const a = runtime.continuationTask({
     action: "begin-auto",
-    conversationScopeId: "conversation-a",
+    conversationScopeId: "v1/test-conversation-a",
     workspaceId: "ws_shared",
     objective: "generic",
     maxNoProgress: 2,
@@ -2147,17 +2784,17 @@ try {
   const modelActivityBefore = a.task.lastModelActivityAt;
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 2));
   const touchedTaskId = runtime.touchContinuationModelActivity({
-    conversationScopeId: "conversation-a",
+    conversationScopeId: "v1/test-conversation-a",
     workspaceId: "ws_shared",
   });
   assert.equal(touchedTaskId, a.task.id);
   const touchedActivity = runtime.continuationTask({ action: "status", taskId: a.task.id });
   assert.ok(Date.parse(touchedActivity.task.lastModelActivityAt) >= Date.parse(modelActivityBefore));
   assert.equal(runtime.continuationSupervisorDirective({
-    conversationScopeId: "conversation-a",
+    conversationScopeId: "v1/test-conversation-a",
     workspaceId: "ws_shared",
   })?.reanchorRequired, true, "automatic Task Contracts must request a supervisor until the open-workspace anchor is live");
-  const aVerifiedAnchor = verifyRuntimeAnchor(a, "conversation-a", "ui_test");
+  const aVerifiedAnchor = verifyRuntimeAnchor(a, "v1/test-conversation-a", "ui_test");
 
   // ChatGPT App-originated callServerTool requests may omit openai/session even
   // though the model-side continuation_anchor call had a canonical scope. The
@@ -2282,7 +2919,7 @@ try {
   assert.equal(earlyStopClaim.reason, "continuation-trigger-not-authorized");
 
   const ensured = runtime.ensureContinuationTaskContract({
-    conversationScopeId: "conversation-a",
+    conversationScopeId: "v1/test-conversation-a",
     workspaceId: "ws_shared",
     sourceTool: "read",
     substantive: true,
@@ -2585,15 +3222,6 @@ try {
   });
   assert.equal(ghostStaleDirective, undefined,
     "stale unverified issuance must not request another UI-bearing anchor");
-  const staleComplete = runtime.continuationTask({
-    action: "complete",
-    taskId: ghostAnchor.task.id,
-    evidence: { work: "done but the issued card never actually mounted" },
-  });
-  assert.equal(staleComplete.accepted, false);
-  assert.equal(staleComplete.reason, "anchor-mount-verification-pending",
-    "an unverified card must not be canonically completed as if the user had a working milestone card");
-
   const ghostRecoveryRequest = runtime.prepareContinuationAnchorMount({
     taskId: ghostAnchor.task.id,
     conversationScopeId: "v1/test-ghost-anchor",
@@ -2676,6 +3304,37 @@ try {
   });
   assert.equal(ghostCompleted.task.state, "SUCCEEDED",
     "verified mount truth plus milestone evidence must allow canonical completion");
+
+  const unmountedCompletion = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "v1/test-unmounted-completion",
+    workspaceId: "ws_unmounted_completion",
+    objective: "finish business work independently of UI health",
+    requiredMilestones: ["business work complete"],
+    sourceTool: "continuation_anchor",
+    anchorMounted: false,
+  });
+  runtime.continuationTask({
+    action: "checkpoint",
+    taskId: unmountedCompletion.task.id,
+    completedMilestones: ["business work complete"],
+    evidence: { work: "verified while card mount remained pending" },
+  });
+  const unmountedIssuance = runtime.prepareContinuationAnchorMount({
+    taskId: unmountedCompletion.task.id,
+    conversationScopeId: "v1/test-unmounted-completion",
+  });
+  assert.ok(unmountedIssuance.anchorMountToken);
+  const completedWithoutMountAck = runtime.continuationTask({
+    action: "complete",
+    taskId: unmountedCompletion.task.id,
+    evidence: { work: "verified while card mount remained pending" },
+  });
+  assert.equal(completedWithoutMountAck.accepted, true,
+    "verified business completion must not be blocked by an independent iframe mount failure");
+  assert.equal(completedWithoutMountAck.task.state, "SUCCEEDED");
+  assert.equal(completedWithoutMountAck.task.anchorMountVerifiedAt, undefined,
+    "terminal business state must preserve the missing-mount UI incident for diagnostics");
 
   const turnGhostAnchor = runtime.continuationTask({
     action: "begin",
@@ -3000,14 +3659,26 @@ try {
     action: "status",
     taskId: a.task.id,
     workspaceId: "ws_shared",
-    conversationScopeId: "conversation-a",
+    conversationScopeId: "v1/test-conversation-a",
   });
   assert.equal(exactScopeLookup.task?.id, a.task.id);
+
+  const preRefinementRow = runtime.database.sqlite.prepare(`
+    select auto_created, required_milestones_json, completed_milestones_json
+    from continuation_tasks where id=?
+  `).get(a.task.id);
+  assert.equal(Number(preRefinementRow?.auto_created || 0), 1,
+    `canonical card/anchor recovery must preserve auto_created until the first explicit model refinement: ${JSON.stringify(preRefinementRow)}`);
+  assert.deepEqual(JSON.parse(preRefinementRow.required_milestones_json), [
+    "Complete the original user-requested DevSpace work",
+    "Run necessary verification and deliver completion evidence",
+  ]);
+  assert.deepEqual(JSON.parse(preRefinementRow.completed_milestones_json), []);
 
   const upgraded = runtime.continuationTask({
     action: "begin",
     taskId: a.task.id,
-    conversationScopeId: "conversation-a",
+    conversationScopeId: "v1/test-conversation-a",
     workspaceId: "ws_shared",
     objective: "publish release",
     requiredMilestones: ["tests", "git", "release"],
@@ -3026,7 +3697,7 @@ try {
     "an unfinished completion-driven task must explicitly require real work after the model-side status ACK");
   assert.deepEqual(staleSupervisorStatus.nextRequiredMilestones, ["tests", "git", "release"]);
   const staleDirective = runtime.continuationSupervisorDirective({
-    conversationScopeId: "conversation-a",
+    conversationScopeId: "v1/test-conversation-a",
     workspaceId: "ws_shared",
   });
   assert.equal(staleDirective, undefined,
@@ -3044,13 +3715,13 @@ try {
   assert.equal(liveSupervisorStatus.continueRequired, true,
     "a live supervisor does not make an unfinished completion-driven task safe to end after a status-only response");
   assert.equal(runtime.continuationSupervisorDirective({
-    conversationScopeId: "conversation-a",
+    conversationScopeId: "v1/test-conversation-a",
     workspaceId: "ws_shared",
   }), undefined, "a fresh supervisor heartbeat must suppress same-turn re-anchor maintenance");
 
   const completionLeaseRuntime = runtime.continuationTask({
     action: "begin",
-    conversationScopeId: "conversation-completion-lease-runtime",
+    conversationScopeId: "v1/test-completion-lease-runtime",
     workspaceId: "ws_completion_lease_runtime",
     requiredMilestones: ["finish"],
   });
@@ -3059,7 +3730,7 @@ try {
   assert.equal(completionLeaseRuntime.task.deadlineAt, undefined);
   const completionLeaseMounted = verifyRuntimeAnchor(
     completionLeaseRuntime,
-    "conversation-completion-lease-runtime",
+    "v1/test-completion-lease-runtime",
     "ui_stall_probe",
   );
   assert.equal(completionLeaseMounted.accepted, true);
@@ -3132,15 +3803,90 @@ try {
     "ordinary resource teardown must not authorize a completion-driven continuation");
   assert.equal(atomicCompletionTeardown.reason, "continuation-trigger-not-authorized");
 
+  // Live dev39 proved that a READY generation must not be created without a
+  // sender. Live dev42 then exposed the opposite ordering hazard: ChatGPT may
+  // not initialize the visible App/sender until the assistant/tool render is
+  // crossing its final boundary. Rejecting model-owned turn-complete before
+  // that boundary creates a circular dependency. Preserve the signed
+  // COMPLETION_REQUESTED lease, but hold promotion/READY until a sender arrives.
+  const missingSenderTask = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: "v1/test-turn-complete-missing-sender",
+    workspaceId: "ws_turn_complete_missing_sender",
+    requiredMilestones: ["finish"],
+  });
+  const missingSenderAnchor = runtime.prepareContinuationAnchorMount({
+    taskId: missingSenderTask.task.id,
+    conversationScopeId: "v1/test-turn-complete-missing-sender",
+  });
+  const missingSenderMounted = runtime.continuationTask({
+    action: "anchor-mounted",
+    taskId: missingSenderTask.task.id,
+    conversationScopeId: "v1/test-turn-complete-missing-sender",
+    coordinatorInstanceId: "ui_turn_complete_missing_sender",
+    anchorMountToken: missingSenderAnchor.anchorMountToken,
+  });
+  assert.equal(missingSenderMounted.accepted, true);
+  runtime.touchContinuationModelActivity({
+    workspaceId: "ws_turn_complete_missing_sender",
+    conversationScopeId: "v1/test-turn-complete-missing-sender",
+    substantive: true,
+  });
+  const missingSenderCompletion = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: missingSenderTask.task.id,
+    note: "model stage complete before Host App sender initializes",
+  });
+  assert.equal(missingSenderCompletion.accepted, true,
+    "turn-complete must preserve the model's exact-turn completion signature even when the Host App sender has not initialized yet");
+  assert.equal(missingSenderCompletion.task.assistantTurnState, "COMPLETION_REQUESTED");
+  const missingSenderPromotionAt = Date.parse(missingSenderCompletion.task.assistantTurnCompletionRequestedAt) + 8_001;
+  const missingSenderPromotion = runtime.promoteMatureAssistantCompletionIntent(
+    missingSenderTask.task.id,
+    missingSenderPromotionAt,
+  );
+  assert.equal(missingSenderPromotion.promoted, false,
+    "promotion must remain fail-closed until a current-process sender exists");
+  assert.equal(missingSenderPromotion.reason, "continuation-sender-unavailable");
+  assert.equal(runtime.continuationTask({ action: "status", taskId: missingSenderTask.task.id }).task.assistantTurnState,
+    "COMPLETION_REQUESTED",
+    "missing sender must leave the signed completion intent durable for a later Host/App bind instead of reverting it to GENERATING");
+  const generationBeforeSenderBind = runtime.database.sqlite.prepare(`
+    select count(*) as count from continuation_generations
+    where workset_id=(
+      select active_workset_id from continuation_conversation_cards
+      where conversation_scope_id=?
+    ) and owner_type='synthetic' and state in ('READY','CLAIMED','DELIVERING','DELIVERED','TURN_ACKED','ACTIVE')
+  `).get("v1/test-turn-complete-missing-sender")?.count ?? 0;
+  assert.equal(generationBeforeSenderBind, 0,
+    "waiting for a sender after turn-complete must not leave an orphan automatic generation behind");
+  const missingSenderBound = runtime.bindContinuationSender({
+    conversationScopeId: "v1/test-turn-complete-missing-sender",
+    taskId: missingSenderTask.task.id,
+    senderInstanceId: "ui_turn_complete_missing_sender",
+    anchorMountGeneration: missingSenderAnchor.anchorMountGeneration,
+  });
+  assert.equal(missingSenderBound.accepted, true,
+    "the current App may recover by binding its sender without rotating the lifetime card");
+  const recoveredSenderPromotion = runtime.promoteMatureAssistantCompletionIntent(
+    missingSenderTask.task.id,
+    missingSenderPromotionAt + 1,
+  );
+  assert.equal(recoveredSenderPromotion.promoted, true,
+    "a late Host/App sender bind must promote the already-signed completion lease without requiring another model turn-complete call");
+  const recoveredSenderSweep = runtime.continuationSupervisorSweep({ nowMs: missingSenderPromotionAt + 2 });
+  assert.equal(recoveredSenderSweep.ready.some(item => item.conversationScopeId === "v1/test-turn-complete-missing-sender"), true,
+    "once the late sender is bound, the same signed completion must create the READY synthetic generation on the next resident sweep");
+
   const verifiedSurfaceTeardownTask = runtime.continuationTask({
     action: "begin",
-    conversationScopeId: "conversation-verified-surface-teardown",
+    conversationScopeId: "v1/test-verified-surface-teardown",
     workspaceId: "ws_verified_surface_teardown",
     requiredMilestones: ["finish"],
   });
   const verifiedSurfaceMounted = verifyRuntimeAnchor(
     verifiedSurfaceTeardownTask,
-    "conversation-verified-surface-teardown",
+    "v1/test-verified-surface-teardown",
     "ui_verified_surface_teardown",
   );
   assert.equal(verifiedSurfaceMounted.accepted, true);
@@ -3166,7 +3912,7 @@ try {
   assert.equal(tooEarlyVerifiedTeardownClaim.reason, "continuation-trigger-not-authorized");
   runtime.touchContinuationModelActivity({
     workspaceId: "ws_verified_surface_teardown",
-    conversationScopeId: "conversation-verified-surface-teardown",
+    conversationScopeId: "v1/test-verified-surface-teardown",
     substantive: true,
   });
   const completionRequested = runtime.continuationTask({
@@ -3313,21 +4059,21 @@ try {
     "ordinary timeout-recovery work must not gain a process-completion wake source");
   const resident = runtime.continuationTask({
     action: "begin",
-    conversationScopeId: "conversation-resident",
+    conversationScopeId: "v1/test-resident",
     workspaceId: "ws_resident",
     continuationMode: "resident",
     objective: "monitor training across stages",
     requiredMilestones: ["monitor until done"],
   });
   assert.equal(resident.task.continuationMode, "resident");
-  verifyRuntimeAnchor(resident, "conversation-resident", "ui_resident_anchor");
+  verifyRuntimeAnchor(resident, "v1/test-resident", "ui_resident_anchor");
   const watched = runtime.continuationTask({ action: "watch-process", taskId: resident.task.id, processHandle: "training-1" });
   assert.equal(watched.accepted, true);
   assert.deepEqual(watched.task.watchProcessHandles, ["training-1"]);
   runtime.database.sqlite.prepare("update continuation_tasks set state='WAITING_EXTERNAL', last_ui_heartbeat_at=? where id=?")
     .run(new Date(Date.now() - 60_000).toISOString(), resident.task.id);
   const residentWaitDirective = runtime.continuationSupervisorDirective({
-    conversationScopeId: "conversation-resident",
+    conversationScopeId: "v1/test-resident",
     workspaceId: "ws_resident",
   });
   assert.equal(residentWaitDirective, undefined,
@@ -3360,10 +4106,10 @@ try {
   assert.equal(learnedBudget.task.confirmedTurnLimitSource, "host-timeout-regime-down");
   const learnedReuseTask = runtime.continuationTask({
     action: "begin-auto",
-    conversationScopeId: "conversation-budget-reuse",
+    conversationScopeId: "v1/test-budget-reuse",
     workspaceId: "ws_budget_reuse",
   });
-  verifyRuntimeAnchor(learnedReuseTask, "conversation-budget-reuse", "ui_reuse");
+  verifyRuntimeAnchor(learnedReuseTask, "v1/test-budget-reuse", "ui_reuse");
   const learnedReuse = runtime.continuationTask({
     action: "host-signal",
     taskId: learnedReuseTask.task.id,
@@ -3402,8 +4148,8 @@ try {
   // Independent actual turns supply the longer samples; retransmitting one
   // timeout must never count twice just to satisfy the upward-regime test.
   const longerTask1 = runtime.continuationTask({ action: "begin-auto",
-    conversationScopeId: "conversation-budget-longer-1", workspaceId: "ws_budget_longer_1" });
-  verifyRuntimeAnchor(longerTask1, "conversation-budget-longer-1", "ui_longer_1");
+    conversationScopeId: "v1/test-budget-longer-1", workspaceId: "ws_budget_longer_1" });
+  verifyRuntimeAnchor(longerTask1, "v1/test-budget-longer-1", "ui_longer_1");
   const longerProbe1 = runtime.continuationTask({
     action: "host-signal",
     taskId: longerTask1.task.id,
@@ -3415,8 +4161,8 @@ try {
   assert.equal(longerProbe1.task.confirmedTurnLimitMs, 300000,
     "one longer timeout must not immediately double the adaptive Host budget on a single outlier");
   const longerTask2 = runtime.continuationTask({ action: "begin-auto",
-    conversationScopeId: "conversation-budget-longer-2", workspaceId: "ws_budget_longer_2" });
-  verifyRuntimeAnchor(longerTask2, "conversation-budget-longer-2", "ui_longer_2");
+    conversationScopeId: "v1/test-budget-longer-2", workspaceId: "ws_budget_longer_2" });
+  verifyRuntimeAnchor(longerTask2, "v1/test-budget-longer-2", "ui_longer_2");
   const longerProbe2 = runtime.continuationTask({
     action: "host-signal",
     taskId: longerTask2.task.id,
@@ -3631,13 +4377,13 @@ try {
 
   const supervisorGuard = runtime.continuationTask({
     action: "begin",
-    conversationScopeId: "conversation-supervisor-guard",
+    conversationScopeId: "v1/test-supervisor-guard",
     workspaceId: "ws_supervisor_guard",
     continuationMode: "resident",
   });
   const supervisorGuardMounted = verifyRuntimeAnchor(
     supervisorGuard,
-    "conversation-supervisor-guard",
+    "v1/test-supervisor-guard",
     "ui_guard",
   );
   assert.equal(supervisorGuardMounted.accepted, true);
@@ -3649,7 +4395,7 @@ try {
   const staleOwnerAttempt = runtime.continuationTask({
     action: "status",
     taskId: supervisorGuard.task.id,
-    conversationScopeId: "conversation-supervisor-guard",
+    conversationScopeId: "v1/test-supervisor-guard",
     coordinatorInstanceId: "ui_stale_guard",
   });
   assert.equal(staleOwnerAttempt.task.state, "WAITING_SUPERVISOR",
@@ -3659,7 +4405,7 @@ try {
   const acknowledgedWait = runtime.continuationTask({
     action: "status",
     taskId: supervisorGuard.task.id,
-    conversationScopeId: "conversation-supervisor-guard",
+    conversationScopeId: "v1/test-supervisor-guard",
     coordinatorInstanceId: "ui_guard",
   });
   assert.equal(acknowledgedWait.task.state, "WAITING_EXTERNAL", "the next coordinator status poll must atomically acknowledge the pending wait");
@@ -3677,7 +4423,7 @@ try {
   const coordinatorTouch = runtime.continuationTask({
     action: "status",
     taskId: supervisorGuard.task.id,
-    conversationScopeId: "conversation-supervisor-guard",
+    conversationScopeId: "v1/test-supervisor-guard",
     coordinatorInstanceId: "ui_guard",
   });
   assert.equal(coordinatorTouch.task.coordinatorInstanceId, "ui_guard");
@@ -3741,13 +4487,13 @@ try {
 
   const ackWake = runtime.continuationTask({
     action: "begin",
-    conversationScopeId: "conversation-delivery-ack",
+    conversationScopeId: "v1/test-delivery-ack",
     workspaceId: "ws_delivery_ack",
     continuationMode: "resident",
     requiredMilestones: ["finish after resumed turn"],
     maxContinuations: 4,
   });
-  verifyRuntimeAnchor(ackWake, "conversation-delivery-ack", "ui_delivery_ack_anchor");
+  verifyRuntimeAnchor(ackWake, "v1/test-delivery-ack", "ui_delivery_ack_anchor");
   runtime.continuationTask({ action: "arm-wake", taskId: ackWake.task.id });
   const ackClaim = runtime.continuationTask({ action: "claim-continuation", taskId: ackWake.task.id });
   assert.equal(ackClaim.accepted, true);
@@ -3771,7 +4517,7 @@ try {
     "a synthetic resumed turn must reuse the already-verified conversation card instead of mounting another one");
   const ackWakeResumedMount = runtime.prepareContinuationAnchorMount({
     taskId: ackWake.task.id,
-    conversationScopeId: "conversation-delivery-ack",
+    conversationScopeId: "v1/test-delivery-ack",
   });
   assert.equal(ackWakeResumedMount.alreadyVerified, true,
     "even a direct anchor attempt from the resumed turn must be idempotent after verified mount truth");
@@ -3794,12 +4540,12 @@ try {
 
   const proactiveAck = runtime.continuationTask({
     action: "begin",
-    conversationScopeId: "conversation-proactive-ack",
+    conversationScopeId: "v1/test-proactive-ack",
     workspaceId: "ws_proactive_ack",
     requiredMilestones: ["finish after timeout recovery"],
     maxContinuations: 4,
   });
-  verifyRuntimeAnchor(proactiveAck, "conversation-proactive-ack", "ui_proactive_ack_anchor");
+  verifyRuntimeAnchor(proactiveAck, "v1/test-proactive-ack", "ui_proactive_ack_anchor");
   runtime.continuationTask({
     action: "host-signal",
     taskId: proactiveAck.task.id,
@@ -3877,7 +4623,7 @@ try {
     "an unfinished resumed Task Contract must reuse the verified conversation card without creating a second visible card");
   const proactiveResumedMount = runtime.prepareContinuationAnchorMount({
     taskId: proactiveAck.task.id,
-    conversationScopeId: "conversation-proactive-ack",
+    conversationScopeId: "v1/test-proactive-ack",
   });
   assert.equal(proactiveResumedMount.alreadyVerified, true);
   assert.equal(proactiveResumedMount.anchorMountToken, undefined);
@@ -3900,7 +4646,7 @@ try {
   const controlOnlyCountBefore = proactiveModelAck.task.substantiveActivityCount;
   const controlOnlyTouch = runtime.touchContinuationModelActivity({
     workspaceId: "ws_proactive_ack",
-    conversationScopeId: "conversation-proactive-ack",
+    conversationScopeId: "v1/test-proactive-ack",
     substantive: false,
   });
   assert.equal(controlOnlyTouch, proactiveAck.task.id);
@@ -3974,7 +4720,7 @@ try {
   const fulfilledToken = statusOnlyRetryAfterHostEnd.deliveryToken;
   const touchedAfterResume = runtime.touchContinuationModelActivity({
     workspaceId: "ws_proactive_ack",
-    conversationScopeId: "conversation-proactive-ack",
+    conversationScopeId: "v1/test-proactive-ack",
     substantive: true,
   });
   assert.equal(touchedAfterResume, proactiveAck.task.id);
@@ -4028,12 +4774,12 @@ try {
 
   const directWork = runtime.continuationTask({
     action: "begin",
-    conversationScopeId: "conversation-direct-synthetic-work",
+    conversationScopeId: "v1/test-direct-synthetic-work",
     workspaceId: "ws_direct_synthetic_work",
     requiredMilestones: ["perform direct resumed work"],
     maxContinuations: 4,
   });
-  verifyRuntimeAnchor(directWork, "conversation-direct-synthetic-work", "ui_direct_work_anchor");
+  verifyRuntimeAnchor(directWork, "v1/test-direct-synthetic-work", "ui_direct_work_anchor");
   runtime.continuationTask({
     action: "host-signal",
     taskId: directWork.task.id,
@@ -4064,7 +4810,7 @@ try {
     "accepted transport delivery must retain durable ACK-retry state before real work begins");
   const directSubstantiveTouch = runtime.touchContinuationModelActivity({
     workspaceId: "ws_direct_synthetic_work",
-    conversationScopeId: "conversation-direct-synthetic-work",
+    conversationScopeId: "v1/test-direct-synthetic-work",
     substantive: true,
   });
   assert.equal(directSubstantiveTouch, directWork.task.id);
@@ -4091,7 +4837,7 @@ try {
   assert.equal(directAck.reason, "continuation-resume-acknowledged");
   runtime.touchContinuationModelActivity({
     workspaceId: "ws_direct_synthetic_work",
-    conversationScopeId: "conversation-direct-synthetic-work",
+    conversationScopeId: "v1/test-direct-synthetic-work",
     substantive: true,
   });
   const directMaterialCheckpoint = runtime.continuationTask({
@@ -4126,12 +4872,12 @@ try {
 
   const manualTakeover = runtime.continuationTask({
     action: "begin",
-    conversationScopeId: "conversation-manual-takeover",
+    conversationScopeId: "v1/test-manual-takeover",
     workspaceId: "ws_manual_takeover",
     requiredMilestones: ["finish exactly once"],
     maxContinuations: 4,
   });
-  verifyRuntimeAnchor(manualTakeover, "conversation-manual-takeover", "ui_manual_takeover_anchor");
+  verifyRuntimeAnchor(manualTakeover, "v1/test-manual-takeover", "ui_manual_takeover_anchor");
   runtime.continuationTask({
     action: "host-signal",
     taskId: manualTakeover.task.id,
@@ -4215,7 +4961,7 @@ try {
     syntheticDeliveryGenerationToken: true,
     manualTurnSupersedesLateSyntheticTurn: true,
     deliveryReadinessBackoff: true,
-    durableSyntheticTurnRetransmission: true,
+    durableSyntheticDeliveryNoRetransmission: true,
     syntheticResumeRequiresSubstantiveWork: true,
     syntheticStatusOnlyTurnRecovery: true,
     syntheticControlTrafficNotSubstantive: true,
@@ -4225,7 +4971,7 @@ try {
     residentStageWake: true,
     nonResidentProcessWakeRejected: true,
     singleContinuationAnchor: true,
-    teardownRecoveryPath: true,
+    verifiedTeardownCompletionFastPath: true,
     continuationDeliveryDiagnostics: true,
     explicitWallClockExtension: true,
     nativeOnlyFollowUpRecovery: true,
@@ -4233,7 +4979,7 @@ try {
     staleSupervisorWaitGuard: true,
     coordinatorStatusLivenessTouch: true,
     supervisorAckWaitHandshake: true,
-    continuationResumeAckRetry: true,
+    continuationAckDiagnosticNoRetransmission: true,
     explicitAnchorTaskBinding: true,
     exactTaskConversationIsolation: true,
     historicalContinuationGuardAlias: true,

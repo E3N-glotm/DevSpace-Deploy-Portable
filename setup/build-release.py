@@ -50,6 +50,11 @@ EXCLUDED_TOP_LEVEL_DIRS = {
     "workspace-archives",
 }
 EXCLUDED_TOP_LEVEL_FILES = {
+    # Linked Git worktrees store repository metadata in a top-level `.git`
+    # pointer file rather than a `.git/` directory.  The directory filter
+    # above therefore does not catch it; never ship that local path pointer
+    # inside a Portable release.
+    ".git",
     ".gitattributes",
     ".gitignore",
     "CHANGELOG.md",

@@ -1,5 +1,75 @@
 # DevSpace Portable 1.1.59 Hotfix
 
+## dev47：按 dev46 调查结果统一收紧 Host 投递、续轮执行与卡片生命周期
+
+dev47 不再把 transport Promise fulfilled 当成 Host 已创建模型轮次：`ui/message` 返回 `{isError:true}` 会作为拒绝持久化，且只有明确 method unsupported 才能使用旧 compatibility bridge。Host 已接受但 resumed-model 尚未 ACK 的 generation 保持 outcome-uncertain，只显示启动健康告警，不再按 45/60 秒 deadline 重发可见 user message；这样不会在模型已经启动但较慢时插入第二条“继续”。tool cancellation 与 iframe teardown 的自由文本也不再被提升为 Host timeout，只有经过精确 turn/card capability 验证的 timeout 路径拥有截断权限。
+
+内联 coordinator 的 wake endpoint 改由 server 以绝对 HTTP(S) URL 注入；`srcdoc/about:blank` 环境不再执行 `new URL(..., import.meta.url)` 并在安装 listener 前崩溃。缺少有效 URL 时仅关闭 SSE wake，保留权威 status/timer 恢复。sender wire contract 因此升至 epoch 10。
+
+synthetic 与手动 continue 现在采用相同的 1 次实质操作防空转证明；旧的 4 次操作和已学习 Host 窗口 95% 门槛已删除。操作次数和时间只用于诊断，不能成为提前结束或触发另一轮的权限。自动续轮仍必须以完整里程碑集为目标，在同一 Host turn 中持续读取、修改、执行、验证并可完成多个里程碑，直到全部完成、真实外部阻塞/暂停、模型在持续工作后签署明确阶段边界，或 Host 自身截断。
+
+业务完成与卡片 iframe mount telemetry 已解耦：里程碑和证据齐全时可以进入 `SUCCEEDED`，同时保留缺失 mount ACK 作为独立 UI 事件，避免 UI 故障复活已完成任务。卡片刷新改为保留根节点和交互状态的递归增量 reconcile，并移除同一 tool-result 上的 25/150ms 双重延迟 render，从源头降低整卡替换导致的滚动锚定和 ResizeObserver 抖动。真实 D-live E2E 未通过前，本迭代不部署生产，也不构建或发布 Release。
+
+## dev44：标准 `ui/message` 负责真正的 user-role 续轮，并立即释放 superseded sender claim
+
+dev43 的真实网页验收把故障进一步收窄到了 Host delivery 层。前一轮已经成功签署 `COMPLETION_REQUESTED`、promotion 成功并创建 synthetic generation；但 generation 3 在 15:45:36、15:46:59、15:48:58 三次进入 delivery，三次 `window.openai.sendFollowUpMessage` Promise 都在 0–1 ms 内 fulfilled，却始终没有 resumed model 的 `continuation_task status` ACK，`turn_acked_at` 一直为空，直到 15:49:38 人工输入接管。也就是说，dev43 的 generation FSM、sender recovery 和 ACK retry 已经实际工作，但 compatibility `sendFollowUpMessage` 的“调用成功”并不等于 ChatGPT 创建了一条真正的 user-role 模型轮次；继续重复同一 compatibility API 只会得到更多 transport-level fulfilled，而不会自动完成任务。
+
+本地当前打包的 `@modelcontextprotocol/ext-apps` 同时给出了标准协议证据：`App.sendMessage()` 发送的就是 MCP Apps `ui/message` 请求，其参数角色必须为 `user`，内容为标准 MCP content blocks。dev44 因此撤销 dev32 以来“自动续轮必须 native-only、标准 `ui/message` 只能渲染气泡”的经验性假设，改为由标准 `ui/message` 承担首发与同 generation ACK retry：`{ role: "user", content: [{ type: "text", text }] }`。`window.openai.sendFollowUpMessage` 只保留给明确拒绝 `ui/message` 的旧 Host 做 compatibility fallback；如果 `ui/message` fulfilled，则记录 `method=ui/message/result=accepted/model-turn-unconfirmed` 并等待真实模型 ACK；如果 Promise 在 settlement deadline 后仍 pending，则记录 `result=unknown`，保持 outcome-uncertain 并禁止立刻调用 compatibility API，避免第一条标准 user message 已跨过 Host 边界时再制造第二条重复消息。无论 transport 使用哪条路径，唯一成功证明仍是 resumed synthetic model 的 server-owned generation ACK，而不是 Promise fulfillment。
+
+同一次 live 记录还暴露出另一个独立的 sender claim 竞态。generation 2 在 15:44:33 被 sender A CLAIMED，但新的 milestone/App iframe 在 sender A 完成 `authorize-delivery` 前重新 bind，同一 Conversation Card 的 `sender_instance_id` 被 sender B 替换。旧 claimant 此后会正确收到 `sender-instance-superseded`，但 dev43 仍让 generation 2 保持 CLAIMED，直到 15:45:18 左右完整 45 秒 claim lease 到期后才以 `sender-claim-expired` 关闭并重新创建后续 generation。这不是安全要求，而是换绑后的无效等待。
+
+dev44 把 sender replacement 与该 claim 的恢复放进一个 SQLite 事务。仅当当前 card 正在替换 sender 且 active Workset 存在尚未完成 authorize 的 synthetic `CLAIMED` generation 时，runtime 才释放这个已失去发送资格的旧 claim：初次 delivery claim 回到 `READY` 并清除旧 token/ownership；如果它本身是同 generation 的 ACK retry claim，则回到 `DELIVERED` 并保留原 delivery token。随后才写入新的 `sender_instance_id`，因此新 sender 的 bind 返回可以立即暴露原 generation 为 `readyGeneration`，不再等待 45 秒。该处理不旋转 lifetime card、不增加 continuationCount、不创建 sibling generation，也不允许任意 heartbeat 抢占已经绑定的 sender；人工输入依旧能随时 supersede 全部 synthetic ownership。
+
+新增动态回归分别覆盖四个关键边界：Host 同时有标准与 compatibility API 时首发/ACK retry 必须都只走 `ui/message`；标准请求永不 settle 时不得调用 compatibility transport；标准请求明确 reject 时允许且只允许一次 compatibility fallback；sender A 已 CLAIM、sender B 随后 bind 时原 generation 必须立刻回到 READY，并由 sender B 在同一次测试中立即重新 claim。隐藏 sender wire contract 因发送与 rebind 语义变化升至 epoch 8，升级前存活 iframe fail-closed；Portable Protocol 继续保持 1.6。真实 D-live `turn-complete → ui/message → synthetic status ACK → substantive DevSpace work` 仍是 dev44 最终验收门槛。
+
+## dev43：解除 turn-complete 与 Host sender 初始化的前置死锁
+
+dev42 的真实 D-live 验收证明，`continuation_anchor` 工具外壳出现在 ChatGPT transcript 并不代表 Apps iframe 已完成 `ui/initialize`：当前 generation 长时间保持 `mount_state=REQUESTED`，`mount_verified_at`、`coordinator_instance_id`、`sender_instance_id` 与 `last_ui_heartbeat_at` 均为空，`continuation_sender` 审计也没有任何 bind/heartbeat。与此同时，旧版 1.1.48 并不存在 `continuation-sender-unavailable` 的模型签署前置门禁，而是由仍存活的 Workspace App 直接尝试 Host follow-up；这解释了“旧版至少能自动续，但续轮只工作几十秒/工具能力差”，而新版本在更严格的 exactly-once/sender 安全边界下反而完全不续。
+
+根因是 dev39 为避免 orphan READY 将 sender readiness 放在了 `turn-complete` 之前。ATCC 要求模型在可见 final 前签署当前 turn lease 的阶段完成意图，但 ChatGPT Host 可能直到 assistant/tool render 正在提交最终边界时才真正初始化 App iframe，因此产生循环依赖：没有 final 边界就没有 sender，没有 sender 又拒绝 `turn-complete`，最终既没有 completion intent 也没有自动续轮。
+
+dev43 将安全边界移动到正确层级。`turn-complete` 只验证模型当前阶段是否真的结束、里程碑仍未完成以及 manual/synthetic substantive-work/Host-budget 门禁；它不再依赖 browser transport。模型签署后持久化 `COMPLETION_REQUESTED` 和精确 turn lease。resident 在 8 秒 handoff grace 到期后调用 `promoteMatureAssistantCompletionIntent()`，此时才要求当前 process-local sender 已绑定且 heartbeat 在 `ANCHOR_LEASE_MS` 内新鲜；sender 缺失时保持原 completion intent，既不回退 GENERATING，也不创建 READY。合法 App 稍后 bind/heartbeat 后，同一 completion lease 会在下一次 sweep 被 promotion 并创建 READY，不需要第二次 `turn-complete`，因此不会丢失模型已经发生的真实阶段边界。
+
+新的动态回归覆盖生产时序：无 sender 时模型完成 substantive work 后 `turn-complete` 必须成功进入 `COMPLETION_REQUESTED`；handoff grace 后 promotion 必须以 `continuation-sender-unavailable` fail-closed，且 synthetic READY 数量严格为 0；随后当前 generation sender bind，旧 completion lease 无需重签即可 promotion，下一 supervisor sweep 必须产生 READY。这样保留 dev39 的 orphan-READY 防护、唯一卡片、人工输入最高优先级和 generation CAS，同时恢复旧版“至少能进入续轮”的能力边界。
+
+## dev42：MCP 重启后由合法 heartbeat 恢复 process-local sender
+
+dev41 部署后的真实 D-live 验收暴露了一个此前单元测试没有覆盖的服务重启生命周期缺陷。`StructuredRuntimeState` 在每个新 MCP 进程构造时会按安全设计清空持久化的 `continuation_conversation_cards.sender_instance_id`，防止旧进程的 sender authority 跨服务实例继承；但 ChatGPT 页面中已经存活的当前 milestone iframe 在 MCP 短暂重启后不保证再次收到 Workspace App `onConnected()`。现场因此出现了一个看似矛盾但可稳定解释的状态：iframe/sender heartbeat 继续刷新 `last_ui_heartbeat_at`，浏览器内也仍持有正确的 card capability，而服务端 `sender_instance_id` 已为 `NULL`。`turn-complete` 的 sender readiness gate 随后正确 fail-closed 为 `continuation-sender-unavailable`，导致模型已经明确结束当前阶段、里程碑仍未完成时仍无法创建 READY synthetic generation。
+
+dev42 不把 sender authority 改成跨进程持久信任，也不依赖 Host 重新触发 `onConnected()`。`heartbeatContinuationSender()` 现在要求非空 sender instance，并继续完整验证当前 task/conversation、已发行 Conversation Card 的 mount token 与 generation；`continuation_sender` server wrapper 仍先验证当前 sender protocol epoch。只有这些 capability 全部匹配时，heartbeat 才通过 SQLite 条件更新把 `sender_instance_id` 从 `NULL` 原子填为当前 sender。若槽位已经属于同一 sender，只刷新 heartbeat；若已经属于另一个 sender，则仍返回 `sender-instance-superseded`，竞争 iframe 不能借 heartbeat 抢占 sender。该恢复不改变 card id/generation/coordinator，不创建 synthetic generation，也不改 manual/synthetic turn ownership，因此保持唯一卡片、人工输入最高优先级和 generation CAS 边界。
+
+专项动态回归直接模拟生产故障：Runtime A 创建并验证卡片、绑定 sender 后关闭 SQLite；Runtime B 在同一状态目录重新构造并确认 sender 被清空而 card generation 保持不变；原合法 iframe 的第一条 sender heartbeat 必须重新绑定 sender，竞争 sender heartbeat 必须被拒绝；随后当前模型的 substantive activity 后 `turn-complete` 必须成功进入 `COMPLETION_REQUESTED`，不再出现 `continuation-sender-unavailable`。`test-continuation-guard.mjs` 与 `test-continuation-architecture.mjs` 已分别通过；完整 source tree、正式 Portable 构建和真实 `turn-complete → synthetic model ACK` 仍作为 dev42 的最终发布前门禁。
+
+## dev41：保护 synthetic ACK 等待状态并区分 Host 调用与模型启动
+
+dev40 真实 E2E 诊断确认了两个相互叠加的缺陷。第一，普通 Workspace App 重连会把 `continuationPending=true && continuationWakePending=false` 当成执行 `resume` 的理由；对已完成发送、正在等待 resumed-model ACK 的 pending 4/5 generation，这会清除 pending、旋转 turn lease，并可能把 assistant owner 改写为 manual，却留下 synthetic delivery token。第二，native `window.openai.sendFollowUpMessage` 的 Promise 正常 fulfilled 与 bounded settlement deadline 后仍 pending 都曾被归入 `fallback-accepted`，使 transport settlement 与 Host 是否真正启动模型轮次混在同一状态标签里。
+
+dev41 将重连恢复与模型 ownership mutation 分离。coordinator 只允许不带 synthetic ACK 状态的 `FAILED_RETRYABLE` 继续走 legacy `resume`；已存在 delivery token 或 `continuationDeliveryAwaitingAck` 时只通过 sender bind/supervisor 恢复原 generation。runtime-state 同时增加服务端防线：当 `delivery_token` 存在、`continuation_pending` 为 4/5 且 owner 为 `synthetic-pending`/`synthetic-active` 时，普通 `resume` 返回 `synthetic-delivery-resume-forbidden`，不会清 pending、不会改 owner、不会生成新的 manual turn lease。这样即使浏览器仍缓存旧 coordinator，也不能破坏迟到 ACK 或同 generation 恢复资格。
+
+发送结果语义同步收紧。native Host Promise 超过 bounded settlement deadline 仍未结束时记录 `result=unknown`，canonical generation 保持 outcome-uncertain，不把它伪装成 DELIVERED，也不立即换 payload 或自动重复发送；如果 Promise fulfilled，则仍使用 transport-compatible `fallback-accepted`，但 note 明确写入 `model-turn-unconfirmed`，只有 resumed model 的 DevSpace ACK 才证明模型轮次真正启动。诊断只记录 payload 形状、实际 settlement 耗时、返回类型和最多 8 个安全字段名，不记录返回字段值、delivery token 或完整提示词。由于隐藏 sender wire contract 的结果语义发生不兼容变化，sender protocol epoch 升为 7；Portable Protocol 继续保持 1.5。
+
+## dev38：修复 `fallback-accepted` 后 sender relay 消失导致 ACK retry 无人接管
+
+2026-09-08 真实网页 E2E 对 dev37 给出了新的确定性证据：本会话在 22:47:15.944（14:47:15.944Z）签署 `turn-complete`，generation 3 于 22:47:24.763 READY、22:47:45 左右 CLAIMED、22:47:48.686 完成发送前授权，并在 22:47:58.655 由 superseded card 的 headless sender relay 调用 `window.openai.sendFollowUpMessage` 后记录 `fallback-accepted`。该 generation 随后保持 `DELIVERED` 且 `turn_acked_at` 为空，ACK retry deadline 为 22:48:43.654。resident server 从 22:48:44 起约每 5 秒持续识别 `delivery_ack_retry_due` 并广播 continuation wake，说明 SQLite generation FSM、ACK deadline 和 server sweep 均正常；但直到 22:50:41 用户人工输入触发 manual takeover 前，数据库没有第二次 delivery authorization / delivery，网页也没有 synthetic turn。
+
+根因位于 App/Host sender relay 生命周期：第一次 native Host 调用恰好由已经 supersede 的旧卡 headless relay 完成；该 iframe teardown 后会 `dispose()`，同时关闭 EventSource 与 supervisor。后续新的 current-generation Workspace App 可以重新获得 sender capability，但旧 bind 快路径只在 server 返回 `readyGeneration` 时立即调用 `attemptContinuation()`，不会把已经到期的 `continuationDeliveryAwaitingAck` 当作同等恢复条件，因此 durable ACK retry 可能长期无人消费。dev38 将该快路径升级为 `consumeRecoveryAfterSenderBind()`：bind、rehydrate、connected 以及 superseded relay rebound 都会同时检查 READY 和 overdue delivery ACK retry；replacement App 一旦证明当前 card sender capability，就立即通过既有 `continuation_sender claim` CAS 对**同一个 DELIVERED generation / delivery token**执行 reclaim。runtime 原有 CAS 已保证该恢复复用 token、continuationCount 不增加，并在 sibling App 竞争时只有一个 claim 成功，所以修复不创建新的 synthetic generation，也不降低人工输入最高优先级。
+
+同时，`fallback-accepted` 不再以绿色 success UI 表示“自动续轮已经成功”。它只表示 native Host 调用已发出、但 resumed model turn 尚未得到 DevSpace 证明；界面改为 warning，并明确只有 resumed synthetic model 的首个 `continuation_task status` ACK 才能把 generation 视为真正启动。新增动态回归完整模拟“原 sender 首发后进入 awaiting ACK → ACK deadline 到期 → 原 controller/iframe 销毁 → replacement App 重建并 onConnected”，要求 replacement 立即 retransmit、delivery token 与原值完全相同、continuationCount 不增加且实际进入 atomic sender claim；focused `setup/test-continuation-guard.mjs` 已通过。完整源码回归和真实 D-live `turn-complete → synthetic` 仍是 dev38 的最终验收门槛。
+
+完整回归随后又暴露一处同属恢复路径的 stale snapshot 覆盖：`bindSenderTransport()` 返回的 task 快照早于可见卡随后的 authenticated mount ACK；旧 `consumeRecoveryAfterSenderBind()` 会再次 `acceptTask(outcome.task)`，从而把刚写入的 `anchorMountVerifiedAt` / `anchorMountCoordinatorId` 擦掉，使已验证卡错误退回未验证状态。dev38 现在由 bind 负责一次性接纳 bind 快照，recovery consumer 只读取 controller 的最新 state，不再回放旧 outcome.task；missing-toolresult 的 Host 排序回归要求 capability 恢复后 mount verification 在 `onConnected()` 返回前保持有效且不能被后续 recovery 覆盖。
+
+## dev37：修复 native follow-up Promise 永久 pending
+
+2026-09-08 本会话真实 E2E 进一步确认：13:57:09.086Z generation 2 已 READY，13:59:57.303Z 被 sender CLAIMED，14:00:00.338Z 已记录 `continuation-generation-delivery-authorized`，但直到 14:02:29.033Z 人工接管前没有任何 `continuation-generation-delivery`，数据库的 `last_send_attempt_at` / `last_send_result` 也始终为空。结合 coordinator 控制流可确定，阻塞发生在授权成功后的 `await window.openai.sendFollowUpMessage(...)`；该 Host Promise 可以既不 resolve 也不 reject，旧实现没有 settlement timeout，因此 generation 会无限留在结果不确定的 `DELIVERING`。
+
+dev37 给 native follow-up Promise 增加 4 秒 settlement 上限，但该上限只限制“等待 Host Promise 返回”的时间，不把沉默解释为发送失败，也不立即调用第二种 payload 形态。超时表示 native Host 调用已经发起但结果 Promise 不可靠，coordinator 会记录 `fallback-accepted` 与 `native-follow-up-settlement-timeout-*` 证据，让既有同 generation、同 delivery token 的 ACK 恢复状态机继续负责启动确认；这样既消除永久挂死，又保持人工输入最高优先级和避免立即重复可见续轮的 at-most-once 边界。新增 Fake Host 永不 settle 回归，要求 `attemptContinuation()` 有界返回、`delivery-result` 被记录且 Host 调用次数严格为 1。
+
+## dev36：修复 sender 前后端协议漂移
+
+2026-09-08 实际读取 vendor、installed core 与 D-live，均确认 dev35 的 coordinator 声明 sender epoch 5，而 server.js 仍要求 epoch 4。原测试分别断言这两个不同值，未验证互操作性。新增两端相等断言在原 dev35 上真实失败（5 !== 4）；修复服务端 epoch 后，测试还会检查 installed core 与源码一致，并让 FakeApp 按真实服务端 epoch 校验 bind、claim、authorize-delivery 和 delivery-result 请求。
+
+本会话上次 E2E 的数据库记录为 10:35:00.500Z READY、10:35:17.820Z CLAIMED、10:35:21.012Z delivery-authorized，随后没有 delivery result / TURN_ACKED，直到人工接管。协议漂移是确定性的发送阻断；历史 DELIVERING 的原生 Host 调用是否已经执行仍无完整证据，不伪造发送失败或用计时器重发。dev36 保留该边界，并须在真实网页上重新验证模型 ACK 与实质工作后才能称为通过。
+
 ## 目标
 
 1.1.59 当前 hotfix 同时收口 Remote Workspace / Linux Agent 配置更新链路，以及 ChatGPT Host 自动续轮 / 里程碑卡片状态机中的确定性竞态。

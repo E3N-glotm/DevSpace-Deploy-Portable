@@ -55,10 +55,51 @@ function preserveDisclosure(panel, key, defaultOpen) {
   });
 }
 
+function reconcileCardNode(current, next) {
+  if (!current || !next || current.nodeType !== next.nodeType) return false;
+  if (current.nodeType === Node.TEXT_NODE) {
+    if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+    return true;
+  }
+  if (!(current instanceof Element) || !(next instanceof Element) || current.tagName !== next.tagName) return false;
+
+  for (const attribute of [...current.attributes]) {
+    if (!next.hasAttribute(attribute.name)) current.removeAttribute(attribute.name);
+  }
+  for (const attribute of [...next.attributes]) {
+    if (current.getAttribute(attribute.name) !== attribute.value) {
+      current.setAttribute(attribute.name, attribute.value);
+    }
+  }
+
+  const currentChildren = [...current.childNodes];
+  const nextChildren = [...next.childNodes];
+  const common = Math.min(currentChildren.length, nextChildren.length);
+  for (let index = 0; index < common; index += 1) {
+    if (!reconcileCardNode(currentChildren[index], nextChildren[index])) {
+      currentChildren[index].replaceWith(nextChildren[index]);
+    }
+  }
+  for (let index = currentChildren.length - 1; index >= nextChildren.length; index -= 1) {
+    currentChildren[index].remove();
+  }
+  for (let index = common; index < nextChildren.length; index += 1) {
+    current.append(nextChildren[index]);
+  }
+  return true;
+}
+
 function replaceCardIfChanged(card) {
-  // Ignore duplicate notifications without touching live DOM or its height.
+  // Keep the mounted root/details nodes stable so status updates do not reset
+  // disclosure, focus, scroll anchoring or iframe height. Only a genuinely
+  // different card shape falls back to replacement.
   const current = root.firstElementChild;
-  if (!current || current.outerHTML !== card.outerHTML) root.replaceChildren(card);
+  if (!current) {
+    root.append(card);
+    return;
+  }
+  if (current.outerHTML === card.outerHTML) return;
+  if (!reconcileCardNode(current, card)) root.replaceChildren(card);
 }
 
 function element(tag, options = {}) {
@@ -667,7 +708,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-      text: "DevSpace Portable 1.1.59 dev35 · Protocol 1.5",
+      text: "DevSpace Portable 1.1.59 dev48 · Protocol 1.6",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);
@@ -830,8 +871,6 @@ function handleMessage(message) {
     else if (REVIEW_TOOLS.has(state.tool)) state.mode = "review";
     else if (CONTINUATION_TOOLS.has(state.tool)) state.mode = "continuation";
     scheduleRender();
-    setTimeout(scheduleRender, 25);
-    setTimeout(scheduleRender, 150);
     return;
   }
   if (message.method === "ui/notifications/tool-cancelled") {

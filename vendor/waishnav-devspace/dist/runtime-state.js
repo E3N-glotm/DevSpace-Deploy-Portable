@@ -6,6 +6,23 @@ const DEFAULT_TASK_CONTRACT_MILESTONES = [
     "Complete the original user-requested DevSpace work",
     "Run necessary verification and deliver completion evidence",
 ];
+// Canonical projection recovery stores lineage/control metadata in the same
+// durable evidence object as user/model verification evidence. Those fields
+// prove only that the runtime reconstructed its Conversation Card/Workset
+// projection; they do not prove the user's task is complete and therefore
+// must never satisfy the completion-evidence gate by themselves.
+const INTERNAL_PROJECTION_EVIDENCE_KEYS = new Set([
+    "canonicalProjectionRecovered",
+    "recoveredAt",
+    "cardId",
+    "sourceWorksetId",
+    "migratedShadowTaskId",
+]);
+function hasCompletionEvidence(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return false;
+    return Object.keys(value).some((key) => !INTERNAL_PROJECTION_EVIDENCE_KEYS.has(key));
+}
 const TASK_CONTRACT_VERSION = 2;
 const ANCHOR_LEASE_MS = 90_000;
 // This is an activity-suspicion threshold, not a ChatGPT turn deadline. Its
@@ -47,16 +64,6 @@ const DELIVERY_ACK_RETRY_MAX_MS = 60_000;
 // synthetic work.  Manual takeover can revoke this ownership immediately and
 // therefore remains the higher-priority preemption mechanism.
 const SYNTHETIC_WORK_OWNER_LEASE_MS = 30 * 60_000;
-// Once this Host has *live verified timeout samples*, an unfinished synthetic
-// continuation should consume essentially the same work window as a manual
-// "continue" turn.  The ratio is intentionally dimensionless: there is no
-// hard-coded 2/10/26 minute synthetic duration.  A Host that changes its turn
-// window is relearned from verified timeout samples without a source change.
-// Owner/manual confirm-turn-limit values remain useful telemetry seeds but are
-// not sufficient by themselves to authorize an early synthetic boundary; that
-// avoids a stale historical value becoming a permanent shorter turn cap after
-// the Host increases its real window.
-const SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO = 0.95;
 // The sender owns CLAIMED while it performs bounded MCP retries, the advisory
 // model-context update and the final server authorization.  Fifteen seconds was
 // shorter than the coordinator's own worst-case retry envelope and caused valid
@@ -128,39 +135,6 @@ function deliveryAckRetryDelayMs(retryCount) {
     const exponent = Math.max(0, Math.min(8, Math.round(Number(retryCount || 1)) - 1));
     return Math.min(DELIVERY_ACK_RETRY_MAX_MS, DELIVERY_ACK_RETRY_BASE_MS * (2 ** exponent));
 }
-function syntheticAdaptiveActiveWorkGate(row) {
-    const timeoutSamples = Math.max(0, Math.round(Number(row?.host_timeout_samples || 0)));
-    const confirmedHostLimitMs = Number(row?.confirmed_turn_limit_ms || 0);
-    const confirmedSource = String(row?.confirmed_turn_limit_source || "");
-    const liveCutoffSamples = numericSamples(row?.cutoff_samples_json);
-    const liveVerified = timeoutSamples > 0
-        && /^host-timeout-/.test(confirmedSource)
-        && liveCutoffSamples.length > 0;
-    if (!liveVerified) {
-        return {
-            calibrated: false,
-            timeoutSamples,
-            confirmedHostLimitMs: Number.isFinite(confirmedHostLimitMs) && confirmedHostLimitMs > 0
-                ? confirmedHostLimitMs
-                : undefined,
-        };
-    }
-    const robustSampleMs = median(liveCutoffSamples);
-    const adaptiveHostLimitMs = Number.isFinite(confirmedHostLimitMs) && confirmedHostLimitMs >= HOST_CUTOFF_MIN_SAMPLE_MS
-        ? confirmedHostLimitMs
-        : robustSampleMs;
-    if (!Number.isFinite(adaptiveHostLimitMs) || adaptiveHostLimitMs < HOST_CUTOFF_MIN_SAMPLE_MS) {
-        return { calibrated: false, timeoutSamples };
-    }
-    return {
-        calibrated: true,
-        timeoutSamples,
-        confirmedHostLimitMs: Math.round(adaptiveHostLimitMs),
-        minimumActiveWorkMs: Math.max(1, Math.floor(adaptiveHostLimitMs * SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO)),
-        budgetRatio: SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO,
-        cutoffEpoch: Math.max(0, Math.round(Number(row?.cutoff_epoch || 0))),
-    };
-}
 function anchorMountRecoveryRequired(row, nowMs = Date.now(), _currentHostTurnFingerprint) {
     if (!row)
         return true;
@@ -222,8 +196,179 @@ function adaptHostCutoffRegime({ elapsedMs, confirmedTurnLimitMs, confirmedTurnL
 export class StructuredRuntimeState {
     database;
     continuationModelRequests = new Map();
+    continuationSenderServerBootId = randomUUID();
+    continuationSenderProtocolEpoch = 0;
+    continuationSenderAssetRevision = "";
     constructor(stateDir) {
         this.database = openDatabase(stateDir);
+        // A continuation sender is an in-memory Workspace App transport bound
+        // to the currently running MCP process.  Persisting sender_instance_id
+        // is useful while one process is alive (all sibling App surfaces share
+        // the same SQLite authority), but that binding must never survive a
+        // service restart: the old iframe may be gone, or a live upgrade may
+        // have fenced its sender protocol epoch.  Treat sender authority as a
+        // process-local lease and force a fresh continuation_sender bind after
+        // every runtime construction.  The immutable visible-card identity,
+        // mount token/generation and milestone state remain untouched.
+        this.database.sqlite.prepare(`
+          update continuation_conversation_cards
+          set sender_instance_id=null,
+              sender_server_boot_id=null,
+              sender_mount_generation=null,
+              sender_last_heartbeat_at=null,
+              sender_lease_state=case
+                when mount_requested_at is not null and mount_token is not null and mount_generation>0 then 'NEED_REBIND'
+                else 'UNBOUND'
+              end
+        `).run();
+    }
+    configureContinuationSenderTransport(input = {}) {
+        const protocolEpoch = Number(input.protocolEpoch || 0);
+        this.continuationSenderProtocolEpoch = Number.isInteger(protocolEpoch) && protocolEpoch > 0 ? protocolEpoch : 0;
+        this.continuationSenderAssetRevision = String(input.assetRevision ?? "").trim();
+        return {
+            protocolEpoch: this.continuationSenderProtocolEpoch || undefined,
+            assetRevision: this.continuationSenderAssetRevision || undefined,
+            serverBootId: this.continuationSenderServerBootId,
+        };
+    }
+    recordContinuationSenderFailure(input = {}) {
+        const conversationScopeId = String(input.conversationScopeId ?? "").trim();
+        const senderInstanceId = String(input.senderInstanceId ?? "").trim();
+        const reason = String(input.reason ?? "sender-unavailable").trim().slice(0, 160) || "sender-unavailable";
+        if (!conversationScopeId)
+            return { accepted: false, reason: "conversation-scope-required" };
+        const nowIso = new Date().toISOString();
+        const upgradeRequired = reason === "sender-protocol-epoch-mismatch"
+            || reason === "sender-asset-revision-mismatch";
+        const changed = this.database.sqlite.prepare(`
+          update continuation_conversation_cards
+          set sender_lease_state=?,sender_last_failure_reason=?,sender_last_failure_at=?,updated_at=?
+          where conversation_scope_id=?
+            and (sender_instance_id is null or sender_instance_id=?)
+        `).run(upgradeRequired ? "UPGRADE_REQUIRED" : "NEED_REBIND", reason, nowIso, nowIso,
+            conversationScopeId, senderInstanceId || null);
+        if (Number(changed.changes || 0) === 1) {
+            this.appendEvent({
+                kind: "continuation-sender-unavailable",
+                subject: conversationScopeId,
+                payload: {
+                    reason,
+                    expectedSenderProtocolEpoch: this.continuationSenderProtocolEpoch || undefined,
+                    observedSenderProtocolEpoch: Number(input.senderProtocolEpoch || 0) || undefined,
+                    expectedSenderAssetRevision: this.continuationSenderAssetRevision || undefined,
+                    observedSenderAssetRevision: String(input.senderAssetRevision ?? "").trim() || undefined,
+                    serverBootId: this.continuationSenderServerBootId,
+                    senderInstanceId: senderInstanceId || undefined,
+                },
+            });
+        }
+        return { accepted: Number(changed.changes || 0) === 1, reason };
+    }
+    continuationSenderStatus(input = {}, nowMs = Date.now()) {
+        const taskId = String(input.taskId ?? "").trim();
+        let conversationScopeId = String(input.conversationScopeId ?? "").trim();
+        if (!conversationScopeId && taskId) {
+            conversationScopeId = String(this.database.sqlite.prepare(
+                "select conversation_scope_id from continuation_tasks where id=?",
+            ).get(taskId)?.conversation_scope_id ?? "").trim();
+        }
+        const card = conversationScopeId
+            ? this.database.sqlite.prepare("select * from continuation_conversation_cards where conversation_scope_id=?").get(conversationScopeId)
+            : undefined;
+        const senderInstanceId = String(card?.sender_instance_id || "").trim();
+        const observedProtocolEpoch = Number(card?.sender_protocol_epoch || 0);
+        const expectedProtocolEpoch = Number(this.continuationSenderProtocolEpoch || 0);
+        const observedAssetRevision = String(card?.sender_asset_revision || "").trim();
+        const expectedAssetRevision = String(this.continuationSenderAssetRevision || "").trim();
+        const observedBootId = String(card?.sender_server_boot_id || "").trim();
+        const observedGeneration = Number(card?.sender_mount_generation || 0);
+        const cardGeneration = Number(card?.mount_generation || 0);
+        const heartbeatAt = String(card?.sender_last_heartbeat_at || "").trim();
+        const heartbeatAtMs = Date.parse(heartbeatAt);
+        const heartbeatAgeMs = Number.isFinite(heartbeatAtMs) ? Math.max(0, Number(nowMs) - heartbeatAtMs) : Number.POSITIVE_INFINITY;
+        let reason;
+        if (!card || !card.mount_requested_at || !card.mount_token || cardGeneration <= 0)
+            reason = "card-not-issued";
+        else if (!senderInstanceId)
+            reason = "sender-not-bound";
+        else if (expectedProtocolEpoch > 0 && observedProtocolEpoch !== expectedProtocolEpoch)
+            reason = "sender-protocol-epoch-mismatch";
+        else if (expectedAssetRevision && observedAssetRevision !== expectedAssetRevision)
+            reason = "sender-asset-revision-mismatch";
+        else if (!observedBootId || observedBootId !== this.continuationSenderServerBootId)
+            reason = "sender-server-boot-mismatch";
+        else if (observedGeneration !== cardGeneration)
+            reason = "sender-card-generation-mismatch";
+        else if (String(card.sender_lease_state || "") !== "ACTIVE")
+            reason = String(card.sender_last_failure_reason || "").trim() || "sender-lease-inactive";
+        else if (!Number.isFinite(heartbeatAtMs) || heartbeatAgeMs > ANCHOR_LEASE_MS)
+            reason = "sender-heartbeat-stale";
+        return {
+            eligible: !reason,
+            reason,
+            leaseState: String(card?.sender_lease_state || (card ? "NEED_REBIND" : "UNBOUND")),
+            senderInstanceId: senderInstanceId || undefined,
+            protocolEpoch: observedProtocolEpoch || undefined,
+            expectedProtocolEpoch: expectedProtocolEpoch || undefined,
+            assetRevision: observedAssetRevision || undefined,
+            expectedAssetRevision: expectedAssetRevision || undefined,
+            serverBootId: observedBootId || undefined,
+            expectedServerBootId: this.continuationSenderServerBootId,
+            cardGeneration: cardGeneration || undefined,
+            senderGeneration: observedGeneration || undefined,
+            lastSenderHeartbeatAt: heartbeatAt || undefined,
+            senderHeartbeatAgeMs: Number.isFinite(heartbeatAgeMs) ? heartbeatAgeMs : undefined,
+            senderFreshnessLimitMs: ANCHOR_LEASE_MS,
+            lastFailureReason: String(card?.sender_last_failure_reason || "").trim() || undefined,
+            lastFailureAt: String(card?.sender_last_failure_at || "").trim() || undefined,
+        };
+    }
+    continuationSenderDiagnostics(nowMs = Date.now()) {
+        const rows = this.database.sqlite.prepare(`
+          select sender_lease_state,sender_last_failure_reason,sender_last_failure_at,
+                 sender_protocol_epoch,sender_asset_revision,sender_server_boot_id,
+                 sender_mount_generation,mount_generation,sender_last_heartbeat_at
+          from continuation_conversation_cards
+        `).all();
+        const leaseStates = {};
+        let staleHeartbeatCount = 0;
+        const recentFailures = [];
+        for (const row of rows) {
+            const leaseState = String(row.sender_lease_state || "UNBOUND");
+            leaseStates[leaseState] = Number(leaseStates[leaseState] || 0) + 1;
+            const heartbeatAtMs = Date.parse(String(row.sender_last_heartbeat_at || ""));
+            if (row.sender_last_heartbeat_at
+                && (!Number.isFinite(heartbeatAtMs) || Number(nowMs) - heartbeatAtMs > ANCHOR_LEASE_MS)) {
+                staleHeartbeatCount += 1;
+            }
+            const failureReason = String(row.sender_last_failure_reason || "").trim();
+            if (failureReason) {
+                recentFailures.push({
+                    reason: failureReason,
+                    at: String(row.sender_last_failure_at || "").trim() || undefined,
+                    leaseState,
+                    observedProtocolEpoch: Number(row.sender_protocol_epoch || 0) || undefined,
+                    observedAssetRevision: String(row.sender_asset_revision || "").trim() || undefined,
+                    observedServerBootMatches: Boolean(row.sender_server_boot_id)
+                        && String(row.sender_server_boot_id) === this.continuationSenderServerBootId,
+                    senderGeneration: Number(row.sender_mount_generation || 0) || undefined,
+                    cardGeneration: Number(row.mount_generation || 0) || undefined,
+                });
+            }
+        }
+        recentFailures.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+        return {
+            expectedProtocolEpoch: this.continuationSenderProtocolEpoch || undefined,
+            expectedAssetRevision: this.continuationSenderAssetRevision || undefined,
+            serverBootId: this.continuationSenderServerBootId,
+            senderFreshnessLimitMs: ANCHOR_LEASE_MS,
+            totalCards: rows.length,
+            leaseStates,
+            upgradeRequiredCount: Number(leaseStates.UPGRADE_REQUIRED || 0),
+            staleHeartbeatCount,
+            recentFailures: recentFailures.slice(0, 12),
+        };
     }
     beginContinuationModelRequest(conversationScopeId) {
         const scope = String(conversationScopeId ?? "").trim();
@@ -284,6 +429,35 @@ export class StructuredRuntimeState {
             const incomplete = required.length > 0 && required.some((milestone) => !completed.has(milestone));
             if (!incomplete)
                 return { promoted: false, reason: "no-incomplete-milestones", task: current };
+            // The model owns the decision that its current stage is complete;
+            // the browser App owns transport availability.  Do not make the
+            // model's turn-complete signature depend on whether ChatGPT has
+            // already initialized the milestone iframe: live dev42 showed that
+            // the Host may defer App initialization until the assistant/tool
+            // render is itself crossing the final boundary.  Requiring a sender
+            // *before* accepting turn-complete creates a circular dependency and
+            // prevents that boundary from ever being reached.
+            //
+            // Keep the dev39 orphan-READY protection here instead.  A signed
+            // COMPLETION_REQUESTED lease may wait durably without creating any
+            // synthetic generation.  Promotion to COMPLETED/READY is allowed
+            // only after a current-process sender is both bound and fresh.  If
+            // the App appears after the model final, the resident sweep retries
+            // this exact lease and proceeds; if it never appears, no READY
+            // generation is manufactured or stranded.
+            const senderStatus = this.continuationSenderStatus({
+                taskId: current.id,
+                conversationScopeId: current.conversation_scope_id,
+            }, effectiveNowMs);
+            if (!senderStatus.eligible) {
+                return {
+                    promoted: false,
+                    reason: "continuation-sender-unavailable",
+                    senderBound: Boolean(senderStatus.senderInstanceId),
+                    senderStatus,
+                    task: current,
+                };
+            }
             const changed = this.database.sqlite.prepare(`
               update continuation_tasks set
                 assistant_turn_state='COMPLETED',assistant_turn_completed_at=?,
@@ -570,8 +744,16 @@ export class StructuredRuntimeState {
         const claimedConversationScopeId = String(input.claimedConversationScopeId ?? "").trim();
         const taskId = String(input.taskId ?? "").trim();
         const senderInstanceId = String(input.senderInstanceId ?? "").trim();
+        const senderProtocolEpoch = Number(input.senderProtocolEpoch || this.continuationSenderProtocolEpoch || 0);
+        const senderAssetRevision = String(input.senderAssetRevision ?? this.continuationSenderAssetRevision ?? "").trim();
         if (!senderInstanceId)
             return { accepted: false, reason: "sender-required" };
+        if (!Number.isInteger(senderProtocolEpoch) || senderProtocolEpoch <= 0)
+            return { accepted: false, reason: "sender-protocol-epoch-required" };
+        if (this.continuationSenderProtocolEpoch > 0 && senderProtocolEpoch !== this.continuationSenderProtocolEpoch)
+            return { accepted: false, reason: "sender-protocol-epoch-mismatch" };
+        if (this.continuationSenderAssetRevision && senderAssetRevision !== this.continuationSenderAssetRevision)
+            return { accepted: false, reason: "sender-asset-revision-mismatch" };
         // Prefer the authenticated Host request scope. Some App->MCP calls do
         // not preserve it, so allow a narrow app-only fallback bound to the
         // exact random taskId + canonical conversation scope + current manual-
@@ -607,15 +789,86 @@ export class StructuredRuntimeState {
         }
         const conversationScopeId = task.conversation_scope_id;
         const nowIso = new Date().toISOString();
-        this.database.sqlite.prepare(`
-          update continuation_conversation_cards
-          set sender_instance_id=?,updated_at=?
-          where conversation_scope_id=?
-            and mount_requested_at is not null and mount_token is not null and mount_generation>0
-        `).run(senderInstanceId, nowIso, conversationScopeId);
-        this.database.sqlite.prepare(`
-          update continuation_tasks set last_ui_heartbeat_at=?,updated_at=? where id=?
-        `).run(nowIso, nowIso, task.id);
+        // A sender bind is allowed to replace an older iframe for the same
+        // immutable card generation. Live dev43 exposed a race when that
+        // replacement happened after the old sender had already CLAIMED a
+        // generation but before authorize-delivery: the new bind replaced
+        // card.sender_instance_id, the old claimant then failed authorization
+        // with sender-instance-superseded, and the generation remained CLAIMED
+        // until the 45-second lease expired. Release only that pre-delivery
+        // CLAIMED state atomically with the sender replacement so the newly
+        // bound App can consume the same runnable work immediately.
+        const rebindRecovery = this.database.sqlite.transaction(() => {
+            const currentCard = this.database.sqlite.prepare(`
+              select * from continuation_conversation_cards where conversation_scope_id=?
+            `).get(conversationScopeId);
+            let releasedClaim = false;
+            let releasedGeneration;
+            if (currentCard?.sender_instance_id
+                && String(currentCard.sender_instance_id) !== senderInstanceId
+                && currentCard.active_workset_id) {
+                const claimed = this.database.sqlite.prepare(`
+                  select * from continuation_generations
+                  where workset_id=? and owner_type='synthetic' and state='CLAIMED'
+                  order by generation asc limit 1
+                `).get(currentCard.active_workset_id);
+                if (claimed?.delivery_token) {
+                    const retryExisting = Boolean(claimed.delivered_at);
+                    const targetState = retryExisting ? 'DELIVERED' : 'READY';
+                    const released = this.database.sqlite.prepare(`
+                      update continuation_generations set
+                        state=?,delivery_token=?,claimed_at=null,due_at=?,updated_at=?
+                      where id=? and state='CLAIMED' and delivery_token=?
+                    `).run(targetState, retryExisting ? claimed.delivery_token : null,
+                        nowIso, nowIso, claimed.id, claimed.delivery_token);
+                    if (Number(released.changes || 0) === 1) {
+                        releasedClaim = true;
+                        releasedGeneration = Number(claimed.generation || 0);
+                        if (retryExisting) {
+                            this.database.sqlite.prepare(`
+                              update continuation_tasks set
+                                delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
+                                continuation_pending=5,delivery_ack_retry_after_at=?,updated_at=?
+                              where id=? and delivery_token=?
+                            `).run(nowIso, nowIso, nowIso, task.id, claimed.delivery_token);
+                        }
+                        else {
+                            this.database.sqlite.prepare(`
+                              update continuation_tasks set
+                                superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+                                delivery_token=null,continuation_pending=0,delivery_owner=null,
+                                delivery_owner_expires_at=null,delivery_ack_started_at=null,
+                                delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
+                                delivery_work_baseline_count=0,updated_at=?
+                              where id=? and delivery_token=?
+                            `).run(nowIso, task.id, claimed.delivery_token);
+                        }
+                        this.appendEvent({
+                            kind: "continuation-generation-sender-rebind-release",
+                            subject: conversationScopeId,
+                            workspaceId: task.workspace_id ?? undefined,
+                            payload: {
+                                worksetId: currentCard.active_workset_id,
+                                generation: releasedGeneration,
+                                restoredState: targetState,
+                            },
+                        });
+                    }
+                }
+            }
+            this.database.sqlite.prepare(`
+              update continuation_conversation_cards
+              set sender_instance_id=?,sender_protocol_epoch=?,sender_asset_revision=?,
+                  sender_server_boot_id=?,sender_mount_generation=?,
+                  sender_last_heartbeat_at=?,sender_lease_state='ACTIVE',
+                  sender_last_failure_reason=null,sender_last_failure_at=null,updated_at=?
+              where conversation_scope_id=?
+                and mount_requested_at is not null and mount_token is not null and mount_generation>0
+            `).run(senderInstanceId, senderProtocolEpoch, senderAssetRevision || null,
+                this.continuationSenderServerBootId, capability.anchorMountGeneration,
+                nowIso, nowIso, conversationScopeId);
+            return { releasedClaim, releasedGeneration };
+        })();
         const reboundCard = this.database.sqlite.prepare(`
           select active_workset_id from continuation_conversation_cards where conversation_scope_id=?
         `).get(conversationScopeId);
@@ -636,8 +889,11 @@ export class StructuredRuntimeState {
             accepted: true,
             ...capability,
             senderInstanceId,
-            lastUiHeartbeatAt: nowIso,
+            lastSenderHeartbeatAt: nowIso,
+            senderStatus: this.continuationSenderStatus({ taskId: task.id, conversationScopeId }),
             readyGeneration: readyGeneration ? Number(readyGeneration.generation) : undefined,
+            senderRebindReleasedClaim: rebindRecovery.releasedClaim,
+            senderRebindReleasedGeneration: rebindRecovery.releasedGeneration,
             task: refreshedTask,
         };
     }
@@ -844,13 +1100,29 @@ export class StructuredRuntimeState {
             ]);
             const completedMilestones = requiredMilestones.filter((milestone) => completedSet.has(milestone));
             const hasUnfinishedMilestones = requiredMilestones.some((milestone) => !completedSet.has(milestone));
+            // Worksets intentionally collapse both WAITING_SUPERVISOR and the
+            // acknowledged WAITING_EXTERNAL phase into WAITING_EXTERNAL. The
+            // canonical task keeps the finer-grained supervisor-ACK fence.
+            // Projection recovery runs before the status action validates the
+            // requesting coordinator, so blindly restoring from the Workset
+            // here lets any stale/unverified iframe erase WAITING_SUPERVISOR
+            // before the coordinator ownership check executes. Preserve the
+            // canonical pending-ACK state while a watched process still exists;
+            // only the verified anchor coordinator status path may acknowledge
+            // it and transition the task to WAITING_EXTERNAL.
+            const preserveSupervisorAckPending = Boolean(canonical)
+                && String(canonical.state ?? '') === 'WAITING_SUPERVISOR'
+                && parseJson(canonical.watch_process_handles_json, []).length > 0
+                && String(latestWorkset?.state ?? '') === 'WAITING_EXTERNAL'
+                && !activeShadowTask;
             const stateMap = {
                 RUNNING: 'RUNNING', WAITING_EXTERNAL: 'WAITING_EXTERNAL', SUSPECTED_STALL: 'FAILED_RETRYABLE',
                 PAUSED: 'PAUSED_BY_USER', SUCCEEDED: 'SUCCEEDED', CANCELLED: 'CANCELLED_BY_USER',
             };
             const recoveredState = hasUnfinishedMilestones
                 ? (forceRunning ? 'RUNNING'
-                    : String(latestWorkset?.state ?? '') === 'WAITING_EXTERNAL' ? 'WAITING_EXTERNAL'
+                    : preserveSupervisorAckPending ? 'WAITING_SUPERVISOR'
+                        : String(latestWorkset?.state ?? '') === 'WAITING_EXTERNAL' ? 'WAITING_EXTERNAL'
                         : String(latestWorkset?.state ?? '') === 'PAUSED' ? 'PAUSED_BY_USER'
                             : 'RUNNING')
                 : (stateMap[String(latestWorkset?.state ?? '')] ?? 'SUCCEEDED');
@@ -1500,6 +1772,14 @@ export class StructuredRuntimeState {
                 return { accepted: false, reason: "sender-mount-token-mismatch" };
             if (Number(card.mount_generation || 0) !== anchorMountGeneration)
                 return { accepted: false, reason: "sender-mount-generation-mismatch" };
+            const senderStatus = this.continuationSenderStatus({ taskId, conversationScopeId }, nowMs);
+            if (!senderStatus.eligible || String(senderStatus.senderInstanceId || "") !== senderInstanceId) {
+                return {
+                    accepted: false,
+                    reason: senderStatus.eligible ? "sender-instance-superseded" : senderStatus.reason,
+                    senderStatus,
+                };
+            }
             if (!card || !card.active_workset_id)
                 return { accepted: false, reason: "no-active-workset" };
             const workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(card.active_workset_id);
@@ -1511,34 +1791,17 @@ export class StructuredRuntimeState {
               order by generation asc limit 1
             `).get(card.active_workset_id);
             let deliveryToken;
-            let retryExisting = false;
             if (!generation) {
-                // Native follow-up acceptance is only transport acceptance. A
-                // resumed assistant turn must still perform its first
-                // continuation_task status handshake before substantive work.
-                // If that startup ACK never arrives, retry the same logical
-                // generation/token after the durable ACK retry deadline instead
-                // of parking it behind the synthetic-active ownership lease.
-                // This bounded startup recovery is intentionally independent of
-                // the dynamically learned model work-duration budget.
-                const retryAt = task.delivery_ack_retry_after_at
-                    ? Date.parse(task.delivery_ack_retry_after_at) : NaN;
-                const retryableDelivered = Number(task.continuation_pending || 0) === 5
-                    && String(task.delivery_owner || "") === "synthetic-pending"
-                    && Boolean(task.delivery_token)
-                    && Number.isFinite(retryAt) && retryAt <= nowMs
-                    ? this.database.sqlite.prepare(`
-                        select * from continuation_generations
-                        where workset_id=? and owner_type='synthetic'
-                          and delivery_token=? and state='DELIVERED' and turn_acked_at is null
-                        order by generation desc limit 1
-                      `).get(card.active_workset_id, String(task.delivery_token))
-                    : undefined;
-                if (!retryableDelivered)
-                    return { accepted: false, reason: "no-ready-generation" };
-                generation = retryableDelivered;
-                deliveryToken = String(task.delivery_token);
-                retryExisting = true;
+                // DELIVERED without model ACK is outcome-uncertain. Never turn
+                // an elapsed startup-health deadline back into permission to
+                // send another visible user message: the original model may be
+                // alive but slow to call DevSpace.
+                return {
+                    accepted: false,
+                    reason: Number(task.continuation_pending || 0) === 5
+                        ? "delivery-in-flight-no-retransmit"
+                        : "no-ready-generation",
+                };
             }
             else {
                 deliveryToken = randomUUID();
@@ -1546,33 +1809,19 @@ export class StructuredRuntimeState {
             const changed = this.database.sqlite.prepare(`
               update continuation_generations set state='CLAIMED',delivery_token=?,claimed_at=?,due_at=?,updated_at=?
               where id=? and state=?
-            `).run(deliveryToken, nowIso, claimDueAt, nowIso, generation.id,
-                retryExisting ? "DELIVERED" : "READY");
+            `).run(deliveryToken, nowIso, claimDueAt, nowIso, generation.id, "READY");
             if (Number(changed.changes || 0) !== 1)
                 return { accepted: false, reason: "generation-race-lost" };
             this.database.sqlite.prepare(`
-              update continuation_conversation_cards set sender_instance_id=?,updated_at=? where conversation_scope_id=?
-            `).run(senderInstanceId, nowIso, conversationScopeId);
-            if (retryExisting) {
-                this.database.sqlite.prepare(`
-                  update continuation_tasks set
-                    delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
-                    continuation_pending=5,delivery_ack_retry_after_at=null,updated_at=?
-                  where id=? and conversation_scope_id=? and delivery_token=?
-                `).run(claimDueAt, nowIso, taskId, conversationScopeId, deliveryToken);
-            }
-            else {
-                this.database.sqlite.prepare(`
-                  update continuation_tasks set
-                    superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
-                    delivery_token=?,delivery_generation=coalesce(delivery_generation,0)+1,
-                    delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
-                    continuation_pending=5,delivery_ack_started_at=null,
-                    delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
-                    delivery_work_baseline_count=0,updated_at=?
-                  where id=? and conversation_scope_id=?
-                `).run(deliveryToken, claimDueAt, nowIso, taskId, conversationScopeId);
-            }
+              update continuation_tasks set
+                superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+                delivery_token=?,delivery_generation=coalesce(delivery_generation,0)+1,
+                delivery_owner='synthetic-pending',delivery_owner_expires_at=?,
+                continuation_pending=5,delivery_ack_started_at=null,
+                delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
+                delivery_work_baseline_count=0,updated_at=?
+              where id=? and conversation_scope_id=?
+            `).run(deliveryToken, claimDueAt, nowIso, taskId, conversationScopeId);
             return {
                 accepted: true,
                 conversationScopeId,
@@ -1582,17 +1831,36 @@ export class StructuredRuntimeState {
                 generation: generation.generation,
                 deliveryToken,
                 claimDueAt,
-                retryExisting,
+                retryExisting: false,
+                senderStatus,
             };
         })();
     }
     heartbeatContinuationSender(input = {}) {
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
         const taskId = String(input.taskId ?? "").trim();
+        const senderInstanceId = String(input.senderInstanceId ?? "").trim();
         const anchorMountToken = String(input.anchorMountToken ?? "").trim();
         const anchorMountGeneration = Number(input.anchorMountGeneration || 0);
-        if (!conversationScopeId || !taskId || !anchorMountToken || !Number.isInteger(anchorMountGeneration) || anchorMountGeneration <= 0)
+        const senderProtocolEpoch = Number(input.senderProtocolEpoch || 0);
+        const senderAssetRevision = String(input.senderAssetRevision ?? "").trim();
+        if (!conversationScopeId || !taskId || !senderInstanceId || !anchorMountToken
+            || !Number.isInteger(anchorMountGeneration) || anchorMountGeneration <= 0)
             return { accepted: false, reason: "sender-capability-required" };
+        if (!Number.isInteger(senderProtocolEpoch) || senderProtocolEpoch <= 0)
+            return { accepted: false, reason: "sender-protocol-epoch-required" };
+        if (this.continuationSenderProtocolEpoch > 0 && senderProtocolEpoch !== this.continuationSenderProtocolEpoch) {
+            this.recordContinuationSenderFailure({ conversationScopeId, senderInstanceId, senderProtocolEpoch, senderAssetRevision,
+                reason: "sender-protocol-epoch-mismatch" });
+            return { accepted: false, reason: "sender-protocol-epoch-mismatch",
+                senderStatus: this.continuationSenderStatus({ taskId, conversationScopeId }) };
+        }
+        if (this.continuationSenderAssetRevision && senderAssetRevision !== this.continuationSenderAssetRevision) {
+            this.recordContinuationSenderFailure({ conversationScopeId, senderInstanceId, senderProtocolEpoch, senderAssetRevision,
+                reason: "sender-asset-revision-mismatch" });
+            return { accepted: false, reason: "sender-asset-revision-mismatch",
+                senderStatus: this.continuationSenderStatus({ taskId, conversationScopeId }) };
+        }
         const task = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
         if (!task || String(task.conversation_scope_id || "") !== conversationScopeId)
             return { accepted: false, reason: task ? "conversation-task-mismatch" : "task-not-found" };
@@ -1601,21 +1869,45 @@ export class StructuredRuntimeState {
         `).get(conversationScopeId);
         if (!card || !card.mount_requested_at || !card.mount_token || Number(card.mount_generation || 0) <= 0)
             return { accepted: false, reason: "card-not-issued" };
-        if (card.sender_instance_id && String(card.sender_instance_id) !== String(input.senderInstanceId ?? "").trim())
+        if (card.sender_instance_id && String(card.sender_instance_id) !== senderInstanceId)
             return { accepted: false, reason: "sender-instance-superseded" };
         if (String(card.mount_token || "") !== anchorMountToken)
             return { accepted: false, reason: "sender-mount-token-mismatch" };
         if (Number(card.mount_generation || 0) !== anchorMountGeneration)
             return { accepted: false, reason: "sender-mount-generation-mismatch" };
         const nowIso = new Date().toISOString();
-        this.database.sqlite.prepare(`
-          update continuation_tasks set last_ui_heartbeat_at=?,updated_at=? where id=?
-        `).run(nowIso, nowIso, taskId);
-        // Do not call continuationTask(status) here: a token-less model-side
-        // status intentionally means "manual turn took over" when a synthetic
-        // delivery is pending. Sender liveness is App control traffic and must
-        // never participate in that ownership transition.
-        return { accepted: true, lastUiHeartbeatAt: nowIso };
+        // Heartbeat refreshes an already-bound transport lease only. It must
+        // never recreate sender authority after MCP restart: doing so lets a
+        // stale pre-upgrade iframe bypass the protocol/asset bind fence merely
+        // because its ordinary timers are still firing.
+        const senderRefresh = this.database.sqlite.prepare(`
+          update continuation_conversation_cards
+          set sender_last_heartbeat_at=?,sender_lease_state='ACTIVE',
+              sender_last_failure_reason=null,sender_last_failure_at=null,updated_at=?
+          where conversation_scope_id=?
+            and sender_instance_id=?
+            and sender_protocol_epoch=?
+            and sender_asset_revision=?
+            and sender_server_boot_id=?
+            and sender_mount_generation=?
+            and sender_lease_state='ACTIVE'
+        `).run(nowIso, nowIso, conversationScopeId, senderInstanceId,
+            senderProtocolEpoch, senderAssetRevision, this.continuationSenderServerBootId,
+            anchorMountGeneration);
+        if (Number(senderRefresh.changes || 0) !== 1) {
+            this.recordContinuationSenderFailure({ conversationScopeId, senderInstanceId, senderProtocolEpoch, senderAssetRevision,
+                reason: card.sender_instance_id && String(card.sender_instance_id) !== senderInstanceId
+                    ? "sender-instance-superseded" : "sender-rebind-required" });
+            return { accepted: false,
+                reason: card.sender_instance_id && String(card.sender_instance_id) !== senderInstanceId
+                    ? "sender-instance-superseded" : "sender-rebind-required",
+                senderStatus: this.continuationSenderStatus({ taskId, conversationScopeId }) };
+        }
+        return {
+            accepted: true,
+            lastSenderHeartbeatAt: nowIso,
+            senderStatus: this.continuationSenderStatus({ taskId, conversationScopeId }),
+        };
     }
     recordContinuationSenderHostTimeout(input = {}) {
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
@@ -1647,6 +1939,14 @@ export class StructuredRuntimeState {
             return { accepted: false, reason: "sender-mount-token-mismatch" };
         if (Number(card.mount_generation || 0) !== anchorMountGeneration)
             return { accepted: false, reason: "sender-mount-generation-mismatch" };
+        const senderStatus = this.continuationSenderStatus({ taskId, conversationScopeId });
+        if (!senderStatus.eligible || String(senderStatus.senderInstanceId || "") !== senderInstanceId) {
+            return {
+                accepted: false,
+                reason: senderStatus.eligible ? "sender-instance-superseded" : senderStatus.reason,
+                senderStatus,
+            };
+        }
         return this.continuationTask({
             action: "host-signal",
             taskId,
@@ -1684,6 +1984,14 @@ export class StructuredRuntimeState {
             return { accepted: false, reason: "sender-mount-token-mismatch" };
         if (Number(card.mount_generation || 0) !== anchorMountGeneration)
             return { accepted: false, reason: "sender-mount-generation-mismatch" };
+        const senderStatus = this.continuationSenderStatus({ taskId, conversationScopeId });
+        if (!senderStatus.eligible || String(senderStatus.senderInstanceId || "") !== senderInstanceId) {
+            return {
+                accepted: false,
+                reason: senderStatus.eligible ? "sender-instance-superseded" : senderStatus.reason,
+                senderStatus,
+            };
+        }
         const telemetry = input.telemetry && typeof input.telemetry === "object" ? input.telemetry : {};
         const normalizeNames = (value) => Array.isArray(value)
             ? [...new Set(value
@@ -1708,7 +2016,7 @@ export class StructuredRuntimeState {
         });
         // Observational only. Do not touch continuation_tasks, card/workset
         // ownership, turn leases, Assistant Turn state, or Generation state.
-        return { accepted: true, eventSequence };
+        return { accepted: true, eventSequence, senderStatus };
     }
     authorizeContinuationGenerationDelivery(input = {}) {
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
@@ -1748,8 +2056,14 @@ export class StructuredRuntimeState {
                 return { accepted: false, reason: "sender-mount-token-mismatch" };
             if (Number(card.mount_generation || 0) !== anchorMountGeneration)
                 return { accepted: false, reason: "sender-mount-generation-mismatch" };
-            if (String(card.sender_instance_id || "") !== senderInstanceId)
-                return { accepted: false, reason: "sender-instance-superseded" };
+            const senderStatus = this.continuationSenderStatus({ taskId, conversationScopeId }, nowMs);
+            if (!senderStatus.eligible || String(senderStatus.senderInstanceId || "") !== senderInstanceId) {
+                return {
+                    accepted: false,
+                    reason: senderStatus.eligible ? "sender-instance-superseded" : senderStatus.reason,
+                    senderStatus,
+                };
+            }
             if (!card.active_workset_id)
                 return { accepted: false, reason: "no-active-workset" };
             const workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(card.active_workset_id);
@@ -1794,6 +2108,7 @@ export class StructuredRuntimeState {
                 deliveryToken,
                 deliveryDueAt,
                 eventSequence,
+                senderStatus,
             };
         })();
     }
@@ -2551,21 +2866,35 @@ export class StructuredRuntimeState {
                 finalResponseAllowed: !taskIncomplete || blocked || normalTurnCompletionRequested,
             };
         };
-        // checkpoint is the authoritative mutation boundary for its required /
-        // completed milestone deltas and evidence. Feeding those same values
-        // into canonical projection recovery first would pre-apply the delta,
-        // making the checkpoint unable to detect a milestone-set revision or
-        // any other material progress. Keep projection recovery structural on
-        // checkpoint calls; the action-specific block below performs the merge.
-        const checkpointOwnsMutation = action === "checkpoint";
+        // checkpoint and complete are authoritative mutation boundaries for
+        // their required/completed milestone deltas and evidence. Feeding
+        // those same values into canonical projection recovery first would
+        // pre-apply data before the action-specific validation runs. For
+        // checkpoint that hides milestone-set revisions/material progress; for
+        // complete it is more dangerous: a rejected completion (for example,
+        // missing required milestones) could still persist supplied evidence
+        // or completion bits, and a later checkpoint could then seal the task
+        // from those rejected side effects. Keep projection recovery structural
+        // for both actions and let their own branches commit atomically.
+        const actionOwnsTaskMutation = action === "checkpoint" || action === "complete";
+        // An explicit begin is also the authoritative mutation boundary for
+        // its required milestone plan.  Letting canonical projection recovery
+        // pre-merge input.requiredMilestones here can poison the subsequent
+        // auto-created fallback refinement check: the two generic compatibility
+        // milestones become [generic..., supplied...] before begin gets a
+        // chance to replace them.  Recover the conversation/card structure
+        // first, then let the begin branch below apply/replace the plan once.
+        const beginOwnsRequiredPlanMutation = action === "begin";
         const recoveredCanonicalProjection = this.recoverCanonicalConversationTaskProjection({
             conversationScopeId: input.conversationScopeId,
             taskId: input.taskId,
             workspaceId: input.workspaceId,
             objective: input.objective,
-            requiredMilestones: checkpointOwnsMutation ? undefined : input.requiredMilestones,
-            completedMilestones: checkpointOwnsMutation ? undefined : input.completedMilestones,
-            evidence: checkpointOwnsMutation ? undefined : input.evidence,
+            requiredMilestones: (actionOwnsTaskMutation || beginOwnsRequiredPlanMutation)
+                ? undefined
+                : input.requiredMilestones,
+            completedMilestones: actionOwnsTaskMutation ? undefined : input.completedMilestones,
+            evidence: actionOwnsTaskMutation ? undefined : input.evidence,
             // Do not let projection recovery pre-reactivate a terminal lifetime
             // task for explicit begin/begin-auto.  The begin state machine below
             // must still observe the terminal row so it can rotate exactly one
@@ -3590,13 +3919,11 @@ export class StructuredRuntimeState {
             const owner = String(row.delivery_owner || "") === "synthetic-active" ? "synthetic" : "manual";
             const workDelta = Math.max(0,
                 Number(row.substantive_activity_count || 0) - Number(row.delivery_work_baseline_count || 0));
-            // Synthetic resumes must not collapse into the short two-call loops
-            // observed in live ChatGPT runs (status/one inspection/early final).
-            // Four substantive post-ACK operations is still a work-based gate,
-            // not an artificial sleep: simple work can finish quickly, while a
-            // resumed multi-step task must demonstrate sustained execution before
-            // it may voluntarily sign an incomplete-stage boundary.
-            const minimumWorkDelta = owner === "synthetic" ? 4 : 1;
+            // Manual and synthetic turns share the same semantic stopping rule:
+            // at least one real operation must precede a voluntary incomplete
+            // stage boundary. Four calls and elapsed wall time are useful E2E
+            // observations, but are not production completion authority.
+            const minimumWorkDelta = 1;
             if (workDelta < minimumWorkDelta) {
                 return {
                     task: rowToTask(row),
@@ -3604,48 +3931,6 @@ export class StructuredRuntimeState {
                     reason: "assistant-turn-substantive-work-required",
                     substantiveWorkDelta: workDelta,
                     minimumSubstantiveWorkDelta: minimumWorkDelta,
-                    ...continuationDirective(rowToTask(row)),
-                };
-            }
-            const turnStartedAtMs = Date.parse(String(row.turn_started_at || ""));
-            const activeWorkMs = Number.isFinite(turnStartedAtMs)
-                ? Math.max(0, now.getTime() - turnStartedAtMs)
-                : 0;
-            const syntheticBudgetGate = owner === "synthetic" ? syntheticAdaptiveActiveWorkGate(row) : undefined;
-            if (owner === "synthetic" && !syntheticBudgetGate?.calibrated) {
-                return {
-                    task: rowToTask(row),
-                    accepted: false,
-                    reason: "synthetic-host-budget-calibration-required",
-                    substantiveWorkDelta: workDelta,
-                    minimumSubstantiveWorkDelta: minimumWorkDelta,
-                    activeWorkMs,
-                    hostTimeoutSamples: syntheticBudgetGate?.timeoutSamples ?? Number(row.host_timeout_samples || 0),
-                    confirmedHostTurnLimitMs: syntheticBudgetGate?.confirmedHostLimitMs,
-                    // Deliberately no retryAfterMs: there is no fixed fallback
-                    // duration. Keep doing runnable work until the task finishes,
-                    // blocks/pauses, or a verified Host timeout supplies the
-                    // current profile's real turn-window sample.
-                    ...continuationDirective(rowToTask(row)),
-                };
-            }
-            const minimumActiveWorkMs = owner === "synthetic"
-                ? syntheticBudgetGate.minimumActiveWorkMs
-                : 0;
-            if (owner === "synthetic" && activeWorkMs < minimumActiveWorkMs) {
-                return {
-                    task: rowToTask(row),
-                    accepted: false,
-                    reason: "synthetic-turn-min-active-work-required",
-                    substantiveWorkDelta: workDelta,
-                    minimumSubstantiveWorkDelta: minimumWorkDelta,
-                    activeWorkMs,
-                    minimumActiveWorkMs,
-                    confirmedHostTurnLimitMs: syntheticBudgetGate.confirmedHostLimitMs,
-                    hostTimeoutSamples: syntheticBudgetGate.timeoutSamples,
-                    cutoffEpoch: syntheticBudgetGate.cutoffEpoch,
-                    syntheticHostBudgetRatio: syntheticBudgetGate.budgetRatio,
-                    retryAfterMs: Math.max(1, minimumActiveWorkMs - activeWorkMs),
                     ...continuationDirective(rowToTask(row)),
                 };
             }
@@ -3696,7 +3981,8 @@ export class StructuredRuntimeState {
             };
         }
         if (action === "heartbeat") {
-            const coordinatorInstanceId = input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : row.coordinator_instance_id;
+            const requestedCoordinatorInstanceId = input.coordinatorInstanceId ? String(input.coordinatorInstanceId) : "";
+            const coordinatorInstanceId = requestedCoordinatorInstanceId || row.coordinator_instance_id;
             const anchorMountAckPrefix = "anchor-mount-ack:";
             const heartbeatNote = String(input.note ?? "");
             if (!row.anchor_mount_verified_at && heartbeatNote.startsWith(anchorMountAckPrefix)) {
@@ -3721,8 +4007,14 @@ export class StructuredRuntimeState {
                 };
             }
             const verifiedAnchorHeartbeat = Boolean(row.anchor_mount_verified_at)
-                && Boolean(coordinatorInstanceId)
-                && coordinatorInstanceId === row.anchor_mount_coordinator_id;
+                && Boolean(requestedCoordinatorInstanceId)
+                && requestedCoordinatorInstanceId === row.anchor_mount_coordinator_id;
+            // Card/coordinator heartbeat proves only that the visible milestone
+            // surface is alive. Sender authority is a distinct process-local
+            // lease and can be acquired only through continuation_sender bind.
+            // In particular, never recreate sender_instance_id here after an
+            // MCP restart: an old pre-upgrade iframe may continue emitting task
+            // heartbeat indefinitely and must remain fenced by epoch/asset/boot.
             const anchorLeaseExpiresAt = verifiedAnchorHeartbeat
                 ? new Date(now.getTime() + ANCHOR_LEASE_MS).toISOString()
                 : row.anchor_lease_expires_at;
@@ -4152,7 +4444,7 @@ export class StructuredRuntimeState {
                     terminalReason = "same-failure-limit";
                 }
             }
-            const completionEvidencePresent = Object.keys(evidence).length > 0;
+            const completionEvidencePresent = hasCompletionEvidence(evidence);
             const canonicalCompletionSurfaceReady = !isCanonicalConversationScope(row.conversation_scope_id)
                 || Boolean(row.anchor_mount_verified_at);
             const checkpointCanSealCompletion = completionDriven
@@ -4252,6 +4544,23 @@ export class StructuredRuntimeState {
             if (row.state === "PAUSED_BY_USER") {
                 return { task: rowToTask(row), accepted: false, reason: "task-paused-by-user" };
             }
+            // A synthetic generation owns its delivery token until the resumed
+            // model ACKs it, the user explicitly takes over, or the generation
+            // is closed by the sender state machine. Generic reconnect/resume
+            // must never clear pending=4/5 or rewrite synthetic-pending as a
+            // manual turn. This server-side fence also protects against cached
+            // pre-dev41 Workspace App iframes that still issue resume here.
+            const syntheticDeliveryPending = Boolean(row.delivery_token)
+                && [4, 5].includes(Number(row.continuation_pending || 0))
+                && ["synthetic-pending", "synthetic-active"].includes(String(row.delivery_owner || ""));
+            if (syntheticDeliveryPending) {
+                return {
+                    task: rowToTask(row),
+                    accepted: false,
+                    reason: "synthetic-delivery-resume-forbidden",
+                    ...continuationDirective(rowToTask(row)),
+                };
+            }
             const turnLeaseId = `turn_${randomUUID()}`;
             const turnLeaseExpiresAt = normalizedMode(row.continuation_mode, "compat") === "completion-driven"
                 ? completionTurnLeaseExpiresAt()
@@ -4304,15 +4613,17 @@ export class StructuredRuntimeState {
             if (row.owner_locked) {
                 return { task: rowToTask(row), accepted: false, reason: "task-owner-locked" };
             }
-            if (isCanonicalConversationScope(row.conversation_scope_id) && !row.anchor_mount_verified_at) {
-                return {
-                    task: rowToTask(row),
-                    accepted: false,
-                    reason: row.anchor_mount_requested_at
-                        ? "anchor-mount-verification-pending"
-                        : "continuation-anchor-required",
-                };
+            // The Host must at least receive the one deliberate UI-bearing
+            // anchor result for this manual round. Whether the iframe later
+            // mounts and ACKs is separate UI health telemetry and must not
+            // block verified business completion.
+            if (!row.anchor_mount_requested_at) {
+                return { task: rowToTask(row), accepted: false, reason: "continuation-anchor-required" };
             }
+            // UI delivery is independently observable product state. A missing
+            // or failed card mount must not prevent verified business work from
+            // becoming terminal, otherwise an iframe failure resurrects work
+            // and can trigger duplicate continuation attempts.
             const persistedRequiredMilestones = parseJson(row.required_milestones_json, [])
                 .map((value) => String(value).trim()).filter(Boolean);
             const suppliedRequiredMilestones = [...new Set((Array.isArray(input.requiredMilestones) ? input.requiredMilestones : [])
@@ -4348,7 +4659,7 @@ export class StructuredRuntimeState {
             const persistedEvidence = parseJson(row.evidence_json, {});
             const suppliedEvidence = input.evidence && typeof input.evidence === "object" ? redactValue(input.evidence) : {};
             const evidence = { ...persistedEvidence, ...suppliedEvidence };
-            if (Object.keys(evidence).length === 0) {
+            if (!hasCompletionEvidence(evidence)) {
                 return { task: rowToTask(row), accepted: false, reason: "completion-evidence-required" };
             }
             this.database.sqlite.transaction(() => {
@@ -4373,7 +4684,7 @@ export class StructuredRuntimeState {
                 // already-open pre-generation Workspace App may still call the
                 // legacy continuation_task claim path after a live upgrade.
                 // Letting that compatibility path consume pending=4/5 mutates
-                // only continuation_tasks and tears the ACK-retry lease away
+                // only continuation_tasks and tears the delivery receipt away
                 // from the still-DELIVERED generation.  Fail closed instead;
                 // the current app-only sender CAS must reclaim/release the same
                 // generation and token atomically.
