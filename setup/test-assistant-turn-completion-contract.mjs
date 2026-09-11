@@ -345,8 +345,14 @@ try {
   assert.equal(handoffRequested.accepted, true);
   assert.equal(handoffRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
   const handoffRequestedAt = Date.parse(handoffRequested.task.assistantTurnCompletionRequestedAt);
+  const handoffPrearm = runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 1 });
+  assert.equal(readyForScope(handoffPrearm, handoffScope).length, 1,
+    "an explicit completion signature must pre-arm one READY continuation while the current Host sender is most likely alive");
+  assert.equal(runtime.continuationTask({ action: "status", taskId: handoff.task.id }).task.assistantTurnState,
+    "COMPLETION_REQUESTED",
+    "pre-arming delivery must not skip the guarded completion handoff state");
   assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 7_000 }), handoffScope).length, 0,
-    "the explicit completion handoff must not create a continuation before its rendering grace matures");
+    "pre-grace supervisor sweeps must not create duplicate READY generations");
   const releaseInFlight = runtime.beginContinuationModelRequest(handoffScope);
   assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 9_000 }), handoffScope).length, 0,
     "even a mature explicit completion intent must fail closed while a model-originated DevSpace request is still in flight");
@@ -354,15 +360,51 @@ try {
     "COMPLETION_REQUESTED");
   releaseInFlight();
   const handoffReady = runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 9_001 });
-  assert.equal(readyForScope(handoffReady, handoffScope).length, 1,
-    "a mature exact-turn completion intent must create one timely READY continuation even when normal Host teardown never arrives");
+  assert.equal(readyForScope(handoffReady, handoffScope).length, 0,
+    "mature handoff must reuse the pre-armed READY continuation instead of creating a second generation");
   const handoffCompleted = runtime.continuationTask({ action: "status", taskId: handoff.task.id });
   assert.equal(handoffCompleted.task.assistantTurnState, "COMPLETED");
   assert.equal(handoffCompleted.task.assistantTurnCompletionLeaseId, handoffCompleted.task.turnLeaseId);
   assert.equal(handoffCompleted.task.assistantTurnCompletionSource, "model-completion-handoff-grace");
   assert.equal(handoffCompleted.task.stallState, "CONTINUATION_ARMED");
+  const handoffArchitecture = runtime.continuationArchitectureSnapshot(handoffScope);
+  assert.equal(handoffArchitecture.generations.filter(
+    (entry) => entry.workset_id === handoffArchitecture.card.active_workset_id
+      && entry.owner_type === "synthetic" && entry.state === "READY",
+  ).length, 1,
+    "the pre-armed continuation must remain the singleton durable READY generation after handoff promotion");
   assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: handoffRequestedAt + 20_000 }), handoffScope).length, 0,
     "the handoff promotion must be idempotent and may create only one READY generation");
+
+  // If the model performs real work after signing turn-complete, that newer
+  // activity owns the turn. Revoke both the completion signature and any
+  // unclaimed pre-arm so an early READY can never interrupt continuing work.
+  const revokedScope = "v1/atcc-prearm-revoked-by-later-work";
+  const revokedPrearmTask = begin(revokedScope, "ws_atcc_prearm_revoked_by_later_work");
+  mount(revokedPrearmTask, revokedScope, "ui_atcc_prearm_revoked");
+  work(revokedPrearmTask, revokedScope, 1);
+  const revokedRequested = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: revokedPrearmTask.task.id,
+    note: "stage looked complete but model continued working",
+  });
+  assert.equal(revokedRequested.accepted, true);
+  const revokedRequestedAt = Date.parse(revokedRequested.task.assistantTurnCompletionRequestedAt);
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: revokedRequestedAt + 1 }), revokedScope).length, 1);
+  runtime.touchContinuationModelActivity({
+    workspaceId: "ws_atcc_prearm_revoked_by_later_work",
+    conversationScopeId: revokedScope,
+    substantive: true,
+  });
+  const revokedStatus = runtime.continuationTask({ action: "status", taskId: revokedPrearmTask.task.id });
+  assert.equal(revokedStatus.task.assistantTurnState, "GENERATING",
+    "later substantive work must revoke the model-owned completion signature");
+  const revokedArchitecture = runtime.continuationArchitectureSnapshot(revokedScope);
+  assert.equal(revokedArchitecture.generations.some(
+    (entry) => entry.workset_id === revokedArchitecture.card.active_workset_id
+      && entry.owner_type === "synthetic" && entry.state === "READY",
+  ), false,
+    "later substantive work must supersede an unclaimed pre-armed READY generation");
 
   // dev52 regression: browser sender availability is a delivery prerequisite,
   // not authority for the model-owned completion boundary.  A protocol upgrade
@@ -679,14 +721,25 @@ try {
   assert.equal(cachedRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
   assert.equal(cachedRequested.finalResponseAllowed, true);
   const cachedRequestedAt = Date.parse(cachedRequested.task.assistantTurnCompletionRequestedAt);
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: cachedRequestedAt + 1 }), cachedSchemaScope).length, 1,
+    "cached-schema completion compatibility must pre-arm the same singleton READY generation as native turn-complete");
+  assert.equal(runtime.continuationTask({ action: "status", taskId: cachedSchema.task.id }).task.assistantTurnState,
+    "COMPLETION_REQUESTED",
+    "cached-schema pre-arm must still preserve the bounded completion handoff state");
   assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: cachedRequestedAt + 7_000 }), cachedSchemaScope).length, 0,
-    "cached-schema completion compatibility must use the same bounded handoff grace");
+    "cached-schema pre-grace sweeps must not mint duplicate READY generations");
   const cachedReady = runtime.continuationSupervisorSweep({ nowMs: cachedRequestedAt + 9_000 });
-  assert.equal(readyForScope(cachedReady, cachedSchemaScope).length, 1,
-    "cached-schema checkpoint completion must recover a normal final without requiring Host teardown");
+  assert.equal(readyForScope(cachedReady, cachedSchemaScope).length, 0,
+    "cached-schema checkpoint completion must reuse the pre-armed READY generation after handoff promotion");
   const cachedCompleted = runtime.continuationTask({ action: "status", taskId: cachedSchema.task.id });
   assert.equal(cachedCompleted.task.assistantTurnState, "COMPLETED");
   assert.equal(cachedCompleted.task.assistantTurnCompletionSource, "model-completion-handoff-grace");
+  const cachedArchitecture = runtime.continuationArchitectureSnapshot(cachedSchemaScope);
+  assert.equal(cachedArchitecture.generations.filter(
+    (entry) => entry.workset_id === cachedArchitecture.card.active_workset_id
+      && entry.owner_type === "synthetic" && entry.state === "READY",
+  ).length, 1,
+    "cached-schema compatibility must preserve exactly one durable READY generation");
 
   const ordinaryCheckpointScope = "v1/atcc-ordinary-checkpoint";
   const ordinaryCheckpoint = begin(ordinaryCheckpointScope);

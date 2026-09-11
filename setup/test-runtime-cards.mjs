@@ -124,11 +124,10 @@ try {
     || !html.includes(".codex-runtime-card{")
     || !html.includes(".devspace-session-review{")
     || !html.includes(".devspace-operation-timeline {")
-    || externalScriptSources.length !== 1
-    || externalScriptSources[0] !== "https://example.test/mcp-app-assets/continuation-runtime.js"
+    || externalScriptSources.length !== 0
     || /<link[^>]+rel="stylesheet"/.test(html)
   ) {
-    throw new Error("runtime enhancement assets must remain inline while only the stable continuation runtime may load externally");
+    throw new Error("runtime enhancement and continuation sender assets must remain self-contained in the revisioned Workspace App document");
   }
 
   for (const relativePath of [

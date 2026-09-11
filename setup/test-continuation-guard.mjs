@@ -36,6 +36,12 @@ assert.ok(Number.isInteger(senderEpoch(server)) && senderEpoch(server) > 0,
   "server must declare a valid sender protocol epoch");
 assert.equal(senderEpoch(coordinator), senderEpoch(server),
   "the actual coordinator and server must agree on the sender protocol epoch; individually valid constants cannot prove interoperability");
+assert.match(server,
+  /CONTINUATION_SENDER_COMPATIBLE_PROTOCOL_EPOCHS = new Set\(\[11, CONTINUATION_SENDER_PROTOCOL_EPOCH\]\)/,
+  "the App bridge must accept still-mounted epoch-11 senders after the transport-only epoch-12 bump");
+assert.match(server,
+  /normalizedSenderProtocolEpoch = CONTINUATION_SENDER_PROTOCOL_EPOCH[\s\S]{0,2600}bindContinuationSender\([\s\S]{0,900}senderProtocolEpoch: normalizedSenderProtocolEpoch[\s\S]{0,1800}heartbeatContinuationSender\([\s\S]{0,900}senderProtocolEpoch: normalizedSenderProtocolEpoch/,
+  "compatible cached senders must be normalized into the current runtime epoch before strict sender lease/CAS checks");
 assert.equal(senderEpoch(readFileSync(packagedServerPath, "utf8")), senderEpoch(server),
   "installed core must enforce the same sender protocol as source");
 const visibleTriggerSource = coordinator.match(/function visibleContinuationTrigger\(task, deliveryToken\) \{[\s\S]*?\n\}/)?.[0] ?? "";
@@ -49,13 +55,13 @@ assert.match(finalizeRelease,
   "release metadata must fingerprint the continuation coordinator so same-version live/source drift is detectable");
 assert.match(server,
   /\/mcp-app-assets\/continuation-runtime\.js[\s\S]{0,1800}Cache-Control[\s\S]{0,160}no-cache, no-store/,
-  "the continuation coordinator hot-upgrade endpoint must be served from a stable no-store URL");
+  "the legacy continuation coordinator hot-upgrade endpoint must remain available as a no-store compatibility/diagnostic URL");
 assert.match(server,
-  /<script type="module" src=\$\{JSON\.stringify\(continuationRuntimeUrl\)\}><\/script>/,
-  "Host-cacheable Workspace App HTML must load the continuation sender from the no-store runtime endpoint instead of pinning inline coordinator bytes");
+  /const continuationCoordinatorSource = escapeInlineScript\([\s\S]{0,240}continuation-coordinator\.js/,
+  "the revisioned Workspace App HTML generator must inline the continuation coordinator so visible card startup and sender startup cannot diverge");
 assert.doesNotMatch(server,
-  /const continuationCoordinatorSource = readFileSync/,
-  "the Workspace App HTML generator must not inline protocol-sensitive continuation coordinator bytes");
+  /<script type="module" src=\$\{JSON\.stringify\(continuationRuntimeUrl\)\}><\/script>/,
+  "automatic continuation must not depend on a secondary external module request that the Host may skip while still rendering the inline card");
 assert.match(server,
   /globalThis\.__DEVSPACE_CONTINUATION_SENDER_ASSET_REVISION__=/,
   "the live runtime endpoint must stamp the provenance revision for the bytes it actually serves");
@@ -399,6 +405,10 @@ assert.match(coordinator, /async function callSender[\s\S]{0,1600}senderProtocol
   "every hidden sender action must carry the current protocol epoch");
 assert.match(coordinator, /async function bindSenderTransport[\s\S]{0,1600}senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH/,
   "sender bind must carry the current protocol epoch");
+assert.match(coordinator, /async function bindSenderTransport\(\)[\s\S]{0,1000}if \(state\.task && terminal\(state\.task\)\) return \{ accepted: false, reason: "task-terminal" \}/,
+  "a newly connected Workspace App must be allowed to perform the server-authenticated scope-only sender bind before toolresult hydrates state.task");
+assert.doesNotMatch(coordinator, /async function bindSenderTransport\(\)[\s\S]{0,1000}if \(terminal\(state\.task\)\) return \{ accepted: false, reason: "task-terminal" \}/,
+  "undefined pre-hydration task state must never be mistaken for a terminal task and suppress the first sender bind");
 assert.match(coordinator, /async function heartbeat\(note = "workspace-app"\)[\s\S]{0,1800}senderHeartbeatAuthorized[\s\S]{0,500}state\.anchorMountAcked[\s\S]{0,500}callSender\("heartbeat", \{ note \}\)[\s\S]{0,2200}callTask\("heartbeat", \{ note \}\)/,
   "a verified visible anchor must renew process-local sender authority as well as the durable task/card lease after MCP restart");
 assert.match(runtimeStateSource, /const requestedCoordinatorInstanceId = input\.coordinatorInstanceId[\s\S]{0,180}const coordinatorInstanceId = requestedCoordinatorInstanceId \|\| row\.coordinator_instance_id/,
@@ -550,9 +560,13 @@ assert.match(runtimeStateSource, /recordContinuationSenderHostTimeout\(input = \
 assert.match(runtimeStateSource, /senderTimeoutCapabilityVerified[\s\S]{0,500}expectedTurnLeaseId[\s\S]{0,600}exactTurnSenderTimeout/,
   "runtime Host-signal authorization must distinguish an internally verified exact-turn sender timeout from model-visible lifecycle calls");
 assert.match(server, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"host-timeout",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
-  "the app-only sender bridge must expose the exact-turn host-timeout action without making it a model-visible continuation_task action");
+  "the dedicated sender bridge must expose the exact-turn host-timeout action without adding sender actions to continuation_task");
+assert.match(server, /function senderHostCompatibleToolMeta\([\s\S]{0,900}visibility:\s*\["model",\s*"app"\][\s\S]{0,220}"openai\/widgetAccessible":\s*true/,
+  "the sender bridge must use the Host-compatible model+app Apps-SDK visibility while keeping server-side capability fencing authoritative");
+assert.doesNotMatch(server, /function appOnlyToolMeta\(/,
+  "dev59 must not depend on the Host-unreliable app-only sender visibility path");
 assert.match(server, /input\.action === "host-timeout"[\s\S]{0,700}recordContinuationSenderHostTimeout/,
-  "the hidden sender host-timeout route must terminate in the runtime capability validator");
+  "the sender host-timeout route must terminate in the runtime capability validator");
 assert.match(coordinator, /hostSignal === "timeout"[\s\S]{0,1200}callSender\("host-timeout"[\s\S]{0,500}turnLeaseId:\s*state\.task\.turnLeaseId/,
   "when ChatGPT omits a current card iframe, explicit timeout must retain exact-turn Host authority through the current sender relay");
 assert.doesNotMatch(coordinator, /callSender\("host-(?:teardown|signal)"/,
@@ -891,10 +905,12 @@ assert.notEqual(workspaceAppAnchorUri({ ...descriptorConfig, publicBaseUrl: "htt
 const renderedWorkspaceApp = workspaceAppHtml(descriptorConfig);
 assert.match(renderedWorkspaceApp, /return\s+[A-Za-z_$][\w$]*===`continuation_anchor`\|\|[A-Za-z_$][\w$]*===`open_workspace`/,
   "the final self-contained Workspace App resource must really route continuation_anchor into the visible renderer after minification");
-assert.match(renderedWorkspaceApp, /<script type="module" src="https:\/\/devspace\.example\.test\/mcp-app-assets\/continuation-runtime\.js"><\/script>/,
-  "Workspace App HTML must load the stable no-store continuation runtime so a Host-cached document can adopt the current sender implementation after upgrade");
+assert.match(renderedWorkspaceApp, /const SENDER_TOOL = "continuation_sender";/,
+  "Workspace App HTML must inline the continuation coordinator so sender startup does not depend on a secondary Host module request");
 assert.doesNotMatch(renderedWorkspaceApp, /data:text\/javascript;base64,/, "Workspace App HTML must not depend on a data: module that ChatGPT may block before widget CSP compatibility metadata is applied");
 assert.doesNotMatch(renderedWorkspaceApp, /src="[^"]*continuation-coordinator\.js/, "Workspace App HTML must not depend on an externally cached continuation coordinator script");
+assert.doesNotMatch(renderedWorkspaceApp, /<script[^>]+src=["'][^"']*continuation-runtime\.js["']/,
+  "the continuation sender must not depend on the dev52 external runtime bootstrap that can be skipped by the Host while the card UI still renders");
 assert.match(renderedWorkspaceApp, /window\.__DEVSPACE_MCP_APP__=/, "Workspace App HTML must inline the MCP Apps bootstrap bundle so ChatGPT does not need a second script request before connecting");
 assert.match(renderedWorkspaceApp, /RUNTIME_TOOLS/, "Workspace App HTML must inline runtime enhancements used by the render surface");
 assert.match(renderedWorkspaceApp, /__devspaceEarlyHostMessages/, "Workspace App must buffer host notifications that arrive before module listeners are ready");
@@ -903,8 +919,8 @@ assert.match(renderedWorkspaceApp, /devspace:workspace-app-ready/, "Workspace Ap
 assert.doesNotMatch(renderedWorkspaceApp, /<section class="empty">Waiting for a tool result\.<\/section>/, "the legacy permanently-stuck placeholder must not remain in the Workspace App shell");
 assert.match(renderedWorkspaceApp, /data-devspace-continuation/, "Workspace App must include the dedicated continuation task card renderer");
 assert.match(renderedWorkspaceApp, /<style>[\s\S]*\.shell/, "Workspace App HTML must inline its initial styles so the iframe is self-contained");
-assert.equal([...renderedWorkspaceApp.matchAll(/<script[^>]+src=/g)].length, 1,
-  "Workspace App may have exactly one external script request: the stable no-store continuation runtime used for hot sender upgrades");
+assert.equal([...renderedWorkspaceApp.matchAll(/<script[^>]+src=/g)].length, 0,
+  "the continuation/milestone bootstrap must remain fully self-contained so card rendering and sender startup have the same Host lifecycle");
 assert.doesNotMatch(renderedWorkspaceApp, /<link[^>]+rel="stylesheet"/, "Workspace App bootstrap must not depend on external stylesheet requests");
 assert.match(renderedWorkspaceApp, /https:\/\/devspace\.example\.test\/mcp-app-assets\/assets\/heavy-payload-[^"']+\.js/, "inline Vite entry must rewrite lazy chunk URLs to the public asset origin");
 const staleResourceUri = "ui://devspace/workspace-app-deadbeefdeadbeef.html";
@@ -916,13 +932,13 @@ assert.equal(staleResource.contents?.[0]?._meta?.ui?.domain, descriptorConfig.pu
 const generationResource = workspaceAppResourceResult(descriptorConfig, generation7Uri);
 assert.equal(generationResource.contents?.[0]?.uri, generation7Uri,
   "generation-specific compatibility reads must preserve the exact result-level URI requested by the host");
-assert.match(generationResource.contents?.[0]?.text ?? "", /mcp-app-assets\/continuation-runtime\.js/,
-  "generation-specific result cache keys must resolve to an App document that can hot-load the current continuation sender runtime");
+assert.match(generationResource.contents?.[0]?.text ?? "", /const SENDER_TOOL = "continuation_sender";/,
+  "generation-specific compatibility reads must resolve to a self-contained App document with the current continuation sender runtime inline");
 const historicalContinuationGuardUri = "ui://devspace/continuation-guard.html";
 const historicalContinuationGuardResource = workspaceAppResourceResult(descriptorConfig, historicalContinuationGuardUri);
 assert.equal(historicalContinuationGuardResource.contents?.[0]?.uri, historicalContinuationGuardUri);
-assert.match(historicalContinuationGuardResource.contents?.[0]?.text ?? "", /mcp-app-assets\/continuation-runtime\.js/,
-  "historical continuation-guard URI must resolve to an App document that hot-loads the current continuation sender runtime");
+assert.match(historicalContinuationGuardResource.contents?.[0]?.text ?? "", /const SENDER_TOOL = "continuation_sender";/,
+  "historical continuation-guard URI must resolve to a self-contained App document with the current continuation sender runtime inline");
 assert.match(server, /DevSpace Continuation Guard Legacy Compatibility/);
 assert.match(server, /ui:\/\/devspace\/continuation-guard\.html/);
 
@@ -4065,12 +4081,12 @@ try {
     "ordinary resource teardown must not authorize a completion-driven continuation");
   assert.equal(atomicCompletionTeardown.reason, "continuation-trigger-not-authorized");
 
-  // Live dev39 proved that a READY generation must not be created without a
-  // sender. Live dev42 then exposed the opposite ordering hazard: ChatGPT may
-  // not initialize the visible App/sender until the assistant/tool render is
-  // crossing its final boundary. Rejecting model-owned turn-complete before
-  // that boundary creates a circular dependency. Preserve the signed
-  // COMPLETION_REQUESTED lease, but hold promotion/READY until a sender arrives.
+  // dev55 live evidence showed the inverse of the old senderless concern:
+  // model-owned turn-complete reached READY only after the handoff grace, by
+  // which point the current Host sender had already disappeared. Pre-arm one
+  // durable READY generation immediately after the exact turn-complete
+  // signature while keeping the task itself COMPLETION_REQUESTED until the
+  // normal 8-second promotion grace matures.
   const missingSenderTask = runtime.continuationTask({
     action: "begin",
     conversationScopeId: "v1/test-turn-complete-missing-sender",
@@ -4102,6 +4118,11 @@ try {
   assert.equal(missingSenderCompletion.accepted, true,
     "turn-complete must preserve the model's exact-turn completion signature even when the Host App sender has not initialized yet");
   assert.equal(missingSenderCompletion.task.assistantTurnState, "COMPLETION_REQUESTED");
+  const missingSenderPrearm = runtime.continuationSupervisorSweep({
+    nowMs: Date.parse(missingSenderCompletion.task.assistantTurnCompletionRequestedAt) + 1,
+  });
+  assert.equal(missingSenderPrearm.ready.some(item => item.conversationScopeId === "v1/test-turn-complete-missing-sender"), true,
+    "explicit turn-complete must pre-arm READY immediately instead of waiting until the Host sender is likely gone");
   const missingSenderPromotionAt = Date.parse(missingSenderCompletion.task.assistantTurnCompletionRequestedAt) + 8_001;
   const missingSenderPromotion = runtime.promoteMatureAssistantCompletionIntent(
     missingSenderTask.task.id,
@@ -4115,8 +4136,8 @@ try {
     "COMPLETED",
     "missing sender must preserve the signed completion as a completed turn while transport catches up");
   const missingSenderSweep = runtime.continuationSupervisorSweep({ nowMs: missingSenderPromotionAt + 1 });
-  assert.equal(missingSenderSweep.ready.some(item => item.conversationScopeId === "v1/test-turn-complete-missing-sender"), true,
-    "the resident supervisor must persist READY work independently of browser sender availability");
+  assert.equal(missingSenderSweep.ready.filter(item => item.conversationScopeId === "v1/test-turn-complete-missing-sender").length <= 1, true,
+    "post-grace sweeps must preserve the already pre-armed singleton READY generation");
   const generationBeforeSenderBind = runtime.database.sqlite.prepare(`
     select generation,state from continuation_generations
     where workset_id=(
@@ -4126,7 +4147,7 @@ try {
     order by generation asc limit 1
   `).get("v1/test-turn-complete-missing-sender");
   assert.ok(generationBeforeSenderBind,
-    "senderless promotion must leave one discoverable durable READY generation rather than a silent COMPLETION_REQUESTED task");
+    "senderless pre-arm must leave one discoverable durable READY generation rather than a silent COMPLETION_REQUESTED task");
   const senderlessClaim = runtime.claimReadyContinuationGeneration({
     conversationScopeId: "v1/test-turn-complete-missing-sender",
     taskId: missingSenderTask.task.id,

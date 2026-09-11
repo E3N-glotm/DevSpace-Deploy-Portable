@@ -31,8 +31,8 @@ const scope = "v1/test-continuation-architecture";
 try {
   assert.match(serverSource, /registerAppTool\(server,\s*"continuation_sender"/,
     "1.1.54 must register a dedicated continuation_sender bridge");
-  assert.match(serverSource, /ui:\s*\{\s*visibility:\s*\["app"\]/s,
-    "continuation_sender metadata must support app-only visibility without a model-visible card surface");
+  assert.match(serverSource, /function senderHostCompatibleToolMeta\([\s\S]{0,900}visibility:\s*\["model",\s*"app"\]/,
+    "continuation_sender metadata must use the Host-compatible model+app Apps-SDK visibility while remaining server capability locked");
   assert.match(coordinatorSource, /const SENDER_TOOL = "continuation_sender";/,
     "the verified card App must use the dedicated sender bridge");
   assert.match(coordinatorSource, /callSender\("claim"/,
@@ -40,11 +40,11 @@ try {
   assert.match(serverSource, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"host-timeout",\s*"claim",\s*"authorize-delivery",\s*"delivery-result"\]\)/,
     "continuation_sender must expose context-derived bind, relay heartbeat, observational Host telemetry, exact-turn timeout fallback, and final authorize-delivery before Host user-role transport");
   assert.match(serverSource, /input\.action === "host-timeout"[\s\S]{0,700}recordContinuationSenderHostTimeout/,
-    "the hidden sender bridge must route Host timeout fallback through the runtime exact-turn capability validator");
+    "the sender bridge must route Host timeout fallback through the runtime exact-turn capability validator");
   assert.match(runtimeSource, /recordContinuationSenderHostTimeout\(input = \{\}\)[\s\S]{0,3600}stale-sender-turn-lease[\s\S]{0,2600}sender-mount-generation-mismatch/,
     "sender timeout fallback must require the exact current turn lease and current card generation");
   assert.match(coordinatorSource, /hostSignal === "timeout"[\s\S]{0,1200}callSender\("host-timeout"[\s\S]{0,500}turnLeaseId:\s*state\.task\.turnLeaseId/,
-    "the coordinator must use hidden exact-turn sender fallback only for explicit timeout when a verified visible coordinator is unavailable");
+    "the coordinator must use exact-turn sender fallback only for explicit timeout when a verified visible coordinator is unavailable");
   assert.doesNotMatch(coordinatorSource, /callSender\("host-(?:teardown|signal)"/,
     "generic teardown must never gain a sender fallback");
   assert.match(runtimeSource, /recordContinuationHostTelemetry\(input = \{\}\)[\s\S]{0,6200}continuation-host-telemetry/,
@@ -52,7 +52,7 @@ try {
   assert.match(coordinatorSource, /window\.addEventListener\("openai:set_globals",\s*onOpenAiGlobals\)/,
     "the Workspace App must observe Host global-surface changes without reading message content");
   assert.match(coordinatorSource, /callSender\("telemetry",\s*\{\s*telemetry:\s*payload\s*\}\)/,
-    "the Workspace App must report bounded Host-surface names through the app-only sender bridge");
+    "the Workspace App must report bounded Host-surface names through the dedicated capability-locked sender bridge");
   assert.match(serverSource, /function enablePortableContinuationAnchorRenderer[\s\S]{0,1200}continuation_anchor[\s\S]{0,800}open_workspace/,
     "the Portable server must adapt the upstream Workspace App renderer so continuation_anchor is a real visible result card instead of an ACK-only ghost iframe");
   assert.match(serverSource, /function workspaceAppAnchorUri[\s\S]{0,300}-continuation-anchor\.html/,
@@ -152,7 +152,7 @@ try {
     "sender bind must pass authenticated scope separately from the Host-forwarded fallback scope");
   assert.match(senderBridgeSource, /claimedConversationScopeId:\s*input\.conversationScopeId[\s\S]*?anchorMountGeneration:\s*input\.anchorMountGeneration/,
     "sender bind must forward the verified task/card fallback when the Host strips App call conversation metadata");
-  assert.match(coordinatorSource, /async function bindSenderTransport\([\s\S]{0,900}action:\s*"bind"/,
+  assert.match(coordinatorSource, /async function bindSenderTransport\([\s\S]{0,1800}action:\s*"bind"/,
     "every current Workspace App transport must be able to bind sender authority directly even if Host strips custom tool-result _meta");
   const senderBindSource = runtimeSource.match(/bindContinuationSender\(input = \{\}\)[\s\S]*?\n    heartbeatContinuationSender\(/)?.[0] ?? "";
   assert.match(senderBindSource, /sender_instance_id/,

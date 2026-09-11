@@ -1561,6 +1561,33 @@ export class StructuredRuntimeState {
                 `).get(current.id);
                 if (!pendingMilestone)
                     return undefined;
+                // An explicit model-owned turn-complete signature is strong
+                // enough to pre-arm one durable READY generation immediately,
+                // while the current Workspace App/sender is still most likely
+                // alive. Keep the 8-second ATCC handoff grace for the durable
+                // COMPLETED transition itself: if no sender is available, the
+                // same signed lease is promoted normally after the grace. If
+                // the model performs later substantive work, touchContinuation-
+                // ModelActivity revokes both COMPLETION_REQUESTED and any
+                // unclaimed READY generation atomically.
+                let legacy = current.legacy_task_id
+                    ? this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(current.legacy_task_id)
+                    : undefined;
+                if (legacy
+                    && String(legacy.assistant_turn_state || "") === "COMPLETION_REQUESTED"
+                    && normalizedContinuationMode(legacy.continuation_mode, "compat") === "completion-driven") {
+                    this.promoteMatureAssistantCompletionIntent(legacy.id, nowMs);
+                    legacy = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(legacy.id);
+                }
+                const legacyTurnLeaseId = String(legacy?.turn_lease_id || "");
+                const legacyCompletionLeaseId = String(legacy?.assistant_turn_completion_lease_id || "");
+                const signedCompletionPrearm = Boolean(legacy
+                    && legacy.state === "RUNNING"
+                    && normalizedContinuationMode(legacy.continuation_mode, "compat") === "completion-driven"
+                    && String(legacy.assistant_turn_state || "") === "COMPLETION_REQUESTED"
+                    && Boolean(legacyTurnLeaseId)
+                    && legacyCompletionLeaseId === legacyTurnLeaseId
+                    && !this.continuationModelRequestInFlight(current.conversation_scope_id));
                 const liveSynthetic = this.database.sqlite.prepare(`
                   select * from continuation_generations
                   where workset_id=? and owner_type='synthetic'
@@ -1657,27 +1684,6 @@ export class StructuredRuntimeState {
                     retryAuthorized = true;
                 }
                 if (!retryAuthorized) {
-                    let legacy = current.legacy_task_id
-                        ? this.database.sqlite.prepare(`
-                            select * from continuation_tasks where id=?
-                          `).get(current.legacy_task_id)
-                        : undefined;
-                    if (legacy
-                        && String(legacy.assistant_turn_state || "") === "COMPLETION_REQUESTED"
-                        && normalizedContinuationMode(legacy.continuation_mode, "compat") === "completion-driven") {
-                        // Normal ChatGPT finals currently do not emit Apps
-                        // resource teardown.  Promote only an explicit,
-                        // exact-turn model completion intent after the bounded
-                        // handoff grace. GENERATING silence can never enter this
-                        // branch, and any in-flight/later model request keeps it
-                        // fail-closed.
-                        this.promoteMatureAssistantCompletionIntent(legacy.id, nowMs);
-                        legacy = this.database.sqlite.prepare(`
-                          select * from continuation_tasks where id=?
-                        `).get(legacy.id);
-                    }
-                    const legacyTurnLeaseId = String(legacy?.turn_lease_id || "");
-                    const legacyCompletionLeaseId = String(legacy?.assistant_turn_completion_lease_id || "");
                     const legacyMode = normalizedContinuationMode(legacy?.continuation_mode, "compat");
                     const legacyTurnState = String(legacy?.assistant_turn_state || "UNKNOWN");
                     const atccArmed = (legacyMode === "completion-driven"
@@ -1687,7 +1693,7 @@ export class StructuredRuntimeState {
                         && Boolean(legacyTurnLeaseId)
                         && legacyCompletionLeaseId === legacyTurnLeaseId
                         && String(legacy?.stall_state || "ACTIVE") === "CONTINUATION_ARMED";
-                    let armed = atccArmed || [2, 3].includes(Number(legacy?.continuation_pending || 0));
+                    let armed = atccArmed || signedCompletionPrearm || [2, 3].includes(Number(legacy?.continuation_pending || 0));
                     if (!armed && legacy
                         && legacy.state === "RUNNING"
                         && normalizedContinuationMode(legacy.continuation_mode, "compat") === "completion-driven"
@@ -1731,8 +1737,8 @@ export class StructuredRuntimeState {
                 `).get(current.id, Number(current.current_generation || 0));
                 if (previous && previous.owner_type === "manual" && !["CLOSED", "SUPERSEDED", "NO_WORK"].includes(String(previous.state))) {
                     this.database.sqlite.prepare(`
-                      update continuation_generations set state='SUPERSEDED',closed_at=?,failure_reason='watchdog-expired',updated_at=? where id=?
-                    `).run(nowIso, nowIso, previous.id);
+                      update continuation_generations set state='SUPERSEDED',closed_at=?,failure_reason=?,updated_at=? where id=?
+                    `).run(nowIso, signedCompletionPrearm ? "model-turn-complete-prearmed" : "watchdog-expired", nowIso, previous.id);
                 }
                 const nextGeneration = Math.max(1, Number(current.current_generation || 0) + 1);
                 const generationId = `generation:${current.id}:${nextGeneration}`;
@@ -1751,7 +1757,11 @@ export class StructuredRuntimeState {
                     kind: "continuation-generation-ready",
                     subject: current.conversation_scope_id,
                     workspaceId: current.workspace_id ?? undefined,
-                    payload: { worksetId: current.id, generation: nextGeneration },
+                    payload: {
+                        worksetId: current.id,
+                        generation: nextGeneration,
+                        ...(signedCompletionPrearm ? { prearmed: true, reason: "model-turn-complete" } : {}),
+                    },
                 });
                 return { conversationScopeId: current.conversation_scope_id, worksetId: current.id, generation: nextGeneration, generationId };
             })();
@@ -3997,7 +4007,6 @@ export class StructuredRuntimeState {
                 ? "atcc-turn-complete (cached-schema compatibility)"
                 : String(input.note ?? "normal-stage-complete").trim().slice(0, 1000)
                     || "normal-stage-complete";
-            const completionHandoffDueAt = new Date(now.getTime() + MODEL_COMPLETION_HANDOFF_GRACE_MS).toISOString();
             this.database.sqlite.prepare(`
               update continuation_tasks set
                 assistant_turn_state='COMPLETION_REQUESTED',
@@ -4018,15 +4027,15 @@ export class StructuredRuntimeState {
             // Workset as authoritative and briefly projects the pre-completion
             // milestone state back onto the lifetime task.
             this.syncContinuationArchitectureForLegacyTask(taskId);
-            // Make the resident supervisor revisit this exact workset when the
-            // explicit completion handoff grace matures. This does not arm a
-            // continuation: the sweep still must atomically promote the exact
-            // COMPLETION_REQUESTED turn lease, and GENERATING tasks never pass
-            // that gate.
+            // Revisit this workset immediately so the resident supervisor can
+            // pre-arm one READY generation while the current Host App sender is
+            // still alive. The task itself remains COMPLETION_REQUESTED until
+            // the bounded ATCC handoff grace matures; later model activity
+            // revokes both the completion signature and an unclaimed pre-arm.
             this.database.sqlite.prepare(`
               update continuation_worksets set continuation_due_at=?,updated_at=?
               where legacy_task_id=? and state in ('RUNNING','SUSPECTED_STALL')
-            `).run(completionHandoffDueAt, nowIso, taskId);
+            `).run(nowIso, nowIso, taskId);
             const refreshed = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
             const task = rowToTask(refreshed);
             return {

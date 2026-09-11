@@ -64,6 +64,15 @@ const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 // sender action prevents a superseded pre-upgrade iframe from retaining sender
 // authority after a live Portable update.
 const CONTINUATION_SENDER_PROTOCOL_EPOCH = 12;
+// Epoch 11 and 12 share the same authenticated sender lease/CAS wire contract.
+// 2222796 bumped the epoch while changing only the preferred Host follow-up
+// transport (ui/message vs sendFollowUpMessage). Current live evidence moved
+// the coordinator back to ui/message-primary, so rejecting still-mounted epoch
+// 11 Workspace Apps strands otherwise valid READY work across ChatGPT client
+// caches. Accept 11 at the App bridge and normalize it to the current runtime
+// epoch; older epochs remain fail-closed because their sender lease contract is
+// genuinely incompatible.
+const CONTINUATION_SENDER_COMPATIBLE_PROTOCOL_EPOCHS = new Set([11, CONTINUATION_SENDER_PROTOCOL_EPOCH]);
 let structuredRuntimeState;
 let continuationTaskContractsEnabled = false;
 function resultWorkspaceId(result) {
@@ -528,7 +537,7 @@ function appCallableToolMeta(config, kind) {
         },
     };
 }
-function appOnlyToolMeta(config, kind) {
+function senderHostCompatibleToolMeta(config, kind) {
     const securitySchemes = [
         {
             type: "oauth2",
@@ -543,7 +552,13 @@ function appOnlyToolMeta(config, kind) {
             "openai/toolInvocation/invoking": status.invoking,
             "openai/toolInvocation/invoked": status.invoked,
             ui: {
-                visibility: ["app"],
+                // Current ChatGPT Hosts do not reliably proxy Apps-SDK
+                // callServerTool requests to app-only tools. Older DevSpace
+                // releases proved the model+app bridge is Host-compatible.
+                // Keep the sender service itself capability-locked, but expose
+                // the transport at the Host layer to both surfaces so a mounted
+                // Workspace App can actually reach it.
+                visibility: ["model", "app"],
             },
             "openai/widgetAccessible": true,
         },
@@ -1027,7 +1042,7 @@ function workspaceAppRevision(config) {
         .update("\0")
         .update(publicBaseUrl)
         .update("\0")
-        .update("workspace-app-self-contained-bootstrap-v6")
+        .update("workspace-app-self-contained-bootstrap-v7-inline-continuation-runtime")
         .digest("hex")
         .slice(0, 16);
 }
@@ -1097,10 +1112,22 @@ function workspaceAppSurfaceBootstrap(resourceUri) {
 function workspaceAppHtml(config, resourceUri = workspaceAppUri(config)) {
     const baseUrl = assetBaseUrl(config);
     const continuationWakeUrl = `${baseUrl}/continuation-wake`;
-    const continuationRuntimeUrl = `${baseUrl}/continuation-runtime.js`;
     const continuationSenderAssetRevision = workspaceAppRevision(config);
     const entry = getWorkspaceAppManifestEntry();
     const escapeInlineScript = (source) => String(source).replace(/<\/script/gi, "<\\/script");
+    // Keep the continuation coordinator in the immutable revisioned MCP App
+    // document itself.  dev52 moved this runtime to a normal HTTPS module URL
+    // so a cached App could hot-load newer sender bytes, but live ChatGPT
+    // clients can render the surrounding inline App while never executing that
+    // secondary module request.  The result is a visible milestone card with
+    // zero coordinator/sender registration and a permanently stranded READY
+    // generation. workspaceAppUri() already includes workspaceAppRevision(),
+    // and that revision hashes the coordinator bytes, so changing sender code
+    // naturally creates a new immutable resource URI without relying on an
+    // external bootstrap request.
+    const continuationCoordinatorSource = escapeInlineScript(
+        readFileSync(new URL("../dist/ui/assets/continuation-coordinator.js", import.meta.url), "utf8"),
+    );
     const runtimeEnhancementSource = escapeInlineScript(readFileSync(new URL("../dist/ui/assets/runtime-enhancements.js", import.meta.url), "utf8"));
     const workspaceEntrySource = escapeInlineScript(enablePortableContinuationAnchorRenderer(
         readFileSync(new URL(`../dist/ui/${entry.file}`, import.meta.url), "utf8")
@@ -1155,14 +1182,9 @@ ${inlineStyles}
     <script type="module">
 ${runtimeEnhancementSource}
     </script>
-    <!--
-      Keep the continuation sender runtime outside the Host-cacheable MCP HTML.
-      ChatGPT may reuse an already-cached output-template document across a
-      Portable upgrade.  A stable no-store module URL lets that cached
-      bootstrap acquire the *current* sender protocol/runtime bytes on every
-      fresh iframe mount, instead of pinning an obsolete coordinator forever.
-    -->
-    <script type="module" src=${JSON.stringify(continuationRuntimeUrl)}></script>
+    <script type="module">
+${continuationCoordinatorSource}
+    </script>
     <script type="module">
 ${workspaceEntrySource}
     </script>
@@ -2220,7 +2242,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 serverBootId: z.string().optional(),
                 senderStatus: z.unknown().optional(),
             }),
-            ...appOnlyToolMeta(config, "shell"),
+            ...senderHostCompatibleToolMeta(config, "shell"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async (input, context = {}) => {
             const conversationScopeId = openAiConversationScopeId(context?._meta);
@@ -2256,11 +2278,17 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                     }),
                 };
             };
-            if (Number(input.senderProtocolEpoch) !== CONTINUATION_SENDER_PROTOCOL_EPOCH) {
+            const observedSenderProtocolEpoch = Number(input.senderProtocolEpoch);
+            if (!CONTINUATION_SENDER_COMPATIBLE_PROTOCOL_EPOCHS.has(observedSenderProtocolEpoch)) {
                 const outcome = senderCompatibilityFailure("sender-protocol-epoch-mismatch");
                 const result = JSON.stringify(outcome, null, 2);
                 return { content: [textBlock(result)], structuredContent: { result, ...outcome } };
             }
+            // RuntimeState intentionally remains single-epoch internally. Once
+            // the App bridge has authenticated an explicitly compatible legacy
+            // epoch, normalize it to the current epoch before binding/renewing
+            // the sender lease so all downstream CAS checks stay strict.
+            const normalizedSenderProtocolEpoch = CONTINUATION_SENDER_PROTOCOL_EPOCH;
             // The resource revision proves which Workspace App bytes are
             // calling, but it is not itself a compatibility boundary.  That
             // hash includes presentation-only assets and therefore may differ
@@ -2279,7 +2307,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                     claimedConversationScopeId: input.conversationScopeId,
                     taskId: input.taskId,
                     senderInstanceId: input.senderInstanceId,
-                    senderProtocolEpoch: input.senderProtocolEpoch,
+                    senderProtocolEpoch: normalizedSenderProtocolEpoch,
                     senderAssetRevision: input.senderAssetRevision,
                     anchorMountGeneration: input.anchorMountGeneration,
                 })
@@ -2288,7 +2316,7 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                     conversationScopeId: input.conversationScopeId,
                     taskId: input.taskId,
                     senderInstanceId: input.senderInstanceId,
-                    senderProtocolEpoch: input.senderProtocolEpoch,
+                    senderProtocolEpoch: normalizedSenderProtocolEpoch,
                     senderAssetRevision: input.senderAssetRevision,
                     anchorMountToken: input.anchorMountToken,
                     anchorMountGeneration: input.anchorMountGeneration,

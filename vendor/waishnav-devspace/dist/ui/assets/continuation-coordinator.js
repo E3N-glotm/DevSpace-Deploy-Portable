@@ -747,7 +747,13 @@ export function installContinuationCoordinator(app, options = {}) {
 
   async function bindSenderTransport() {
     if (!state.connected || typeof app.callServerTool !== "function") return undefined;
-    if (terminal(state.task)) return { accepted: false, reason: "task-terminal" };
+    // A freshly connected ordinary Workspace App can enter here before its
+    // one-shot toolresult has populated state.task.  Do not classify that
+    // pre-hydration state as terminal: the server can authenticate the App's
+    // MCP conversation scope and recover the current lifetime task/card
+    // capability from that trusted scope alone.  Once an actual task object is
+    // known, keep the existing terminal fence fail-closed.
+    if (state.task && terminal(state.task)) return { accepted: false, reason: "task-terminal" };
     let lastError;
     for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
       if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
