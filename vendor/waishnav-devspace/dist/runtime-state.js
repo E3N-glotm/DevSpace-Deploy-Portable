@@ -3973,11 +3973,16 @@ export class StructuredRuntimeState {
             const owner = String(row.delivery_owner || "") === "synthetic-active" ? "synthetic" : "manual";
             const workDelta = Math.max(0,
                 Number(row.substantive_activity_count || 0) - Number(row.delivery_work_baseline_count || 0));
-            // Manual and synthetic turns share the same semantic stopping rule:
-            // at least one real operation must precede a voluntary incomplete
-            // stage boundary. Four calls and elapsed wall time are useful E2E
-            // observations, but are not production completion authority.
-            const minimumWorkDelta = 1;
+            // Manual and synthetic turns share the same milestone-driven
+            // stopping rule, but a resumed synthetic turn has a stronger
+            // anti-idle quality floor because the Host just spent a separate
+            // user-role turn to restart it. A manual turn needs one substantive
+            // operation before voluntarily yielding an unfinished stage;
+            // synthetic resumes need at least four post-ACK substantive
+            // operations. Four is only an anti-empty/anti-short-loop floor: it
+            // is never a target duration, a wall-clock budget, or permission to
+            // stop while runnable milestones remain.
+            const minimumWorkDelta = owner === "synthetic" ? 4 : 1;
             if (workDelta < minimumWorkDelta) {
                 return {
                     task: rowToTask(row),

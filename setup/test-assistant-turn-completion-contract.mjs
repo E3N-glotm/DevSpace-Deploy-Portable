@@ -544,10 +544,11 @@ try {
   assert.equal(duplicateSenderTimeout.task.hostTimeoutSamples, senderTimeoutSamples,
     "duplicate timeout delivery must be idempotent and must not double-count Host calibration samples");
 
-  // Synthetic resumed turns use the same anti-empty completion floor as a
-  // manual continue. Operation count and elapsed time are not a second turn
-  // budget: the milestone contract and model-owned stage boundary decide when
-  // a runnable turn may yield.
+  // Synthetic resumed turns use a stronger anti-idle completion floor than a
+  // manual continue: at least four post-ACK substantive operations are needed
+  // before a voluntary unfinished stage boundary. Operation count and elapsed
+  // time are not a second turn budget: the milestone contract and model-owned
+  // stage boundary still decide when a runnable turn may yield.
   const syntheticScope = "v1/atcc-synthetic-quality";
   const synthetic = begin(syntheticScope);
   mount(synthetic, syntheticScope, "ui_atcc_synthetic_quality");
@@ -563,7 +564,16 @@ try {
     note: "empty-handshake-loop",
   });
   assert.equal(syntheticTooShort.accepted, false);
-  assert.equal(syntheticTooShort.minimumSubstantiveWorkDelta, 1);
+  assert.equal(syntheticTooShort.minimumSubstantiveWorkDelta, 4);
+  work(synthetic, syntheticScope, 3);
+  const syntheticStillTooShort = runtime.continuationTask({
+    action: "turn-complete",
+    taskId: synthetic.task.id,
+    note: "three-operations-still-too-short",
+  });
+  assert.equal(syntheticStillTooShort.accepted, false);
+  assert.equal(syntheticStillTooShort.substantiveWorkDelta, 3);
+  assert.equal(syntheticStillTooShort.minimumSubstantiveWorkDelta, 4);
   work(synthetic, syntheticScope, 1);
   const syntheticRequested = runtime.continuationTask({
     action: "turn-complete",
@@ -592,7 +602,7 @@ try {
       delivery_work_baseline_count=coalesce(substantive_activity_count,0)
     where id=?
   `).run(budgetSynthetic.task.id);
-  work(budgetSynthetic, budgetScope, 1);
+  work(budgetSynthetic, budgetScope, 4);
   runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
     .run(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), budgetSynthetic.task.id);
   const budgetRequested = runtime.continuationTask({
@@ -630,7 +640,7 @@ try {
   // An already-open ChatGPT Host can cache the pre-dev11 action enum even
   // after the MCP service has upgraded.  The exact reserved checkpoint note
   // is therefore a model-owned compatibility signature for turn-complete.
-  // It must use the identical one-operation anti-empty gate and Host
+  // It must use the identical four-operation synthetic anti-idle gate and Host
   // ownership restrictions; ordinary checkpoint notes remain checkpoints.
   const cachedSchemaScope = "v1/atcc-cached-schema";
   const cachedSchema = begin(cachedSchemaScope, "ws_atcc_cached_schema");
@@ -649,8 +659,8 @@ try {
   assert.equal(cachedTooShort.accepted, false);
   assert.equal(cachedTooShort.reason, "assistant-turn-substantive-work-required");
   assert.equal(cachedTooShort.substantiveWorkDelta, 0);
-  assert.equal(cachedTooShort.minimumSubstantiveWorkDelta, 1);
-  work(cachedSchema, cachedSchemaScope, 1);
+  assert.equal(cachedTooShort.minimumSubstantiveWorkDelta, 4);
+  work(cachedSchema, cachedSchemaScope, 4);
   const cachedHostForgery = runtime.continuationTask({
     action: "checkpoint",
     taskId: cachedSchema.task.id,
@@ -696,9 +706,15 @@ try {
   runtime.database.sqlite.prepare(`
     update continuation_tasks set delivery_owner='synthetic-active',
       delivery_owner_expires_at=?,assistant_turn_state='GENERATING',
-      assistant_turn_completion_lease_id=null,stall_state='ACTIVE'
+      assistant_turn_completion_lease_id=null,stall_state='ACTIVE',
+      turn_started_at=?,turn_lease_expires_at=?
     where id=?
-  `).run(new Date(Date.now() - 60_000).toISOString(), synthetic.task.id);
+  `).run(
+    new Date(Date.now() - 15 * 60_000).toISOString(),
+    new Date(Date.now() - 45 * 60_000).toISOString(),
+    new Date(Date.now() - 10 * 60_000).toISOString(),
+    synthetic.task.id,
+  );
   const expiredOwnerClaim = runtime.continuationTask({
     action: "claim-continuation",
     taskId: synthetic.task.id,
@@ -706,6 +722,13 @@ try {
   });
   assert.equal(expiredOwnerClaim.accepted, false);
   assert.equal(expiredOwnerClaim.reason, "continuation-trigger-not-authorized");
+  const longRunningSyntheticSweep = runtime.continuationSupervisorSweep({ nowMs: Date.now() + 120_000 });
+  assert.equal(readyForScope(longRunningSyntheticSweep, syntheticScope).length, 0,
+    "even a >30-minute GENERATING synthetic turn with expired activity/owner leases must never manufacture a replacement turn");
+  const longRunningSyntheticStatus = runtime.continuationTask({ action: "status", taskId: synthetic.task.id });
+  assert.equal(longRunningSyntheticStatus.task.assistantTurnState, "GENERATING");
+  assert.equal(longRunningSyntheticStatus.task.deliveryOwner, "synthetic-active",
+    "lease expiry is telemetry only and must not revoke an actually GENERATING synthetic turn");
 
   // A new manual turn creates a new lease and invalidates stale completion
   // intent from the previous assistant turn before any side effect is allowed.
@@ -968,7 +991,8 @@ try {
     senderTimeoutKeepsMountVerificationTruthful: true,
     senderTimeoutIsIdempotent: true,
     genericTeardownHasNoSenderFallback: true,
-    manualAndSyntheticMinimumSubstantiveWorkDelta: 1,
+    manualMinimumSubstantiveWorkDelta: 1,
+    syntheticMinimumSubstantiveWorkDelta: 4,
     confirmedHostBudgetIsTelemetryOnly: true,
     verifiedHostTimeoutRemainsAuthoritative: true,
     cachedSchemaCheckpointCompletionCompatibility: true,

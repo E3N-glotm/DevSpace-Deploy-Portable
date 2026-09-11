@@ -373,14 +373,14 @@ assert.match(coordinator, /standard\.status === "pending"[\s\S]{0,500}result: "u
   "an outcome-uncertain ui/message request must never trigger a second transport and risk a duplicate user turn");
 assert.match(coordinator, /window\.openai\?\.sendFollowUpMessage[\s\S]{0,600}window\.openai\.sendFollowUpMessage\.bind\(window\.openai\)/,
   "ChatGPT Hosts must expose the native follow-up bridge as a first-class transport candidate");
-assert.match(coordinator, /if \(typeof hostNativeFollowUp === "function"\)[\s\S]{0,2600}invokeWithSettlementBound\(hostNativeFollowUp, \{ prompt: text \}\)[\s\S]{0,1500}method: "window\.openai\.sendFollowUpMessage"/,
-  "when ChatGPT exposes its native Host bridge it must be attempted before generic ui/message");
-assert.match(coordinator, /nativePrimaryUnsupported[\s\S]{0,3600}if \(typeof standardUiMessage === "function"\)/,
-  "generic ui/message must remain available after an explicitly unsupported ChatGPT native bridge or on non-ChatGPT Hosts");
+assert.match(coordinator, /if \(typeof standardUiMessage === "function"\)[\s\S]{0,2200}standardPayload = \{ role: "user", content: \[\{ type: "text", text \}\] \}[\s\S]{0,1800}if \(state\.headlessSenderRelay\)[\s\S]{0,1000}invokeWithSettlementBound\(nativeFollowUp, \{ prompt: text \}\)/,
+  "ui/message must be attempted before any native compatibility fallback, including when ChatGPT exposes window.openai.sendFollowUpMessage");
+assert.match(coordinator, /if \(state\.headlessSenderRelay\)[\s\S]{0,400}headless-relay-native-follow-up-disabled/,
+  "a superseded/headless sender relay may use ui/message but must never invoke the surface-scoped native follow-up bridge");
 assert.doesNotMatch(coordinator, /appTestFollowUp|app\.sendFollowUpMessage\.bind\(app\)/,
   "automatic production delivery must not confuse an App-level lookalike sendFollowUpMessage with a Host user-turn API");
-assert.match(coordinator, /invokeWithSettlementBound\(hostNativeFollowUp, \{ prompt: text \}\)[\s\S]{0,1600}method: "window\.openai\.sendFollowUpMessage"/,
-  "the ChatGPT native primary path must retain bounded settlement diagnostics");
+assert.match(coordinator, /invokeWithSettlementBound\(nativeFollowUp, \{ prompt: text \}\)[\s\S]{0,1600}method: "window\.openai\.sendFollowUpMessage"/,
+  "the native compatibility fallback must retain bounded settlement diagnostics");
 assert.match(coordinator, /DEFAULT_NATIVE_FOLLOW_UP_SETTLEMENT_TIMEOUT_MS = 4_000/,
   "native Host follow-up promise settlement must have a bounded production default");
 assert.match(coordinator, /nativeFollowUpSettlementTimeoutMs = Math\.max\(1,[\s\S]{0,240}DEFAULT_NATIVE_FOLLOW_UP_SETTLEMENT_TIMEOUT_MS/,
@@ -609,15 +609,16 @@ assert.match(runtimeStateSource, /syntheticResumeWorkRequired:\s*row\.delivery_o
   "runtime status must retain a durable resumed-turn work obligation after the connectivity ACK");
 assert.match(runtimeStateSource, /SYNTHETIC_WORK_OWNER_LEASE_MS = 30 \* 60_000/,
   "synthetic ownership must remain durable across manual-like reasoning/execution intervals rather than expiring after a few tens of seconds");
-assert.match(runtimeStateSource, /const minimumWorkDelta = 1/,
-  "manual and synthetic turn-complete must share one anti-empty substantive-work floor");
+assert.match(runtimeStateSource, /const minimumWorkDelta = owner === "synthetic" \? 4 : 1/,
+  "manual turn-complete must keep the one-operation anti-empty floor while synthetic resumes require four post-ACK substantive operations");
 assert.doesNotMatch(runtimeStateSource, /SYNTHETIC_MIN_ACTIVE_WORK_MS|syntheticMinimumActiveWorkMs/,
   "synthetic voluntary completion must not retain a fixed-duration fallback");
 assert.doesNotMatch(runtimeStateSource, /SYNTHETIC_CONFIRMED_HOST_BUDGET_RATIO|syntheticAdaptiveActiveWorkGate|synthetic-host-budget-calibration-required|synthetic-turn-min-active-work-required/,
   "Host timing telemetry must not become a synthetic completion budget or percentage gate");
 
 for (const [pattern, message] of [
-  [/single post-ACK substantive-operation floor only rejects an empty handshake-and-final loop/, "hidden synthetic context must treat the one-operation floor only as anti-empty evidence"],
+  [/at least four substantive DevSpace operations after its ACK/, "hidden synthetic context must require the four-operation post-ACK anti-idle floor"],
+  [/four-operation rule only rejects empty or very short handshake-and-final loops/, "hidden synthetic context must make clear that four operations are an anti-idle floor rather than a target duration"],
   [/never a fixed number of minutes or a learned Host-budget percentage/, "hidden synthetic context must reject both fixed and learned duration budgets"],
   [/across multiple milestones/, "hidden synthetic context must keep one resumed turn working across multiple milestones"],
 ]) {
@@ -1298,12 +1299,12 @@ assert.equal(senderRebindApp.messages.length, 0,
   "re-establishing sender authority alone must not invent a synthetic continuation when no READY generation exists");
 senderRebindController.dispose();
 
-// Current ChatGPT production can fulfill generic MCP Apps ui/message without
-// entering the normal model/tool pipeline. The native Host follow-up bridge is
-// therefore primary when window.openai exposes it. ATCC already waits for the
-// prior model turn to complete, avoiding the historical native-while-generating
-// silent-ignore race. Transport fulfillment still is not model-start proof;
-// the resumed DevSpace status ACK remains authoritative.
+// Real production evidence is stronger than API naming: the only observed
+// synthetic Host turn that reached a DevSpace ACK used ui/message, while both
+// dev43 and the dev52 E2E observed window.openai.sendFollowUpMessage fulfill in
+// 0-1 ms without creating a model generation. ui/message must therefore remain
+// primary even when both transports exist. Transport fulfillment is still not
+// model-start proof; the resumed DevSpace status ACK remains authoritative.
 const transportOrder = [];
 class NativeOnlyTransportApp extends FakeApp {
   async sendMessage(value) {
@@ -1332,8 +1333,8 @@ try {
   await transportController.onConnected();
   const firstTransportResult = await transportController.attemptContinuation("first delivery", { force: true });
   assert.equal(firstTransportResult, true);
-  assert.deepEqual(transportOrder, ["window-openai"],
-    "when ChatGPT exposes its native bridge, the first delivery must use it instead of generic ui/message");
+  assert.deepEqual(transportOrder, ["ui-message"],
+    "when both transports exist, the first delivery must use the proven ui/message user-role path and must not touch the native bridge");
   transportApp.task = {
     ...transportApp.task,
     deliveryAckRetryCount: 1,
@@ -1342,12 +1343,12 @@ try {
   };
   transportController.state.task = transportApp.task;
   await transportController.refreshNow();
-  assert.deepEqual(transportOrder, ["window-openai"],
+  assert.deepEqual(transportOrder, ["ui-message"],
     "an overdue ACK must remain diagnostic and must not retransmit a visible message");
   const deliveryMethods = transportApp.callInputs
     .filter((entry) => entry.name === "continuation_sender" && entry.action === "delivery-result")
     .map((entry) => entry.method);
-  assert.deepEqual(deliveryMethods, ["window.openai.sendFollowUpMessage"]);
+  assert.deepEqual(deliveryMethods, ["ui/message"]);
   transportController.dispose();
 } finally {
   if (previousWindow === undefined) delete globalThis.window;
@@ -1877,6 +1878,85 @@ await supersededSurfaceController.refreshNow();
 assert.equal(supersededSurfaceApp.messages.length, 1,
   "repeated headless refreshes must remain exactly-once after the READY generation was claimed");
 supersededSurfaceController.dispose();
+
+// A superseded historical iframe may keep a private sender relay alive so a
+// durable READY generation is not stranded, but it is no longer the active
+// ChatGPT surface. If ui/message is explicitly unavailable on that relay, do
+// not fall through to window.openai.sendFollowUpMessage: dev52 proved that a
+// native call from this state can fulfill while creating no Host model turn.
+let headlessNativeFallbackCalls = 0;
+class HeadlessUnsupportedUiMessageApp extends FakeApp {
+  async sendMessage() {
+    const error = new Error("ui/message unsupported by headless relay host");
+    error.code = "METHOD_UNSUPPORTED";
+    throw error;
+  }
+}
+const headlessUnsupportedApp = new HeadlessUnsupportedUiMessageApp();
+headlessUnsupportedApp.autoVerifyAnchor = false;
+headlessUnsupportedApp.task = {
+  id: "task_headless_unsupported",
+  workspaceId: "ws_headless_unsupported",
+  state: "RUNNING",
+  continuationMode: "completion-driven",
+  objective: "headless relay must not use native fallback",
+  requiredMilestones: ["done"],
+  completedMilestones: [],
+  continuationPending: false,
+  watchProcessHandles: [],
+  stallState: "CONTINUATION_ARMED",
+  anchorMountVerifiedAt: "2026-01-01T00:00:00.000Z",
+  anchorMountCoordinatorId: "ui_headless_generation_one",
+  anchorMountGeneration: 1,
+  anchorMountRequestedAt: "2026-01-01T00:00:00.000Z",
+  turnLeaseExpiresAt: new Date(Date.now() - 1000).toISOString(),
+  turnStartedAt: new Date(Date.now() - 60_000).toISOString(),
+};
+const headlessUnsupportedController = installContinuationCoordinator(
+  headlessUnsupportedApp,
+  {
+    timers: false,
+    instanceId: "ui_headless_generation_one",
+    nativeFollowUp: async () => {
+      headlessNativeFallbackCalls += 1;
+      return undefined;
+    },
+  },
+);
+headlessUnsupportedApp.emit("toolinput", {
+  name: "continuation_anchor",
+  arguments: { workspaceId: "ws_headless_unsupported", taskId: "task_headless_unsupported" },
+});
+headlessUnsupportedApp.emit("toolresult", {
+  name: "continuation_anchor",
+  structuredContent: {
+    continuationAnchor: true,
+    anchorMountGeneration: 1,
+    task: headlessUnsupportedApp.task,
+  },
+});
+await headlessUnsupportedController.onConnected();
+headlessUnsupportedApp.task = {
+  ...headlessUnsupportedApp.task,
+  anchorMountVerifiedAt: undefined,
+  anchorMountCoordinatorId: undefined,
+  anchorMountGeneration: 2,
+  anchorMountRequestedAt: "2026-01-01T00:01:00.000Z",
+};
+headlessUnsupportedApp.anchorMountGeneration = 2;
+headlessUnsupportedApp.anchorMountToken = "00000000-0000-4000-8000-00000000a053";
+headlessUnsupportedApp.statusReadyGeneration = 53;
+headlessUnsupportedApp.bindReadyGeneration = 53;
+await headlessUnsupportedController.refreshNow();
+assert.equal(headlessUnsupportedController.state.headlessSenderRelay, true,
+  "the unsupported-transport fixture must actually enter superseded headless relay state");
+assert.equal(headlessNativeFallbackCalls, 0,
+  "a headless relay must never invoke native follow-up after ui/message reports METHOD_UNSUPPORTED");
+const headlessDeliveryResult = headlessUnsupportedApp.callInputs.find((entry) =>
+  entry.name === "continuation_sender" && entry.action === "delivery-result");
+assert.equal(headlessDeliveryResult?.result, "rejected",
+  "headless ui/message unavailability must fail closed instead of pretending native delivery succeeded");
+headlessUnsupportedController.dispose();
 
 class FlakyTransportApp extends FakeApp {
   constructor() {

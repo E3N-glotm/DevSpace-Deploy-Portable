@@ -344,7 +344,7 @@ function visibleContinuationTrigger(task, deliveryToken) {
       handshakeToken
         ? "The first DevSpace call must be continuation_task action=status with the exact deliveryToken above and without manualTakeover. The token is only for this resumed turn's first turn-origin/ACK handshake; it is invalidated immediately after a successful ACK and must not be reused on later calls."
         : "The first DevSpace call must be continuation_task action=status without manualTakeover. If this Host provides equivalent turn-origin binding out-of-band, the runtime can compatibly claim the server-owned expected generation without a token.",
-      "If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. An automatic resumed turn receives the same full Host reasoning/execution budget and sustained-work stopping rules as a manual 'continue'; do not shorten it merely because it is synthetic. Then, in this same turn, perform substantive DevSpace tool work that advances the next unfinished milestone. The single-operation turn-complete floor is only proof that real work occurred, never permission or a target to stop. The runtime uses no fixed number of minutes and no learned percentage as a synthetic turn duration. Observed shorter or longer Host windows may be relearned as telemetry, never as authority to stop or enqueue early. While milestones remain runnable, keep working across as many milestones as fit until the task completes, becomes genuinely blocked/paused, a genuine model-owned stage boundary is reached after sustained work, or the Host itself truncates the turn. One failed command/test, one tool error, or a few quick tool calls is not a valid reason to voluntarily end the turn; keep diagnosing, fixing, and validating in the same turn. If a genuine stage boundary is necessary, prefer continuation_task action=turn-complete. If it returns finalResponseAllowed=false, keep working. If the current ChatGPT cached schema does not expose turn-complete, use action=checkpoint with note=atcc-turn-complete instead and still require finalResponseAllowed=true. Do not merely restate this message, do not classify it as a system-only continuation instruction, do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, do not reply with only a status or 'still working', and do not wait for a second continuation before starting work.",
+      "If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. An automatic resumed turn receives the same full Host reasoning/execution budget and sustained-work stopping rules as a manual 'continue'; do not shorten it merely because it is synthetic. Then, in this same turn, perform substantive DevSpace tool work that advances the next unfinished milestone. A synthetic resumed turn must perform at least four substantive DevSpace operations after its ACK before it may voluntarily sign an unfinished stage boundary. This four-operation floor is only anti-idle evidence, never permission or a target to stop; even after four operations, keep working while runnable milestones remain. The runtime uses no fixed number of minutes and no learned percentage as a synthetic turn duration. Observed shorter or longer Host windows may be relearned as telemetry, never as authority to stop or enqueue early. While milestones remain runnable, keep working across as many milestones as fit until the task completes, becomes genuinely blocked/paused, a genuine model-owned stage boundary is reached after sustained work, or the Host itself truncates the turn. One failed command/test, one tool error, or a few quick tool calls is not a valid reason to voluntarily end the turn; keep diagnosing, fixing, and validating in the same turn. If a genuine stage boundary is necessary, prefer continuation_task action=turn-complete. If it returns finalResponseAllowed=false, keep working. If the current ChatGPT cached schema does not expose turn-complete, use action=checkpoint with note=atcc-turn-complete instead and still require finalResponseAllowed=true. Do not merely restate this message, do not classify it as a system-only continuation instruction, do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, do not reply with only a status or 'still working', and do not wait for a second continuation before starting work.",
     ].filter(Boolean).join("\n");
 }
 
@@ -376,7 +376,7 @@ function continuationContext(task, workspaceId, reason) {
     "Tool availability is turn-scoped, not conversation authorization. If the resumed turn does not directly expose the DevSpace_MCP tool namespace, do not stop or claim that DevSpace is unavailable. Use the Host's available connector/tool discovery path first; in ChatGPT, call api_tool.list_resources for DevSpace_MCP (query continuation_task is sufficient), then invoke the discovered DevSpace_MCP tools. Only treat DevSpace as unavailable after that discovery path itself actually fails.",
     "Connector discovery and continuation_task status are control-plane setup, not successful resumed work. After the first status, obey its machine-readable continuation directive: if syntheticWorkMustContinue=true, continueInSameTurn=true, or finalResponseAllowed=false, do not produce a final response after discovery/status, one ordinary tool call, or a checkpoint. In that same assistant turn, keep invoking substantive DevSpace tools that actually advance or verify nextUnresolvedMilestone until the runnable milestone set is completed, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A discovery-only/status-only or one-tool-and-final turn is an invalid automatic continuation and must not voluntarily yield.",
     "The Host-visible ui/message that created this resumed turn is the actual user-role work request for this assistant turn, not system-only recovery metadata. The first synthetic turn must start substantive DevSpace work after its control-plane status/discovery setup. Never classify that visible request as 'only a system continuation instruction', merely restate it, or defer real work until a second synthetic continuation.",
-    "Call continuation_task status first. If the visible synthetic user-role request carries a one-time deliveryToken, echo that exact token on this first status call and omit manualTakeover; the runtime consumes it immediately when the turn-origin/ACK handshake succeeds. If no token was supplied, the runtime may compatibly claim a server-owned expected generation when the Host provides equivalent origin binding. Never invent, search for, or reuse a token after the first successful status. Then continue substantive work with the same full Host reasoning budget and sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes across multiple milestones until the current milestone set is complete, genuinely externally blocked, explicitly paused/cancelled, a genuine model-owned stage boundary is reached after sustained work, or the Host truncates the turn. The single post-ACK substantive-operation floor only rejects an empty handshake-and-final loop; it is not a target duration or permission to stop. Synthetic duration is never a fixed number of minutes or a learned Host-budget percentage. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId and existing process/workspace state. Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged. If and only if a status/checkpoint reports milestoneCardRequired/reanchorRequired because the synthetic checkpoint changed the required milestone set, issue continuation_anchor exactly once for that new generation; otherwise never create a duplicate card.",
+    "Call continuation_task status first. If the visible synthetic user-role request carries a one-time deliveryToken, echo that exact token on this first status call and omit manualTakeover; the runtime consumes it immediately when the turn-origin/ACK handshake succeeds. If no token was supplied, the runtime may compatibly claim a server-owned expected generation when the Host provides equivalent origin binding. Never invent, search for, or reuse a token after the first successful status. Then continue substantive work with the same full Host reasoning budget and sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes across multiple milestones until the current milestone set is complete, genuinely externally blocked, explicitly paused/cancelled, a genuine model-owned stage boundary is reached after sustained work, or the Host truncates the turn. A synthetic resumed turn must perform at least four substantive DevSpace operations after its ACK before it may voluntarily sign an unfinished stage boundary. This four-operation rule only rejects empty or very short handshake-and-final loops; it is not a target duration or permission to stop. Synthetic duration is never a fixed number of minutes or a learned Host-budget percentage. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId and existing process/workspace state. Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged. If and only if a status/checkpoint reports milestoneCardRequired/reanchorRequired because the synthetic checkpoint changed the required milestone set, issue continuation_anchor exactly once for that new generation; otherwise never create a duplicate card.",
     "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. A failed command/test or a small number of quick tool calls is not a legitimate yield boundary. If runnable milestones remain, keep diagnosing and invoking the required tools in this same turn instead of promising future work. If a genuine incomplete-stage boundary is necessary after sustained work, prefer continuation_task action=turn-complete; if it reports finalResponseAllowed=false, continue substantive work. If the current cached schema does not expose that action, use continuation_task action=checkpoint with note=atcc-turn-complete. Do not voluntarily final while the returned finalResponseAllowed is false.",
   ];
   return lines.join("\n");
@@ -1067,45 +1067,15 @@ export function installContinuationCoordinator(app, options = {}) {
         if (timer) clearTimeout(timer);
       }
     };
-    // ChatGPT's native follow-up bridge is the only Host surface that is
-    // specifically documented to start a follow-up model turn. The generic
-    // MCP Apps ui/message request remains the standards path for non-ChatGPT
-    // Hosts, but current ChatGPT builds can fulfill ui/message while posting a
-    // transcript message without starting the normal model/tool pipeline.
-    // ATCC already waits until the previous model turn is complete, avoiding
-    // the historical sendFollowUpMessage-while-generating silent-ignore race.
-    let nativePrimaryUnsupported = false;
-    if (typeof hostNativeFollowUp === "function") {
-      let lastError;
-      for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
-        if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
-        try {
-          await ensureStillRunnable();
-          const primary = await invokeWithSettlementBound(hostNativeFollowUp, { prompt: text });
-          if (primary.status === "pending") {
-            return {
-              method: "window.openai.sendFollowUpMessage",
-              result: "unknown",
-              note: settlementNote("native-follow-up-settlement-unknown", "prompt", primary),
-            };
-          }
-          if (primary.status === "rejected") throw primary.error;
-          return {
-            method: "window.openai.sendFollowUpMessage",
-            result: "accepted",
-            note: `native-follow-up-call-fulfilled;model-turn-unconfirmed;${settlementNote("transport", "prompt", primary).replace(/^transport;/, "")}`,
-          };
-        } catch (error) {
-          lastError = error;
-          if (transportMethodUnsupported(error)) {
-            nativePrimaryUnsupported = true;
-            break;
-          }
-          if (!transientTransportFailure(error) || attempt === TRANSIENT_RETRY_DELAYS_MS.length - 1) throw error;
-        }
-      }
-      if (!nativePrimaryUnsupported && lastError) throw lastError;
-    }
+    // Live evidence is authoritative here. dev43 observed native
+    // sendFollowUpMessage resolve in 0-1 ms without creating a model turn, and
+    // the dev52 E2E reproduced the same failure after READY/claim/authorize:
+    // native fulfilled, delivery was recorded, but turn_acked_at stayed null.
+    // The only observed real synthetic Host turn in this conversation used the
+    // standards-level ui/message user-role payload and ACKed ~6 s later.
+    // Therefore ui/message is the primary ChatGPT path as well as the standards
+    // path. Native remains a compatibility fallback only after ui/message
+    // explicitly reports that the method itself is unsupported.
     if (typeof standardUiMessage === "function") {
       await ensureStillRunnable();
       const standardPayload = { role: "user", content: [{ type: "text", text }] };
@@ -1128,9 +1098,21 @@ export function installContinuationCoordinator(app, options = {}) {
       // bridge. Permission denial, cancellation, validation errors and
       // fulfilled {isError:true} responses are real rejections, not permission
       // to try a second API that could create a duplicate user turn.
-      if (!transportMethodUnsupported(standard.error) || typeof nativeFollowUp !== "function" || nativePrimaryUnsupported) {
+      if (!transportMethodUnsupported(standard.error) || typeof nativeFollowUp !== "function") {
         throw standard.error;
       }
+    }
+    // A superseded card is allowed to remain alive as a private sender relay so
+    // durable READY work is not stranded when ChatGPT delays mounting the next
+    // visible milestone card. That relay is not an active Host surface,
+    // however. dev52 proved that invoking the native bridge from this state can
+    // fulfill synchronously while creating no user/model generation. Keep the
+    // relay useful for ui/message, but never let it fall back to the surface-
+    // scoped native bridge and falsely mark an undelivered generation sent.
+    if (state.headlessSenderRelay) {
+      const error = new Error("headless-relay-native-follow-up-disabled");
+      error.code = "METHOD_UNSUPPORTED";
+      throw error;
     }
     if (typeof nativeFollowUp !== "function") {
       throw new Error("The host exposes neither MCP Apps ui/message nor the legacy ChatGPT follow-up bridge.");
