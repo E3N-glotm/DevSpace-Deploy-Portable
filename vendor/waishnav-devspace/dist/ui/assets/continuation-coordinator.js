@@ -681,9 +681,9 @@ export function installContinuationCoordinator(app, options = {}) {
     throw lastError ?? new Error("DevSpace continuation transport retry exhausted.");
   }
 
-  async function callSender(action, extra = {}) {
+  async function callSender(action, extra = {}, { rebindAttempted = false } = {}) {
     if (!state.connected) throw new Error("DevSpace Workspace App is not connected to the host yet.");
-    const capability = activeSenderCapability();
+    let capability = activeSenderCapability();
     if (!capability) {
       return { accepted: false, reason: "sender-capability-unavailable" };
     }
@@ -713,7 +713,30 @@ export function installContinuationCoordinator(app, options = {}) {
         if (result?.isError && transientTransportFailure(textFromToolResult(result))) {
           throw new Error(textFromToolResult(result) || "Transient MCP transport failure");
         }
-        return normalizeTaskOutcome(result);
+        const outcome = normalizeTaskOutcome(result);
+        // MCP service restart deliberately invalidates every process-local
+        // sender lease while a ChatGPT iframe can survive with the same issued
+        // card capability.  Do not weaken that restart fence and do not grant
+        // mount/ACK authority to an unverified card.  Instead, if any normal
+        // sender operation proves that its server-side lease needs rebinding,
+        // run the authenticated bind path and retry the exact operation once.
+        //
+        // This recovery belongs here rather than only in heartbeat(): a current
+        // anchor whose iframe mount ACK is still pending is intentionally barred
+        // from sender heartbeat, yet it may be the only surviving transport when
+        // ATCC later exposes a durable READY generation.  In dev53 that ordering
+        // left READY unclaimed until manual takeover.  bindContinuationSender
+        // revalidates protocol epoch, task/conversation identity and the current
+        // immutable card generation, so stale/manual-superseded capabilities
+        // remain fail-closed.
+        if (!rebindAttempted && outcome?.accepted === false && outcome?.reason === "sender-rebind-required") {
+          const rebound = await bindSenderTransport().catch(() => undefined);
+          if (!rebound?.accepted) return outcome;
+          capability = activeSenderCapability();
+          if (!capability) return { accepted: false, reason: "sender-capability-unavailable-after-rebind" };
+          return callSender(action, extra, { rebindAttempted: true });
+        }
+        return outcome;
       } catch (error) {
         lastError = error;
         if (!transientTransportFailure(error) || attempt === TRANSIENT_RETRY_DELAYS_MS.length - 1) throw error;

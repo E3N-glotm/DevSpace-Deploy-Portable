@@ -957,12 +957,14 @@ class FakeApp {
     this.hostDisplayMode = "inline";
     this.task = undefined;
     this.autoVerifyAnchor = true;
+    this.anchorMountAccepted = true;
     this.autoEmitAnchorResult = true;
     this.anchorMountToken = "00000000-0000-4000-8000-00000000a001";
     this.anchorMountGeneration = 1;
     this.bindReadyGeneration = undefined;
     this.senderBindCount = 0;
     this.senderHeartbeatRebindRequiredOnce = false;
+    this.senderClaimRebindRequiredOnce = false;
   }
   verifyExistingAnchor() {
     if (this.task) {
@@ -1059,6 +1061,15 @@ class FakeApp {
         return { structuredContent: { accepted: true, lastUiHeartbeatAt: new Date().toISOString() } };
       }
       if (input.action === "claim") {
+        if (this.senderClaimRebindRequiredOnce) {
+          this.senderClaimRebindRequiredOnce = false;
+          return {
+            structuredContent: {
+              accepted: false,
+              reason: "sender-rebind-required",
+            },
+          };
+        }
         const retryExisting = Boolean(this.task?.continuationDeliveryAwaitingAck
           && this.task?.deliveryToken
           && Date.parse(this.task?.deliveryAckRetryAfterAt || "") <= Date.now());
@@ -1165,7 +1176,8 @@ class FakeApp {
       return { structuredContent: { task: this.task, accepted: true } };
     }
     if (input.action === "anchor-mounted") {
-      const accepted = input.anchorMountToken === this.anchorMountToken
+      const accepted = this.anchorMountAccepted !== false
+        && input.anchorMountToken === this.anchorMountToken
         && Number(input.anchorMountGeneration || 0) === Number(this.anchorMountGeneration || 0);
       if (accepted) {
         this.task = {
@@ -1298,6 +1310,53 @@ assert.equal(senderRebindApp.senderHeartbeatRebindRequiredOnce, false,
 assert.equal(senderRebindApp.messages.length, 0,
   "re-establishing sender authority alone must not invent a synthetic continuation when no READY generation exists");
 senderRebindController.dispose();
+
+// Reproduce the dev53 production ordering more precisely: the current visible
+// card has been issued but its iframe mount ACK is still pending, the MCP
+// service restarts and invalidates the server-side sender lease, then ATCC
+// creates durable READY work.  Security hardening intentionally prevents this
+// unverified current anchor from manufacturing a sender heartbeat, so claim
+// itself must recover sender authority through one authenticated bind.  The
+// recovery must not turn the private sender bind into a fake visible-card ACK.
+const pendingAnchorRestartApp = new FakeApp();
+pendingAnchorRestartApp.autoVerifyAnchor = false;
+pendingAnchorRestartApp.anchorMountAccepted = false;
+const pendingAnchorRestartController = installContinuationCoordinator(pendingAnchorRestartApp, {
+  timers: false,
+  instanceId: "ui_pending_anchor_restart_recovery",
+});
+pendingAnchorRestartApp.emit("toolinput", {
+  name: "continuation_anchor",
+  arguments: { workspaceId: "ws_pending_anchor_restart_recovery" },
+});
+await pendingAnchorRestartController.onConnected();
+const pendingIssuedTask = {
+  ...pendingAnchorRestartController.state.task,
+  anchorMountRequestedAt: "2026-01-01T00:00:00.000Z",
+};
+pendingAnchorRestartController.state.task = pendingIssuedTask;
+pendingAnchorRestartApp.task = pendingIssuedTask;
+assert.equal(Boolean(pendingAnchorRestartApp.task?.anchorMountVerifiedAt), false,
+  "the restart regression must keep the current visible card genuinely unverified");
+assert.equal(pendingAnchorRestartController.state.anchorMountAcked, false,
+  "a private sender bind must not manufacture visible-card mount authority");
+const pendingAnchorBindCountBeforeLeaseLoss = pendingAnchorRestartApp.senderBindCount;
+pendingAnchorRestartApp.senderClaimRebindRequiredOnce = true;
+assert.equal(await pendingAnchorRestartController.attemptContinuation("post-restart READY", { force: true }), true,
+  "READY claim must recover a restarted sender lease even while the current anchor mount ACK is pending");
+assert.equal(pendingAnchorRestartApp.senderClaimRebindRequiredOnce, false,
+  "the restart regression must exercise the rejected claim rather than succeed through stale local sender state");
+assert.ok(pendingAnchorRestartApp.senderBindCount > pendingAnchorBindCountBeforeLeaseLoss,
+  "sender-rebind-required from claim must execute one fresh authenticated sender bind");
+assert.equal(pendingAnchorRestartController.state.anchorMountAcked, false,
+  "claim recovery must preserve the separation between sender authority and visible-card mount ACK authority");
+assert.equal(pendingAnchorRestartApp.messages.length, 1,
+  "post-restart READY recovery must create exactly one Host-visible continuation request");
+const pendingAnchorClaims = pendingAnchorRestartApp.callInputs
+  .filter((entry) => entry.name === "continuation_sender" && entry.action === "claim");
+assert.equal(pendingAnchorClaims.length, 2,
+  "the failed post-restart claim may be retried exactly once after authenticated sender rebind");
+pendingAnchorRestartController.dispose();
 
 // Real production evidence is stronger than API naming: the only observed
 // synthetic Host turn that reached a DevSpace ACK used ui/message, while both
