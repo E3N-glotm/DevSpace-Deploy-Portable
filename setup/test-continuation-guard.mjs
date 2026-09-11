@@ -740,6 +740,8 @@ assert.match(coordinator, /headlessSenderRelay:\s*false/,
   "the coordinator state must explicitly track headless sender-relay demotion");
 assert.match(coordinator, /function markAnchorSuperseded\([^)]*\)[\s\S]{0,700}state\.headlessSenderRelay = true/,
   "a superseded visible card must demote to a headless sender relay instead of killing the only surviving Host transport");
+assert.match(coordinator, /function startSupervisor\(\)[\s\S]{0,1500}recoverableHeadlessRelay = state\.anchorSuperseded && state\.headlessSenderRelay[\s\S]{0,700}!senderTransportAvailable\(\) && !recoverableHeadlessRelay/,
+  "a superseded authenticated relay must be able to restart its supervisor before it has rebound the current-generation sender capability");
 assert.match(coordinator, /activeSenderCapability\(\)[\s\S]{0,900}anchorMountGeneration[\s\S]{0,700}authoritativeGeneration/,
   "a headless relay must reject its stale sender capability until private bind refreshes it to the authoritative current generation");
 assert.match(coordinator, /const mountToken = state\.anchorMountToken[\s\S]{0,500}callTask\("heartbeat",\s*\{\s*note:\s*`anchor-mount-ack:\$\{mountToken\}`\s*\}\)/,
@@ -871,9 +873,16 @@ assert.notEqual(generation8Uri, generation7Uri,
 assert.equal(workspaceAppGenerationUri(descriptorConfig, 0), anchorUri,
   "invalid/non-positive generations must fall back to the stable revisioned Workspace App URI");
 const generation7Meta = workspaceAppResultMeta(descriptorConfig, 7);
-assert.equal(generation7Meta?.ui?.resourceUri, generation7Uri);
-assert.equal(generation7Meta?.["ui/resourceUri"], generation7Uri);
-assert.equal(generation7Meta?.["openai/outputTemplate"], generation7Uri);
+const generation8Meta = workspaceAppResultMeta(descriptorConfig, 8);
+assert.equal(generation7Meta?.ui?.resourceUri, anchorUri,
+  "new continuation_anchor results must keep the same stable Host template identity as the static tool descriptor");
+assert.equal(generation7Meta?.["ui/resourceUri"], anchorUri);
+assert.equal(generation7Meta?.["openai/outputTemplate"], anchorUri);
+assert.equal(generation8Meta?.ui?.resourceUri, anchorUri,
+  "rotating the durable milestone generation must not rotate the Host App template URI");
+assert.equal(generation8Meta?.["openai/outputTemplate"], anchorUri);
+assert.notEqual(generation7Uri, anchorUri,
+  "legacy generation-specific resource URIs remain distinct compatibility aliases only");
 const fullWorkspaceMeta = toolWidgetDescriptorMeta({ ...descriptorConfig, widgets: "full" }, "workspace");
 assert.equal(fullWorkspaceMeta?._meta?.ui?.resourceUri, workspaceUri,
   "widgets=full keeps the explicit compatibility behavior where workspace calls render cards");

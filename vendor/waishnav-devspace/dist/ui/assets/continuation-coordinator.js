@@ -1459,7 +1459,17 @@ export function installContinuationCoordinator(app, options = {}) {
     // Keep a lightweight supervisor alive for non-terminal waiting tasks too. A
     // watch-process registration may arrive after the anchor is mounted, and a
     // stopped timer would otherwise never discover that new server-side watch.
-    if (!timersEnabled || terminal(state.task) || !senderTransportAvailable() || state.supervisorTimer || !state.task?.id) return;
+    // A superseded historical anchor is a special authenticated recovery case:
+    // it may have deliberately discarded its stale sender capability when a new
+    // card generation was issued. Allow that already-connected App to keep the
+    // supervisor alive long enough to refresh authoritative state and privately
+    // bind the current generation. supervisorTickImpl still requires the
+    // generation-safe bind/CAS before any claim/send, so this does not grant an
+    // arbitrary transport App sender authority.
+    const recoverableHeadlessRelay = state.anchorSuperseded && state.headlessSenderRelay;
+    if (!timersEnabled || terminal(state.task)
+        || (!senderTransportAvailable() && !recoverableHeadlessRelay)
+        || state.supervisorTimer || !state.task?.id) return;
     state.supervisorTimer = setInterval(() => void supervisorTick(), supervisorTickMs);
     void supervisorTick();
   }

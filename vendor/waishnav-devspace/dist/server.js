@@ -1051,7 +1051,17 @@ function workspaceAppGenerationUri(config, generation) {
     return baseUri.replace(/\.html$/, `-g${normalizedGeneration}.html`);
 }
 function workspaceAppResultMeta(config, generation) {
-    const resourceUri = workspaceAppGenerationUri(config, generation);
+    // Keep the Host-facing continuation_anchor template identity stable for the
+    // lifetime of this Workspace App revision. The card generation is an
+    // authorization/CAS capability owned by continuation state, not a second
+    // template identity. ChatGPT can prefer the static tool descriptor URI or
+    // the result-level URI depending on cache/rehydration ordering; returning a
+    // generation-specific URI here makes one tool call advertise two different
+    // App documents and can leave only the outer result shell mounted. Older
+    // -gN URIs remain readable through workspaceAppGenerationUri() for transcript
+    // compatibility, but new anchor results always use the stable anchor URI.
+    void generation;
+    const resourceUri = workspaceAppAnchorUri(config);
     return {
         ui: {
             resourceUri,

@@ -276,7 +276,7 @@ try {
   assert.equal(await barrierAllows({ ...pendingDelivery, state: "SUCCEEDED" }, 1), false);
   assert.equal(await barrierAllows({ ...pendingDelivery, state: "WAITING_EXTERNAL" }, 1), false);
   }
-  assert.match(coordinatorSource, /function startSupervisor\(\)[\s\S]{0,700}terminal\(state\.task\)/,
+  assert.match(coordinatorSource, /function startSupervisor\(\)[\s\S]{0,1800}terminal\(state\.task\)/,
     "terminal tasks must not retain a retry or quiet-probe supervisor timer");
   assert.match(runtimeSource, /closeTerminalContinuationArtifacts\(taskId[\s\S]{0,4200}state='NO_WORK'[\s\S]{0,2600}delivery_token=null[\s\S]{0,1600}stall_armed_at=null/,
     "terminal transitions must seal live synthetic generations and clear retry/delivery/quiet-recovery latches");
