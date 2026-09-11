@@ -97,8 +97,18 @@ try {
     getHostContext() { return {}; },
     async callServerTool(request) {
       calls.push(request);
+      const bridgeAction = request.name === "continuation_anchor"
+        ? request.arguments?.bridgeAction
+        : undefined;
       const action = request.arguments?.action;
-      if (request.name === "continuation_sender" && action === "bind") {
+      const senderAction = bridgeAction?.startsWith("sender-")
+        ? bridgeAction.slice("sender-".length)
+        : request.name === "continuation_sender" ? action : undefined;
+      const taskAction = bridgeAction?.startsWith("task-")
+        ? bridgeAction.slice("task-".length)
+        : request.name === "continuation_task" ? action : undefined;
+      if ((request.name === "continuation_anchor" || request.name === "continuation_sender")
+        && senderAction === "bind") {
         return { structuredContent: {
           accepted: true,
           taskId: currentTask.id,
@@ -109,14 +119,17 @@ try {
           task: currentTask,
         } };
       }
-      if (request.name === "continuation_task" && action === "begin-auto") {
+      if ((request.name === "continuation_anchor" || request.name === "continuation_task")
+        && taskAction === "begin-auto") {
         return { structuredContent: { accepted: true, task: currentTask } };
       }
-      if (request.name === "continuation_task" && action === "anchor-mounted") {
+      if ((request.name === "continuation_anchor" || request.name === "continuation_task")
+        && taskAction === "anchor-mounted") {
         currentTask = { ...currentTask, anchorMountVerifiedAt: "2026-09-07T00:00:01.000Z" };
         return { structuredContent: { accepted: true, task: currentTask } };
       }
-      if (request.name === "continuation_task") {
+      if ((request.name === "continuation_anchor" && taskAction)
+        || request.name === "continuation_task") {
         return { structuredContent: { accepted: true, task: currentTask } };
       }
       return { structuredContent: { accepted: true } };
@@ -129,8 +142,8 @@ try {
     assert.equal(controller.state.currentTool, "continuation_anchor");
     assert.equal(controller.state.anchorMountAcked, true,
       "the resource-identified anchor must ACK even with no Host tool lifecycle notifications");
-    assert.ok(calls.some((call) => call.name === "continuation_task"
-      && call.arguments?.action === "anchor-mounted"
+    assert.ok(calls.some((call) => call.name === "continuation_anchor"
+      && call.arguments?.bridgeAction === "task-anchor-mounted"
       && call.arguments?.anchorMountGeneration === 7),
     "resource fallback must authenticate the exact issued generation through anchor-mounted");
     controller.dispose();

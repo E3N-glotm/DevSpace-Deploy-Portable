@@ -564,10 +564,27 @@ assert.match(server, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"host-t
 assert.match(server, /function senderHostCompatibleToolMeta\([\s\S]{0,900}visibility:\s*\["model",\s*"app"\][\s\S]{0,220}"openai\/widgetAccessible":\s*true/,
   "the sender bridge must use the Host-compatible model+app Apps-SDK visibility while keeping server-side capability fencing authoritative");
 assert.match(server,
-  /registerAppTool\(server,\s*"continuation_anchor"[\s\S]{0,5200}\.\.\.appCallableToolMeta\(config,\s*"continuation-anchor"\)/,
+  /registerAppTool\(server,\s*"continuation_anchor"[\s\S]{0,14000}\.\.\.appCallableToolMeta\(config,\s*"continuation-anchor"\)/,
   "the visible continuation anchor source must itself expose the Host component tool bridge used immediately after App.connect");
-assert.match(server, /workspace-app-self-contained-bootstrap-v8-host-callable-anchor/,
-  "dev60 must rotate the immutable Workspace App revision so a pre-fix anchor document cannot remain cached by the Host");
+assert.match(server, /workspace-app-self-contained-bootstrap-v10-descriptor-only-anchor-mount/,
+  "dev62 must rotate the immutable Workspace App revision after restoring the Host-proven descriptor-only anchor mount contract");
+assert.match(coordinator, /const ANCHOR_TOOL = "continuation_anchor";/,
+  "the coordinator must know the source continuation_anchor tool used by the Host-bound same-source component bridge");
+assert.match(coordinator,
+  /async function callTask[\s\S]{0,1800}useAnchorBridge = state\.anchorSurface[\s\S]{0,900}name: useAnchorBridge \? ANCHOR_TOOL : TASK_TOOL[\s\S]{0,700}bridgeAction: `task-\$\{action\}`/,
+  "anchor Apps must route task control traffic back through their own source tool instead of depending on cross-tool component calls");
+assert.match(coordinator,
+  /async function callSender[\s\S]{0,2000}useAnchorBridge = state\.anchorSurface[\s\S]{0,900}name: useAnchorBridge \? ANCHOR_TOOL : SENDER_TOOL[\s\S]{0,700}bridgeAction: `sender-\$\{action\}`/,
+  "anchor Apps must route sender control traffic back through their own source tool while ordinary relay Apps keep the dedicated sender target");
+assert.match(server,
+  /bridgeAction: z\.enum\([\s\S]{0,900}"sender-authorize-delivery"/,
+  "continuation_anchor must expose the same-source sender bridge actions");
+assert.match(server,
+  /if \(input\.bridgeAction\)[\s\S]{0,700}runContinuationSenderBridge\(/,
+  "continuation_anchor must delegate same-source sender calls into the existing capability-fenced runtime path");
+assert.match(server,
+  /if \(input\.bridgeAction\)[\s\S]{0,1800}Never emit outputTemplate\/_meta here/,
+  "same-source control calls must never create a second visible milestone card");
 assert.doesNotMatch(server, /function appOnlyToolMeta\(/,
   "dev59 must not depend on the Host-unreliable app-only sender visibility path");
 assert.match(server, /input\.action === "host-timeout"[\s\S]{0,700}recordContinuationSenderHostTimeout/,
@@ -881,6 +898,12 @@ assert.notEqual(anchorUri, workspaceUri,
   "the visible continuation anchor must not share the generic Workspace App resource identity");
 assert.equal(anchorMeta?._meta?.ui?.resourceUri, anchorUri);
 assert.equal(anchorMeta?._meta?.["openai/outputTemplate"], anchorUri);
+assert.match(server,
+  /const payload = \{[\s\S]{0,1800}continuationAnchor: true[\s\S]{0,2200}const result = JSON\.stringify\(payload, null, 2\);[\s\S]{0,1200}structuredContent: \{ result, \.\.\.payload \},[\s\S]{0,300}\};/,
+  "the primary continuation_anchor result must rely on its registered descriptor outputTemplate instead of advertising a second result-level App template");
+assert.doesNotMatch(server,
+  /structuredContent: \{ result, \.\.\.payload \},\s*_meta: workspaceAppResultMeta\(config, mount\.anchorMountGeneration\)/,
+  "the primary continuation_anchor result must not reintroduce dev15 result-level outputTemplate metadata that can leave the Host at an unmounted result shell");
 const generation7Uri = workspaceAppGenerationUri(descriptorConfig, 7);
 const generation8Uri = workspaceAppGenerationUri(descriptorConfig, 8);
 assert.match(generation7Uri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}-continuation-anchor-g7\.html$/,
@@ -1051,8 +1074,26 @@ class FakeApp {
     return { name: "test-host", version: "1" };
   }
   async callServerTool({ name, arguments: input }) {
+    const rawName = name;
+    const rawInput = input;
+    // dev61 models the current ChatGPT Host behavior: an anchor iframe routes
+    // component control traffic back through the source continuation_anchor
+    // tool. Normalize that same-source bridge into the pre-existing fake task
+    // and sender handlers so all lease/CAS/delivery assertions below still
+    // exercise the exact same state transitions.
+    if (name === "continuation_anchor" && typeof input?.bridgeAction === "string") {
+      const bridgeAction = input.bridgeAction;
+      if (bridgeAction.startsWith("sender-")) {
+        name = "continuation_sender";
+        input = { ...input, action: bridgeAction.slice("sender-".length) };
+      }
+      else if (bridgeAction.startsWith("task-")) {
+        name = "continuation_task";
+        input = { ...input, action: bridgeAction.slice("task-".length) };
+      }
+    }
     this.calls.push(input.action);
-    this.callInputs.push({ name, ...input });
+    this.callInputs.push({ name: rawName, ...rawInput });
     this.verifyExistingAnchor();
     if (name === "continuation_sender") {
       assert.equal(input.senderProtocolEpoch, senderEpoch(server),
@@ -1258,6 +1299,14 @@ class FakeApp {
   }
 }
 
+const isAnchorSenderBridgeCall = (entry, action) => entry?.name === "continuation_anchor"
+  && entry?.bridgeAction === `sender-${action}`;
+const isSenderControlCall = (entry, action) => isAnchorSenderBridgeCall(entry, action)
+  || (entry?.name === "continuation_sender" && entry?.action === action);
+const isTaskControlCall = (entry, action) => (entry?.name === "continuation_anchor"
+  && entry?.bridgeAction === `task-${action}`)
+  || (entry?.name === "continuation_task" && entry?.action === action);
+
 const fakeApp = new FakeApp();
 const fakeController = installContinuationCoordinator(fakeApp, { timers: false, instanceId: "ui_test" });
 fakeApp.emit("toolinput", { arguments: { workspaceId: "ws_fake" } });
@@ -1312,8 +1361,10 @@ assert.doesNotMatch(hiddenSyntheticContext, /00000000-0000-4000-8000-00000000000
   "hidden model context must describe token handling without duplicating the concrete one-time capability outside the Host-visible user-role handoff");
 assert.ok(fakeApp.calls.includes("begin-auto"));
 assert.ok(fakeApp.calls.includes("heartbeat"));
-assert.ok(fakeApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "claim"));
-assert.ok(fakeApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "authorize-delivery"));
+assert.ok(fakeApp.callInputs.some((entry) => isAnchorSenderBridgeCall(entry, "claim")),
+  "the milestone anchor must claim READY through its same-source continuation_anchor bridge");
+assert.ok(fakeApp.callInputs.some((entry) => isAnchorSenderBridgeCall(entry, "authorize-delivery")),
+  "the milestone anchor must authorize delivery through its same-source continuation_anchor bridge");
 assert.ok(fakeApp.calls.includes("delivery-result"));
 fakeController.dispose();
 
@@ -1383,7 +1434,7 @@ assert.equal(pendingAnchorRestartController.state.anchorMountAcked, false,
 assert.equal(pendingAnchorRestartApp.messages.length, 1,
   "post-restart READY recovery must create exactly one Host-visible continuation request");
 const pendingAnchorClaims = pendingAnchorRestartApp.callInputs
-  .filter((entry) => entry.name === "continuation_sender" && entry.action === "claim");
+  .filter((entry) => isAnchorSenderBridgeCall(entry, "claim"));
 assert.equal(pendingAnchorClaims.length, 2,
   "the failed post-restart claim may be retried exactly once after authenticated sender rebind");
 pendingAnchorRestartController.dispose();
@@ -1435,7 +1486,7 @@ try {
   assert.deepEqual(transportOrder, ["ui-message"],
     "an overdue ACK must remain diagnostic and must not retransmit a visible message");
   const deliveryMethods = transportApp.callInputs
-    .filter((entry) => entry.name === "continuation_sender" && entry.action === "delivery-result")
+    .filter((entry) => isAnchorSenderBridgeCall(entry, "delivery-result"))
     .map((entry) => entry.method);
   assert.deepEqual(deliveryMethods, ["ui/message"]);
   transportController.dispose();
@@ -1479,7 +1530,7 @@ assert.equal(hangingUiMessageCalls, 1,
 assert.equal(hangingCompatCalls, 0,
   "an outcome-uncertain ui/message must not invoke the compatibility bridge and risk a duplicate visible continuation");
 const hangingDeliveryResult = hangingTransportApp.callInputs.find((entry) =>
-  entry.name === "continuation_sender" && entry.action === "delivery-result");
+  isSenderControlCall(entry, "delivery-result"));
 assert.equal(hangingDeliveryResult?.result, "unknown");
 assert.equal(hangingDeliveryResult?.method, "ui/message");
 assert.match(String(hangingDeliveryResult?.note || ""),
@@ -1511,7 +1562,7 @@ assert.equal(await semanticErrorController.attemptContinuation("semantic ui/mess
 assert.equal(semanticErrorCompatCalls, 0,
   "fulfilled isError:true must not be recorded as accepted or retried through a second Host API");
 const semanticErrorDeliveryResult = semanticErrorApp.callInputs.find((entry) =>
-  entry.name === "continuation_sender" && entry.action === "delivery-result");
+  isSenderControlCall(entry, "delivery-result"));
 assert.equal(semanticErrorDeliveryResult?.result, "rejected");
 semanticErrorController.dispose();
 
@@ -1541,7 +1592,7 @@ assert.equal(rejectedStandardCalls, 1);
 assert.equal(compatibilityFallbackCalls, 1,
   "an explicit ui/message rejection may use exactly one compatibility Host follow-up attempt");
 const compatibilityDeliveryResult = rejectingStandardApp.callInputs.find((entry) =>
-  entry.name === "continuation_sender" && entry.action === "delivery-result");
+  isSenderControlCall(entry, "delivery-result"));
 assert.equal(compatibilityDeliveryResult?.method, "window.openai.sendFollowUpMessage");
 rejectingStandardController.dispose();
 
@@ -1635,7 +1686,7 @@ assert.equal(reboundAfterRelayLossApp.task.deliveryToken, relayLossDeliveryToken
 assert.equal(reboundAfterRelayLossApp.task.continuationCount, relayLossContinuationCount,
   "observing overdue ACK health must not consume another continuation budget");
 assert.equal(reboundAfterRelayLossApp.callInputs.some((entry) =>
-  entry.name === "continuation_sender" && entry.action === "claim"), false,
+  isSenderControlCall(entry, "claim")), false,
 "replacement App bind must not claim an already delivered outcome-uncertain generation");
 reboundAfterRelayLossController.dispose();
 
@@ -1653,7 +1704,7 @@ lateReadyApp.statusReadyGeneration = 7;
 await lateReadyController.refreshNow();
 assert.equal(lateReadyApp.messages.length, 1,
   "a READY generation discovered after sender bind must be delivered by the next supervisor refresh");
-assert.ok(lateReadyApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "claim"),
+assert.ok(lateReadyApp.callInputs.some((entry) => isAnchorSenderBridgeCall(entry, "claim")),
   "late READY delivery must still go through the atomic sender claim path");
 lateReadyController.dispose();
 
@@ -1734,8 +1785,12 @@ relayController.dispose();
 class ManualTakeoverBeforeSendApp extends FakeApp {
   async callServerTool(request) {
     const input = request.arguments;
-    if (request.name === "continuation_sender"
-      && input.action === "authorize-delivery"
+    const senderAction = request.name === "continuation_sender"
+      ? input.action
+      : request.name === "continuation_anchor" && String(input.bridgeAction || "").startsWith("sender-")
+        ? String(input.bridgeAction).slice("sender-".length)
+        : undefined;
+    if (senderAction === "authorize-delivery"
       && this.task?.deliveryOwner === "synthetic-pending") {
       // A manual user action that wins before the final authorization CAS must
       // make authorize-delivery reject. After a successful CAS the first Host
@@ -1797,9 +1852,10 @@ await explicitBindingController.onConnected();
 assert.equal(explicitBindingController.state.task?.id, "task_explicit");
 assert.ok(explicitBindingApp.calls.includes("status"), "explicit anchor taskId must be resolved through status when toolresult is absent");
 assert.equal(explicitBindingApp.calls.includes("begin-auto"), false, "explicit anchor taskId must suppress begin-auto shadow task creation");
-assert.equal(explicitBindingApp.callInputs.find((entry) => entry.action === "status")?.taskId, "task_explicit");
+assert.equal(explicitBindingApp.callInputs.find((entry) => entry.name === "continuation_anchor"
+  && entry.bridgeAction === "task-status")?.taskId, "task_explicit");
 assert.equal(
-  explicitBindingApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "heartbeat"),
+  explicitBindingApp.callInputs.some((entry) => isSenderControlCall(entry, "heartbeat")),
   false,
   "taskId-only recovery may bind the lifetime task, but a missing one-shot anchor capability must fail closed instead of fabricating sender authority",
 );
@@ -1818,7 +1874,9 @@ class MissingToolResultAnchorApp extends FakeApp {
   }
   async callServerTool(request) {
     const input = request.arguments;
-    if (request.name === "continuation_task" && input.action === "heartbeat"
+    const taskHeartbeat = (request.name === "continuation_task" && input.action === "heartbeat")
+      || (request.name === "continuation_anchor" && input.bridgeAction === "task-heartbeat");
+    if (taskHeartbeat
       && String(input.note || "").startsWith("anchor-mount-ack:")) {
       assert.equal(input.note, `anchor-mount-ack:${this.anchorMountToken}`);
       this.task = {
@@ -1869,10 +1927,10 @@ assert.equal(missingToolResultAnchorController.state.anchorMountGeneration, 2,
   "private sender bind must recover only the authoritative current manual-round generation");
 assert.equal(missingToolResultAnchorController.state.task?.anchorMountVerifiedAt, "2026-01-01T00:00:01.000Z",
   "the recovered capability must be used immediately to verify the already-visible manual-round card");
-assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => entry.name === "continuation_sender" && entry.action === "bind"),
+assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => isAnchorSenderBridgeCall(entry, "bind")),
   "missing-toolresult recovery must still obtain capability only through the private sender bind path");
-assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => entry.name === "continuation_task"
-  && entry.action === "heartbeat" && String(entry.note || "").startsWith("anchor-mount-ack:")),
+assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => entry.name === "continuation_anchor"
+  && entry.bridgeAction === "task-heartbeat" && String(entry.note || "").startsWith("anchor-mount-ack:")),
   "the visible anchor must authenticate the recovered capability through the normal mount-ACK path");
 missingToolResultAnchorController.dispose();
 
@@ -1934,7 +1992,7 @@ supersededSurfaceApp.anchorMountToken = "00000000-0000-4000-8000-00000000a002";
 supersededSurfaceApp.statusReadyGeneration = 13;
 supersededSurfaceApp.bindReadyGeneration = 13;
 const staleClaimCountBeforeRefresh = supersededSurfaceApp.callInputs.filter(
-  (entry) => entry.name === "continuation_sender" && entry.action === "claim",
+  (entry) => isSenderControlCall(entry, "claim"),
 ).length;
 await supersededSurfaceController.refreshNow();
 assert.equal(supersededSurfaceController.state.anchorSuperseded, true,
@@ -1947,7 +2005,7 @@ assert.equal(supersededSurfaceController.state.senderCapability?.anchorMountGene
   "the private sender capability must rebind independently to the current generation");
 assert.equal(
   supersededSurfaceApp.callInputs.filter(
-    (entry) => entry.name === "continuation_sender" && entry.action === "claim",
+    (entry) => isSenderControlCall(entry, "claim"),
   ).length,
   staleClaimCountBeforeRefresh + 1,
   "the headless relay must claim the current READY generation exactly once after generation-safe rebind",
@@ -1955,7 +2013,8 @@ assert.equal(
 assert.equal(supersededSurfaceApp.messages.length, 1,
   "a surviving historical App relay must deliver READY even when the new visible card never ACKed");
 assert.equal(supersededSurfaceApp.callInputs.some(
-  (entry) => entry.name === "continuation_task" && entry.action === "anchor-mounted"
+  (entry) => ((entry.name === "continuation_task" && entry.action === "anchor-mounted")
+    || (entry.name === "continuation_anchor" && entry.bridgeAction === "task-anchor-mounted"))
     && Number(entry.anchorMountGeneration) === 2,
 ), false, "a headless historical relay must never impersonate the new card's mount ACK");
 // Real sender claim atomically removes the READY generation. The fake server
@@ -2042,7 +2101,7 @@ assert.equal(headlessUnsupportedController.state.headlessSenderRelay, true,
 assert.equal(headlessNativeFallbackCalls, 0,
   "a headless relay must never invoke native follow-up after ui/message reports METHOD_UNSUPPORTED");
 const headlessDeliveryResult = headlessUnsupportedApp.callInputs.find((entry) =>
-  entry.name === "continuation_sender" && entry.action === "delivery-result");
+  isSenderControlCall(entry, "delivery-result"));
 assert.equal(headlessDeliveryResult?.result, "rejected",
   "headless ui/message unavailability must fail closed instead of pretending native delivery succeeded");
 headlessUnsupportedController.dispose();
@@ -2053,7 +2112,9 @@ class FlakyTransportApp extends FakeApp {
     this.transientFailuresRemaining = 1;
   }
   async callServerTool({ name, arguments: input }) {
-    if (input.action === "status" && this.transientFailuresRemaining > 0) {
+    const taskStatus = input.action === "status"
+      || (name === "continuation_anchor" && input.bridgeAction === "task-status");
+    if (taskStatus && this.transientFailuresRemaining > 0) {
       this.transientFailuresRemaining -= 1;
       throw new Error("Connection failed: transient TLS handshake");
     }
@@ -2185,7 +2246,7 @@ assert.equal(completionLeaseApp.messages.length, 0,
 assert.equal(completionLeaseApp.task.stallState, "SUSPECTED_STALL",
   "activity-lease expiry should only persist a suspected stall");
 assert.equal(completionLeaseApp.callInputs.some(
-  (entry) => entry.name === "continuation_sender" && entry.action === "claim",
+  (entry) => isSenderControlCall(entry, "claim"),
 ), false,
   "the first stall phase must not even claim a continuation");
 completionLeaseController.dispose();
@@ -2211,7 +2272,7 @@ await new Promise((resolvePromise) => setTimeout(resolvePromise, 60));
 assert.equal(completionArmedApp.messages.length, 1,
   "an ATCC-completed current turn should resume the persisted task");
 assert.equal(completionArmedApp.callInputs.find(
-  (entry) => entry.name === "continuation_sender" && entry.action === "claim",
+  (entry) => isSenderControlCall(entry, "claim"),
 )?.note,
   "Assistant Turn Completion Contract armed");
 completionArmedController.dispose();
@@ -2238,7 +2299,7 @@ await completionTeardownController.onTeardown({ reason: "resource teardown" });
 assert.equal(completionTeardownApp.messages.length, 0,
   "ordinary completion-driven resource teardown must fail closed before an explicit timeout or confirmed cutoff gate");
 assert.equal(completionTeardownApp.callInputs.some(
-  (entry) => entry.name === "continuation_sender" && entry.action === "claim",
+  (entry) => isSenderControlCall(entry, "claim"),
 ), false,
   "ordinary iframe teardown must not even claim a continuation");
 completionTeardownController.dispose();
@@ -2435,7 +2496,7 @@ await pausedController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
 assert.equal(pausedApp.messages.length, 0, "owner-paused tasks must suppress every automatic continuation path");
 assert.equal(pausedApp.callInputs.some(
-  (entry) => entry.name === "continuation_sender" && entry.action === "claim",
+  (entry) => isSenderControlCall(entry, "claim"),
 ), false, "paused tasks must never be claimed automatically");
 assert.equal(pausedApp.calls.includes("watch-status"), false, "paused tasks must preserve process watches without consuming them");
 pausedController.dispose();
@@ -2515,7 +2576,7 @@ persistentWakeApp.emit("toolinput", { arguments: { workspaceId: "ws_persistent_w
 await persistentWakeController.onConnected();
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 40));
 assert.ok(persistentWakeApp.callInputs.some(
-  (entry) => entry.name === "continuation_sender" && entry.action === "claim",
+  (entry) => isSenderControlCall(entry, "claim"),
 ), "a sibling iframe must claim a persisted wake without a process handle");
 assert.equal(persistentWakeApp.messages.length, 1, "a persisted wake must be deliverable by any surviving iframe");
 persistentWakeController.dispose();
@@ -2540,9 +2601,7 @@ await teardownController.onTeardown({ reason: "host timeout" });
 assert.equal(teardownApp.messages.length, 0,
   "free-form teardown reason text must not impersonate an authenticated exact-turn Host timeout");
 assert.ok(teardownApp.callInputs.some(
-  (entry) => entry.name === "continuation_task"
-    && entry.action === "host-signal"
-    && entry.hostSignal === "teardown",
+  (entry) => isTaskControlCall(entry, "host-signal") && entry.hostSignal === "teardown",
 ), "generic resource teardown must be reported as teardown telemetry even when its reason string contains timeout");
 teardownController.dispose();
 

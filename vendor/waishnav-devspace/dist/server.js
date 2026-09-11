@@ -1042,7 +1042,7 @@ function workspaceAppRevision(config) {
         .update("\0")
         .update(publicBaseUrl)
         .update("\0")
-        .update("workspace-app-self-contained-bootstrap-v8-host-callable-anchor")
+        .update("workspace-app-self-contained-bootstrap-v10-descriptor-only-anchor-mount")
         .digest("hex")
         .slice(0, 16);
 }
@@ -1946,10 +1946,134 @@ function registerDoctorTool(server, config, processSessions, runtimeState) {
 }
 function registerRuntimeStateTools(server, config, workspaces, runtimeState, fileWatches, permissionRules, processSessions, remoteAgents, continuationSupervisor) {
     if (config.features?.continuationGuard) {
+        // ChatGPT currently scopes a component's tools/call bridge to the tool
+        // that created that iframe on some Hosts. Keep continuation_sender as a
+        // compatibility target for already-mounted/ordinary relay Apps, but let
+        // continuation_anchor invoke the exact same capability-fenced sender
+        // runtime through its own source tool. This helper is intentionally the
+        // single authorization path used by the same-source bridge: protocol
+        // epoch, sender lease, immutable card capability, generation CAS and
+        // manual takeover semantics remain owned by RuntimeState.
+        const runContinuationSenderBridge = (input, context = {}) => {
+            const conversationScopeId = openAiConversationScopeId(context?._meta);
+            const boundTask = input.taskId
+                ? runtimeState.continuationTask({ action: "status", taskId: input.taskId, readOnlyStatus: true }).task
+                : undefined;
+            const claimedScopeId = String(input.conversationScopeId ?? "").trim();
+            const failureScopeId = conversationScopeId
+                ?? (boundTask?.conversationScopeId
+                    && (!claimedScopeId || claimedScopeId === boundTask.conversationScopeId)
+                    ? boundTask.conversationScopeId
+                    : undefined);
+            const expectedSenderAssetRevision = runtimeState.continuationSenderAssetRevision;
+            const compatibilityFailure = (reason) => {
+                if (failureScopeId) {
+                    runtimeState.recordContinuationSenderFailure({
+                        conversationScopeId: failureScopeId,
+                        senderInstanceId: input.senderInstanceId,
+                        senderProtocolEpoch: input.senderProtocolEpoch,
+                        senderAssetRevision: input.senderAssetRevision,
+                        reason,
+                    });
+                }
+                return {
+                    accepted: false,
+                    reason,
+                    expectedSenderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH,
+                    expectedSenderAssetRevision: expectedSenderAssetRevision || undefined,
+                    serverBootId: runtimeState.continuationSenderServerBootId,
+                    senderStatus: runtimeState.continuationSenderStatus({
+                        taskId: input.taskId,
+                        conversationScopeId: failureScopeId,
+                    }),
+                };
+            };
+            const observedSenderProtocolEpoch = Number(input.senderProtocolEpoch);
+            if (!CONTINUATION_SENDER_COMPATIBLE_PROTOCOL_EPOCHS.has(observedSenderProtocolEpoch))
+                return compatibilityFailure("sender-protocol-epoch-mismatch");
+            if (!String(input.senderAssetRevision ?? "").trim())
+                return compatibilityFailure("sender-asset-revision-required");
+            const normalizedSenderProtocolEpoch = CONTINUATION_SENDER_PROTOCOL_EPOCH;
+            const action = String(input.action ?? "");
+            const outcome = action === "bind"
+                ? runtimeState.bindContinuationSender({
+                    conversationScopeId,
+                    claimedConversationScopeId: input.conversationScopeId,
+                    taskId: input.taskId,
+                    senderInstanceId: input.senderInstanceId,
+                    senderProtocolEpoch: normalizedSenderProtocolEpoch,
+                    senderAssetRevision: input.senderAssetRevision,
+                    anchorMountGeneration: input.anchorMountGeneration,
+                })
+                : action === "heartbeat"
+                ? runtimeState.heartbeatContinuationSender({
+                    conversationScopeId: input.conversationScopeId,
+                    taskId: input.taskId,
+                    senderInstanceId: input.senderInstanceId,
+                    senderProtocolEpoch: normalizedSenderProtocolEpoch,
+                    senderAssetRevision: input.senderAssetRevision,
+                    anchorMountToken: input.anchorMountToken,
+                    anchorMountGeneration: input.anchorMountGeneration,
+                })
+                : action === "telemetry"
+                ? runtimeState.recordContinuationHostTelemetry({
+                    conversationScopeId: input.conversationScopeId,
+                    taskId: input.taskId,
+                    senderInstanceId: input.senderInstanceId,
+                    anchorMountToken: input.anchorMountToken,
+                    anchorMountGeneration: input.anchorMountGeneration,
+                    telemetry: input.telemetry,
+                })
+                : action === "host-timeout"
+                ? runtimeState.recordContinuationSenderHostTimeout({
+                    conversationScopeId: input.conversationScopeId,
+                    taskId: input.taskId,
+                    senderInstanceId: input.senderInstanceId,
+                    anchorMountToken: input.anchorMountToken,
+                    anchorMountGeneration: input.anchorMountGeneration,
+                    turnLeaseId: input.turnLeaseId,
+                    hostProfileId: input.hostProfileId,
+                    elapsedMs: input.elapsedMs,
+                    note: input.note,
+                })
+                : action === "claim"
+                ? runtimeState.claimReadyContinuationGeneration({
+                    conversationScopeId: input.conversationScopeId,
+                    taskId: input.taskId,
+                    senderInstanceId: input.senderInstanceId,
+                    anchorMountToken: input.anchorMountToken,
+                    anchorMountGeneration: input.anchorMountGeneration,
+                })
+                : action === "authorize-delivery"
+                ? runtimeState.authorizeContinuationGenerationDelivery({
+                    conversationScopeId: input.conversationScopeId,
+                    taskId: input.taskId,
+                    senderInstanceId: input.senderInstanceId,
+                    anchorMountToken: input.anchorMountToken,
+                    anchorMountGeneration: input.anchorMountGeneration,
+                    deliveryToken: input.deliveryToken,
+                })
+                : action === "delivery-result"
+                ? runtimeState.recordContinuationGenerationDelivery({
+                    deliveryToken: input.deliveryToken,
+                    result: input.result,
+                    method: input.method,
+                    note: input.note,
+                })
+                : { accepted: false, reason: "unsupported-sender-bridge-action" };
+            if (action === "claim" && outcome?.accepted)
+                continuationSupervisor?.scheduleClaimRecovery?.(outcome);
+            return outcome;
+        };
         registerAppTool(server, "continuation_anchor", {
             title: "Continuation anchor",
             description: "Issue exactly one visible DevSpace milestone App surface for the card generation currently requested by the Task Contract while reusing the ChatGPT thread's lifetime taskId. Every manual user message that uses DevSpace gets one fresh generation. Synthetic/App turns reuse the current generation while requiredMilestones is unchanged; if a synthetic checkpoint changes the required milestone set, the runtime reports milestoneCardRequired/initialAnchorRequired/reanchorRequired and this tool must be called exactly once for that new generation. If anchorMountVerificationPending is true, never issue a duplicate for the same generation. Reconnects, service restarts, page refreshes, workspace switches and iframe rehydrates do not create a new card by themselves. workspaceId is optional so a requested card can be issued before a workspace is opened.",
             inputSchema: {
+                bridgeAction: z.enum([
+                    "task-status", "task-heartbeat", "task-anchor-mounted", "task-host-signal",
+                    "sender-bind", "sender-heartbeat", "sender-telemetry", "sender-host-timeout",
+                    "sender-claim", "sender-authorize-delivery", "sender-delivery-result",
+                ]).optional(),
                 workspaceId: z.string().optional(),
                 taskId: z.string().optional(),
                 continuationMode: z.enum(["completion-driven", "timeout-recovery", "resident"]).optional(),
@@ -1959,6 +2083,28 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 maxNoProgress: z.number().int().min(1).max(20).optional(),
                 maxSameFailure: z.number().int().min(1).max(20).optional(),
                 wallClockMinutes: z.number().int().min(0).max(1440).optional().describe("Optional wall-clock budget in minutes. 0 or omitted means unlimited for completion-driven tasks."),
+                coordinatorInstanceId: z.string().max(160).optional(),
+                readOnlyStatus: z.boolean().optional(),
+                anchorMountToken: z.string().uuid().optional(),
+                anchorMountGeneration: z.number().int().nonnegative().optional(),
+                senderProtocolEpoch: z.number().int().positive().optional(),
+                senderAssetRevision: z.string().regex(/^[0-9a-f]{16}$/).optional(),
+                conversationScopeId: z.string().optional(),
+                senderInstanceId: z.string().max(160).optional(),
+                turnLeaseId: z.string().max(160).optional(),
+                hostProfileId: z.string().max(160).optional(),
+                hostSignal: z.enum(["connected", "timeout", "teardown", "visibility-loss", "unknown"]).optional(),
+                elapsedMs: z.number().int().min(0).max(86400000).optional(),
+                deliveryToken: z.string().uuid().optional(),
+                result: z.enum(["accepted", "rejected", "failed", "fallback-accepted", "unknown"]).optional(),
+                method: z.string().max(160).optional(),
+                note: z.string().max(1000).optional(),
+                telemetry: z.object({
+                    openaiKeys: z.array(z.string().regex(/^[A-Za-z0-9._:/-]{1,160}$/)).max(128).optional(),
+                    hostContextKeys: z.array(z.string().regex(/^[A-Za-z0-9._:/-]{1,160}$/)).max(128).optional(),
+                    globalsKeys: z.array(z.string().regex(/^[A-Za-z0-9._:/-]{1,160}$/)).max(128).optional(),
+                    parentMethods: z.array(z.string().regex(/^[A-Za-z0-9._:/-]{1,160}$/)).max(128).optional(),
+                }).optional(),
             },
             outputSchema: resultOutputSchema({
                 task: z.unknown().optional(),
@@ -1974,6 +2120,18 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 taskIncomplete: z.boolean().optional(),
                 remainingMilestones: z.array(z.string()).optional(),
                 finalResponseAllowed: z.boolean().optional(),
+                accepted: z.boolean().optional(),
+                reason: z.string().optional(),
+                continueRequired: z.boolean().optional(),
+                continueInSameTurn: z.boolean().optional(),
+                syntheticWorkMustContinue: z.boolean().optional(),
+                readyGeneration: z.number().int().optional(),
+                deliveryToken: z.string().optional(),
+                retryAfterMs: z.number().int().nonnegative().optional(),
+                expectedSenderProtocolEpoch: z.number().int().positive().optional(),
+                expectedSenderAssetRevision: z.string().optional(),
+                serverBootId: z.string().optional(),
+                senderStatus: z.unknown().optional(),
             }),
             // The continuation anchor is the visible source App for automatic
             // continuation control traffic. Some ChatGPT Hosts render a normal
@@ -1991,6 +2149,38 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 ? runtimeState.continuationTask({ action: "status", taskId: input.taskId, readOnlyStatus: true }).task
                 : undefined;
             const conversationScopeId = requestConversationScopeId ?? boundTask?.conversationScopeId;
+            if (input.bridgeAction) {
+                const bridgeAction = String(input.bridgeAction);
+                let payload;
+                if (bridgeAction.startsWith("sender-")) {
+                    payload = runContinuationSenderBridge({
+                        ...input,
+                        action: bridgeAction.slice("sender-".length),
+                    }, context);
+                }
+                else {
+                    const taskAction = bridgeAction.slice("task-".length);
+                    payload = runtimeState.continuationTask({
+                        action: taskAction,
+                        taskId: input.taskId,
+                        workspaceId: input.workspaceId,
+                        conversationScopeId,
+                        coordinatorInstanceId: input.coordinatorInstanceId,
+                        anchorMountToken: input.anchorMountToken,
+                        anchorMountGeneration: input.anchorMountGeneration,
+                        readOnlyStatus: taskAction === "status" ? true : input.readOnlyStatus,
+                        hostProfileId: input.hostProfileId,
+                        hostSignal: input.hostSignal,
+                        elapsedMs: input.elapsedMs,
+                        note: input.note,
+                    });
+                }
+                const result = JSON.stringify(payload, null, 2);
+                // A bridge call is control traffic from the already-mounted
+                // anchor App. Never emit outputTemplate/_meta here: doing so
+                // would ask the Host to create another milestone card.
+                return { content: [textBlock(result)], structuredContent: { result, ...payload } };
+            }
             if (!conversationScopeId) {
                 const payload = {
                     accepted: false,
@@ -2027,10 +2217,19 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 anchorMountProvisionalUntil: mount.anchorMountProvisionalUntil,
             };
             const result = JSON.stringify(payload, null, 2);
+            // Keep the visible anchor mount contract identical to the older
+            // Host-proven App pattern: the tool descriptor owns the single
+            // outputTemplate/resourceUri identity, while the successful tool
+            // result carries only content + structuredContent.  dev15 added a
+            // second result-level outputTemplate and current ChatGPT desktop
+            // can acknowledge that tool call without mounting the iframe at
+            // all.  The source descriptor is already revisioned, registered,
+            // model+app callable and points at the dedicated anchor resource,
+            // so duplicating the template identity here is unnecessary and
+            // creates an avoidable Host negotiation ambiguity.
             return {
                 content: [textBlock(result)],
                 structuredContent: { result, ...payload },
-                _meta: workspaceAppResultMeta(config, mount.anchorMountGeneration),
             };
         });
         registerAppTool(server, "continuation_task", {

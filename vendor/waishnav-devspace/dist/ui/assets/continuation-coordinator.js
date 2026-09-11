@@ -1,5 +1,6 @@
 const TASK_TOOL = "continuation_task";
 const SENDER_TOOL = "continuation_sender";
+const ANCHOR_TOOL = "continuation_anchor";
 // Increment only when the hidden sender contract changes incompatibly. The
 // server rejects all sender actions from older in-memory iframes, so an App
 // surface loaded before a live Portable upgrade cannot continue delivering
@@ -653,12 +654,17 @@ export function installContinuationCoordinator(app, options = {}) {
     for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
       if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
       try {
+        const useAnchorBridge = state.anchorSurface;
+        const taskId = state.task?.id ?? state.currentInput?.taskId;
         const result = await app.callServerTool({
-          name: TASK_TOOL,
+          name: useAnchorBridge ? ANCHOR_TOOL : TASK_TOOL,
           arguments: {
-            action,
-            ...(state.task?.id ? { taskId: state.task.id } : {}),
+            ...(useAnchorBridge ? { bridgeAction: `task-${action}` } : { action }),
+            ...(taskId ? { taskId: String(taskId) } : {}),
             ...(state.workspaceId ? { workspaceId: state.workspaceId } : {}),
+            ...(useAnchorBridge && state.anchorMountGeneration
+              ? { anchorMountGeneration: Number(state.anchorMountGeneration) }
+              : {}),
             coordinatorInstanceId: state.instanceId,
             ...extra,
             // `extra` is intentionally before this marker. No internal caller
@@ -691,10 +697,11 @@ export function installContinuationCoordinator(app, options = {}) {
     for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
       if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
       try {
+        const useAnchorBridge = state.anchorSurface;
         const result = await app.callServerTool({
-          name: SENDER_TOOL,
+          name: useAnchorBridge ? ANCHOR_TOOL : SENDER_TOOL,
           arguments: {
-            action,
+            ...(useAnchorBridge ? { bridgeAction: `sender-${action}` } : { action }),
             senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH,
             senderAssetRevision: CONTINUATION_SENDER_ASSET_REVISION,
             taskId: capability.taskId,
@@ -758,10 +765,11 @@ export function installContinuationCoordinator(app, options = {}) {
     for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
       if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
       try {
+        const useAnchorBridge = state.anchorSurface;
         const result = await app.callServerTool({
-          name: SENDER_TOOL,
+          name: useAnchorBridge ? ANCHOR_TOOL : SENDER_TOOL,
           arguments: {
-            action: "bind",
+            ...(useAnchorBridge ? { bridgeAction: "sender-bind" } : { action: "bind" }),
             senderProtocolEpoch: CONTINUATION_SENDER_PROTOCOL_EPOCH,
             senderAssetRevision: CONTINUATION_SENDER_ASSET_REVISION,
             senderInstanceId: state.instanceId,
