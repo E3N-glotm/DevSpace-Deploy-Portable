@@ -504,9 +504,16 @@ function toolWidgetDescriptorMeta(config, kind) {
             _meta: baseMeta,
         };
     }
-    const appUri = kind === "continuation-anchor"
-        ? workspaceAppAnchorUri(config)
-        : workspaceAppUri(config);
+    // Keep one Host-facing Workspace App resource identity for every visible
+    // DevSpace result.  The dedicated continuation-anchor URI remains readable
+    // below as a transcript/cache compatibility alias, but advertising that
+    // second identity from the tool descriptor caused current ChatGPT Hosts to
+    // render only the outer result shell without ever issuing resources/read.
+    // v1.1.48 used the main Workspace App URI for continuation_anchor and is
+    // the last Host-proven mount shape.  App-callable permission is layered on
+    // separately by appCallableToolMeta(), so sharing the resource identity
+    // does not weaken the same-source continuation capability checks.
+    const appUri = workspaceAppUri(config);
     return {
         securitySchemes,
         _meta: {
@@ -1042,7 +1049,7 @@ function workspaceAppRevision(config) {
         .update("\0")
         .update(publicBaseUrl)
         .update("\0")
-        .update("workspace-app-self-contained-bootstrap-v10-descriptor-only-anchor-mount")
+        .update("workspace-app-self-contained-bootstrap-v11-single-host-resource-identity")
         .digest("hex")
         .slice(0, 16);
 }
@@ -1066,17 +1073,14 @@ function workspaceAppGenerationUri(config, generation) {
     return baseUri.replace(/\.html$/, `-g${normalizedGeneration}.html`);
 }
 function workspaceAppResultMeta(config, generation) {
-    // Keep the Host-facing continuation_anchor template identity stable for the
-    // lifetime of this Workspace App revision. The card generation is an
-    // authorization/CAS capability owned by continuation state, not a second
-    // template identity. ChatGPT can prefer the static tool descriptor URI or
-    // the result-level URI depending on cache/rehydration ordering; returning a
-    // generation-specific URI here makes one tool call advertise two different
-    // App documents and can leave only the outer result shell mounted. Older
-    // -gN URIs remain readable through workspaceAppGenerationUri() for transcript
-    // compatibility, but new anchor results always use the stable anchor URI.
+    // Keep the Host-facing continuation_anchor template identity identical to
+    // the already proven generic Workspace App identity. Card generation is an
+    // authorization/CAS capability owned by continuation state, not a template
+    // identity. Dedicated -continuation-anchor[-gN] URIs remain readable for
+    // existing transcripts only; new Host-facing metadata must never advertise
+    // those aliases.
     void generation;
-    const resourceUri = workspaceAppAnchorUri(config);
+    const resourceUri = workspaceAppUri(config);
     return {
         ui: {
             resourceUri,

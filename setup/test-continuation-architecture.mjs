@@ -56,9 +56,11 @@ try {
   assert.match(serverSource, /function enablePortableContinuationAnchorRenderer[\s\S]{0,1200}continuation_anchor[\s\S]{0,800}open_workspace/,
     "the Portable server must adapt the upstream Workspace App renderer so continuation_anchor is a real visible result card instead of an ACK-only ghost iframe");
   assert.match(serverSource, /function workspaceAppAnchorUri[\s\S]{0,300}-continuation-anchor\.html/,
-    "continuation_anchor must own a distinct immutable MCP App resource identity instead of sharing the generic workspace surface URI");
-  assert.match(serverSource, /kind === "continuation-anchor"[\s\S]{0,180}workspaceAppAnchorUri\(config\)/,
-    "the continuation_anchor tool descriptor must select the dedicated anchor resource before Host rendering");
+    "legacy continuation-anchor resource aliases must remain readable for existing transcripts");
+  assert.ok(serverSource.includes("const appUri = workspaceAppUri(config);"),
+    "all new visible DevSpace tool descriptors, including continuation_anchor, must converge on the Host-proven Workspace App resource identity");
+  assert.doesNotMatch(serverSource, /const appUri = kind === "continuation-anchor"[\s\S]{0,180}workspaceAppAnchorUri\(config\)/,
+    "continuation_anchor must not advertise the dedicated legacy alias as a second Host resource identity");
   assert.match(serverSource, /window\.__DEVSPACE_CONTINUATION_SURFACE__ = Object\.freeze\(\$\{surfaceBootstrap\}\)/,
     "the self-contained App HTML must carry server-authored surface identity when Host tool notifications are omitted");
   assert.match(coordinatorSource, /resourceSurface\.kind === "continuation-anchor"[\s\S]{0,700}currentTool: resourceIdentifiesAnchor \? "continuation_anchor"[\s\S]{0,300}anchorSurface: resourceIdentifiesAnchor/,

@@ -566,8 +566,8 @@ assert.match(server, /function senderHostCompatibleToolMeta\([\s\S]{0,900}visibi
 assert.match(server,
   /registerAppTool\(server,\s*"continuation_anchor"[\s\S]{0,14000}\.\.\.appCallableToolMeta\(config,\s*"continuation-anchor"\)/,
   "the visible continuation anchor source must itself expose the Host component tool bridge used immediately after App.connect");
-assert.match(server, /workspace-app-self-contained-bootstrap-v10-descriptor-only-anchor-mount/,
-  "dev62 must rotate the immutable Workspace App revision after restoring the Host-proven descriptor-only anchor mount contract");
+assert.match(server, /workspace-app-self-contained-bootstrap-v11-single-host-resource-identity/,
+  "dev63 must rotate the immutable Workspace App revision after converging continuation_anchor on the Host-proven Workspace App resource identity");
 assert.match(coordinator, /const ANCHOR_TOOL = "continuation_anchor";/,
   "the coordinator must know the source continuation_anchor tool used by the Host-bound same-source component bridge");
 assert.match(coordinator,
@@ -895,9 +895,10 @@ assert.equal(workspaceMeta?._meta?.["openai/outputTemplate"], undefined);
 assert.match(workspaceUri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/);
 assert.match(anchorUri, /^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}-continuation-anchor\.html$/);
 assert.notEqual(anchorUri, workspaceUri,
-  "the visible continuation anchor must not share the generic Workspace App resource identity");
-assert.equal(anchorMeta?._meta?.ui?.resourceUri, anchorUri);
-assert.equal(anchorMeta?._meta?.["openai/outputTemplate"], anchorUri);
+  "the legacy continuation-anchor compatibility alias must remain distinct from the primary Workspace App URI");
+assert.equal(anchorMeta?._meta?.ui?.resourceUri, workspaceUri,
+  "new continuation_anchor calls must advertise the same Host-proven Workspace App URI as other visible DevSpace results");
+assert.equal(anchorMeta?._meta?.["openai/outputTemplate"], workspaceUri);
 assert.match(server,
   /const payload = \{[\s\S]{0,1800}continuationAnchor: true[\s\S]{0,2200}const result = JSON\.stringify\(payload, null, 2\);[\s\S]{0,1200}structuredContent: \{ result, \.\.\.payload \},[\s\S]{0,300}\};/,
   "the primary continuation_anchor result must rely on its registered descriptor outputTemplate instead of advertising a second result-level App template");
@@ -913,16 +914,16 @@ assert.equal(workspaceAppGenerationUri(descriptorConfig, 7), generation7Uri,
 assert.notEqual(generation8Uri, generation7Uri,
   "a later deliberate milestone-card generation must not reuse an earlier generation cache key");
 assert.equal(workspaceAppGenerationUri(descriptorConfig, 0), anchorUri,
-  "invalid/non-positive generations must fall back to the stable revisioned Workspace App URI");
+  "legacy generation aliases must still fall back to the stable legacy continuation-anchor alias");
 const generation7Meta = workspaceAppResultMeta(descriptorConfig, 7);
 const generation8Meta = workspaceAppResultMeta(descriptorConfig, 8);
-assert.equal(generation7Meta?.ui?.resourceUri, anchorUri,
-  "new continuation_anchor results must keep the same stable Host template identity as the static tool descriptor");
-assert.equal(generation7Meta?.["ui/resourceUri"], anchorUri);
-assert.equal(generation7Meta?.["openai/outputTemplate"], anchorUri);
-assert.equal(generation8Meta?.ui?.resourceUri, anchorUri,
-  "rotating the durable milestone generation must not rotate the Host App template URI");
-assert.equal(generation8Meta?.["openai/outputTemplate"], anchorUri);
+assert.equal(generation7Meta?.ui?.resourceUri, workspaceUri,
+  "any compatibility result metadata must converge on the same primary Workspace App URI as the static continuation_anchor descriptor");
+assert.equal(generation7Meta?.["ui/resourceUri"], workspaceUri);
+assert.equal(generation7Meta?.["openai/outputTemplate"], workspaceUri);
+assert.equal(generation8Meta?.ui?.resourceUri, workspaceUri,
+  "rotating the durable milestone generation must not rotate or fork the Host App template URI");
+assert.equal(generation8Meta?.["openai/outputTemplate"], workspaceUri);
 assert.notEqual(generation7Uri, anchorUri,
   "legacy generation-specific resource URIs remain distinct compatibility aliases only");
 const fullWorkspaceMeta = toolWidgetDescriptorMeta({ ...descriptorConfig, widgets: "full" }, "workspace");
