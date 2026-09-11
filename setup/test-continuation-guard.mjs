@@ -173,7 +173,7 @@ assert.match(migrations, /anchor_mount_generation[\s\S]{0,240}integer not null d
 
 for (const pattern of [
   /registerAppTool\(server, "continuation_anchor"/,
-  /toolWidgetDescriptorMeta\(config, "continuation-anchor"\)/,
+  /appCallableToolMeta\(config, "continuation-anchor"\)/,
   /resourceUri: appUri/,
   /assets\/continuation-coordinator\.js/,
   /workspaceAppRevision/,
@@ -563,6 +563,11 @@ assert.match(server, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"host-t
   "the dedicated sender bridge must expose the exact-turn host-timeout action without adding sender actions to continuation_task");
 assert.match(server, /function senderHostCompatibleToolMeta\([\s\S]{0,900}visibility:\s*\["model",\s*"app"\][\s\S]{0,220}"openai\/widgetAccessible":\s*true/,
   "the sender bridge must use the Host-compatible model+app Apps-SDK visibility while keeping server-side capability fencing authoritative");
+assert.match(server,
+  /registerAppTool\(server,\s*"continuation_anchor"[\s\S]{0,5200}\.\.\.appCallableToolMeta\(config,\s*"continuation-anchor"\)/,
+  "the visible continuation anchor source must itself expose the Host component tool bridge used immediately after App.connect");
+assert.match(server, /workspace-app-self-contained-bootstrap-v8-host-callable-anchor/,
+  "dev60 must rotate the immutable Workspace App revision so a pre-fix anchor document cannot remain cached by the Host");
 assert.doesNotMatch(server, /function appOnlyToolMeta\(/,
   "dev59 must not depend on the Host-unreliable app-only sender visibility path");
 assert.match(server, /input\.action === "host-timeout"[\s\S]{0,700}recordContinuationSenderHostTimeout/,

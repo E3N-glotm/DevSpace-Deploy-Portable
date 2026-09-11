@@ -1042,7 +1042,7 @@ function workspaceAppRevision(config) {
         .update("\0")
         .update(publicBaseUrl)
         .update("\0")
-        .update("workspace-app-self-contained-bootstrap-v7-inline-continuation-runtime")
+        .update("workspace-app-self-contained-bootstrap-v8-host-callable-anchor")
         .digest("hex")
         .slice(0, 16);
 }
@@ -1975,7 +1975,13 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 remainingMilestones: z.array(z.string()).optional(),
                 finalResponseAllowed: z.boolean().optional(),
             }),
-            ...toolWidgetDescriptorMeta(config, "continuation-anchor"),
+            // The continuation anchor is the visible source App for automatic
+            // continuation control traffic. Some ChatGPT Hosts render a normal
+            // widget descriptor but do not expose the component tool bridge to
+            // that source. Keep task/card capabilities authoritative, but make
+            // the source itself Host-callable just like the older working
+            // continuation surface.
+            ...appCallableToolMeta(config, "continuation-anchor"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async (input, context = {}) => {
             if (input.workspaceId)
