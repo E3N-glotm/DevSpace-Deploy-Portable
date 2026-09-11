@@ -510,9 +510,9 @@ function toolWidgetDescriptorMeta(config, kind) {
     // second identity from the tool descriptor caused current ChatGPT Hosts to
     // render only the outer result shell without ever issuing resources/read.
     // v1.1.48 used the main Workspace App URI for continuation_anchor and is
-    // the last Host-proven mount shape.  App-callable permission is layered on
-    // separately by appCallableToolMeta(), so sharing the resource identity
-    // does not weaken the same-source continuation capability checks.
+    // the last Host-proven mount shape. App-callable task/sender targets stay
+    // separate from that visible source, so sharing this resource identity does
+    // not make the UI-bearing anchor itself callable by the component.
     const appUri = workspaceAppUri(config);
     return {
         securitySchemes,
@@ -1049,7 +1049,7 @@ function workspaceAppRevision(config) {
         .update("\0")
         .update(publicBaseUrl)
         .update("\0")
-        .update("workspace-app-self-contained-bootstrap-v11-single-host-resource-identity")
+        .update("workspace-app-self-contained-bootstrap-v12-historical-anchor-source-contract")
         .digest("hex")
         .slice(0, 16);
 }
@@ -2137,13 +2137,13 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 serverBootId: z.string().optional(),
                 senderStatus: z.unknown().optional(),
             }),
-            // The continuation anchor is the visible source App for automatic
-            // continuation control traffic. Some ChatGPT Hosts render a normal
-            // widget descriptor but do not expose the component tool bridge to
-            // that source. Keep task/card capabilities authoritative, but make
-            // the source itself Host-callable just like the older working
-            // continuation surface.
-            ...appCallableToolMeta(config, "continuation-anchor"),
+            // Restore the last live Host-proven source contract (v1.1.48): the
+            // visible UI source is model-only, while App control traffic uses
+            // separately app-callable continuation_task / continuation_sender
+            // targets. dev60-dev63 made this UI-bearing source widgetAccessible;
+            // fresh generations 10-15 then rendered only the outer tool shell
+            // without ever issuing resources/read.
+            ...toolWidgetDescriptorMeta(config, "continuation-anchor"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async (input, context = {}) => {
             if (input.workspaceId)

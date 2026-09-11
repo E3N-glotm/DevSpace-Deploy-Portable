@@ -173,7 +173,7 @@ assert.match(migrations, /anchor_mount_generation[\s\S]{0,240}integer not null d
 
 for (const pattern of [
   /registerAppTool\(server, "continuation_anchor"/,
-  /appCallableToolMeta\(config, "continuation-anchor"\)/,
+  /toolWidgetDescriptorMeta\(config, "continuation-anchor"\)/,
   /resourceUri: appUri/,
   /assets\/continuation-coordinator\.js/,
   /workspaceAppRevision/,
@@ -564,27 +564,33 @@ assert.match(server, /z\.enum\(\["bind",\s*"heartbeat",\s*"telemetry",\s*"host-t
 assert.match(server, /function senderHostCompatibleToolMeta\([\s\S]{0,900}visibility:\s*\["model",\s*"app"\][\s\S]{0,220}"openai\/widgetAccessible":\s*true/,
   "the sender bridge must use the Host-compatible model+app Apps-SDK visibility while keeping server-side capability fencing authoritative");
 assert.match(server,
+  /registerAppTool\(server,\s*"continuation_anchor"[\s\S]{0,14000}\.\.\.toolWidgetDescriptorMeta\(config,\s*"continuation-anchor"\)/,
+  "the visible continuation anchor must use the model-only UI-source descriptor from the last live Host-proven mount contract");
+assert.doesNotMatch(server,
   /registerAppTool\(server,\s*"continuation_anchor"[\s\S]{0,14000}\.\.\.appCallableToolMeta\(config,\s*"continuation-anchor"\)/,
-  "the visible continuation anchor source must itself expose the Host component tool bridge used immediately after App.connect");
-assert.match(server, /workspace-app-self-contained-bootstrap-v11-single-host-resource-identity/,
-  "dev63 must rotate the immutable Workspace App revision after converging continuation_anchor on the Host-proven Workspace App resource identity");
-assert.match(coordinator, /const ANCHOR_TOOL = "continuation_anchor";/,
-  "the coordinator must know the source continuation_anchor tool used by the Host-bound same-source component bridge");
+  "the UI-bearing continuation anchor must not also be widgetAccessible/model+app");
+assert.match(server, /workspace-app-self-contained-bootstrap-v12-historical-anchor-source-contract/,
+  "dev64 must rotate the immutable Workspace App revision after restoring the historical anchor source contract");
+assert.doesNotMatch(coordinator, /const ANCHOR_TOOL = "continuation_anchor";/,
+  "new Workspace Apps must not depend on calling back through the visible source tool");
 assert.match(coordinator,
-  /async function callTask[\s\S]{0,1800}useAnchorBridge = state\.anchorSurface[\s\S]{0,900}name: useAnchorBridge \? ANCHOR_TOOL : TASK_TOOL[\s\S]{0,700}bridgeAction: `task-\$\{action\}`/,
-  "anchor Apps must route task control traffic back through their own source tool instead of depending on cross-tool component calls");
+  /async function callTask[\s\S]{0,1800}name: TASK_TOOL[\s\S]{0,500}\baction,/,
+  "all mounted Apps must route task control through the separately app-callable continuation_task target");
 assert.match(coordinator,
-  /async function callSender[\s\S]{0,2000}useAnchorBridge = state\.anchorSurface[\s\S]{0,900}name: useAnchorBridge \? ANCHOR_TOOL : SENDER_TOOL[\s\S]{0,700}bridgeAction: `sender-\$\{action\}`/,
-  "anchor Apps must route sender control traffic back through their own source tool while ordinary relay Apps keep the dedicated sender target");
+  /async function callSender[\s\S]{0,2000}name: SENDER_TOOL[\s\S]{0,500}\baction,/,
+  "all mounted Apps must route sender control through the dedicated Host-compatible continuation_sender target");
+assert.match(coordinator,
+  /async function bindSenderTransport[\s\S]{0,2600}name: SENDER_TOOL[\s\S]{0,500}action: "bind"/,
+  "sender bind must use the dedicated Host-compatible sender target rather than the UI source tool");
 assert.match(server,
   /bridgeAction: z\.enum\([\s\S]{0,900}"sender-authorize-delivery"/,
-  "continuation_anchor must expose the same-source sender bridge actions");
+  "continuation_anchor must retain cached-App same-source sender bridge actions for compatibility");
 assert.match(server,
   /if \(input\.bridgeAction\)[\s\S]{0,700}runContinuationSenderBridge\(/,
-  "continuation_anchor must delegate same-source sender calls into the existing capability-fenced runtime path");
+  "cached same-source sender calls must still delegate into the existing capability-fenced runtime path");
 assert.match(server,
   /if \(input\.bridgeAction\)[\s\S]{0,1800}Never emit outputTemplate\/_meta here/,
-  "same-source control calls must never create a second visible milestone card");
+  "cached same-source control calls must never create a second visible milestone card");
 assert.doesNotMatch(server, /function appOnlyToolMeta\(/,
   "dev59 must not depend on the Host-unreliable app-only sender visibility path");
 assert.match(server, /input\.action === "host-timeout"[\s\S]{0,700}recordContinuationSenderHostTimeout/,
@@ -1300,13 +1306,10 @@ class FakeApp {
   }
 }
 
-const isAnchorSenderBridgeCall = (entry, action) => entry?.name === "continuation_anchor"
-  && entry?.bridgeAction === `sender-${action}`;
-const isSenderControlCall = (entry, action) => isAnchorSenderBridgeCall(entry, action)
-  || (entry?.name === "continuation_sender" && entry?.action === action);
-const isTaskControlCall = (entry, action) => (entry?.name === "continuation_anchor"
-  && entry?.bridgeAction === `task-${action}`)
-  || (entry?.name === "continuation_task" && entry?.action === action);
+const isSenderControlCall = (entry, action) => entry?.name === "continuation_sender"
+  && entry?.action === action;
+const isTaskControlCall = (entry, action) => entry?.name === "continuation_task"
+  && entry?.action === action;
 
 const fakeApp = new FakeApp();
 const fakeController = installContinuationCoordinator(fakeApp, { timers: false, instanceId: "ui_test" });
@@ -1362,10 +1365,10 @@ assert.doesNotMatch(hiddenSyntheticContext, /00000000-0000-4000-8000-00000000000
   "hidden model context must describe token handling without duplicating the concrete one-time capability outside the Host-visible user-role handoff");
 assert.ok(fakeApp.calls.includes("begin-auto"));
 assert.ok(fakeApp.calls.includes("heartbeat"));
-assert.ok(fakeApp.callInputs.some((entry) => isAnchorSenderBridgeCall(entry, "claim")),
-  "the milestone anchor must claim READY through its same-source continuation_anchor bridge");
-assert.ok(fakeApp.callInputs.some((entry) => isAnchorSenderBridgeCall(entry, "authorize-delivery")),
-  "the milestone anchor must authorize delivery through its same-source continuation_anchor bridge");
+assert.ok(fakeApp.callInputs.some((entry) => isSenderControlCall(entry, "claim")),
+  "the milestone anchor must claim READY through the dedicated continuation_sender bridge");
+assert.ok(fakeApp.callInputs.some((entry) => isSenderControlCall(entry, "authorize-delivery")),
+  "the milestone anchor must authorize delivery through the dedicated continuation_sender bridge");
 assert.ok(fakeApp.calls.includes("delivery-result"));
 fakeController.dispose();
 
@@ -1435,7 +1438,7 @@ assert.equal(pendingAnchorRestartController.state.anchorMountAcked, false,
 assert.equal(pendingAnchorRestartApp.messages.length, 1,
   "post-restart READY recovery must create exactly one Host-visible continuation request");
 const pendingAnchorClaims = pendingAnchorRestartApp.callInputs
-  .filter((entry) => isAnchorSenderBridgeCall(entry, "claim"));
+  .filter((entry) => isSenderControlCall(entry, "claim"));
 assert.equal(pendingAnchorClaims.length, 2,
   "the failed post-restart claim may be retried exactly once after authenticated sender rebind");
 pendingAnchorRestartController.dispose();
@@ -1487,7 +1490,7 @@ try {
   assert.deepEqual(transportOrder, ["ui-message"],
     "an overdue ACK must remain diagnostic and must not retransmit a visible message");
   const deliveryMethods = transportApp.callInputs
-    .filter((entry) => isAnchorSenderBridgeCall(entry, "delivery-result"))
+    .filter((entry) => isSenderControlCall(entry, "delivery-result"))
     .map((entry) => entry.method);
   assert.deepEqual(deliveryMethods, ["ui/message"]);
   transportController.dispose();
@@ -1705,7 +1708,7 @@ lateReadyApp.statusReadyGeneration = 7;
 await lateReadyController.refreshNow();
 assert.equal(lateReadyApp.messages.length, 1,
   "a READY generation discovered after sender bind must be delivered by the next supervisor refresh");
-assert.ok(lateReadyApp.callInputs.some((entry) => isAnchorSenderBridgeCall(entry, "claim")),
+assert.ok(lateReadyApp.callInputs.some((entry) => isSenderControlCall(entry, "claim")),
   "late READY delivery must still go through the atomic sender claim path");
 lateReadyController.dispose();
 
@@ -1853,8 +1856,8 @@ await explicitBindingController.onConnected();
 assert.equal(explicitBindingController.state.task?.id, "task_explicit");
 assert.ok(explicitBindingApp.calls.includes("status"), "explicit anchor taskId must be resolved through status when toolresult is absent");
 assert.equal(explicitBindingApp.calls.includes("begin-auto"), false, "explicit anchor taskId must suppress begin-auto shadow task creation");
-assert.equal(explicitBindingApp.callInputs.find((entry) => entry.name === "continuation_anchor"
-  && entry.bridgeAction === "task-status")?.taskId, "task_explicit");
+assert.equal(explicitBindingApp.callInputs.find((entry) => entry.name === "continuation_task"
+  && entry.action === "status")?.taskId, "task_explicit");
 assert.equal(
   explicitBindingApp.callInputs.some((entry) => isSenderControlCall(entry, "heartbeat")),
   false,
@@ -1928,10 +1931,10 @@ assert.equal(missingToolResultAnchorController.state.anchorMountGeneration, 2,
   "private sender bind must recover only the authoritative current manual-round generation");
 assert.equal(missingToolResultAnchorController.state.task?.anchorMountVerifiedAt, "2026-01-01T00:00:01.000Z",
   "the recovered capability must be used immediately to verify the already-visible manual-round card");
-assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => isAnchorSenderBridgeCall(entry, "bind")),
+assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => isSenderControlCall(entry, "bind")),
   "missing-toolresult recovery must still obtain capability only through the private sender bind path");
-assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => entry.name === "continuation_anchor"
-  && entry.bridgeAction === "task-heartbeat" && String(entry.note || "").startsWith("anchor-mount-ack:")),
+assert.ok(missingToolResultAnchorApp.callInputs.some((entry) => entry.name === "continuation_task"
+  && entry.action === "heartbeat" && String(entry.note || "").startsWith("anchor-mount-ack:")),
   "the visible anchor must authenticate the recovered capability through the normal mount-ACK path");
 missingToolResultAnchorController.dispose();
 

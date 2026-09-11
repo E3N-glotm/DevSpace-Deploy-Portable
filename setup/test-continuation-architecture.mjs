@@ -144,10 +144,10 @@ try {
     assert.equal(controller.state.currentTool, "continuation_anchor");
     assert.equal(controller.state.anchorMountAcked, true,
       "the resource-identified anchor must ACK even with no Host tool lifecycle notifications");
-    assert.ok(calls.some((call) => call.name === "continuation_anchor"
-      && call.arguments?.bridgeAction === "task-anchor-mounted"
+    assert.ok(calls.some((call) => call.name === "continuation_task"
+      && call.arguments?.action === "anchor-mounted"
       && call.arguments?.anchorMountGeneration === 7),
-    "resource fallback must authenticate the exact issued generation through anchor-mounted");
+    "resource fallback must authenticate the exact issued generation through continuation_task anchor-mounted");
     controller.dispose();
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
