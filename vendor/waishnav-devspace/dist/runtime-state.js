@@ -4289,6 +4289,16 @@ export class StructuredRuntimeState {
                 assistantTurnCompletionSource, assistantTurnCompletionNote,
                 nextStallState, nextStallArmedAt, nextStallEvidence,
                 nowIso, taskId);
+            if (assistantTurnEnded) {
+                // A verified exact-turn end is immediately actionable. Leaving
+                // the old activity-lease deadline here delays timeout/teardown
+                // recovery even though the Host already proved the turn ended.
+                this.syncContinuationArchitectureForLegacyTask(taskId);
+                this.database.sqlite.prepare(`
+                  update continuation_worksets set continuation_due_at=?,updated_at=?
+                  where legacy_task_id=? and state in ('RUNNING','SUSPECTED_STALL')
+                `).run(nowIso, nowIso, taskId);
+            }
             const task = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId));
             return {
                 task,

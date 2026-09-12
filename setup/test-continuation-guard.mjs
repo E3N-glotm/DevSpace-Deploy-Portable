@@ -305,8 +305,10 @@ assert.match(server, /Before ANY user-visible final response[\s\S]{0,1800}preFin
   "server instructions must forbid a bare final from leaving an incomplete DevSpace turn in RUNNING/GENERATING");
 assert.match(server, /function taskContractText[\s\S]{0,2600}preFinalControlRequired[\s\S]{0,2600}action=turn-complete[\s\S]{0,1200}waitingExternal=true/,
   "every enriched DevSpace tool result must surface the legal pre-final control action instead of relying on one status call");
-assert.match(server, /outputSchema: resultOutputSchema\(\{[\s\S]{0,1800}preFinalControlRequired: z\.boolean\(\)\.optional\(\)[\s\S]{0,500}requiredBeforeFinal: z\.string\(\)\.optional\(\)/,
+assert.match(server, /function continuationTransportOutputFields\(\)[\s\S]{0,2200}preFinalControlRequired: z\.boolean\(\)\.optional\(\)[\s\S]{0,500}requiredBeforeFinal: z\.string\(\)\.optional\(\)/,
   "continuation_task output schema must preserve the pre-final directive fields across the MCP boundary");
+assert.equal((server.match(/outputSchema: resultOutputSchema\(continuationTransportOutputFields\(\)\)/g) ?? []).length, 3,
+  "task, anchor and sender must advertise the same complete continuation transport contract");
 assert.match(runtimeStateSource, /action === "turn-complete"[\s\S]{0,3600}assistant_turn_completion_lease_id/,
   "normal assistant completion intent must be explicitly signed and bound to the current turn lease");
 assert.match(runtimeStateSource, /constructor\(stateDir\)[\s\S]{0,1200}continuation_conversation_cards[\s\S]{0,500}sender_instance_id=null/,

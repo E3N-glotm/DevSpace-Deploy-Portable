@@ -16,6 +16,7 @@ runtime/
 data/
 logs/
 reports/
+.test-cache/
 
 # Generated package and release artifacts.
 packages/*.tgz

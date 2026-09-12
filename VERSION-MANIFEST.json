@@ -6,7 +6,7 @@
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
   },
-  "displayVersion": "1.1.59 dev64",
+  "displayVersion": "1.1.59 dev65",
   "runtime": {
     "node": "24.18.1",
     "gitForWindows": "2.51.2.windows.1",
@@ -763,7 +763,7 @@
   },
   "development": {
     "channel": "dev",
-    "iteration": 64,
-    "label": "dev64"
+    "iteration": 65,
+    "label": "dev65"
   }
 }
