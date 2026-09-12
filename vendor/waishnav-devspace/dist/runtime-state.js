@@ -3226,6 +3226,8 @@ export class StructuredRuntimeState {
                     accepted: false,
                     reason: "synthetic-continuation-superseded",
                     superseded: true,
+                    staleSyntheticTurn: true,
+                    suppressVisibleFinal: true,
                     continueRequired: false,
                     nextRequiredMilestones: [],
                     taskIncomplete: false,
@@ -3239,6 +3241,8 @@ export class StructuredRuntimeState {
                     accepted: false,
                     reason: "synthetic-continuation-superseded",
                     superseded: true,
+                    staleSyntheticTurn: true,
+                    suppressVisibleFinal: true,
                     continueRequired: false,
                     nextRequiredMilestones: [],
                     taskIncomplete: false,
@@ -3491,7 +3495,13 @@ export class StructuredRuntimeState {
                     }
                     const claimToken = String(fresh.delivery_token);
                     if (deliveryToken && deliveryToken !== claimToken)
-                        return { accepted: false, reason: "synthetic-continuation-superseded", superseded: true };
+                        return {
+                            accepted: false,
+                            reason: "synthetic-continuation-superseded",
+                            superseded: true,
+                            staleSyntheticTurn: true,
+                            suppressVisibleFinal: true,
+                        };
                     if (!deliveryToken) {
                         const expectedLeaseAt = Date.parse(String(fresh.delivery_owner_expires_at || ""));
                         if (Number.isFinite(expectedLeaseAt) && expectedLeaseAt <= now.getTime())
@@ -3555,6 +3565,7 @@ export class StructuredRuntimeState {
                         accepted: false,
                         reason: claimed.reason,
                         ...(claimed.superseded ? { superseded: true } : {}),
+                        ...(claimed.superseded ? { staleSyntheticTurn: true, suppressVisibleFinal: true } : {}),
                         retryRequired: claimed.reason === "expected-next-turn-lease-expired",
                         ...continuationDirective(task),
                     };

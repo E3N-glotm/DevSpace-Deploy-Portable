@@ -756,6 +756,8 @@ function continuationTransportOutputFields() {
         initialAnchorRequired: z.boolean().optional(),
         deliveryGeneration: z.number().int().optional(),
         superseded: z.boolean().optional(),
+        staleSyntheticTurn: z.boolean().optional(),
+        suppressVisibleFinal: z.boolean().optional(),
         retryRequired: z.boolean().optional(),
         syntheticOwnerActive: z.boolean().optional(),
         syntheticTokenPending: z.boolean().optional(),
@@ -1137,7 +1139,7 @@ function workspaceAppRevision(config) {
         .update("\0")
         .update(publicBaseUrl)
         .update("\0")
-        .update("workspace-app-self-contained-bootstrap-v12-historical-anchor-source-contract")
+        .update("workspace-app-self-contained-bootstrap-v13-stale-synthetic-self-suppression")
         .digest("hex")
         .slice(0, 16);
 }

@@ -290,21 +290,13 @@ async function updateModelContextBestEffort(app, content) {
 }
 
 function visibleContinuationTrigger(task, deliveryToken) {
-  // The native ChatGPT follow-up bridge creates the resumed model turn, so the
-  // recovery instruction must survive even when updateModelContext is
-  // ignored or not replayed into the resumed model turn. Real Host evidence
-  // showed that a bare "继续" can still produce a status-only assistant final.
-  // Keep protocol/task ids hidden, but make sustained execution explicit in the
-  // actual user-role message that creates the turn.
-  // updateModelContext is useful but Host behavior has shown it is not a
-  // reliable cross-turn transcript bridge. The synthetic user-role message is
-  // the only context that is guaranteed to become part of the resumed turn's
-  // visible conversation. Carry the durable objective and next unresolved
-  // milestone in that message so the model does not have to guess what
-  // "unfinished DevSpace task" refers to when the preceding assistant turn was
-  // truncated or its hidden model context was not replayed.
-  const objective = compactContinuationField(task?.objective, 620);
-  const milestone = compactContinuationField(nextUnresolvedMilestone(task), 420);
+  // ui/message is intentionally a visible user-role Host bridge. Once ChatGPT
+  // accepts it there is no cancellation API: a later manual user turn can
+  // supersede the generation in DevSpace, but an already queued Host message
+  // may still surface afterwards. Keep the visible envelope deliberately
+  // compact so a delayed stale message is harmless. The mandatory first
+  // continuation_task status call returns the authoritative Task Contract, and
+  // updateModelContext remains the richer best-effort context channel.
   // Live ChatGPT production evidence from dev45 showed that standards-level
   // ui/message can create the resumed user turn while the Host still refuses
   // the model's first continuation_task status with
@@ -323,28 +315,22 @@ function visibleContinuationTrigger(task, deliveryToken) {
     : "";
   return isChinese()
     ? [
-      "@DevSpace MCP 继续执行未完成任务。",
-      "这是本轮要立即执行的用户角色工作请求，不是仅供参考的系统续接说明。",
-      "继续执行未完成的 DevSpace 任务。",
-      objective ? `当前任务：${objective}` : "",
-      milestone ? `下一未完成里程碑：${milestone}` : "",
-      handshakeToken ? `DevSpace 一次性续轮握手 deliveryToken：${handshakeToken}` : "",
+      "@DevSpace MCP 自动续轮：继续未完成任务。",
+      handshakeToken ? `一次性 deliveryToken：${handshakeToken}` : "",
       handshakeToken
-        ? "首个 DevSpace 调用必须是 continuation_task action=status，并原样携带上面的 deliveryToken；不要设置 manualTakeover。该 token 只用于本轮首个 status 的 turn-origin/ACK 握手，成功后会立即失效，后续调用不要再携带。"
-        : "首个 DevSpace 调用必须是 continuation_task action=status；不要设置 manualTakeover。当前 Host 若提供等价的 turn-origin 绑定，运行时会使用 server-owned expected generation 兼容认领。",
-      "如果本轮未直接提供 DevSpace_MCP 工具，先通过连接器工具发现并加载它。自动续轮与手动“继续”拥有相同的完整 Host 思考/执行预算；synthetic 身份、固定分钟数、已学习窗口百分比或已完成一个里程碑都不是停止条件。运行时不使用固定分钟数；如果观察到 Host 窗口缩短或延长，可以重新学习为遥测，但绝不能把它变成主动停止或提前续轮的权限。第一条 DevSpace 调用必须用本消息携带的一次性 deliveryToken 执行 continuation_task action=status 且不得设置 manualTakeover；ACK 后立即继续真实工具工作。手动轮和自动轮都至少需要一次实质 DevSpace 操作以排除空转，但一次操作只是反空转底线，不是本轮结束门槛。一个续轮可以连续完成多个里程碑，只要任务仍可推进，就继续诊断、修改、测试和验证，直到所有里程碑完成、遇到真实外部阻塞/用户暂停、模型明确签署当前阶段边界，或 Host 自己截断。单次命令/测试失败、工具错误、短暂 connector rehydrate、只完成状态检查、少量快速工具调用或只完成一个里程碑都不是主动结束理由。需要合法阶段边界时调用 continuation_task action=turn-complete，并且只有 finalResponseAllowed=true 才能结束；若返回 false 就继续实际工作。当前 schema 没有 turn-complete 时，使用 action=checkpoint 且 note=atcc-turn-complete，并遵守同一判据。不要只复述本消息、不要把它判定为“系统续接指令”、不要只回复状态、进度摘要或“继续处理中”，也不要等待第二次续轮才开始工作。",
+        ? "首个 DevSpace 调用必须是 continuation_task action=status，原样携带该 deliveryToken，且不要设置 manualTakeover。"
+        : "首个 DevSpace 调用必须是 continuation_task action=status，且不要设置 manualTakeover。",
+      "如果首个 status 返回 staleSyntheticTurn=true、suppressVisibleFinal=true、superseded=true，或 reason=synthetic-continuation-superseded，说明这是已被人工输入取代的 Host 延迟消息：立即静默结束，不执行任务、不再调用 DevSpace，也不要输出状态或解释。",
+      "否则立即以 status 返回的 Task Contract 为准继续真实工作；自动续轮与手动“继续”使用相同的完整执行预算。ACK 后持续推进可运行里程碑，未完成阶段至少完成 4 次实质 DevSpace 操作后才允许主动签署 turn-complete；不要只做状态检查、不要只回复进度、不要因单个命令失败或只完成一个里程碑就停止。",
     ].filter(Boolean).join("\n")
     : [
-      "@DevSpace MCP Continue the unfinished task.",
-      "This is the actual user-role work request for this assistant turn, not system-only continuation metadata.",
-      "Continue the unfinished DevSpace task.",
-      objective ? `Current task: ${objective}` : "",
-      milestone ? `Next unfinished milestone: ${milestone}` : "",
-      handshakeToken ? `DevSpace one-time continuation handshake deliveryToken: ${handshakeToken}` : "",
+      "@DevSpace MCP automatic continuation: continue the unfinished task.",
+      handshakeToken ? `One-time deliveryToken: ${handshakeToken}` : "",
       handshakeToken
-        ? "The first DevSpace call must be continuation_task action=status with the exact deliveryToken above and without manualTakeover. The token is only for this resumed turn's first turn-origin/ACK handshake; it is invalidated immediately after a successful ACK and must not be reused on later calls."
-        : "The first DevSpace call must be continuation_task action=status without manualTakeover. If this Host provides equivalent turn-origin binding out-of-band, the runtime can compatibly claim the server-owned expected generation without a token.",
-      "If DevSpace_MCP is not directly exposed in this turn, load it through connector/tool discovery. An automatic resumed turn receives the same full Host reasoning/execution budget and sustained-work stopping rules as a manual 'continue'; do not shorten it merely because it is synthetic. Then, in this same turn, perform substantive DevSpace tool work that advances the next unfinished milestone. A synthetic resumed turn must perform at least four substantive DevSpace operations after its ACK before it may voluntarily sign an unfinished stage boundary. This four-operation floor is only anti-idle evidence, never permission or a target to stop; even after four operations, keep working while runnable milestones remain. The runtime uses no fixed number of minutes and no learned percentage as a synthetic turn duration. Observed shorter or longer Host windows may be relearned as telemetry, never as authority to stop or enqueue early. While milestones remain runnable, keep working across as many milestones as fit until the task completes, becomes genuinely blocked/paused, a genuine model-owned stage boundary is reached after sustained work, or the Host itself truncates the turn. One failed command/test, one tool error, or a few quick tool calls is not a valid reason to voluntarily end the turn; keep diagnosing, fixing, and validating in the same turn. If a genuine stage boundary is necessary, prefer continuation_task action=turn-complete. If it returns finalResponseAllowed=false, keep working. If the current ChatGPT cached schema does not expose turn-complete, use action=checkpoint with note=atcc-turn-complete instead and still require finalResponseAllowed=true. Do not merely restate this message, do not classify it as a system-only continuation instruction, do not stop because the previous message is not visible, tools were not preloaded, or only a status check has completed, do not reply with only a status or 'still working', and do not wait for a second continuation before starting work.",
+        ? "The first DevSpace call must be continuation_task action=status with the exact deliveryToken above and without manualTakeover."
+        : "The first DevSpace call must be continuation_task action=status without manualTakeover.",
+      "If that first status returns staleSyntheticTurn=true, suppressVisibleFinal=true, superseded=true, or reason=synthetic-continuation-superseded, this is a delayed Host message already superseded by a manual turn: terminate silently, perform no work, make no further DevSpace call, and emit no status/explanation.",
+      "Otherwise continue immediately from the Task Contract returned by status. A synthetic turn has the same full execution budget as manual 'continue'; keep advancing runnable milestones. Before voluntarily signing an unfinished turn-complete boundary, perform at least four substantive DevSpace operations after ACK. Do not stop after status/progress-only work, one failed command, or one completed milestone.",
     ].filter(Boolean).join("\n");
 }
 

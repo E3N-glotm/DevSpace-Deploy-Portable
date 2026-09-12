@@ -236,9 +236,9 @@ for (const pattern of [
 ]) assert.match(coordinator, pattern);
 assert.doesNotMatch(coordinator, /claim-continuation|release-continuation/,
   "legacy continuation_task claim/release sender paths must stay removed");
-assert.match(visibleTriggerSource, /DevSpace 一次性续轮握手 deliveryToken/,
-  "the live synthetic user-role handoff must carry the sender-issued one-time delivery token so Host turn-origin binding can complete before substantive work");
-assert.match(visibleTriggerSource, /continuation_task action=status[\s\S]{0,260}deliveryToken[\s\S]{0,260}不要设置 manualTakeover/,
+assert.match(visibleTriggerSource, /一次性 deliveryToken：\$\{handshakeToken\}/,
+  "the compact live synthetic user-role handoff must still carry the sender-issued one-time delivery token so Host turn-origin binding can complete before substantive work");
+assert.match(visibleTriggerSource, /continuation_task action=status[\s\S]{0,220}deliveryToken[\s\S]{0,220}不要设置 manualTakeover/,
   "the resumed turn must be instructed to echo the exact one-time delivery token on its first status without impersonating a manual takeover");
 assert.match(coordinator, /visibleContinuationTrigger\(state\.task, deliveryToken\)/,
   "the exact token returned by continuation_sender claim must flow into the Host-visible synthetic handoff");
@@ -307,6 +307,8 @@ assert.match(server, /function taskContractText[\s\S]{0,2600}preFinalControlRequ
   "every enriched DevSpace tool result must surface the legal pre-final control action instead of relying on one status call");
 assert.match(server, /function continuationTransportOutputFields\(\)[\s\S]{0,2200}preFinalControlRequired: z\.boolean\(\)\.optional\(\)[\s\S]{0,500}requiredBeforeFinal: z\.string\(\)\.optional\(\)/,
   "continuation_task output schema must preserve the pre-final directive fields across the MCP boundary");
+assert.match(server, /staleSyntheticTurn: z\.boolean\(\)\.optional\(\)[\s\S]{0,160}suppressVisibleFinal: z\.boolean\(\)\.optional\(\)/,
+  "continuation status output must explicitly publish stale synthetic turn suppression fields");
 assert.equal((server.match(/outputSchema: resultOutputSchema\(continuationTransportOutputFields\(\)\)/g) ?? []).length, 3,
   "task, anchor and sender must advertise the same complete continuation transport contract");
 assert.match(runtimeStateSource, /action === "turn-complete"[\s\S]{0,3600}assistant_turn_completion_lease_id/,
@@ -465,34 +467,24 @@ assert.match(coordinator, /state\.task\?\.state === "FAILED_RETRYABLE"[\s\S]{0,3
 assert.ok(visibleTriggerSource,
   "the continuation coordinator must expose one visibleContinuationTrigger(task, deliveryToken) function for the actual Host user-role turn");
 for (const [pattern, message] of [
-  [/@DevSpace MCP 继续执行未完成任务/, "the Chinese synthetic turn must explicitly activate DevSpace MCP rather than emit a bare continue"],
-  [/继续执行未完成的 DevSpace 任务/, "the Chinese synthetic turn must explicitly request unfinished DevSpace execution"],
-  [/当前任务/, "the Chinese synthetic turn must carry the durable current objective"],
-  [/下一未完成里程碑/, "the Chinese synthetic turn must carry the next unresolved milestone"],
-  [/不要只回复状态/, "the Chinese synthetic turn must forbid a status-only premature final"],
-  [/继续处理中/, "the Chinese synthetic turn must forbid a still-working-only premature final"],
-  [/Continue the unfinished DevSpace task/, "the English synthetic turn must explicitly request unfinished DevSpace execution"],
-  [/Current task/, "the English synthetic turn must carry the durable current objective"],
-  [/Next unfinished milestone/, "the English synthetic turn must carry the next unresolved milestone"],
-  [/do not reply with only a status/, "the English synthetic turn must forbid a status-only premature final"],
-  [/still working/, "the English synthetic turn must forbid a still-working-only premature final"],
-  [/单次命令\/测试失败/, "one failed command or test must not terminate a Chinese synthetic turn"],
-  [/One failed command\/test/, "one failed command or test must not terminate an English synthetic turn"],
-  [/少量快速工具调用/, "a few quick Chinese tool calls must not be treated as sufficient resumed work"],
-  [/a few quick tool calls/, "a few quick English tool calls must not be treated as sufficient resumed work"],
-  [/action=turn-complete/, "a voluntary incomplete stage boundary must use the ATCC turn-complete handshake"],
-  [/finalResponseAllowed=true/, "a voluntary incomplete final must require explicit runtime permission"],
-  [/不使用固定分钟数/, "the Chinese synthetic duration policy must explicitly reject a hard-coded number of minutes"],
-  [/窗口缩短或延长/, "the Chinese synthetic duration policy must treat changing Host windows as telemetry rather than a stopping gate"],
-  [/uses no fixed number of minutes/, "the English synthetic duration policy must explicitly reject a hard-coded number of minutes"],
-  [/Observed shorter or longer Host windows may be relearned as telemetry/, "the English synthetic duration policy must treat changing Host windows as telemetry rather than a stopping gate"],
+  [/@DevSpace MCP 自动续轮：继续未完成任务/, "the compact Chinese synthetic turn must explicitly activate DevSpace MCP"],
+  [/@DevSpace MCP automatic continuation: continue the unfinished task/, "the compact English synthetic turn must explicitly activate DevSpace MCP"],
+  [/continuation_task action=status/, "the visible handoff must still require the mandatory first status call"],
+  [/staleSyntheticTurn=true/, "the visible handoff must recognize an already-superseded delayed Host message"],
+  [/suppressVisibleFinal=true/, "the visible handoff must request a silent stale-turn exit"],
+  [/reason=synthetic-continuation-superseded/, "the visible handoff must preserve the canonical stale-generation reason"],
+  [/立即静默结束/, "the Chinese stale Host replay must self-suppress instead of adding another assistant status reply"],
+  [/terminate silently/, "the English stale Host replay must self-suppress instead of adding another assistant status reply"],
+  [/至少完成 4 次实质 DevSpace 操作/, "the compact Chinese valid synthetic turn must preserve the substantive-work floor"],
+  [/at least four substantive DevSpace operations/, "the compact English valid synthetic turn must preserve the substantive-work floor"],
+  [/Task Contract/, "the visible handoff must direct valid resumed work to the authoritative status-returned Task Contract"],
 ]) {
   assert.match(visibleTriggerSource, pattern, message);
 }
 assert.doesNotMatch(coordinator, /继续。直接完成当前未完成的任务。|Continue\. Directly complete the current unfinished task\./,
   "the visible synthetic continuation trigger must not pressure the model to skip state reconstruction or verification");
-assert.match(visibleTriggerSource, /task\?\.objective[\s\S]{0,500}nextUnresolvedMilestone\(task\)/,
-  "the visible synthetic message must carry durable task semantics when hidden model context is not replayed by the Host");
+assert.doesNotMatch(visibleTriggerSource, /当前任务：\$\{objective\}|下一未完成里程碑：\$\{milestone\}|Current task: \$\{objective\}|Next unfinished milestone: \$\{milestone\}/,
+  "the visible Host envelope must not replay the durable objective/milestone payload after a delayed stale message can no longer be cancelled");
 assert.doesNotMatch(visibleTriggerSource, /taskId=|workspaceId=|generation capability/,
   "taskId/workspaceId/recovery policy must not be emitted as a visible user message; only the exact one-time deliveryToken may cross the live Host turn-origin boundary");
 assert.match(coordinator, /function continuationContext\(/,
@@ -571,8 +563,8 @@ assert.match(server,
 assert.doesNotMatch(server,
   /registerAppTool\(server,\s*"continuation_anchor"[\s\S]{0,14000}\.\.\.appCallableToolMeta\(config,\s*"continuation-anchor"\)/,
   "the UI-bearing continuation anchor must not also be widgetAccessible/model+app");
-assert.match(server, /workspace-app-self-contained-bootstrap-v12-historical-anchor-source-contract/,
-  "dev64 must rotate the immutable Workspace App revision after restoring the historical anchor source contract");
+assert.match(server, /workspace-app-self-contained-bootstrap-v13-stale-synthetic-self-suppression/,
+  "dev66 must rotate the immutable Workspace App revision so Host caches receive stale synthetic self-suppression");
 assert.doesNotMatch(coordinator, /const ANCHOR_TOOL = "continuation_anchor";/,
   "new Workspace Apps must not depend on calling back through the visible source tool");
 assert.match(coordinator,
@@ -639,8 +631,8 @@ assert.doesNotMatch(server, /writeContinuationWake\([\s\S]{0,180}taskId|writeCon
   "wake events must not carry task or delivery authority");
 assert.match(coordinator, /new EventSource\(CONTINUATION_WAKE_URL\)[\s\S]{0,500}addEventListener\("wake"[\s\S]{0,350}supervisorTick\(\{ forceAuthoritative: true \}\)/,
   "a wake event must force authoritative status/CAS handling rather than directly manufacturing a Host follow-up");
-assert.match(coordinator, /@DevSpace MCP 继续执行未完成任务。/,
-  "the synthetic user-role request must preserve the explicit connector activation cue that works for manual continuation");
+assert.match(coordinator, /@DevSpace MCP 自动续轮：继续未完成任务。/,
+  "the compact synthetic user-role request must preserve an explicit DevSpace connector activation cue");
 assert.match(runtimeStateSource, /manual-user-turn-takeover/,
   "runtime must retain an old-schema-compatible manual takeover CAS marker on the existing note field");
 assert.match(server, /older cached schema without manualTakeover[\s\S]{0,500}manual-user-turn-takeover/,
@@ -1324,37 +1316,33 @@ assert.equal(await fakeController.attemptContinuation("unit test", { force: true
 assert.equal(fakeApp.messages.length, 1);
 assert.equal(fakeApp.contextUpdates.length >= 1, true);
 const visibleSyntheticText = fakeApp.messages[0]?.content?.[0]?.text ?? "";
-assert.match(visibleSyntheticText, /继续执行未完成的 DevSpace 任务|Continue the unfinished DevSpace task/,
-  "automatic recovery must carry the unfinished DevSpace task intent in the Host-visible user-role turn");
-assert.match(visibleSyntheticText, /finish fake task/,
-  "the visible continuation trigger must carry the durable objective so a resumed turn does not have to infer which prior task is meant");
-assert.match(visibleSyntheticText, /done/,
-  "the visible continuation trigger must carry the next unresolved milestone when hidden Host model context is absent");
+assert.match(visibleSyntheticText, /@DevSpace MCP 自动续轮|@DevSpace MCP automatic continuation/,
+  "automatic recovery must preserve an explicit compact DevSpace connector activation cue in the Host-visible user-role turn");
 assert.match(visibleSyntheticText, /continuation_task(?:\s+action=)?status/i,
   "the visible continuation trigger must tell the resumed turn how to recover authoritative durable state");
 assert.match(visibleSyntheticText, /deliveryToken[^\n]*00000000-0000-4000-8000-000000000001/i,
   "the Host-visible synthetic turn must carry the exact one-time sender claim token required by the live turn-origin handshake");
 assert.match(visibleSyntheticText, /不要设置 manualTakeover|without manualTakeover/i,
   "the first synthetic status must be explicitly distinguished from a manual takeover");
-assert.match(visibleSyntheticText, /DevSpace_MCP/i,
-  "the visible continuation trigger must preserve the turn-scoped connector discovery recovery path");
-assert.match(visibleSyntheticText, /不要只回复状态|do not reply with only a status/i,
-  "the visible continuation trigger must explicitly reject status-only premature finals");
-assert.match(visibleSyntheticText, /用户角色工作请求|actual user-role work request/i,
-  "the visible continuation trigger must identify itself as this turn's actual user-role work request rather than system-only recovery metadata");
-assert.match(visibleSyntheticText, /不要把它判定为“系统续接指令”|do not classify it as a system-only continuation instruction/i,
-  "the visible continuation trigger must explicitly reject the observed first-resume misclassification");
-assert.match(visibleSyntheticText, /不要等待第二次续轮|do not wait for a second continuation/i,
-  "the first synthetic turn must be told to start substantive work without waiting for another continuation");
-assert.match(visibleSyntheticText, /继续处理中|still working/i,
-  "the visible continuation trigger must name the observed placeholder-final failure mode");
+assert.match(visibleSyntheticText, /staleSyntheticTurn=true[\s\S]{0,220}suppressVisibleFinal=true[\s\S]{0,300}synthetic-continuation-superseded/,
+  "the visible continuation trigger must teach a Host-delayed stale message to self-suppress after its first status call");
+assert.match(visibleSyntheticText, /立即静默结束|terminate silently/i,
+  "a superseded Host-delayed synthetic message must terminate without generating another visible assistant status");
+assert.match(visibleSyntheticText, /Task Contract/,
+  "a valid resumed turn must reconstruct authoritative durable work from the status-returned Task Contract");
+assert.match(visibleSyntheticText, /至少完成 4 次实质 DevSpace 操作|at least four substantive DevSpace operations/i,
+  "a valid resumed turn must preserve the post-ACK substantive-work floor");
+assert.match(visibleSyntheticText, /turn-complete/,
+  "the compact visible handoff must retain the legal unfinished-stage completion action");
+assert.doesNotMatch(visibleSyntheticText, /finish fake task|\bdone\b/i,
+  "durable objective and milestone text must stay out of the uncancellable Host-visible synthetic envelope");
 assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery/i,
   "the visible Host trigger may carry only the one-time deliveryToken capability; durable task/workspace identity and broader generation authority must remain hidden");
-assert.match(visibleSyntheticText, /checkpoint[^\n]{0,120}note=atcc-turn-complete/i,
-  "the visible Host trigger must expose only the exact reserved checkpoint completion signature needed by Hosts with a cached pre-dev11 schema");
-assert.doesNotMatch(visibleSyntheticText, /task_fake|ws_fake|authorized recovery/,
-  "durable task/workspace internals must remain out of the visible synthetic message even though the ephemeral resume capability is intentionally visible");
 const hiddenSyntheticContext = fakeApp.contextUpdates.at(-1)?.content?.[0]?.text ?? "";
+assert.match(hiddenSyntheticContext, /finish fake task/,
+  "hidden model context must retain the durable objective removed from the Host-visible synthetic envelope");
+assert.match(hiddenSyntheticContext, /done/,
+  "hidden model context must retain the next unresolved milestone removed from the Host-visible synthetic envelope");
 assert.match(hiddenSyntheticContext, /Call continuation_task status first/,
   "hidden model context must request the status claim before substantive work");
 assert.match(hiddenSyntheticContext, /one-time deliveryToken[\s\S]{0,500}echo that exact token[\s\S]{0,500}omit manualTakeover[\s\S]{0,500}consumes it immediately/,
@@ -5306,8 +5294,16 @@ try {
   assert.equal(lateSynthetic.reason, "synthetic-continuation-superseded",
     "a late automatic turn must stop instead of executing alongside the newer manual turn");
   assert.equal(lateSynthetic.superseded, true);
+  assert.equal(lateSynthetic.staleSyntheticTurn, true,
+    "a Host-delayed automatic user message must be classified as a stale synthetic turn");
+  assert.equal(lateSynthetic.suppressVisibleFinal, true,
+    "a stale synthetic turn must instruct the model to terminate without adding visible status noise");
   assert.equal(lateSynthetic.continueRequired, false);
   assert.equal(lateSynthetic.finalResponseAllowed, true);
+  assert.match(coordinator, /staleSyntheticTurn=true[\s\S]{0,220}suppressVisibleFinal=true[\s\S]{0,320}synthetic-continuation-superseded/,
+    "the Host handoff must explicitly self-suppress a delayed superseded synthetic message after its first status call");
+  assert.doesNotMatch(coordinator, /当前任务：\$\{objective\}[\s\S]{0,160}下一未完成里程碑：\$\{milestone\}/,
+    "the visible synthetic Host envelope must stay compact instead of replaying the full durable task contract into the transcript");
 
   console.log(JSON.stringify({
       persistentTaskState: true,
@@ -5345,6 +5341,7 @@ try {
     manualTurnSupersedesLateSyntheticTurn: true,
     deliveryReadinessBackoff: true,
     durableSyntheticDeliveryNoRetransmission: true,
+    staleSyntheticHostMessageSelfSuppression: true,
     syntheticResumeRequiresSubstantiveWork: true,
     syntheticStatusOnlyTurnRecovery: true,
     syntheticControlTrafficNotSubstantive: true,
