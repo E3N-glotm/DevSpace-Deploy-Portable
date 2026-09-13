@@ -24,5 +24,9 @@
 .session-review-rollback.session-review-confirm-pending{border-color:var(--color-border-warning,#b88a34);background:color-mix(in srgb,var(--color-background-warning,#4a3817) 45%,transparent);color:var(--color-text-warning,#e8bd68)}
 .session-review-rollback:disabled{opacity:.45;cursor:not-allowed}
 .session-review-action-status{color:var(--color-text-tertiary,#a3a3aa);font-size:11px}
-.devspace-version-footer{color:var(--color-text-tertiary,#888891);font-family:var(--font-mono,ui-monospace,monospace);font-size:10px;text-align:right;padding:6px 4px 2px}
+/* Reserve footer space before JS renders, independently of footer reinsertion.
+   Card bodies retain their natural, user-expandable height. */
+html,body,#app{overflow-anchor:none}
+#app{position:relative;padding-bottom:22px}
+.devspace-version-footer{position:absolute;bottom:2px;left:4px;right:4px;height:14px;line-height:14px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--color-text-tertiary,#888891);font-family:var(--font-mono,ui-monospace,monospace);font-size:10px;text-align:right;padding:0}
 @media (max-width:520px){.session-review-metrics{grid-template-columns:1fr}.session-review-confirmation{grid-template-columns:1fr}.session-review-actions{align-items:stretch;flex-direction:column}}

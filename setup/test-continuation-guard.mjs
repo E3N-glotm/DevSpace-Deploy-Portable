@@ -273,7 +273,7 @@ assert.match(server, /"confirm-turn-limit"/,
 assert.match(coordinator, /SUSPECTED_STALL/,
   "coordinator recovery must retain the fail-closed suspected-stall state");
 assert.doesNotMatch(runtimeStateSource, /confirmedCutoffCorroborated[\s\S]{0,1200}CONTINUATION_ARMED/,
-  "historical Host cutoff observations must not arm completion-driven recovery without a current-turn end signal");
+  "the old single-cutoff corroboration path must remain removed; guarded learned-cutoff recovery is tested behaviorally by ATCC");
 assert.doesNotMatch(runtimeStateSource, /earlyCompletionCorroborated|short-confirmed-probe/,
   "runtime state must not arm recovery from repeated UI heartbeat probes alone");
 assert.match(runtimeStateSource, /COMPLETION_STALL_SUSPECT_MS = 25_000/,
@@ -331,7 +331,7 @@ assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId
   "the resident runtime must promote only a durable explicit completion request into a completed turn after the handoff grace");
 assert.match(runtimeStateSource, /promoteMatureAssistantCompletionIntent\(taskId[\s\S]{0,4000}assistant_turn_state \|\| ""\) !== "COMPLETION_REQUESTED"[\s\S]{0,3600}continuationModelRequestInFlight\(current\.conversation_scope_id\)/,
   "the handoff grace must be unreachable from GENERATING silence and must fail closed while any model-originated DevSpace request is in flight");
-assert.match(runtimeStateSource, /touchContinuationModelActivity[\s\S]{0,4200}assistant_turn_state='COMPLETION_REQUESTED'[\s\S]{0,300}then 'GENERATING'/,
+assert.match(runtimeStateSource.slice(runtimeStateSource.indexOf("    touchContinuationModelActivity(input = {}) {"), runtimeStateSource.indexOf("    continuationTask(input = {}) {")), /assistant_turn_state='COMPLETION_REQUESTED'[\s\S]{0,300}then 'GENERATING'/,
   "later substantive model activity must revoke a pending completion intent before its handoff deadline can authorize anything");
 assert.doesNotMatch(runtimeStateSource, /const syntheticQuietBackstop/,
   "synthetic request silence must never be treated as proof that the Host turn ended");
@@ -348,7 +348,7 @@ assert.match(server, /\["exec_command", "write_stdin", "process_attach", "proces
 assert.doesNotMatch(coordinator, /CONFIRMED_TURN_LIMIT_TEARDOWN_GRACE_MS/,
   "historical Host cutoff timing must not survive as a teardown authorization heuristic");
 assert.doesNotMatch(coordinator, /confirmedCutoffRecoveryReady|confirmed turn-limit lease expired|confirmed turn-limit teardown/,
-  "historical cutoff values must remain telemetry-only and must not create a no-signal continuation path");
+  "the browser must not infer cutoff authorization; guarded learned-cutoff recovery belongs to the server");
 for (const lifecyclePattern of [/visibilitychange/, /pageshow/, /focus/, /online/, /IntersectionObserver/, /forceAuthoritative/]) {
   assert.match(coordinator, lifecyclePattern,
     "a reactivated/recreated task card must immediately refresh authoritative continuation state");
@@ -691,7 +691,7 @@ assert.ok(runtimeStateSource.includes("const isolateCurrentActivePlan = authorit
   && runtimeStateSource.includes(": freezeCompletedCanonicalPlan ? [] : lifetimeMilestoneRows;"),
   "canonical projection recovery must isolate the active plan and freeze an already-completed canonical plan while card ACK is pending, without discarding lifetime lineage needed for disaster recovery");
 assert.doesNotMatch(runtimeStateSource, /const confirmedHostCutoff|const confirmedSyntheticCutoff/,
-  "historical Host cutoff samples must not participate in automatic continuation authorization");
+  "old single-sample and synthetic quiet-cutoff heuristics must remain removed");
 assert.match(runtimeStateSource, /if \(result === "unknown"\)[\s\S]{0,1800}outcomeUncertain:\s*true/,
   "an unknown Host delivery result must remain outcome-uncertain instead of being converted into an automatic retry");
 assert.match(runtimeStateSource, /DELIVERING is an outcome-uncertain zone[\s\S]{0,900}preserve the same generation/,
@@ -4332,6 +4332,21 @@ try {
   assert.equal(confirmedLimit.reason, "confirmed-turn-limit-recorded");
   assert.equal(confirmedLimit.task.confirmedTurnLimitMs, 1_000_000);
   assert.equal(confirmedLimit.task.confirmedTurnLimitSource, "owner-observed-telemetry-seed");
+  const observedCutoff = runtime.continuationTask({
+    action: "confirm-turn-limit", taskId: a.task.id,
+    elapsedMs: 1_003_000, note: "owner-second-observed-cutoff",
+  });
+  assert.deepEqual(observedCutoff.task.cutoffSamples.slice(-2), [1_000_000, 1_003_000],
+    "independent same-regime confirmations must retain earlier observations");
+  const repeatedCutoff = runtime.continuationTask({
+    action: "confirm-turn-limit", taskId: a.task.id,
+    elapsedMs: 1_003_000, note: "owner-second-observed-cutoff",
+  });
+  assert.deepEqual(repeatedCutoff.task.cutoffSamples, observedCutoff.task.cutoffSamples,
+    "retrying a confirmation must not inflate the observation count");
+  const cutoffProfile = runtime.database.sqlite.prepare("select cutoff_samples_json from continuation_host_profiles where id=?").get("chatgpt@test");
+  assert.deepEqual(JSON.parse(cutoffProfile.cutoff_samples_json), repeatedCutoff.task.cutoffSamples,
+    "task and host-profile observations must remain consistent");
   const confirmedGateEarly = runtime.continuationTask({
     action: "begin",
     conversationScopeId: "conversation-confirmed-gate-early",

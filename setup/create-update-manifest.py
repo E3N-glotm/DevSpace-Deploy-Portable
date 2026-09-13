@@ -126,6 +126,10 @@ def main() -> int:
     if not release_name.startswith(prefix):
         raise SystemExit(f"Invalid release name: {release_name}")
     version = release_name.removeprefix(prefix)
+    if version == "1.1.59" or version_manifest.get("development"):
+        raise SystemExit("Development builds must not create a published update manifest; 1.1.59 remains dev-only.")
+    if tuple(map(int, version.split("."))) > (1, 1, 60) and not args.carry_forward_manifest:
+        raise SystemExit("Post-bootstrap releases must carry forward the historical update manifest.")
     archive = Path(args.zip).resolve() if args.zip else ROOT / f"{release_name}.zip"
     if not archive.is_file():
         raise SystemExit(f"Release ZIP not found: {archive}")

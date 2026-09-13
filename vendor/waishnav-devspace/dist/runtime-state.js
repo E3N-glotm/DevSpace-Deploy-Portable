@@ -34,11 +34,16 @@ const COMPLETION_STALL_SUSPECT_MS = 25_000;
 // event. A surviving/verified iframe heartbeat therefore proves only that the
 // card is alive; repeated heartbeats themselves MUST NOT arm a continuation.
 // Recovery is authorized only by independent current-turn Host/lifecycle end
-// evidence. Historical cutoff observations remain telemetry only.
+// evidence. A guarded learned-cutoff fallback below records an inference;
+// single/unstable samples and ordinary silence remain non-authorizing.
 const HOST_CUTOFF_MIN_SAMPLE_MS = 30_000;
 const HOST_CUTOFF_REGIME_DOWN_RATIO = 0.80;
 const HOST_CUTOFF_REGIME_UP_RATIO = 1.20;
 const HOST_CUTOFF_SAMPLE_WINDOW = 8;
+const HOST_CUTOFF_FALLBACK_MIN_SAMPLES = 2;
+const HOST_CUTOFF_FALLBACK_MAX_SPREAD_RATIO = 0.05;
+const HOST_CUTOFF_FALLBACK_MARGIN_RATIO = 0.02;
+const HOST_CUTOFF_FALLBACK_SPREAD_MULTIPLIER = 2;
 // Transport/startup recovery is deliberately separate from the model's work
 // budget. A native Host follow-up may be accepted even though the resumed assistant
 // turn never reaches its mandatory first continuation_task status handshake.
@@ -130,6 +135,28 @@ function median(values) {
     return sorted.length % 2 === 1
         ? sorted[middle]
         : Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+}
+function learnedHostCutoffFallback(cutoffSamples) {
+    const unique = [...new Set(numericSamples(cutoffSamples))].sort((left, right) => left - right);
+    if (unique.length < HOST_CUTOFF_FALLBACK_MIN_SAMPLES)
+        return undefined;
+    const medianMs = median(unique);
+    if (!Number.isFinite(medianMs) || medianMs < HOST_CUTOFF_MIN_SAMPLE_MS)
+        return undefined;
+    const spreadMs = Math.max(0, unique[unique.length - 1] - unique[0]);
+    if (spreadMs > medianMs * HOST_CUTOFF_FALLBACK_MAX_SPREAD_RATIO)
+        return undefined;
+    const marginMs = Math.max(
+        Math.round(medianMs * HOST_CUTOFF_FALLBACK_MARGIN_RATIO),
+        Math.round(spreadMs * HOST_CUTOFF_FALLBACK_SPREAD_MULTIPLIER),
+    );
+    return {
+        samples: unique,
+        medianMs,
+        spreadMs,
+        marginMs,
+        deadlineMs: medianMs + marginMs,
+    };
 }
 function deliveryAckRetryDelayMs(retryCount) {
     const exponent = Math.max(0, Math.min(8, Math.round(Number(retryCount || 1)) - 1));
@@ -1519,6 +1546,83 @@ export class StructuredRuntimeState {
         });
         return transaction();
     }
+    inferLearnedHostCutoffTimeout(legacy, current, nowMs) {
+        const nowIso = new Date(nowMs).toISOString();
+        const legacyMode = normalizedContinuationMode(legacy?.continuation_mode, "compat");
+        const legacyTurnState = String(legacy?.assistant_turn_state || "UNKNOWN");
+        const legacyTurnLeaseId = String(legacy?.turn_lease_id || "");
+        const profile = legacy?.host_profile_id
+            ? this.database.sqlite.prepare("select cutoff_epoch from continuation_host_profiles where id=?").get(legacy.host_profile_id)
+            : undefined;
+        if (profile && Number(profile.cutoff_epoch || 0) !== Number(legacy.cutoff_epoch || 0))
+            return false;
+        if (legacy
+            && legacy.state === "RUNNING"
+            && legacyMode === "completion-driven"
+            && legacyTurnState === "GENERATING"
+            && Boolean(legacyTurnLeaseId)
+            && !this.continuationModelRequestInFlight(current.conversation_scope_id)
+            && parseJson(legacy.watch_process_handles_json, []).length === 0) {
+            const learnedCutoff = learnedHostCutoffFallback(legacy.cutoff_samples_json);
+            const turnStartedAtMs = Date.parse(String(legacy.turn_started_at || ""));
+            const elapsedTurnMs = Number.isFinite(turnStartedAtMs) ? nowMs - turnStartedAtMs : NaN;
+            if (learnedCutoff && Number.isFinite(elapsedTurnMs)
+                && elapsedTurnMs >= learnedCutoff.deadlineMs) {
+                // Some current ChatGPT Hosts enforce a hard model
+                // cutoff without emitting a reliable Workspace App
+                // timeout event. Two distinct, tightly clustered
+                // owner-confirmed cutoffs form an inferred
+                // fallback authority. This is deliberately not a
+                // generic silence timeout: the exact current turn
+                // lease must still be GENERATING, no model request
+                // may be in flight, and no watched process may own
+                // the stage. The deadline carries a dynamic margin
+                // derived from the observed median and spread.
+                const updateResult = this.database.sqlite.prepare(`
+                  update continuation_tasks set
+                    assistant_turn_state='TIMED_OUT',
+                    assistant_turn_completion_lease_id=turn_lease_id,
+                    assistant_turn_completed_at=?,
+                    assistant_turn_completion_source='learned-host-cutoff-watchdog',
+                    assistant_turn_completion_note=?,
+                    continuation_pending=3,
+                    stall_state='CONTINUATION_ARMED',stall_armed_at=?,
+                    stall_evidence='learned-host-cutoff-watchdog',updated_at=?
+                  where id=? and state='RUNNING' and continuation_mode='completion-driven'
+                    and assistant_turn_state='GENERATING' and turn_lease_id=?
+                `).run(
+                    nowIso,
+                    `learned host cutoff ${learnedCutoff.medianMs}ms + adaptive margin ${learnedCutoff.marginMs}ms; samples=${learnedCutoff.samples.join(",")}`,
+                    nowIso,
+                    nowIso,
+                    legacy.id,
+                    legacyTurnLeaseId,
+                );
+                if (Number(updateResult.changes || 0) === 1) {
+                    this.database.sqlite.prepare(`
+                      update continuation_worksets set continuation_due_at=?,state='SUSPECTED_STALL',updated_at=?
+                      where id=?
+                    `).run(nowIso, nowIso, current.id);
+                    this.appendEvent({
+                        kind: "continuation-host-timeout-inferred",
+                        subject: current.conversation_scope_id,
+                        workspaceId: current.workspace_id ?? undefined,
+                        payload: {
+                            worksetId: current.id,
+                            turnLeaseId: legacyTurnLeaseId,
+                            elapsedMs: elapsedTurnMs,
+                            medianMs: learnedCutoff.medianMs,
+                            marginMs: learnedCutoff.marginMs,
+                            deadlineMs: learnedCutoff.deadlineMs,
+                            samples: learnedCutoff.samples,
+                        },
+                    });
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
     continuationSupervisorSweep(input = {}) {
         const nowMs = Number.isFinite(Number(input.nowMs)) ? Number(input.nowMs) : Date.now();
         const nowIso = new Date(nowMs).toISOString();
@@ -1601,6 +1705,11 @@ export class StructuredRuntimeState {
                 if ((!Number.isFinite(worksetDue) || worksetDue > nowMs) && !expiredSenderClaim)
                     return undefined;
                 let retryAuthorized = false;
+                const learnedCutoffTimeoutAuthorized = (!liveSynthetic
+                    || ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state)))
+                    && this.inferLearnedHostCutoffTimeout(legacy, current, nowMs);
+                if (learnedCutoffTimeoutAuthorized)
+                    legacy = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(legacy.id);
                 if (liveSynthetic) {
                     const syntheticOwnerTask = current.legacy_task_id
                         ? this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(current.legacy_task_id)
@@ -1639,8 +1748,10 @@ export class StructuredRuntimeState {
                     // "the assistant turn ended", so any fixed quiet threshold
                     // can preempt a valid multi-minute reasoning interval. Retry
                     // only after the Assistant Turn Completion Contract has a
-                    // durable end state for this exact turn lease. A previously
-                    // observed Host cutoff remains telemetry only.
+                    // durable end state for this exact turn lease. A single or
+                    // unstable Host cutoff observation remains telemetry only;
+                    // the separate learned-hard-cutoff fallback below requires
+                    // multiple independent, tightly clustered observations.
                     const abandonedSyntheticWork = ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state))
                         && String(syntheticOwnerTask?.delivery_owner || "") === "synthetic-active"
                         && Number.isFinite(syntheticWorkOwnerExpiresAt) && syntheticWorkOwnerExpiresAt <= nowMs
@@ -1650,7 +1761,7 @@ export class StructuredRuntimeState {
                         && Number.isFinite(syntheticDue) && syntheticDue <= nowMs
                         && syntheticTurnEnded
                         && (Number(liveSynthetic.substantive_activity_count || 0) <= Number(liveSynthetic.substantive_baseline_count || 0)
-                            || abandonedSyntheticWork)
+                            || abandonedSyntheticWork || learnedCutoffTimeoutAuthorized)
                         && !this.continuationModelRequestInFlight(current.conversation_scope_id);
                     if (!senderClaimExpired && !noWork)
                         return undefined;
@@ -1738,7 +1849,9 @@ export class StructuredRuntimeState {
                 if (previous && previous.owner_type === "manual" && !["CLOSED", "SUPERSEDED", "NO_WORK"].includes(String(previous.state))) {
                     this.database.sqlite.prepare(`
                       update continuation_generations set state='SUPERSEDED',closed_at=?,failure_reason=?,updated_at=? where id=?
-                    `).run(nowIso, signedCompletionPrearm ? "model-turn-complete-prearmed" : "watchdog-expired", nowIso, previous.id);
+                    `).run(nowIso, signedCompletionPrearm
+                        ? "model-turn-complete-prearmed"
+                        : learnedCutoffTimeoutAuthorized ? "learned-host-cutoff-timeout" : "watchdog-expired", nowIso, previous.id);
                 }
                 const nextGeneration = Math.max(1, Number(current.current_generation || 0) + 1);
                 const generationId = `generation:${current.id}:${nextGeneration}`;
@@ -1761,6 +1874,7 @@ export class StructuredRuntimeState {
                         worksetId: current.id,
                         generation: nextGeneration,
                         ...(signedCompletionPrearm ? { prearmed: true, reason: "model-turn-complete" } : {}),
+                        ...(learnedCutoffTimeoutAuthorized ? { inferredTimeout: true, reason: "learned-host-cutoff-watchdog" } : {}),
                     },
                 });
                 return { conversationScopeId: current.conversation_scope_id, worksetId: current.id, generation: nextGeneration, generationId };
@@ -2405,6 +2519,51 @@ export class StructuredRuntimeState {
         if (!row)
             return undefined;
         const substantiveIncrement = input.substantive === false ? 0 : 1;
+        const learnedCutoff = substantiveIncrement > 0
+            ? learnedHostCutoffFallback(row.cutoff_samples_json)
+            : undefined;
+        const turnStartedAtMs = Date.parse(String(row.turn_started_at || ""));
+        const survivedLearnedCutoff = Boolean(learnedCutoff
+            && String(row.assistant_turn_state || "") === "GENERATING"
+            && Number.isFinite(turnStartedAtMs)
+            && Date.now() - turnStartedAtMs >= learnedCutoff.deadlineMs);
+        if (survivedLearnedCutoff) {
+            // A substantive model-originated DevSpace operation observed after
+            // the learned fallback deadline proves that the current Host regime
+            // survived the old cutoff. Invalidate that learned authority before
+            // renewing the turn lease so an old ~25 minute regime cannot keep
+            // pre-empting a newer, longer Host budget.
+            this.database.sqlite.prepare(`
+              update continuation_tasks set
+                confirmed_turn_limit_ms=null,confirmed_turn_limit_at=null,
+                confirmed_turn_limit_source='invalidated-by-live-turn-survival',
+                cutoff_samples_json='[]',cutoff_epoch=coalesce(cutoff_epoch,0)+1,
+                cutoff_regime_changed_at=?,updated_at=?
+              where id=? and assistant_turn_state='GENERATING'
+            `).run(nowIso, nowIso, row.id);
+            if (row.host_profile_id) {
+                this.database.sqlite.prepare(`
+                  update continuation_host_profiles set
+                    confirmed_turn_limit_ms=null,confirmed_turn_limit_at=null,
+                    confirmed_turn_limit_source='invalidated-by-live-turn-survival',
+                    cutoff_samples_json='[]',cutoff_epoch=coalesce(cutoff_epoch,0)+1,
+                    cutoff_regime_changed_at=?,updated_at=?
+                  where id=?
+                `).run(nowIso, nowIso, row.host_profile_id);
+            }
+            this.appendEvent({
+                kind: "continuation-host-cutoff-invalidated",
+                subject: row.conversation_scope_id,
+                workspaceId: workspaceId || row.workspace_id || undefined,
+                payload: {
+                    reason: "live-turn-survived-learned-cutoff",
+                    turnLeaseId: row.turn_lease_id || undefined,
+                    learnedDeadlineMs: learnedCutoff.deadlineMs,
+                    observedElapsedMs: Date.now() - turnStartedAtMs,
+                    samples: learnedCutoff.samples,
+                },
+            });
+        }
         const syntheticOwnerActive = substantiveIncrement > 0
             && ["synthetic-pending", "synthetic-active"].includes(String(row.delivery_owner || ""));
         const syntheticOwnerExpiresAt = syntheticOwnerActive
@@ -3022,6 +3181,32 @@ export class StructuredRuntimeState {
             const readOnlyStatus = input.readOnlyStatus === true;
             const manualTakeover = input.manualTakeover === true
                 || String(input.note ?? "").trim() === "manual-user-turn-takeover";
+            const expectedGeneration = row?.delivery_token
+                ? this.database.sqlite.prepare(`
+                    select generation,state,delivered_at,turn_acked_at from continuation_generations
+                    where delivery_token=? order by generation desc limit 1
+                  `).get(String(row.delivery_token))
+                : undefined;
+            // Report local delivery/ACK evidence without disclosing a capability
+            // or treating a missing ACK as proof of a Host safety rejection.
+            // This snapshot grants no authority and never renews the ACK lease.
+            const ackLeaseMs = row?.delivery_owner_expires_at
+                ? Date.parse(row.delivery_owner_expires_at) : undefined;
+            const deliveryDiagnostics = row?.delivery_token ? {
+                generation: expectedGeneration?.generation,
+                state: expectedGeneration?.state,
+                deliveredAt: expectedGeneration?.delivered_at ?? null,
+                turnAckedAt: expectedGeneration?.turn_acked_at ?? null,
+                ackLeaseExpiresAt: row.delivery_owner_expires_at ?? null,
+                ackLeaseExpired: Number.isFinite(ackLeaseMs) && ackLeaseMs <= now.getTime(),
+                blockReason: !expectedGeneration ? "expected-generation-unavailable"
+                    : !["DELIVERED", "WORK_REQUIRED"].includes(String(expectedGeneration.state))
+                        ? "delivery-not-confirmed"
+                        : ackLeaseMs !== undefined && !Number.isFinite(ackLeaseMs)
+                            ? "expected-next-turn-lease-invalid"
+                            : ackLeaseMs !== undefined && ackLeaseMs <= now.getTime()
+                                ? "expected-next-turn-lease-expired" : null,
+            } : undefined;
             // First-ever status precedes open_workspace/anchor issuance. Persist
             // the manual turn now; otherwise later projection recovery creates
             // an UNKNOWN owner and silently loses the first-status handshake.
@@ -3153,6 +3338,7 @@ export class StructuredRuntimeState {
                     task,
                     accepted: true,
                     reason: "read-only-status",
+                    deliveryDiagnostics,
                     ...(readySynthetic ? { readyGeneration: Number(readySynthetic.generation) } : {}),
                     syntheticOwnerActive: String(row.delivery_owner || "") === "synthetic-active",
                     syntheticTokenPending: Boolean(row.delivery_token),
@@ -3195,12 +3381,6 @@ export class StructuredRuntimeState {
             // status calls never send this exact marker, and synthetic resume
             // context explicitly omits it, so ambiguous tokenless status remains
             // fail-closed.
-            const expectedGeneration = row?.delivery_token
-                ? this.database.sqlite.prepare(`
-                    select state from continuation_generations
-                    where delivery_token=? order by generation desc limit 1
-                  `).get(String(row.delivery_token))
-                : undefined;
             const expectedSyntheticClaim = Boolean(row
                 && !readOnlyStatus
                 && !deliveryToken
@@ -3271,6 +3451,7 @@ export class StructuredRuntimeState {
                         task,
                         accepted: false,
                         reason: "turn-origin-handshake-required",
+                        deliveryDiagnostics,
                         retryRequired: true,
                         readyGeneration: readySynthetic?.generation,
                         syntheticOwnerActive: String(row.delivery_owner || "") === "synthetic-active",
@@ -4339,11 +4520,31 @@ export class StructuredRuntimeState {
                 && (confirmedTurnLimitMs < previousConfirmed * HOST_CUTOFF_REGIME_DOWN_RATIO
                     || confirmedTurnLimitMs > previousConfirmed * HOST_CUTOFF_REGIME_UP_RATIO);
             const cutoffEpoch = Number(row.cutoff_epoch || 0) + (materialRegimeChange ? 1 : 0);
+            // Confirmations alone do not end the current turn. Preserve
+            // same-regime history for the guarded inferred-cutoff fallback
+            // instead of replacing it
+            // with one sample on every confirmation; retries of the same
+            // numeric observation must not manufacture extra evidence.
+            const taskObservedSamples = materialRegimeChange ? [] : numericSamples(row.cutoff_samples_json);
+            if (!materialRegimeChange
+                && taskObservedSamples.length === 0
+                && previousConfirmed >= HOST_CUTOFF_MIN_SAMPLE_MS
+                && previousConfirmed !== confirmedTurnLimitMs) {
+                // Migrate one real owner-confirmed cutoff from pre-dev67 state.
+                // Only seed an empty sample window, and only when the new
+                // observation is numerically distinct, so a repeated owner
+                // confirmation cannot manufacture two-sample confidence.
+                taskObservedSamples.push(previousConfirmed);
+            }
+            const confirmedSamples = [...new Set([
+                ...taskObservedSamples,
+                confirmedTurnLimitMs,
+            ])].slice(-HOST_CUTOFF_SAMPLE_WINDOW);
             this.database.sqlite.prepare(`
               update continuation_tasks set confirmed_turn_limit_ms=?, confirmed_turn_limit_at=?,
                 confirmed_turn_limit_source=?, cutoff_samples_json=?, cutoff_epoch=?, cutoff_regime_changed_at=?,
                 last_activity_at=?, updated_at=? where id=?
-            `).run(confirmedTurnLimitMs, nowIso, source, JSON.stringify([confirmedTurnLimitMs]), cutoffEpoch,
+            `).run(confirmedTurnLimitMs, nowIso, source, JSON.stringify(confirmedSamples), cutoffEpoch,
                 materialRegimeChange ? nowIso : row.cutoff_regime_changed_at, nowIso, nowIso, taskId);
             const hostProfileId = String(row.host_profile_id ?? "").trim();
             if (hostProfileId) {
@@ -4354,11 +4555,22 @@ export class StructuredRuntimeState {
                         && (confirmedTurnLimitMs < profilePrevious * HOST_CUTOFF_REGIME_DOWN_RATIO
                             || confirmedTurnLimitMs > profilePrevious * HOST_CUTOFF_REGIME_UP_RATIO);
                     const profileEpoch = Number(profile.cutoff_epoch || 0) + (profileRegimeChange ? 1 : 0);
+                    const profileObservedSamples = profileRegimeChange ? [] : numericSamples(profile.cutoff_samples_json);
+                    if (!profileRegimeChange
+                        && profileObservedSamples.length === 0
+                        && profilePrevious >= HOST_CUTOFF_MIN_SAMPLE_MS
+                        && profilePrevious !== confirmedTurnLimitMs) {
+                        profileObservedSamples.push(profilePrevious);
+                    }
+                    const profileSamples = [...new Set([
+                        ...profileObservedSamples,
+                        confirmedTurnLimitMs,
+                    ])].slice(-HOST_CUTOFF_SAMPLE_WINDOW);
                     this.database.sqlite.prepare(`
                       update continuation_host_profiles set confirmed_turn_limit_ms=?, confirmed_turn_limit_at=?,
                         confirmed_turn_limit_source=?, cutoff_samples_json=?, cutoff_epoch=?, cutoff_regime_changed_at=?,
                         updated_at=? where id=?
-                    `).run(confirmedTurnLimitMs, nowIso, source, JSON.stringify([confirmedTurnLimitMs]), profileEpoch,
+                    `).run(confirmedTurnLimitMs, nowIso, source, JSON.stringify(profileSamples), profileEpoch,
                         profileRegimeChange ? nowIso : profile.cutoff_regime_changed_at, nowIso, hostProfileId);
                 }
             }

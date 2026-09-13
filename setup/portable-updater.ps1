@@ -1845,7 +1845,13 @@ function Stage-IncrementalChainUpdate([object]$Latest, [object]$Plan) {
 function Stage-Update {
     Write-UpdateProgress -Phase "metadata" -Message "Reading GitHub Release metadata and update manifest"
     $latest = Get-LatestRelease
-    if ((Compare-Version $latest.version $CurrentVersion) -le 0) {
+    $versionComparison = Compare-Version $latest.version $CurrentVersion
+    # Normal update checks remain strictly newer-version only.  The legacy
+    # bootstrap bridge is the one exception: after an old updater installs the
+    # hardened updater/control center at the target version, the new control
+    # center must be able to force a full *same-version* repair so the partial
+    # bootstrap payload is replaced by the complete release.
+    if ($versionComparison -lt 0 -or ($versionComparison -eq 0 -and -not $ForceFull)) {
         return [pscustomobject]@{
             currentVersion = $CurrentVersion
             latestVersion = $latest.version
@@ -1855,7 +1861,11 @@ function Stage-Update {
     }
     Remove-OldStagingDirectories
     if ($ForceFull) {
-        $reason = "Forced full-package fallback after a previous differential/incremental apply failure."
+        $reason = if ($versionComparison -eq 0) {
+            "Forced same-version full-package repair after a legacy updater bootstrap."
+        } else {
+            "Forced full-package fallback after a previous differential/incremental apply failure."
+        }
         Write-UpdateLog $reason
         return Stage-FullUpdate $latest $reason
     }

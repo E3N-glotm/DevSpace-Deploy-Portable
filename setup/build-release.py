@@ -65,6 +65,8 @@ EXCLUDED_TOP_LEVEL_FILES = {
     # this extensionless file in the 1.1.27 local build. Keep source-local
     # diagnostics out of distributable payloads.
     "true",
+    # Historical diagnostic shell-redirection artifact, never a release file.
+    "datetime('now'",
 }
 RELEASE_DIRECTORY_PREFIX = "DevSpacePortable-Windows-x64-"
 TEMP_NATIVE_UI_PATTERN = re.compile(r"^[0-9a-fA-F-]{36}_DevSpace-Portable\.exe$")
@@ -408,6 +410,12 @@ def write_zip(files: list[Path], plugin_entries: list[tuple[Path, Path]], versio
 
 
 def main() -> int:
+    manifest = json.loads((ROOT / "VERSION-MANIFEST.json").read_text(encoding="utf-8"))
+    policy = json.loads((ROOT / "setup" / "legacy-release-policy.json").read_text(encoding="utf-8"))
+    version = release_version()
+    is_dev = bool(manifest.get("development"))
+    if version in policy["developmentOnlyVersions"] and not is_dev:
+        raise RuntimeError(f"{version} is development-only; finalize it with --dev N before building.")
     node = ROOT / "runtime" / "node" / "node.exe"
     native_ui_builder = ROOT / "setup" / "build-native-ui.cjs"
     if not node.exists():
@@ -428,6 +436,37 @@ def main() -> int:
     output = write_zip(files, plugin_entries, version)
     print(f"Created: {output}", flush=True)
     print(f"SHA-256: {sha256_file(output)}", flush=True)
+
+    # Historical Portable versions run their own updater before they can
+    # receive updater fixes from this release.  Generate tiny direct
+    # file-delta-v1 bootstrap assets that old clients already understand.  The
+    # bridge carries only the hardened update control chain; the newly installed
+    # control center immediately performs a same-version ForceFull repair.
+    bridge_script = ROOT / "setup" / "create-legacy-upgrade-bridge.py"
+    # Publish the historical matrix only at the stable bootstrap baseline.
+    # Later graph-capable clients reuse those immutable historical URLs and
+    # one shallow baseline-to-current bridge. Four pre-graph clients retain
+    # direct assets: this is a bounded compatibility set, not a growing matrix.
+    bootstrap = policy["bootstrapVersion"]
+    version_key = lambda value: tuple(int(part) for part in value.split("."))
+    bridge_versions = (() if is_dev or version_key(version) < version_key(bootstrap)
+                       else policy["legacyFromVersions"] if version == bootstrap
+                       else [bootstrap, *policy["legacyDirectOnlyVersions"]])
+    if not bridge_script.is_file():
+        raise RuntimeError(f"Legacy update bridge generator is missing: {bridge_script}")
+    for from_version in bridge_versions:
+        if from_version == version:
+            continue
+        subprocess.run(
+            [
+                sys.executable,
+                str(bridge_script),
+                "--from-version", from_version,
+                "--target-zip", str(output),
+            ],
+            cwd=ROOT,
+            check=True,
+        )
     return 0
 
 

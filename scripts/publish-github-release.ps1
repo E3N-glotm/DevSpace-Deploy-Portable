@@ -12,8 +12,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Version -eq "1.1.59") {
+    throw "1.1.59 is development-only and must never be published. The next stable release is 1.1.60."
+}
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
+
+$VersionManifest = Get-Content -LiteralPath (Join-Path $Root "VERSION-MANIFEST.json") -Raw | ConvertFrom-Json
+if ($VersionManifest.development -or [string]$VersionManifest.runtime.devspacePortable -ne $Version) {
+    throw "Refusing to publish development metadata or a mismatched Portable version."
+}
 
 function Get-GitHubToken {
     if ($env:GH_TOKEN) { return $env:GH_TOKEN }

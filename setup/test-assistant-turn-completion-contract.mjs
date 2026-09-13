@@ -168,6 +168,181 @@ try {
   assert.equal(longThinkClaim.accepted, false);
   assert.equal(longThinkClaim.reason, "continuation-trigger-not-authorized");
 
+  // A single learned cutoff observation is still telemetry only. It must not
+  // manufacture a continuation just because the turn is old and quiet.
+  const singleCutoffScope = "v1/atcc-single-cutoff-telemetry";
+  const singleCutoff = begin(singleCutoffScope);
+  mount(singleCutoff, singleCutoffScope, "ui_atcc_single_cutoff");
+  runtime.continuationTask({
+    action: "confirm-turn-limit", taskId: singleCutoff.task.id,
+    elapsedMs: 30_000, note: "single-owner-observation",
+  });
+  const singleOld = new Date(Date.now() - 90_000).toISOString();
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set turn_started_at=?,turn_lease_expires_at=? where id=?
+  `).run(singleOld, singleOld, singleCutoff.task.id);
+  runtime.database.sqlite.prepare(`
+    update continuation_worksets set continuation_due_at=? where legacy_task_id=?
+  `).run(singleOld, singleCutoff.task.id);
+  const singleSweep = runtime.continuationSupervisorSweep({ nowMs: Date.now() });
+  assert.equal(readyForScope(singleSweep, singleCutoffScope).length, 0,
+    "one cutoff observation must remain non-authorizing telemetry");
+  assert.equal(runtime.continuationTask({ action: "status", taskId: singleCutoff.task.id }).task.assistantTurnState,
+    "GENERATING");
+
+  // Two independent, tightly clustered owner-confirmed hard cutoffs establish
+  // a conservative fallback for Hosts that visibly kill the model turn but do
+  // not expose a timeout lifecycle event to the Workspace App.
+  const learnedCutoffScope = "v1/atcc-learned-hard-cutoff";
+  const learnedCutoff = begin(learnedCutoffScope);
+  mount(learnedCutoff, learnedCutoffScope, "ui_atcc_learned_cutoff");
+  runtime.continuationTask({
+    action: "confirm-turn-limit", taskId: learnedCutoff.task.id,
+    elapsedMs: 30_000, note: "owner-observation-1",
+  });
+  runtime.continuationTask({
+    action: "confirm-turn-limit", taskId: learnedCutoff.task.id,
+    elapsedMs: 30_100, note: "owner-observation-2",
+  });
+  const learnedStatus = runtime.continuationTask({ action: "status", taskId: learnedCutoff.task.id });
+  assert.deepEqual(learnedStatus.task.cutoffSamples, [30_000, 30_100]);
+  const learnedStartedAt = Date.now() - 31_500;
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set turn_started_at=?,turn_lease_expires_at=? where id=?
+  `).run(new Date(learnedStartedAt).toISOString(), new Date(learnedStartedAt).toISOString(), learnedCutoff.task.id);
+  runtime.database.sqlite.prepare(`
+    update continuation_worksets set continuation_due_at=? where legacy_task_id=?
+  `).run(new Date(learnedStartedAt).toISOString(), learnedCutoff.task.id);
+  const beforeLearnedDeadline = runtime.continuationSupervisorSweep({ nowMs: learnedStartedAt + 30_500 });
+  assert.equal(readyForScope(beforeLearnedDeadline, learnedCutoffScope).length, 0,
+    "learned cutoff fallback must preserve its adaptive safety margin");
+  const afterLearnedDeadline = runtime.continuationSupervisorSweep({ nowMs: learnedStartedAt + 31_000 });
+  assert.equal(readyForScope(afterLearnedDeadline, learnedCutoffScope).length, 1,
+    "two tight independent cutoff samples must recover a hard Host cutoff without an explicit timeout event");
+  const inferredTimedOut = runtime.continuationTask({ action: "status", taskId: learnedCutoff.task.id });
+  assert.equal(inferredTimedOut.task.assistantTurnState, "TIMED_OUT");
+  assert.equal(inferredTimedOut.task.assistantTurnCompletionSource, "learned-host-cutoff-watchdog");
+  assert.equal(inferredTimedOut.task.stallState, "CONTINUATION_ARMED");
+  assert.equal(readyForScope(
+    runtime.continuationSupervisorSweep({ nowMs: learnedStartedAt + 32_000 }), learnedCutoffScope,
+  ).length, 0, "repeated watchdog sweeps must not mint a duplicate READY generation");
+
+  // Repeating the exact same owner observation cannot manufacture two-sample
+  // confidence, including when migrating a pre-dev67 confirmed limit that had
+  // no sample window yet.
+  const duplicateCutoffScope = "v1/atcc-duplicate-cutoff-sample";
+  const duplicateCutoff = begin(duplicateCutoffScope);
+  mount(duplicateCutoff, duplicateCutoffScope, "ui_atcc_duplicate_cutoff");
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set confirmed_turn_limit_ms=?,cutoff_samples_json='[]' where id=?
+  `).run(30_000, duplicateCutoff.task.id);
+  runtime.continuationTask({
+    action: "confirm-turn-limit", taskId: duplicateCutoff.task.id,
+    elapsedMs: 30_000, note: "same-observation-retry",
+  });
+  const duplicateStatus = runtime.continuationTask({ action: "status", taskId: duplicateCutoff.task.id });
+  assert.deepEqual(duplicateStatus.task.cutoffSamples, [30_000]);
+
+  // Conversely, a distinct same-regime observation must migrate the one
+  // pre-dev67 confirmed cutoff into the sample window so already-observed live
+  // evidence can participate in the new conservative fallback.
+  const migratedCutoffScope = "v1/atcc-migrated-cutoff-sample";
+  const migratedCutoff = begin(migratedCutoffScope);
+  mount(migratedCutoff, migratedCutoffScope, "ui_atcc_migrated_cutoff");
+  runtime.database.sqlite.prepare(`
+    update continuation_tasks set confirmed_turn_limit_ms=?,cutoff_samples_json='[]' where id=?
+  `).run(30_000, migratedCutoff.task.id);
+  runtime.continuationTask({
+    action: "confirm-turn-limit", taskId: migratedCutoff.task.id,
+    elapsedMs: 30_100, note: "distinct-new-observation",
+  });
+  assert.deepEqual(
+    runtime.continuationTask({ action: "status", taskId: migratedCutoff.task.id }).task.cutoffSamples,
+    [30_000, 30_100],
+  );
+
+  // If a real model-originated substantive operation survives beyond the
+  // learned fallback deadline, the Host regime has lengthened. The stale
+  // cutoff authority must invalidate immediately rather than interrupting the
+  // now-longer live turn.
+  const survivalScope = "v1/atcc-cutoff-survival-invalidation";
+  const survival = begin(survivalScope);
+  mount(survival, survivalScope, "ui_atcc_cutoff_survival");
+  runtime.continuationTask({ action: "confirm-turn-limit", taskId: survival.task.id, elapsedMs: 30_000 });
+  runtime.continuationTask({ action: "confirm-turn-limit", taskId: survival.task.id, elapsedMs: 30_100 });
+  runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
+    .run(new Date(Date.now() - 40_000).toISOString(), survival.task.id);
+  runtime.touchContinuationModelActivity({
+    workspaceId: survival.task.workspaceId,
+    conversationScopeId: survivalScope,
+    substantive: true,
+  });
+  const survivalStatus = runtime.continuationTask({ action: "status", taskId: survival.task.id });
+  assert.deepEqual(survivalStatus.task.cutoffSamples, []);
+  assert.equal(survivalStatus.task.confirmedTurnLimitMs, undefined);
+  assert.equal(survivalStatus.task.confirmedTurnLimitSource, "invalidated-by-live-turn-survival");
+  assert.equal(survivalStatus.task.assistantTurnState, "GENERATING");
+
+
+  // Exercise the inferred-cutoff gate against the conditions that can still
+  // be live when the original MCP request has returned.
+  for (const scenario of ["unstable", "inflight", "process", "manual", "profile", "synthetic"]) {
+    const scope = `v1/atcc-learned-guard-${scenario}`;
+    const fixture = begin(scope);
+    mount(fixture, scope, `ui_atcc_learned_guard_${scenario}`);
+    runtime.continuationTask({ action: "confirm-turn-limit", taskId: fixture.task.id, elapsedMs: 30_000 });
+    runtime.continuationTask({
+      action: "confirm-turn-limit", taskId: fixture.task.id,
+      elapsedMs: scenario === "unstable" ? 34_000 : 30_100,
+    });
+    const old = new Date(Date.now() - 60_000).toISOString();
+    runtime.database.sqlite.prepare(
+      "update continuation_tasks set turn_started_at=?,turn_lease_expires_at=? where id=?",
+    ).run(old, old, fixture.task.id);
+    runtime.database.sqlite.prepare(
+      "update continuation_worksets set continuation_due_at=? where legacy_task_id=?",
+    ).run(old, fixture.task.id);
+    let releaseRequest;
+    if (scenario === "inflight") releaseRequest = runtime.beginContinuationModelRequest(scope);
+    if (scenario === "process") runtime.database.sqlite.prepare(
+      "update continuation_tasks set watch_process_handles_json='[\"active-build\"]' where id=?",
+    ).run(fixture.task.id);
+    if (scenario === "manual") {
+      const newTurn = runtime.continuationTask({ action: "status", taskId: fixture.task.id, manualTakeover: true });
+      assert.notEqual(newTurn.task.turnLeaseId, fixture.task.turnLeaseId);
+    }
+    if (scenario === "profile") {
+      runtime.continuationTask({
+        action: "host-signal", taskId: fixture.task.id,
+        coordinatorInstanceId: "ui_atcc_learned_guard_profile",
+        hostProfileId: "chatgpt@atcc-revoked-profile", hostSignal: "connected",
+      });
+      runtime.database.sqlite.prepare(
+        "update continuation_host_profiles set cutoff_epoch=cutoff_epoch+1,cutoff_samples_json='[]' where id=?",
+      ).run("chatgpt@atcc-revoked-profile");
+    }
+    if (scenario === "synthetic") {
+      const snapshot = runtime.continuationArchitectureSnapshot(scope);
+      const generation = snapshot.generations.at(-1);
+      runtime.database.sqlite.prepare(`
+        update continuation_generations set owner_type='synthetic',state='WORK_REQUIRED',
+          due_at=?,substantive_baseline_count=0,substantive_activity_count=4 where id=?
+      `).run(old, generation.id);
+      runtime.database.sqlite.prepare(`
+        update continuation_tasks set delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
+          delivery_owner_expires_at=?,substantive_activity_count=4 where id=?
+      `).run(new Date(Date.now() + 180_000).toISOString(), fixture.task.id);
+    }
+    const sweep = runtime.continuationSupervisorSweep({ nowMs: Date.now() });
+    releaseRequest?.();
+    assert.equal(readyForScope(sweep, scope).length, scenario === "synthetic" ? 1 : 0,
+      `learned-cutoff ${scenario} gate`);
+    const after = runtime.continuationTask({ action: "status", taskId: fixture.task.id });
+    assert.equal(after.task.assistantTurnState, scenario === "synthetic" ? "TIMED_OUT" : "GENERATING");
+    if (scenario === "synthetic") {
+      assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: Date.now() }), scope).length, 0);
+    }
+  }
   // Generic teardown is not an assistant completion signal because the MCP
   // Apps SDK exposes resource teardown without a response-done reason.
   const genericScope = "v1/atcc-generic-teardown";
@@ -1046,7 +1221,11 @@ try {
     genericTeardownHasNoSenderFallback: true,
     manualMinimumSubstantiveWorkDelta: 1,
     syntheticMinimumSubstantiveWorkDelta: 4,
-    confirmedHostBudgetIsTelemetryOnly: true,
+    singleOrUnstableHostBudgetIsTelemetryOnly: true,
+    clusteredCutoffInfersTimeoutWithoutHostEvent: true,
+    learnedCutoffProtectsRequestsProcessesAndManualTakeover: true,
+    learnedCutoffRejectsRevokedHostProfile: true,
+    learnedCutoffRecoversSyntheticWorkWithoutDuplicateReady: true,
     verifiedHostTimeoutRemainsAuthoritative: true,
     cachedSchemaCheckpointCompletionCompatibility: true,
     syntheticOwnerLeaseExpiryDoesNotContinue: true,

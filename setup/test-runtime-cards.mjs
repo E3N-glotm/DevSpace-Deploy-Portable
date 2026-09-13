@@ -184,11 +184,11 @@ try {
   const anchorMeta = toolWidgetDescriptorMeta(changesConfig, "continuation-anchor");
   const anchorUri = anchorMeta._meta?.ui?.resourceUri;
   if (
-    !/^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}-continuation-anchor\.html$/.test(anchorUri ?? "")
+    !/^ui:\/\/devspace\/workspace-app-[0-9a-f]{16}\.html$/.test(anchorUri ?? "")
     || anchorMeta._meta?.["openai/outputTemplate"] !== anchorUri
-    || anchorUri === renderUri
+    || anchorUri !== renderUri
   ) {
-    throw new Error("continuation_anchor must use the dedicated revisioned surface identity through the one explicit card entry point");
+    throw new Error("continuation_anchor must use the Host-proven canonical Workspace App URI; card generations remain separate state capabilities");
   }
   const enhancementSource = await readFile(
     new URL("../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js", import.meta.url),

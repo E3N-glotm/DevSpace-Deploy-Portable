@@ -35,6 +35,7 @@ jobs:
             $version = "${{ github.ref_name }}".TrimStart('v')
           }
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $version" }
+          if ($version -eq "1.1.59") { throw "1.1.59 is development-only. The next stable release is 1.1.60." }
           "version=$version" >> $env:GITHUB_OUTPUT
           "VERSION=$version" >> $env:GITHUB_ENV
 
@@ -140,7 +141,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ([version]$env:VERSION -le [version]"1.1.42") {
+          if ([version]$env:VERSION -le [version]"1.1.42" -or [version]$env:VERSION -ge [version]"1.1.60") {
             Write-Host "Blockmap bootstrap base is only required after v1.1.42."
             exit 0
           }
@@ -162,6 +163,7 @@ jobs:
         shell: pwsh
         run: |
           $manifest = Get-Content VERSION-MANIFEST.json -Raw | ConvertFrom-Json
+          if ($manifest.development) { throw "Development builds cannot be published as stable Releases." }
           $actual = [string]$manifest.runtime.devspacePortable
           if ($actual -ne $env:VERSION) {
             throw "Tag version $env:VERSION does not match VERSION-MANIFEST portable version $actual"
@@ -239,6 +241,12 @@ jobs:
             $legacy113 = Join-Path $env:MIGRATION_BASE_DIR "DevSpacePortable-Windows-x64-1.1.33.zip"
             $rescueZip = Join-Path $PWD "DevSpacePortable-Rescue-1.1.33-to-$env:VERSION.zip"
             python setup/create-rescue-overlay.py --base-zip "$legacy113" --target-zip "$targetZip" --output "$rescueZip"
+          } elseif ([version]$env:VERSION -ge [version]"1.1.60") {
+            # build-release.py already generated the shallow baseline bridges.
+            # Never overwrite 1.1.42's bridge with a deep full-delta payload.
+            Get-ChildItem -LiteralPath $PWD -Filter "DevSpacePortable-Update-*-to-$env:VERSION.zip" -File |
+              ForEach-Object { $incrementalZips.Add($_.FullName) }
+            if ($incrementalZips.Count -eq 0) { throw "Stable bootstrap assets are missing." }
           } else {
             # v1.1.42 is the compatibility floor for block-pack-v2. Keep one
             # direct 1.1.42 -> current bridge on every later Release so an
@@ -257,7 +265,7 @@ jobs:
           $manifestArgs += @("--blockmap", "$blockmap")
           foreach ($deltaZip in $incrementalZips) { $manifestArgs += @("--incremental", "$deltaZip") }
           if ($rescueZip) { $manifestArgs += @("--rescue", "$rescueZip") }
-          if ($env:VERSION -eq "1.1.41" -or $env:VERSION -eq "1.1.42") {
+          if ($env:VERSION -eq "1.1.41" -or $env:VERSION -eq "1.1.42" -or [version]$env:VERSION -ge [version]"1.1.60") {
             $manifestArgs += @("--carry-forward-manifest", "$env:BASE_UPDATE_MANIFEST")
           }
           python setup/create-update-manifest.py @manifestArgs

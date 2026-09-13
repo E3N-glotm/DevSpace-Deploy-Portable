@@ -1325,7 +1325,73 @@ namespace DevSpacePortable.NativeUI
                     NativeWindowEffects.ActivateExistingWindow("DevSpace Portable");
                     return;
                 }
+                if (TryCompleteLegacyUpgrade(root))
+                {
+                    return;
+                }
                 Application.Run(new MainForm(root));
+            }
+        }
+
+        private static bool TryCompleteLegacyUpgrade(string root)
+        {
+            string marker = Path.Combine(root, "setup", "legacy-upgrade-bootstrap.json");
+            if (!File.Exists(marker))
+            {
+                return false;
+            }
+
+            try
+            {
+                ManagerClient manager = new ManagerClient(root);
+                Dictionary<string, object> staged = manager.RunJson("update-stage-force-full");
+                object stagingValue;
+                string stagingPath = staged.TryGetValue("stagingPath", out stagingValue)
+                    ? Convert.ToString(stagingValue, CultureInfo.InvariantCulture)
+                    : "";
+                if (string.IsNullOrWhiteSpace(stagingPath))
+                {
+                    throw new InvalidOperationException(
+                        "兼容更新无法准备完整安装包。请检查网络后重新启动 DevSpace Portable。\n\n"
+                        + new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(staged));
+                }
+
+                Dictionary<string, object> launched = manager.RunJson(
+                    "update-launch",
+                    new Dictionary<string, object>
+                    {
+                        ["stagingPath"] = stagingPath,
+                        ["uiPid"] = Process.GetCurrentProcess().Id,
+                    });
+                object launchedValue;
+                bool accepted = launched.TryGetValue("launched", out launchedValue) && Convert.ToBoolean(launchedValue, CultureInfo.InvariantCulture);
+                if (!accepted)
+                {
+                    throw new InvalidOperationException(
+                        "兼容更新的完整安装阶段未能启动。\n\n"
+                        + new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Serialize(launched));
+                }
+
+                // update-launch has received the detached updater ACK.  Returning
+                // from Main closes this bootstrap UI process, allowing the
+                // detached hardened updater to replace the partial legacy bridge
+                // with the complete same-version release.  A successful full
+                // update replaces setup/ and therefore removes the marker.
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "旧版本兼容引导已经安装，但完整更新尚未完成。\n\n"
+                    + "请保持网络可用后重新启动 DevSpace Portable；程序会自动继续，不需要重新安装。\n\n"
+                    + ex.Message,
+                    "DevSpace Portable · 兼容更新",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                // Never expose the partially bootstrapped runtime as a normal
+                // current installation.  Keep the marker so the next launch
+                // retries the hardened full repair automatically.
+                return true;
             }
         }
 
@@ -5141,7 +5207,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.59 dev66 · Protocol 1.6";
+            _versionLabel.Text = "DevSpace Portable 1.1.59 dev67 · Protocol 1.6";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);

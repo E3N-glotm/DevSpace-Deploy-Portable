@@ -241,6 +241,12 @@ try {
       assert.equal(receipt.accepted, true);
       if (result === "rejected" || result === "failed") assert.equal(receipt.retryRequired, true);
       else {
+        const deliveryProbe = await wire("continuation_task", {
+          taskId: scenarioTask.id, action: "status", readOnlyStatus: true });
+        assert.equal(deliveryProbe.deliveryDiagnostics.state, "DELIVERED");
+        assert.equal(deliveryProbe.deliveryDiagnostics.turnAckedAt, null);
+        assert.equal(deliveryProbe.deliveryDiagnostics.blockReason, null);
+        assert.equal(JSON.stringify(deliveryProbe.deliveryDiagnostics).includes(acquired.deliveryToken), false);
         const resumed = await wire("continuation_task", { taskId: scenarioTask.id, action: "status", deliveryToken: acquired.deliveryToken });
         assert.equal(resumed.accepted, true);
         const emptyFinal = await wire("continuation_task", { taskId: scenarioTask.id, action: "turn-complete" });

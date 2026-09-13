@@ -70,7 +70,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.59";
-const PORTABLE_DEV_ITERATION = "dev66";
+const PORTABLE_DEV_ITERATION = "dev67";
 const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
@@ -3987,6 +3987,12 @@ async function main() {
       stdoutJson(runPortableUpdater("Check"));
     } else if (command === "update-stage") {
       stdoutJson(runPortableUpdater("Stage"));
+    } else if (command === "update-stage-force-full") {
+      // Used only by the legacy-upgrade bootstrap installed by an old updater.
+      // The hardened updater deliberately permits a same-version ForceFull
+      // stage so the shallow compatibility delta can be replaced by the full
+      // current release without requiring a second user click.
+      stdoutJson(runPortableUpdater("Stage", ["-ForceFull"]));
     } else if (command === "update-launch") {
       stdoutJson(launchPortableUpdate(await readStdinJson()));
     } else if (command === "install-cloudflared") {
@@ -4070,7 +4076,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete oauth-client-list oauth-client-create oauth-client-rotate-secret oauth-client-delete remote-agent-list remote-agent-create-enrollment remote-agent-revoke remote-agent-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-stage-force-full update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete oauth-client-list oauth-client-create oauth-client-rotate-secret oauth-client-delete remote-agent-list remote-agent-create-enrollment remote-agent-revoke remote-agent-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);

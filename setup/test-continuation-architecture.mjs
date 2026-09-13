@@ -939,6 +939,47 @@ try {
   assert.equal(afterReadOnlyProbeTask.delivery_owner, "synthetic-pending");
   assert.equal(afterReadOnlyProbeTask.delivery_token, senderDelivered.deliveryToken);
 
+  // Reproduce the live generation-32 failure without changing delivery or
+  // ownership: a Host-accepted message may start its model after the ACK lease.
+  assert.equal(readOnlyDeliveredStatus.deliveryDiagnostics.state, "DELIVERED");
+  assert.equal(readOnlyDeliveredStatus.deliveryDiagnostics.blockReason, null);
+  assert.equal(readOnlyDeliveredStatus.deliveryDiagnostics.turnAckedAt, null);
+  assert.equal(JSON.stringify(readOnlyDeliveredStatus.deliveryDiagnostics).includes(senderDelivered.deliveryToken), false,
+    "delivery diagnostics must not disclose the pending capability");
+  db.exec("savepoint delayed_model_ack");
+  try {
+    db.prepare("update continuation_tasks set delivery_owner_expires_at=? where id=?")
+      .run(past, first.task.id);
+    const ownershipSnapshot = db.prepare(`select continuation_pending,delivery_owner,delivery_token,
+      delivery_generation,delivery_owner_expires_at,turn_lease_id,turn_started_at,
+      assistant_turn_state,assistant_turn_owner,substantive_activity_count
+      from continuation_tasks where id=?`);
+    const beforeLateAck = ownershipSnapshot.get(first.task.id);
+    const lateAck = runtime.continuationTask({ action: "status", taskId: first.task.id,
+      conversationScopeId: scope, workspaceId: "ws_architecture" });
+    assert.equal(lateAck.accepted, false);
+    assert.equal(lateAck.reason, "turn-origin-handshake-required",
+      "retain the wire-compatible ownership rejection");
+    assert.equal(lateAck.deliveryDiagnostics.blockReason, "expected-next-turn-lease-expired");
+    assert.equal(lateAck.deliveryDiagnostics.ackLeaseExpired, true);
+    assert.equal(lateAck.deliveryDiagnostics.generation, senderDelivered.generation);
+    assert.ok(lateAck.deliveryDiagnostics.deliveredAt);
+    assert.equal(lateAck.deliveryDiagnostics.turnAckedAt, null);
+    const lateProbe = runtime.continuationTask({ action: "status", taskId: first.task.id,
+      conversationScopeId: scope, readOnlyStatus: true });
+    assert.deepEqual(lateProbe.deliveryDiagnostics, lateAck.deliveryDiagnostics);
+    assert.deepEqual(ownershipSnapshot.get(first.task.id), beforeLateAck,
+      "late status and diagnostic probes must not renew leases or take ownership");
+    assert.deepEqual(db.prepare("select state,turn_acked_at from continuation_generations where delivery_token=?")
+      .get(senderDelivered.deliveryToken), { state: "DELIVERED", turn_acked_at: null });
+    db.prepare("update continuation_tasks set delivery_owner_expires_at='invalid' where id=?").run(first.task.id);
+    const invalidAck = runtime.continuationTask({ action: "status", taskId: first.task.id, conversationScopeId: scope });
+    assert.equal(invalidAck.accepted, false);
+    assert.equal(invalidAck.deliveryDiagnostics.blockReason, "expected-next-turn-lease-invalid");
+  } finally {
+    db.exec("rollback to delayed_model_ack; release delayed_model_ack");
+  }
+
   const generationCountBeforeAckRetry = Number(db.prepare(`
     select count(*) as count from continuation_generations where workset_id=?
   `).get(active.id).count);
