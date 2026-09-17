@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.60",
-  "builtAt": "2026-09-17T23:20:08+08:00",
+  "builtAt": "2026-09-18T00:01:31+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -711,7 +711,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "4a0b0fa41c87a2f386d0a02eebd9100235e033644724d24b0967dc071973b211",
+    "setup/portable-manager.cjs.sha256": "9e5c4c20906343de9b0b7442fbd967ab62312685bba3cc2f076276775199f1e1",
     "setup/portable-updater.ps1.sha256": "5944c39ad725a31365d2bdc07d7a9fe9d1fb255e81c77c190ae286304a6ed8c1",
     "setup/test-blockmap-update.mjs.sha256": "b6eb64f2a63f8fdb494eaa6efd15cfaca22bf60e684c94cd78793434b77b82fe",
     "setup/test-codex-runtime-bridge.mjs.sha256": "e9b7985d7eff121d7725460a273d9b956e740bb418b518dcb9657e292e489d11",

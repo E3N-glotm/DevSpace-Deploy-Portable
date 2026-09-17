@@ -2302,6 +2302,7 @@ function stopPortableOwnedProcesses(excludePids = []) {
     ...excludePids,
   ].map(Number).filter((pid) => Number.isInteger(pid) && pid > 0));
   const killed = [];
+  const killedPids = new Set();
   const eligible = (processes) => {
     const byPid = new Map(processes.map((item) => [item.pid, item]));
     const expandedExcluded = new Set(excluded);
@@ -2353,11 +2354,23 @@ function stopPortableOwnedProcesses(excludePids = []) {
       // and leave unrelated descendants alone.
       runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
       killed.push({ pid: item.pid, name: item.name, executablePath: item.executablePath });
+      killedPids.add(item.pid);
     }
     sleepSync(400);
   }
+  // portableProcessSnapshot() identifies owned processes by executable path and
+  // command line. On Windows a just-terminated process can briefly lose those
+  // identifying fields while its PID is still observable in the process table.
+  // A successful stop must therefore drain every PID we explicitly terminated,
+  // not merely wait until it disappears from the ownership snapshot. Reuse the
+  // same bounded stop deadline rather than adding a separate fixed grace.
+  let remainingKilledPids = [...killedPids].filter((pid) => processExists(pid));
+  while (remainingKilledPids.length && Date.now() < deadline) {
+    sleepSync(Math.min(100, Math.max(1, deadline - Date.now())));
+    remainingKilledPids = remainingKilledPids.filter((pid) => processExists(pid));
+  }
   const remaining = eligible(portableProcessSnapshot());
-  return { killed, remaining, excluded: [...excluded] };
+  return { killed, remaining, remainingKilledPids, excluded: [...excluded] };
 }
 
 function stopOrphanedComputerUseBrokers() {
@@ -2389,10 +2402,11 @@ function stopServices(options = {}) {
   cleanupRunState();
   const remainingPids = new Set(processResult.remaining.map((item) => item.pid));
   const listenerRemaining = listenerPids(Number(deployment.port || 7676)).filter((pid) => remainingPids.has(pid));
-  if (processResult.remaining.length || listenerRemaining.length) {
+  if (processResult.remaining.length || listenerRemaining.length || processResult.remainingKilledPids.length) {
     const details = [
       ...processResult.remaining.map((item) => `${item.pid} ${item.name} ${item.executablePath}`),
       ...listenerRemaining.map((pid) => `${pid} still listens on 127.0.0.1:${deployment.port || 7676}`),
+      ...processResult.remainingKilledPids.map((pid) => `${pid} was terminated but is still observable in the Windows process table`),
     ];
     throw new Error(`Portable stop could not terminate these owned processes within ${PORTABLE_STOP_TIMEOUT_MS / 1000} seconds:\n${details.join("\n")}`);
   }
