@@ -17,6 +17,11 @@ legacy updater bootstrap into one production release.
 - Synthetic turns restore the durable objective/milestones, ACK the exact
   delivery generation, and must continue substantive work rather than ending
   after a status-only or short placeholder response.
+- After a synthetic status ACK, the first follow-up model action must be real
+  DevSpace work. Progress text such as `继续处理中` / `still working` is not
+  allowed before the first substantive operation succeeds; once work has
+  actually started, concise in-turn progress remains allowed but cannot serve
+  as a final boundary.
 - The current ChatGPT Apps surface does not expose an authoritative timeout
   lifecycle event. Where required, cutoff recovery uses the separately bounded
   clustered historical-cutoff fallback and records that distinction instead of

@@ -736,8 +736,12 @@ assert.match(coordinator, /resumeExecutionContext:[\s\S]{0,1400}latest concrete 
   "the final Host model context must carry the durable execution resume capsule");
 assert.match(server, /requiredMilestones[\s\S]{0,700}completedMilestones[\s\S]{0,700}nextMilestone[\s\S]{0,900}executionContract/,
   "the synthetic ACK must restore the exact actionable milestone ledger omitted by the dev71 compact projection");
-assert.match(server, /MANDATORY NEXT TOOL CALL:[\s\S]{0,500}ACK\/status is not work[\s\S]{0,500}Do not final with status\/progress\/empty text[\s\S]{0,500}in-turn visible progress is allowed/,
+assert.match(server, /MANDATORY NEXT TOOL CALL:[\s\S]{0,300}ACK\/status is not work[\s\S]{0,500}post-ACK substantive DevSpace operation succeeds[\s\S]{0,300}NO assistant text\/final[\s\S]{0,500}in-turn progress is allowed/,
   "generation-12 style ACK-to-blank-final exits must be forbidden without suppressing in-turn visible progress");
+assert.match(coordinator, /status 成功后的第二个动作必须直接调用实质 DevSpace 工具继续任务[\s\S]{0,260}第一次实质工作前禁止回复“继续处理中”/,
+  "the visible synthetic handoff must forbid a generation-27 style ACK-to-placeholder final before real work starts");
+assert.match(coordinator, /Before the first successful post-ACK substantive DevSpace operation[\s\S]{0,360}emit no user-visible assistant text at all[\s\S]{0,500}after real work has begun/,
+  "automatic progress visibility must begin only after substantive resumed work has actually started");
 assert.match(coordinator, /During sustained automatic work[\s\S]{0,500}concise user-visible progress updates[\s\S]{0,500}do not reveal private chain-of-thought[\s\S]{0,500}continue substantive DevSpace work immediately afterwards/,
   "synthetic turns must distinguish visible in-turn progress from an illegal progress-only final");
 assert.match(server, /DEVSPACE SYNTHETIC EXECUTION HANDOFF \[P0\][\s\S]{0,900}executionDirective/,

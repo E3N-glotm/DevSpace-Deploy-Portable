@@ -172,13 +172,13 @@ function syntheticAckWorkTicket(input, outcome) {
     const completedMilestones = Array.isArray(task?.completedMilestones) ? task.completedMilestones : [];
     const nextMilestone = remainingMilestones[0];
     const requiredBeforeFinal = [
-        "MANDATORY NEXT TOOL CALL: perform substantive DevSpace work now.",
-        "ACK/status is not work. Do not final with status/progress/empty text. Brief in-turn visible progress is allowed; keep doing substantive DevSpace work afterward.",
+        "MANDATORY NEXT TOOL CALL: substantive DevSpace work.",
+        "ACK/status is not work. Until one post-ACK substantive DevSpace operation succeeds: NO assistant text/final, including '继续处理中' or 'still working'.",
+        "After real work starts, brief in-turn progress is allowed but is never a final boundary.",
         nextMilestone
-            ? `Start with the next unfinished milestone: ${nextMilestone}`
-            : "Continue the unfinished task from its durable workspace/process state.",
-        "Use DevSpace read/grep/exec/edit/apply_patch, or process_attach when an existing owned process is running. Continue through every runnable milestone in the same Host turn.",
-        "Only a genuine unavailable external dependency may be persisted as waitingExternal; Host-enforced truncation remains outside MCP control.",
+            ? `Next milestone: ${nextMilestone}`
+            : "Continue from durable workspace/process state.",
+        "Continue every runnable milestone in this Host turn. Only a genuine unavailable external dependency may use waitingExternal=true.",
     ].join(" ");
     const resumeContext = task?.resumeContext && typeof task.resumeContext === "object"
         ? task.resumeContext

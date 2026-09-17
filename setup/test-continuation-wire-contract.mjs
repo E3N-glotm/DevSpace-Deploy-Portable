@@ -294,8 +294,10 @@ try {
   assert.equal(ack.task.executionContract.mustContinueSameTurn, true);
   assert.equal(ack.task.executionContract.finalResponseAllowed, false);
   assert.match(ack.requiredBeforeFinal, /MANDATORY NEXT TOOL CALL/);
-  assert.match(ack.requiredBeforeFinal, /Do not final with status\/progress\/empty text/);
-  assert.match(ack.requiredBeforeFinal, /in-turn visible progress is allowed/);
+  assert.match(ack.requiredBeforeFinal, /post-ACK substantive DevSpace operation succeeds/);
+  assert.match(ack.requiredBeforeFinal, /NO assistant text\/final/);
+  assert.match(ack.requiredBeforeFinal, /'继续处理中'/);
+  assert.match(ack.requiredBeforeFinal, /in-turn progress is allowed/);
   assert.match(ack.requiredBeforeFinal, /wire contract/);
   assert.match(lastWireReply.content?.[0]?.text ?? "", /DEVSPACE SYNTHETIC EXECUTION HANDOFF \[P0\]/,
     "successful synthetic ACK must put the execution handoff before the JSON payload");
