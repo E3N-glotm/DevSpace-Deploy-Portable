@@ -84,34 +84,6 @@ function processStartTicks(pid) {
   return String(result.stdout || "").trim();
 }
 
-function portableOwnershipVisible(pid, portableRoot) {
-  const powershell = join(
-    process.env.SystemRoot || "C:\\Windows",
-    "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
-  );
-  const escapedRoot = String(portableRoot).replaceAll("'", "''");
-  const command = [
-    `$root=[IO.Path]::GetFullPath('${escapedRoot}').TrimEnd('\\')`,
-    `$p=Get-CimInstance Win32_Process -Filter \"ProcessId=${Number(pid)}\" -ErrorAction SilentlyContinue`,
-    "if(-not $p){exit 0}",
-    "$exe=[string]$p.ExecutablePath",
-    "$cmd=[string]$p.CommandLine",
-    "if(($exe -and $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or ($cmd -and $cmd.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0)){'owned'}",
-  ].join(";");
-  const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  return String(result.stdout || "").trim() === "owned";
-}
-
-async function waitForPortableOwnership(pid, portableRoot, label) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    if (portableOwnershipVisible(pid, portableRoot)) return;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-  }
-  assert.fail(`${label} ${pid} never became visible to the Win32_Process ownership oracle`);
-}
 
 function listenerExists(port) {
   const result = spawnSync("netstat.exe", ["-ano", "-p", "tcp"], {
@@ -151,13 +123,6 @@ try {
   const externalStartTicks = processStartTicks(externalPid);
   assert.ok(orphanStartTicks, `orphan test process ${pid} has no stable start identity`);
   assert.ok(externalStartTicks, `external descendant ${externalPid} has no stable start identity`);
-  // The production stop path intentionally discovers ownership via
-  // Win32_Process (ExecutablePath/CommandLine), not via bare PID. GitHub's
-  // Windows runner can expose a newly detached process through Get-Process
-  // before CIM/WMI has indexed its ownership fields. Establish the same
-  // ownership precondition the product consumes so this test measures strict
-  // stop semantics rather than WMI propagation latency.
-  await waitForPortableOwnership(pid, root, "Portable-owned orphan process");
 
   const stopped = spawnSync(sandboxNode, [manager, "stop"], {
     cwd: root,
@@ -224,7 +189,6 @@ try {
   const localExternalStartTicks = processStartTicks(localExternalPid);
   assert.ok(localServiceStartTicks, `orphan local MCP process ${localServicePid} has no stable start identity`);
   assert.ok(localExternalStartTicks, `local unrelated descendant ${localExternalPid} has no stable start identity`);
-  await waitForPortableOwnership(localServicePid, root, "Portable local MCP process");
   assert.equal(listenerExists(17689), true, "orphan local MCP process did not own the expected test listener");
   assert.equal(existsSync(join(runDir, "devspace.pid")), false,
     "stop-local orphan regression requires the recorded MCP PID file to be absent");
