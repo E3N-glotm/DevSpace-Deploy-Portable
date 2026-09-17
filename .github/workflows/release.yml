@@ -41,6 +41,13 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 1.1.60 release acceptance executes the historical updater from
+          # every supported legacy tag (v1.1.36..v1.1.58).  The default
+          # single-commit checkout omits those tags and makes the release job
+          # fail at `git show v<old>:setup/portable-updater.ps1` even though
+          # the product/update path itself is valid.
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4
