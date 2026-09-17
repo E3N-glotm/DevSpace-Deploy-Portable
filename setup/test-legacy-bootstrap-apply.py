@@ -152,6 +152,23 @@ def stage_bridge(root: Path, bridge: Path, updater_bytes: bytes) -> Path:
 
 
 def run_apply(updater: Path, root: Path, current_version: str, stage: Path) -> subprocess.CompletedProcess[str]:
+    # GitHub's Windows runner executes this suite from pwsh 7, whose
+    # PSModulePath is inherited by the Windows PowerShell 5.1 child below.
+    # Historical DevSpace releases launched powershell.exe directly from a
+    # normal desktop environment, where the built-in WindowsPowerShell module
+    # path is present.  Normalize only that launcher environment so commands
+    # such as Get-FileHash resolve exactly as they do for real legacy clients.
+    child_env = os.environ.copy()
+    system_root = Path(child_env.get("SystemRoot", r"C:\Windows"))
+    program_files = Path(child_env.get("ProgramFiles", r"C:\Program Files"))
+    user_profile = Path(child_env.get("USERPROFILE", str(Path.home())))
+    child_env["PSModulePath"] = os.pathsep.join(
+        [
+            str(user_profile / "Documents/WindowsPowerShell/Modules"),
+            str(program_files / "WindowsPowerShell/Modules"),
+            str(system_root / "System32/WindowsPowerShell/v1.0/Modules"),
+        ]
+    )
     return subprocess.run(
         [
             str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -164,6 +181,7 @@ def run_apply(updater: Path, root: Path, current_version: str, stage: Path) -> s
             "-UiPid", "0",
         ],
         cwd=root,
+        env=child_env,
         capture_output=True,
         text=True,
         encoding="utf-8",
