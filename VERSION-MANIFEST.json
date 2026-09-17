@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.60",
-  "builtAt": "2026-09-18T01:49:26+08:00",
+  "builtAt": "2026-09-18T02:31:17+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -747,7 +747,7 @@
     "setup/test-selected-file-diff.mjs.sha256": "1ed95d7171abcf933f33012eb09ff5fed043390311a3a62e83b13e1ee3a888d0",
     "setup/test-session-capabilities.mjs.sha256": "736d246f98ba16c76d16967271a25ab079a17b9acc400b453f8113021ae11fd3",
     "setup/test-standalone-updater.mjs.sha256": "0f3de17818ff80cc3eccf0e8973f3b17a36c56d9ee765807c86db6d3ade36b20",
-    "setup/test-strict-stop.mjs.sha256": "1bc75d0fba11119f2fb92a0b6e00ffc4c4680e4927b2bf3a882986e74ad942af",
+    "setup/test-strict-stop.mjs.sha256": "9e26cc117e197187d4357b61eba1d388819cb19874bc5c21453f099551ae79fd",
     "setup/test-tunnel-network-coexistence.mjs.sha256": "30b4800f2b45ec8482d4b99e0465c9df301b789cbe532d9abd8286ee2530eff7",
     "setup/test-update-launch-ack.mjs.sha256": "dd294a7fc5829514f1642703b1e20f9ba4f6303648c7fae612f2da1b1b674321",
     "setup/test-update-manifest-graph.py.sha256": "5e1c8cd326f9be230766515cd5f7a975d4e7bddcf558eac5d19b37f3224ca9be",
