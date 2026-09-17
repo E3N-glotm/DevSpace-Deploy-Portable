@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.60",
-  "builtAt": "2026-09-17T21:03:14+08:00",
+  "builtAt": "2026-09-17T21:13:38+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -725,7 +725,7 @@
     "setup/test-dashboard-probe-concurrency.mjs.sha256": "150a243c6067d7555634186dc4a508aa4888fe2a49cbf6fe225ee240d387138e",
     "setup/test-incremental-chain.py.sha256": "d9c2e080edf14d682d2835ff3f314a78f9d56ba52922090e06a4779bbdeaa6ba",
     "setup/test-incremental-update.py.sha256": "1a8e589fa327e7225a1d1ba456842b954b3abf76ea7d8971fce3af11a1b31626",
-    "setup/test-legacy-bootstrap-apply.py.sha256": "8bf6a02b2cb6663ba1db23cbba6f4004348de50939855eaa4ad110862ba77a7b",
+    "setup/test-legacy-bootstrap-apply.py.sha256": "931fb33b4428d5da6b3a550cee1f11e50d0006a9c13e8d3825d13eb2af44856f",
     "setup/test-legacy-bootstrap-host.ps1.sha256": "dc199543e30a44b8b41a0178531aee7d2c92c732a822f58dd96406cad4cba285",
     "setup/test-legacy-bootstrap-policy.py.sha256": "d316513e225ebe17c0efca5ebe7dc84c832b6fde0e4ee80377acb4a25e60b713",
     "setup/test-linux-agent-contract.mjs.sha256": "9ea78d94fff64b8131a9b970ecc862c50c565e65e52b685d7109bf2a2892b396",

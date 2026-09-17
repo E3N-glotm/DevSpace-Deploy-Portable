@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -46,6 +47,30 @@ def install_node(target: Path) -> None:
         os.link(SOURCE_NODE, target)
     except OSError:
         shutil.copy2(SOURCE_NODE, target)
+
+
+def remove_tree_retry(path: Path, attempts: int = 30, delay: float = 0.2) -> None:
+    """Remove a Windows fixture tree while tolerating short process-image locks.
+
+    Historical updater Apply restarts the fixture Portable executable near the
+    end of a successful transaction.  On GitHub's Windows runners the process
+    image can remain locked for a short period after the updater returns, so a
+    one-shot TemporaryDirectory cleanup can report WinError 5 despite a fully
+    successful upgrade.  Retry only the test fixture cleanup; never relax the
+    updater transaction assertions themselves.
+    """
+    last_error: OSError | None = None
+    for _ in range(attempts):
+        if not path.exists():
+            return
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(delay)
+    if path.exists() and last_error is not None:
+        raise last_error
 
 
 def stub_manager() -> str:
@@ -246,8 +271,9 @@ def apply_same_version_full_repair(root: Path, sentinels: dict[str, str]) -> Non
     assert_sentinels(root, sentinels)
 
 
-with tempfile.TemporaryDirectory(prefix="legacy-bootstrap-apply-", dir=CACHE) as raw:
-    work = Path(raw)
+raw = Path(tempfile.mkdtemp(prefix="legacy-bootstrap-apply-", dir=CACHE))
+try:
+    work = raw
     target_zip = build_target_zip(work)
     passed: list[str] = []
     final_root: Path | None = None
@@ -259,7 +285,7 @@ with tempfile.TemporaryDirectory(prefix="legacy-bootstrap-apply-", dir=CACHE) as
         if version == POLICY["legacyFromVersions"][-1]:
             final_root, final_sentinels = root, sentinels
         else:
-            shutil.rmtree(root, ignore_errors=True)
+            remove_tree_retry(root)
     assert final_root is not None and final_sentinels is not None
     apply_same_version_full_repair(final_root, final_sentinels)
     print(json.dumps({
@@ -269,3 +295,5 @@ with tempfile.TemporaryDirectory(prefix="legacy-bootstrap-apply-", dir=CACHE) as
         "persistentRootsPreserved": ["data", "logs", "reports"],
         "machineServicesTouched": False,
     }))
+finally:
+    remove_tree_retry(raw)
