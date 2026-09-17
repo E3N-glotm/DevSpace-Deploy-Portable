@@ -140,5 +140,15 @@ setTimeout(() => {
     console.log(JSON.stringify({ compactRuntimeLog: true, operationTimeline: true, collapsibleOperationTimeline: true, fileTimeline: true, redaction: true, browserRender: true, staticFallback: false }));
   }
 } finally {
-  await rm(root, { recursive: true, force: true });
+  // A timed-out Chromium/Edge process can release its Session Storage files a
+  // few hundred milliseconds after spawnSync returns on Windows runners. The
+  // browser layer has already fallen back to deterministic static contracts at
+  // that point, so a short bounded retry is appropriate for fixture cleanup;
+  // it must not turn a successful UI contract check into an EBUSY failure.
+  await rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  });
 }

@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.60",
-  "builtAt": "2026-09-18T01:12:38+08:00",
+  "builtAt": "2026-09-18T01:49:26+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -743,7 +743,7 @@
     "setup/test-remote-workspace-backend.mjs.sha256": "0b227dc5e4f2d5a80b0cee0e52b12105a7398241e3ed6668228db4c48d6536df",
     "setup/test-rescue-overlay.py.sha256": "d7989582c3163b36af2d67ed38052165aca973afba971a887a2c3b69818a9cb8",
     "setup/test-runtime-cards.mjs.sha256": "ccb9c264fd3cdf8da2e71ad68ce2b2b300e0a48cd618ed06f097d32f6bb39a1f",
-    "setup/test-runtime-log-ui.mjs.sha256": "df45258b9ae253b5a9b69bd6f241f8a1be417809dbbbce8a9594ec911fc7013e",
+    "setup/test-runtime-log-ui.mjs.sha256": "45f22866c689c25bd111f8f790aea0fce51a4d92e36ecfe4cf3bdc0380d550e1",
     "setup/test-selected-file-diff.mjs.sha256": "1ed95d7171abcf933f33012eb09ff5fed043390311a3a62e83b13e1ee3a888d0",
     "setup/test-session-capabilities.mjs.sha256": "736d246f98ba16c76d16967271a25ab079a17b9acc400b453f8113021ae11fd3",
     "setup/test-standalone-updater.mjs.sha256": "0f3de17818ff80cc3eccf0e8973f3b17a36c56d9ee765807c86db6d3ade36b20",
