@@ -352,11 +352,22 @@ function testUiLease() {
     assert.equal(lease.status().active, false);
     writeFileSync(leaseFile, JSON.stringify({
       leaseId: "lease",
+      computerUseEnabled: false,
       openedAt: new Date().toISOString(),
       lastHeartbeatAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     }));
     assert.equal(lease.status().active, true);
+    assert.equal(lease.status().computerUseEnabled, false);
+    assert.throws(() => lease.requireComputerUseActive(), /Computer Use is disabled/);
+    writeFileSync(leaseFile, JSON.stringify({
+      leaseId: "lease",
+      computerUseEnabled: true,
+      openedAt: new Date().toISOString(),
+      lastHeartbeatAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }));
+    assert.equal(lease.requireComputerUseActive().computerUseEnabled, true);
     writeFileSync(leaseFile, JSON.stringify({
       leaseId: "lease",
       openedAt: new Date(Date.now() - 60_000).toISOString(),

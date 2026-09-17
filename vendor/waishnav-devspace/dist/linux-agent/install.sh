@@ -5,6 +5,7 @@ SERVER=""
 TOKEN=""
 NAME=""
 RUN_USER="${SUDO_USER:-${USER:-$(id -un 2>/dev/null || echo ubuntu)}}"
+ALLOW_ROOT_SERVICE=0
 STATE_DIR=""
 CONFIG=""
 INSTALL_DIR=""
@@ -23,6 +24,7 @@ while (($#)); do
     --token) TOKEN="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --user) RUN_USER="$2"; shift 2 ;;
+    --allow-root-service) ALLOW_ROOT_SERVICE=1; shift ;;
     --writable-root|--allowed-root) WRITABLE_ROOTS+=("$2"); shift 2 ;;
     --access-mode) ACCESS_MODE="$2"; shift 2 ;;
     --install-root) INSTALL_ROOT="$2"; shift 2 ;;
@@ -41,10 +43,12 @@ if [[ "$ACCESS_MODE" == "scoped" ]]; then
   ((${#WRITABLE_ROOTS[@]} > 0)) || { echo "Scoped mode requires at least one --writable-root" >&2; exit 2; }
 fi
 if [[ "$EUID" -eq 0 && "$RUN_USER" == "root" ]]; then
-  if id ubuntu >/dev/null 2>&1; then
+  if [[ "$ALLOW_ROOT_SERVICE" -eq 1 ]]; then
+    :
+  elif id ubuntu >/dev/null 2>&1; then
     RUN_USER="ubuntu"
   else
-    echo "Refusing to run the DevSpace Agent service as root. Re-run with --user <ordinary-linux-user>." >&2
+    echo "Refusing to run the DevSpace Agent service as root. Re-run with --user <ordinary-linux-user>, or use --allow-root-service only when root is the intended Agent identity." >&2
     exit 2
   fi
 fi

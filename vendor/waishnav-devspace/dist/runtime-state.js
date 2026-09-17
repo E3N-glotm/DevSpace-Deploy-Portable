@@ -33,9 +33,9 @@ const COMPLETION_STALL_SUSPECT_MS = 25_000;
 // MCP Apps does not expose a standard authoritative "assistant turn finished"
 // event. A surviving/verified iframe heartbeat therefore proves only that the
 // card is alive; repeated heartbeats themselves MUST NOT arm a continuation.
-// Recovery is authorized only by independent current-turn Host/lifecycle end
-// evidence. A guarded learned-cutoff fallback below records an inference;
-// single/unstable samples and ordinary silence remain non-authorizing.
+// Recovery requires current-turn completion intent or verified Host timeout.
+// Historical cutoffs remain telemetry even when clustered; no sample window
+// proves that a presently silent model has stopped reasoning.
 const HOST_CUTOFF_MIN_SAMPLE_MS = 30_000;
 const HOST_CUTOFF_REGIME_DOWN_RATIO = 0.80;
 const HOST_CUTOFF_REGIME_UP_RATIO = 1.20;
@@ -44,6 +44,9 @@ const HOST_CUTOFF_FALLBACK_MIN_SAMPLES = 2;
 const HOST_CUTOFF_FALLBACK_MAX_SPREAD_RATIO = 0.05;
 const HOST_CUTOFF_FALLBACK_MARGIN_RATIO = 0.02;
 const HOST_CUTOFF_FALLBACK_SPREAD_MULTIPLIER = 2;
+const HOST_CUTOFF_PREHANDOFF_MIN_MARGIN_MS = 45_000;
+const HOST_CUTOFF_PREHANDOFF_MAX_RATIO = 0.15;
+const HOST_CUTOFF_PREHANDOFF_SPREAD_MULTIPLIER = 3;
 // Transport/startup recovery is deliberately separate from the model's work
 // budget. A native Host follow-up may be accepted even though the resumed assistant
 // turn never reaches its mandatory first continuation_task status handshake.
@@ -69,6 +72,14 @@ const DELIVERY_ACK_RETRY_MAX_MS = 60_000;
 // synthetic work.  Manual takeover can revoke this ownership immediately and
 // therefore remains the higher-priority preemption mechanism.
 const SYNTHETIC_WORK_OWNER_LEASE_MS = 30 * 60_000;
+// Do not infer assistant-turn completion from DevSpace tool silence.  An ACKed
+// synthetic turn may spend minutes reasoning or generating user-visible text
+// without issuing another MCP request, and the Apps transport exposes no
+// authoritative "model is still generating" bit.  Therefore cadence/quiet
+// heuristics are diagnostic only and must never authorize another Host turn.
+// Automatic continuation authority is limited to a model-signed stage boundary
+// or Host-timeout recovery (explicit Host signal, plus the separately bounded
+// clustered-cutoff fallback for Hosts that silently hard-cut turns).
 // The sender owns CLAIMED while it performs bounded MCP retries, the advisory
 // model-context update and the final server authorization.  Fifteen seconds was
 // shorter than the coordinator's own worst-case retry envelope and caused valid
@@ -86,6 +97,13 @@ const CONTINUATION_SENDER_CLAIM_LEASE_MS = 45_000;
 // delivery is armed.
 const MODEL_COMPLETION_HANDOFF_GRACE_MS = 8_000;
 const CONTINUATION_COOLDOWN_MS = 45_000;
+// Synthetic continuations need more than a milestone ledger: they need the
+// small execution working set that a native manual "continue" naturally sees
+// from the conversation transcript. Persist a bounded/redacted capsule so a
+// Host-created synthetic user turn can resume from the last concrete tool
+// state instead of spending its first minutes rediscovering the workspace.
+const RESUME_CONTEXT_MAX_OPERATIONS = 20;
+const RESUME_CONTEXT_MAX_JSON_CHARS = 12_000;
 const AUTO_TASK_ABANDON_AFTER_MS = 24 * 60 * 60 * 1000;
 const TERMINAL_CONTINUATION_STATES = new Set([
     "SUCCEEDED",
@@ -113,6 +131,18 @@ function normalizedContinuationMode(value, fallback = "compat") {
     return fallback;
 }
 
+function allowsSignedModelCompletion(row) {
+    const mode = normalizedContinuationMode(row?.continuation_mode, "compat");
+    return mode === "completion-driven" || mode === "resident" || (mode === "timeout-recovery"
+        && ["learned-host-cutoff-prehandoff", "external-process-wait"].includes(row?.assistant_turn_completion_note));
+}
+
+// Process lifetime and assistant-turn lifetime are independent. Resident
+// monitoring has the same turn-end contract as completion-driven work.
+function supportsAssistantTurnRecovery(mode) {
+    return ["completion-driven", "timeout-recovery", "resident"].includes(mode);
+}
+
 function parseJson(value, fallback) {
     try {
         return JSON.parse(value);
@@ -120,6 +150,44 @@ function parseJson(value, fallback) {
     catch {
         return fallback;
     }
+}
+// Evidence on the conversation-lifetime Task Contract contains two different
+// classes of facts: durable task/business evidence, and execution evidence
+// produced by one particular Workset validation run.  A fresh Workset must
+// retain the former while dropping the latter; otherwise a historical PASS,
+// delivery receipt, doctor result, or source/live hash can incorrectly certify
+// a later validation run.  Keep this list intentionally narrow so arbitrary
+// user/task evidence survives plan replacement.
+function evidenceForFreshWorkset(value) {
+    const evidence = {
+        ...(value && typeof value === "object" && !Array.isArray(value) ? value : {}),
+    };
+    for (const key of [
+        "verdict",
+        "canonicalProjectionRecovered",
+        "recoveredAt",
+        "cardId",
+        "sourceWorksetId",
+        "migratedShadowTaskId",
+        "realHostCutoffObserved",
+        "inferredTimeoutEventSequence",
+        "readyEventSequence",
+        "deliveryAuthorizedEventSequence",
+        "deliveryAcceptedEventSequence",
+        "syntheticAckEventSequence",
+        "deliveryGeneration",
+        "deliveryMethod",
+        "deliveryAckReason",
+        "postAckSubstantiveBaseline",
+        "postAckSubstantiveCount",
+        "doctor",
+        "sourceLiveRuntimeStateSha256",
+        "sourceLiveRuntimeEnhancementsSha256",
+        "sourceLiveExeSha256",
+    ]) {
+        delete evidence[key];
+    }
+    return evidence;
 }
 function numericSamples(value) {
     const parsed = Array.isArray(value) ? value : parseJson(value, []);
@@ -150,12 +218,52 @@ function learnedHostCutoffFallback(cutoffSamples) {
         Math.round(medianMs * HOST_CUTOFF_FALLBACK_MARGIN_RATIO),
         Math.round(spreadMs * HOST_CUTOFF_FALLBACK_SPREAD_MULTIPLIER),
     );
+    // Distinguish "the old Host window was survived" from the later
+    // continuation inference deadline.  A substantive model request after the
+    // largest observed cutoff (+ a small spread-derived scheduler allowance)
+    // is strong evidence that the Host regime changed and must revoke learned
+    // authority before the wider inference margin can fire.
+    const latestObservedMs = unique[unique.length - 1];
+    const survivalMarginMs = Math.max(10_000, Math.round(spreadMs * HOST_CUTOFF_FALLBACK_SPREAD_MULTIPLIER));
+    const survivalBoundaryMs = Math.min(medianMs + marginMs, latestObservedMs + survivalMarginMs);
     return {
         samples: unique,
         medianMs,
         spreadMs,
         marginMs,
+        survivalBoundaryMs,
         deadlineMs: medianMs + marginMs,
+    };
+}
+function learnedHostCutoffPrehandoff(cutoffSamples, deliveryLatencySamples = []) {
+    const learned = learnedHostCutoffFallback(cutoffSamples);
+    if (!learned)
+        return undefined;
+    const deliverySamples = (Array.isArray(deliveryLatencySamples) ? deliveryLatencySamples : [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value >= 0)
+        .slice(-HOST_CUTOFF_SAMPLE_WINDOW);
+    const deliveryMedianMs = median(deliverySamples) ?? 0;
+    // Leave one extra supervisor/Host scheduling quantum beyond the observed
+    // READY->ACK median.  Pathological historical freezes are still bounded by
+    // the ratio cap below, so one bad run cannot consume most of a future turn.
+    const deliveryAllowanceMs = deliveryMedianMs > 0 ? deliveryMedianMs + 10_000 : 0;
+    const prehandoffMarginMs = Math.max(
+        HOST_CUTOFF_PREHANDOFF_MIN_MARGIN_MS,
+        Math.round(learned.spreadMs * HOST_CUTOFF_PREHANDOFF_SPREAD_MULTIPLIER),
+        learned.marginMs,
+        deliveryAllowanceMs,
+    );
+    const cappedMarginMs = Math.min(
+        prehandoffMarginMs,
+        Math.round(learned.medianMs * HOST_CUTOFF_PREHANDOFF_MAX_RATIO),
+    );
+    return {
+        ...learned,
+        deliverySamples,
+        deliveryMedianMs,
+        prehandoffMarginMs: cappedMarginMs,
+        handoffAtMs: Math.max(HOST_CUTOFF_MIN_SAMPLE_MS, learned.medianMs - cappedMarginMs),
     };
 }
 function deliveryAckRetryDelayMs(retryCount) {
@@ -266,12 +374,13 @@ export class StructuredRuntimeState {
         if (!conversationScopeId)
             return { accepted: false, reason: "conversation-scope-required" };
         const nowIso = new Date().toISOString();
-        // Protocol epoch is the compatibility boundary.  The Workspace App
-        // resource revision is still recorded as immutable provenance, but it
-        // also changes for presentation-only assets (for example a footer
-        // version label). Treating that whole-resource hash as a protocol
-        // fence makes a still-compatible cached ChatGPT iframe unusable after
-        // every live Portable upgrade.
+        // Protocol epoch is the execution-compatibility boundary. The concrete
+        // Workspace App resource revision remains provenance only: ChatGPT can
+        // cache both the tool descriptor and referenced App document across a
+        // Portable hot update, so treating the whole resource hash as an ABI
+        // fence can permanently strand an otherwise wire-compatible sender.
+        // Incompatible sender behavior must explicitly bump the protocol epoch;
+        // revision drift remains observable in diagnostics.
         const upgradeRequired = reason === "sender-protocol-epoch-mismatch";
         const changed = this.database.sqlite.prepare(`
           update continuation_conversation_cards
@@ -367,10 +476,20 @@ export class StructuredRuntimeState {
         `).all();
         const leaseStates = {};
         let staleHeartbeatCount = 0;
+        let assetRevisionDriftCount = 0;
+        let upgradeRequiredCount = 0;
         const recentFailures = [];
         for (const row of rows) {
             const leaseState = String(row.sender_lease_state || "UNBOUND");
             leaseStates[leaseState] = Number(leaseStates[leaseState] || 0) + 1;
+            const observedAssetRevision = String(row.sender_asset_revision || "").trim();
+            const assetRevisionDrift = Boolean(observedAssetRevision && this.continuationSenderAssetRevision
+                && observedAssetRevision !== this.continuationSenderAssetRevision);
+            if (assetRevisionDrift) {
+                assetRevisionDriftCount += 1;
+            }
+            if (leaseState === "UPGRADE_REQUIRED")
+                upgradeRequiredCount += 1;
             const heartbeatAtMs = Date.parse(String(row.sender_last_heartbeat_at || ""));
             if (row.sender_last_heartbeat_at
                 && (!Number.isFinite(heartbeatAtMs) || Number(nowMs) - heartbeatAtMs > ANCHOR_LEASE_MS)) {
@@ -399,7 +518,8 @@ export class StructuredRuntimeState {
             senderFreshnessLimitMs: ANCHOR_LEASE_MS,
             totalCards: rows.length,
             leaseStates,
-            upgradeRequiredCount: Number(leaseStates.UPGRADE_REQUIRED || 0),
+            upgradeRequiredCount,
+            assetRevisionDriftCount,
             staleHeartbeatCount,
             recentFailures: recentFailures.slice(0, 12),
         };
@@ -435,7 +555,7 @@ export class StructuredRuntimeState {
             if (!current)
                 return { promoted: false, reason: "task-not-found" };
             if (current.state !== "RUNNING"
-                || normalizedContinuationMode(current.continuation_mode, "compat") !== "completion-driven"
+                || !allowsSignedModelCompletion(current)
                 || String(current.assistant_turn_state || "") !== "COMPLETION_REQUESTED") {
                 return { promoted: false, reason: "completion-intent-not-pending", task: current };
             }
@@ -496,7 +616,9 @@ export class StructuredRuntimeState {
                 assistant_turn_completion_source='model-completion-handoff-grace',
                 stall_state='CONTINUATION_ARMED',stall_armed_at=?,
                 stall_evidence='atcc-model-completion-handoff-grace',updated_at=?
-              where id=? and state='RUNNING' and continuation_mode='completion-driven'
+              where id=? and state='RUNNING'
+                and (continuation_mode in ('completion-driven','resident') or
+                  (continuation_mode='timeout-recovery' and assistant_turn_completion_note in ('learned-host-cutoff-prehandoff','external-process-wait')))
                 and assistant_turn_state='COMPLETION_REQUESTED'
                 and turn_lease_id=? and assistant_turn_completion_lease_id=?
                 and assistant_turn_completion_requested_at=?
@@ -666,33 +788,32 @@ export class StructuredRuntimeState {
         const row = this.database.sqlite.prepare(`
           select * from continuation_tasks where conversation_scope_id=? order by created_at asc limit 1
         `).get(conversationScopeId);
-        if (!row || row.state !== "RUNNING" || normalizedContinuationMode(row.continuation_mode, "compat") !== "completion-driven")
-            return { accepted: false, reason: row ? "not-active-completion-driven" : "task-not-found", handles: [] };
+        if (!row || !["RUNNING", "WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(row.state)
+            || normalizedContinuationMode(row.continuation_mode) !== "resident")
+            return { accepted: false, reason: row ? "not-active-monitoring-task" : "task-not-found", handles: [] };
         const handles = new Set(parseJson(row.watch_process_handles_json, []));
-        if (input.running === true)
-            handles.add(processHandle);
-        else if (input.running === false)
-            handles.delete(processHandle);
-        else
-            return { accepted: false, reason: "running-state-required", handles: [...handles] };
-        const nowMs = Date.now();
-        const nowIso = new Date(nowMs).toISOString();
-        const nextLeaseAt = new Date(nowMs + COMPLETION_STALL_SUSPECT_MS).toISOString();
+        const completedWatch = input.running === false && handles.has(processHandle);
+        if (input.running === true) handles.add(processHandle);
+        else if (input.running === false) handles.delete(processHandle);
+        else return { accepted: false, reason: "running-state-required", handles: [...handles] };
+        const nowIso = new Date().toISOString();
         this.database.sqlite.prepare(`
-          update continuation_tasks set
-            watch_process_handles_json=?,
-            stall_state='ACTIVE',stall_suspected_at=null,stall_armed_at=null,
-            stall_probe_count=0,stall_last_probe_at=null,stall_evidence=null,
-            turn_lease_expires_at=?,last_activity_at=?,updated_at=?
-          where id=?
-        `).run(JSON.stringify([...handles]), nextLeaseAt, nowIso, nowIso, row.id);
+          update continuation_tasks set watch_process_handles_json=?,updated_at=? where id=?
+        `).run(JSON.stringify([...handles]), nowIso, row.id);
+        // Background process completion is a business wake, not model activity.
+        // The model's explicit wait signature is still required before delivery.
+        if (completedWatch && ["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(row.state)) {
+            this.continuationTask({ action: "arm-wake", taskId: row.id,
+                conversationScopeId, note: "watched process completed" });
+        }
         return { accepted: true, handles: [...handles], running: input.running };
     }
     continuationActivityProcessGuards() {
         return this.database.sqlite.prepare(`
           select id,conversation_scope_id,workspace_id,watch_process_handles_json
           from continuation_tasks
-          where state='RUNNING' and continuation_mode='completion-driven'
+          where state in ('RUNNING','WAITING_EXTERNAL','WAITING_SUPERVISOR')
+            and continuation_mode='resident'
             and watch_process_handles_json is not null and watch_process_handles_json <> '[]'
           order by updated_at asc
         `).all().map((row) => ({
@@ -701,6 +822,24 @@ export class StructuredRuntimeState {
             workspaceId: row.workspace_id ?? undefined,
             processHandles: parseJson(row.watch_process_handles_json, []),
         })).filter((entry) => entry.processHandles.length > 0);
+    }
+    recordContinuationExternalWait(taskId, input = {}) {
+        // A model's explicit wait is a yield signature; process probes cannot
+        // create it or rewrite its exact turn lease and timestamp.
+        if (input.coordinatorInstanceId) return;
+        const nowIso = new Date().toISOString();
+        this.database.sqlite.prepare(`
+          update continuation_tasks set
+            assistant_turn_state='COMPLETION_REQUESTED',
+            assistant_turn_completion_lease_id=turn_lease_id,
+            assistant_turn_completion_requested_at=?,assistant_turn_completed_at=null,
+            assistant_turn_completion_source='model-external-wait-intent',
+            assistant_turn_completion_note='external-process-wait',
+            stall_armed_at=null,stall_evidence='external-wait-awaiting-process'
+          where id=? and state in ('WAITING_EXTERNAL','WAITING_SUPERVISOR')
+            and continuation_mode in ('completion-driven','timeout-recovery','resident')
+            and turn_lease_id is not null and assistant_turn_state in ('GENERATING','UNKNOWN')
+        `).run(nowIso, taskId);
     }
     closeTerminalContinuationArtifacts(taskId, reason = "task-terminal", nowIso = new Date().toISOString()) {
         const id = String(taskId ?? "").trim();
@@ -723,8 +862,19 @@ export class StructuredRuntimeState {
           where workset_id in (select id from continuation_worksets where legacy_task_id=? and conversation_scope_id=?)
             and owner_type<>'synthetic' and state not in ('CLOSED','SUPERSEDED','NO_WORK')
         `).run(nowIso, terminalReason, nowIso, id, scope);
-        this.database.sqlite.prepare("update continuation_worksets set continuation_due_at=null,updated_at=? where legacy_task_id=? and conversation_scope_id=?")
-            .run(nowIso, id, scope);
+        // A terminal legacy task must terminate the execution projection as
+        // well.  Clearing only continuation_due_at leaves a RUNNING workset
+        // with pending milestones behind; canonical recovery can then adopt it
+        // as authoritative and resurrect the task as RUNNING even though the
+        // supervisor has nothing schedulable to scan.  Archive every active
+        // workset atomically with the generation close so a later manual round
+        // necessarily allocates a fresh execution projection.
+        this.database.sqlite.prepare(`
+          update continuation_worksets set state='ARCHIVED',continuation_due_at=null,
+            completed_at=coalesce(completed_at,?),updated_at=?
+          where legacy_task_id=? and conversation_scope_id=?
+            and state in ('RUNNING','WAITING_EXTERNAL','SUSPECTED_STALL','PAUSED')
+        `).run(nowIso, nowIso, id, scope);
         this.database.sqlite.prepare(`
           update continuation_conversation_cards set active_workset_id=null,updated_at=?
           where conversation_scope_id=? and active_workset_id in
@@ -790,6 +940,11 @@ export class StructuredRuntimeState {
             return { accepted: false, reason: "sender-protocol-epoch-required" };
         if (this.continuationSenderProtocolEpoch > 0 && senderProtocolEpoch !== this.continuationSenderProtocolEpoch)
             return { accepted: false, reason: "sender-protocol-epoch-mismatch" };
+        if (!senderAssetRevision)
+            return { accepted: false, reason: "sender-asset-revision-required" };
+        // senderAssetRevision is mandatory provenance, not an ABI gate. A
+        // cached same-epoch Workspace App may rebind after a hot update;
+        // continuationSenderStatus exposes assetRevisionDrift for diagnostics.
         // Prefer the authenticated Host request scope. Some App->MCP calls do
         // not preserve it, so allow a narrow app-only fallback bound to the
         // exact random taskId + canonical conversation scope + current manual-
@@ -824,7 +979,8 @@ export class StructuredRuntimeState {
             }
         }
         const conversationScopeId = task.conversation_scope_id;
-        const nowIso = new Date().toISOString();
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
         // A sender bind is allowed to replace an older iframe for the same
         // immutable card generation. Live dev43 exposed a race when that
         // replacement happened after the old sender had already CLAIMED a
@@ -840,6 +996,8 @@ export class StructuredRuntimeState {
             `).get(conversationScopeId);
             let releasedClaim = false;
             let releasedGeneration;
+            let protectedClaim = false;
+            let retryAfterAt;
             if (currentCard?.sender_instance_id
                 && String(currentCard.sender_instance_id) !== senderInstanceId
                 && currentCard.active_workset_id) {
@@ -849,6 +1007,43 @@ export class StructuredRuntimeState {
                   order by generation asc limit 1
                 `).get(currentCard.active_workset_id);
                 if (claimed?.delivery_token) {
+                    const claimDueAtMs = Date.parse(String(claimed.due_at || ""));
+                    const currentSenderHeartbeatAtMs = Date.parse(String(currentCard.sender_last_heartbeat_at || ""));
+                    const currentSenderHeartbeatAgeMs = Number.isFinite(currentSenderHeartbeatAtMs)
+                        ? Math.max(0, nowMs - currentSenderHeartbeatAtMs)
+                        : Number.POSITIVE_INFINITY;
+                    const currentSenderOwnsCurrentRuntime = String(currentCard.sender_server_boot_id || "")
+                        === this.continuationSenderServerBootId;
+                    const currentSenderProtocolMatches = Number(currentCard.sender_protocol_epoch || 0)
+                        === Number(this.continuationSenderProtocolEpoch || 0);
+                    const currentSenderGenerationMatches = Number(currentCard.sender_mount_generation || 0)
+                        === Number(currentCard.mount_generation || 0);
+                    const currentSenderLeaseActive = String(currentCard.sender_lease_state || "") === "ACTIVE";
+                    const currentSenderHeartbeatFresh = Number.isFinite(currentSenderHeartbeatAtMs)
+                        && currentSenderHeartbeatAgeMs <= ANCHOR_LEASE_MS;
+                    const claimLeaseActive = Number.isFinite(claimDueAtMs) && claimDueAtMs > nowMs;
+                    // Multiple transcript/rehydrated iframes can share the same
+                    // immutable card. Do not let a newly mounted sibling revoke
+                    // a generation that the current, healthy sender has already
+                    // CLAIMED and still owns. Live dev71 showed this exact race:
+                    // the replacement bind returned the claim to READY, adding
+                    // minutes before the same generation was reclaimed/sent.
+                    //
+                    // The fence is deliberately narrower than sender identity:
+                    // expired claims, stale heartbeats, process restarts, epoch
+                    // changes, card-generation changes, or inactive sender
+                    // leases all remove protection and retain the existing
+                    // takeover/recovery behavior below.
+                    if (currentSenderOwnsCurrentRuntime
+                        && currentSenderProtocolMatches
+                        && currentSenderGenerationMatches
+                        && currentSenderLeaseActive
+                        && currentSenderHeartbeatFresh
+                        && claimLeaseActive) {
+                        protectedClaim = true;
+                        retryAfterAt = String(claimed.due_at || "") || undefined;
+                        return { releasedClaim, releasedGeneration, protectedClaim, retryAfterAt };
+                    }
                     const retryExisting = Boolean(claimed.delivered_at);
                     const targetState = retryExisting ? 'DELIVERED' : 'READY';
                     const released = this.database.sqlite.prepare(`
@@ -903,8 +1098,16 @@ export class StructuredRuntimeState {
             `).run(senderInstanceId, senderProtocolEpoch, senderAssetRevision || null,
                 this.continuationSenderServerBootId, capability.anchorMountGeneration,
                 nowIso, nowIso, conversationScopeId);
-            return { releasedClaim, releasedGeneration };
+            return { releasedClaim, releasedGeneration, protectedClaim, retryAfterAt };
         })();
+        if (rebindRecovery.protectedClaim) {
+            return {
+                accepted: false,
+                reason: "sender-claim-owned-by-live-sender",
+                retryAfterAt: rebindRecovery.retryAfterAt,
+                senderStatus: this.continuationSenderStatus({ taskId: task.id, conversationScopeId }, nowMs),
+            };
+        }
         const reboundCard = this.database.sqlite.prepare(`
           select active_workset_id from continuation_conversation_cards where conversation_scope_id=?
         `).get(conversationScopeId);
@@ -1546,83 +1749,6 @@ export class StructuredRuntimeState {
         });
         return transaction();
     }
-    inferLearnedHostCutoffTimeout(legacy, current, nowMs) {
-        const nowIso = new Date(nowMs).toISOString();
-        const legacyMode = normalizedContinuationMode(legacy?.continuation_mode, "compat");
-        const legacyTurnState = String(legacy?.assistant_turn_state || "UNKNOWN");
-        const legacyTurnLeaseId = String(legacy?.turn_lease_id || "");
-        const profile = legacy?.host_profile_id
-            ? this.database.sqlite.prepare("select cutoff_epoch from continuation_host_profiles where id=?").get(legacy.host_profile_id)
-            : undefined;
-        if (profile && Number(profile.cutoff_epoch || 0) !== Number(legacy.cutoff_epoch || 0))
-            return false;
-        if (legacy
-            && legacy.state === "RUNNING"
-            && legacyMode === "completion-driven"
-            && legacyTurnState === "GENERATING"
-            && Boolean(legacyTurnLeaseId)
-            && !this.continuationModelRequestInFlight(current.conversation_scope_id)
-            && parseJson(legacy.watch_process_handles_json, []).length === 0) {
-            const learnedCutoff = learnedHostCutoffFallback(legacy.cutoff_samples_json);
-            const turnStartedAtMs = Date.parse(String(legacy.turn_started_at || ""));
-            const elapsedTurnMs = Number.isFinite(turnStartedAtMs) ? nowMs - turnStartedAtMs : NaN;
-            if (learnedCutoff && Number.isFinite(elapsedTurnMs)
-                && elapsedTurnMs >= learnedCutoff.deadlineMs) {
-                // Some current ChatGPT Hosts enforce a hard model
-                // cutoff without emitting a reliable Workspace App
-                // timeout event. Two distinct, tightly clustered
-                // owner-confirmed cutoffs form an inferred
-                // fallback authority. This is deliberately not a
-                // generic silence timeout: the exact current turn
-                // lease must still be GENERATING, no model request
-                // may be in flight, and no watched process may own
-                // the stage. The deadline carries a dynamic margin
-                // derived from the observed median and spread.
-                const updateResult = this.database.sqlite.prepare(`
-                  update continuation_tasks set
-                    assistant_turn_state='TIMED_OUT',
-                    assistant_turn_completion_lease_id=turn_lease_id,
-                    assistant_turn_completed_at=?,
-                    assistant_turn_completion_source='learned-host-cutoff-watchdog',
-                    assistant_turn_completion_note=?,
-                    continuation_pending=3,
-                    stall_state='CONTINUATION_ARMED',stall_armed_at=?,
-                    stall_evidence='learned-host-cutoff-watchdog',updated_at=?
-                  where id=? and state='RUNNING' and continuation_mode='completion-driven'
-                    and assistant_turn_state='GENERATING' and turn_lease_id=?
-                `).run(
-                    nowIso,
-                    `learned host cutoff ${learnedCutoff.medianMs}ms + adaptive margin ${learnedCutoff.marginMs}ms; samples=${learnedCutoff.samples.join(",")}`,
-                    nowIso,
-                    nowIso,
-                    legacy.id,
-                    legacyTurnLeaseId,
-                );
-                if (Number(updateResult.changes || 0) === 1) {
-                    this.database.sqlite.prepare(`
-                      update continuation_worksets set continuation_due_at=?,state='SUSPECTED_STALL',updated_at=?
-                      where id=?
-                    `).run(nowIso, nowIso, current.id);
-                    this.appendEvent({
-                        kind: "continuation-host-timeout-inferred",
-                        subject: current.conversation_scope_id,
-                        workspaceId: current.workspace_id ?? undefined,
-                        payload: {
-                            worksetId: current.id,
-                            turnLeaseId: legacyTurnLeaseId,
-                            elapsedMs: elapsedTurnMs,
-                            medianMs: learnedCutoff.medianMs,
-                            marginMs: learnedCutoff.marginMs,
-                            deadlineMs: learnedCutoff.deadlineMs,
-                            samples: learnedCutoff.samples,
-                        },
-                    });
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
     continuationSupervisorSweep(input = {}) {
         const nowMs = Number.isFinite(Number(input.nowMs)) ? Number(input.nowMs) : Date.now();
         const nowIso = new Date(nowMs).toISOString();
@@ -1639,7 +1765,7 @@ export class StructuredRuntimeState {
                 select 1 from continuation_tasks t
                 where t.id=w.legacy_task_id
                   and t.state='RUNNING'
-                  and t.continuation_mode='completion-driven'
+                  and t.continuation_mode in ('completion-driven','resident')
                   and t.assistant_turn_state='COMPLETION_REQUESTED'
                   and t.assistant_turn_completion_requested_at is not null
                   and t.assistant_turn_completion_lease_id=t.turn_lease_id
@@ -1679,15 +1805,70 @@ export class StructuredRuntimeState {
                     : undefined;
                 if (legacy
                     && String(legacy.assistant_turn_state || "") === "COMPLETION_REQUESTED"
-                    && normalizedContinuationMode(legacy.continuation_mode, "compat") === "completion-driven") {
+                    && allowsSignedModelCompletion(legacy)) {
                     this.promoteMatureAssistantCompletionIntent(legacy.id, nowMs);
                     legacy = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(legacy.id);
+                }
+                let inferredCutoffRecovery;
+                if (legacy
+                    && legacy.state === "RUNNING"
+                    && ["completion-driven", "resident"].includes(normalizedContinuationMode(legacy.continuation_mode, "compat"))
+                    && String(legacy.assistant_turn_state || "") === "GENERATING"
+                    && Boolean(legacy.turn_lease_id)
+                    && !this.continuationModelRequestInFlight(current.conversation_scope_id)) {
+                    const learned = learnedHostCutoffFallback(legacy.cutoff_samples_json);
+                    const turnStartedAtMs = Date.parse(String(legacy.turn_started_at || ""));
+                    const lastModelActivityAtMs = Date.parse(String(legacy.last_model_activity_at || ""));
+                    const elapsedTurnMs = Number.isFinite(turnStartedAtMs) ? nowMs - turnStartedAtMs : NaN;
+                    const lateModelActivity = Boolean(learned
+                        && Number.isFinite(turnStartedAtMs)
+                        && Number.isFinite(lastModelActivityAtMs)
+                        && lastModelActivityAtMs >= turnStartedAtMs + learned.survivalBoundaryMs);
+                    if (learned
+                        && Number.isFinite(elapsedTurnMs)
+                        && elapsedTurnMs >= learned.deadlineMs
+                        && !lateModelActivity) {
+                        const changed = this.database.sqlite.prepare(`
+                          update continuation_tasks set
+                            assistant_turn_state='TIMED_OUT',
+                            assistant_turn_completion_lease_id=turn_lease_id,
+                            assistant_turn_completed_at=?,
+                            assistant_turn_completion_source='learned-host-cutoff-inferred',
+                            assistant_turn_completion_note='adaptive clustered cutoff inference',
+                            stall_state='CONTINUATION_ARMED',stall_armed_at=?,
+                            stall_evidence='atcc-learned-host-cutoff-inferred',updated_at=?
+                          where id=? and state='RUNNING' and assistant_turn_state='GENERATING'
+                            and turn_lease_id=?
+                        `).run(nowIso, nowIso, nowIso, legacy.id, legacy.turn_lease_id);
+                        if (Number(changed.changes || 0) === 1) {
+                            inferredCutoffRecovery = {
+                                elapsedTurnMs,
+                                medianMs: learned.medianMs,
+                                marginMs: learned.marginMs,
+                                deadlineMs: learned.deadlineMs,
+                                survivalBoundaryMs: learned.survivalBoundaryMs,
+                                samples: learned.samples,
+                            };
+                            this.appendEvent({
+                                kind: "continuation-host-timeout-inferred",
+                                subject: current.conversation_scope_id,
+                                workspaceId: current.workspace_id ?? undefined,
+                                payload: {
+                                    worksetId: current.id,
+                                    turnLeaseId: legacy.turn_lease_id,
+                                    ...inferredCutoffRecovery,
+                                    watchedProcessCount: parseJson(legacy.watch_process_handles_json, []).length,
+                                },
+                            });
+                            legacy = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(legacy.id);
+                        }
+                    }
                 }
                 const legacyTurnLeaseId = String(legacy?.turn_lease_id || "");
                 const legacyCompletionLeaseId = String(legacy?.assistant_turn_completion_lease_id || "");
                 const signedCompletionPrearm = Boolean(legacy
                     && legacy.state === "RUNNING"
-                    && normalizedContinuationMode(legacy.continuation_mode, "compat") === "completion-driven"
+                    && allowsSignedModelCompletion(legacy)
                     && String(legacy.assistant_turn_state || "") === "COMPLETION_REQUESTED"
                     && Boolean(legacyTurnLeaseId)
                     && legacyCompletionLeaseId === legacyTurnLeaseId
@@ -1705,11 +1886,6 @@ export class StructuredRuntimeState {
                 if ((!Number.isFinite(worksetDue) || worksetDue > nowMs) && !expiredSenderClaim)
                     return undefined;
                 let retryAuthorized = false;
-                const learnedCutoffTimeoutAuthorized = (!liveSynthetic
-                    || ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state)))
-                    && this.inferLearnedHostCutoffTimeout(legacy, current, nowMs);
-                if (learnedCutoffTimeoutAuthorized)
-                    legacy = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(legacy.id);
                 if (liveSynthetic) {
                     const syntheticOwnerTask = current.legacy_task_id
                         ? this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(current.legacy_task_id)
@@ -1724,50 +1900,33 @@ export class StructuredRuntimeState {
                     // continuation message, so it must wait for an explicit
                     // delivery result or manual takeover instead of lease expiry.
                     const senderClaimExpired = expiredSenderClaim;
-                    const syntheticWorkOwnerExpiresAt = syntheticOwnerTask?.delivery_owner_expires_at
-                        ? Date.parse(syntheticOwnerTask.delivery_owner_expires_at) : NaN;
-                    const syntheticTurnStartedAt = syntheticOwnerTask?.turn_started_at
-                        ? Date.parse(syntheticOwnerTask.turn_started_at) : NaN;
                     const syntheticTurnLeaseId = String(syntheticOwnerTask?.turn_lease_id || "");
                     const syntheticCompletionLeaseId = String(syntheticOwnerTask?.assistant_turn_completion_lease_id || "");
                     const syntheticMode = normalizedContinuationMode(syntheticOwnerTask?.continuation_mode, "compat");
                     const syntheticTurnState = String(syntheticOwnerTask?.assistant_turn_state || "UNKNOWN");
-                    const syntheticTurnEnded = ((syntheticMode === "completion-driven"
-                        && ["COMPLETED", "TIMED_OUT"].includes(syntheticTurnState))
-                        || (syntheticMode === "timeout-recovery" && syntheticTurnState === "TIMED_OUT"))
+                    const syntheticOrphanEnded = syntheticTurnState === "ORPHANED"
+                        && String(syntheticOwnerTask?.assistant_turn_completion_source || "") === "synthetic-active-orphan-inferred";
+                    const syntheticTurnEnded = ((allowsSignedModelCompletion(syntheticOwnerTask)
+                        && ["COMPLETED", "TIMED_OUT"].includes(syntheticTurnState)
+                        || syntheticMode === "timeout-recovery" && syntheticTurnState === "TIMED_OUT"
+                        || syntheticOrphanEnded)
                         && Boolean(syntheticTurnLeaseId)
                         && syntheticCompletionLeaseId === syntheticTurnLeaseId
-                        && String(syntheticOwnerTask?.stall_state || "ACTIVE") === "CONTINUATION_ARMED";
-                    // The short synthetic owner lease is only a stale-ownership
-                    // detector. Connector discovery, long reasoning, workspace
-                    // switching, and other Host-side work are invisible to the
-                    // DevSpace request counter and may legitimately exceed it.
-                    // Never manufacture a second ChatGPT turn from owner-lease or
-                    // request silence alone. The Host exposes no authoritative
-                    // distinction between "the model is still reasoning" and
-                    // "the assistant turn ended", so any fixed quiet threshold
-                    // can preempt a valid multi-minute reasoning interval. Retry
-                    // only after the Assistant Turn Completion Contract has a
-                    // durable end state for this exact turn lease. A single or
-                    // unstable Host cutoff observation remains telemetry only;
-                    // the separate learned-hard-cutoff fallback below requires
-                    // multiple independent, tightly clustered observations.
-                    const abandonedSyntheticWork = ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state))
-                        && String(syntheticOwnerTask?.delivery_owner || "") === "synthetic-active"
-                        && Number.isFinite(syntheticWorkOwnerExpiresAt) && syntheticWorkOwnerExpiresAt <= nowMs
+                        && String(syntheticOwnerTask?.stall_state || "ACTIVE") === "CONTINUATION_ARMED");
+                    // Exact turn-end evidence retires worked and empty turns
+                    // alike. Waiting for a 30-minute owner lease after a proven
+                    // timeout strands healthy long-running monitoring work.
+                    // Conversely lease expiry alone never retires a live turn.
+                    const endedSyntheticWork = ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state))
                         && syntheticTurnEnded
                         && !this.continuationModelRequestInFlight(current.conversation_scope_id);
-                    const noWork = ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state))
-                        && Number.isFinite(syntheticDue) && syntheticDue <= nowMs
-                        && syntheticTurnEnded
-                        && (Number(liveSynthetic.substantive_activity_count || 0) <= Number(liveSynthetic.substantive_baseline_count || 0)
-                            || abandonedSyntheticWork || learnedCutoffTimeoutAuthorized)
-                        && !this.continuationModelRequestInFlight(current.conversation_scope_id);
-                    if (!senderClaimExpired && !noWork)
+                    if (!senderClaimExpired && !endedSyntheticWork)
                         return undefined;
                     const failureReason = senderClaimExpired
                         ? (liveSynthetic.state === "DELIVERING" ? "sender-delivery-expired" : "sender-claim-expired")
-                        : abandonedSyntheticWork ? "synthetic-resume-work-lease-expired" : "synthetic-no-substantive-work";
+                        : inferredCutoffRecovery
+                            ? "learned-host-cutoff-timeout"
+                            : "assistant-turn-ended";
                     const expectedState = String(liveSynthetic.state);
                     this.database.sqlite.prepare(`
                       update continuation_generations set state='NO_WORK',closed_at=?,failure_reason=?,updated_at=?
@@ -1797,14 +1956,14 @@ export class StructuredRuntimeState {
                 if (!retryAuthorized) {
                     const legacyMode = normalizedContinuationMode(legacy?.continuation_mode, "compat");
                     const legacyTurnState = String(legacy?.assistant_turn_state || "UNKNOWN");
-                    const atccArmed = (legacyMode === "completion-driven"
+                    const atccArmed = (allowsSignedModelCompletion(legacy)
                         ? ["COMPLETED", "TIMED_OUT"].includes(legacyTurnState)
                         : legacyMode === "timeout-recovery" && legacyTurnState === "TIMED_OUT")
                         && legacy?.state === "RUNNING"
                         && Boolean(legacyTurnLeaseId)
                         && legacyCompletionLeaseId === legacyTurnLeaseId
                         && String(legacy?.stall_state || "ACTIVE") === "CONTINUATION_ARMED";
-                    let armed = atccArmed || signedCompletionPrearm || [2, 3].includes(Number(legacy?.continuation_pending || 0));
+                    const armed = atccArmed || signedCompletionPrearm;
                     if (!armed && legacy
                         && legacy.state === "RUNNING"
                         && normalizedContinuationMode(legacy.continuation_mode, "compat") === "completion-driven"
@@ -1822,7 +1981,7 @@ export class StructuredRuntimeState {
                                 stall_state='SUSPECTED_STALL',stall_suspected_at=?,
                                 stall_probe_count=1,stall_last_probe_at=?,stall_armed_at=null,
                                 stall_evidence='server-turn-lease-expired-no-inflight-model-request',updated_at=?
-                              where id=? and state='RUNNING' and continuation_mode='completion-driven'
+                              where id=? and state='RUNNING' and continuation_mode in ('completion-driven','resident')
                                 and stall_state='ACTIVE'
                             `).run(nowIso, nowIso, nowIso, legacy.id);
                         }
@@ -1835,7 +1994,7 @@ export class StructuredRuntimeState {
                               update continuation_tasks set
                                 stall_probe_count=stall_probe_count+1,stall_last_probe_at=?,
                                 stall_evidence='server-turn-lease-expired-no-inflight-model-request',updated_at=?
-                              where id=? and state='RUNNING' and continuation_mode='completion-driven'
+                              where id=? and state='RUNNING' and continuation_mode in ('completion-driven','resident')
                                 and stall_state='SUSPECTED_STALL'
                             `).run(nowIso, nowIso, legacy.id);
                         }
@@ -1849,9 +2008,11 @@ export class StructuredRuntimeState {
                 if (previous && previous.owner_type === "manual" && !["CLOSED", "SUPERSEDED", "NO_WORK"].includes(String(previous.state))) {
                     this.database.sqlite.prepare(`
                       update continuation_generations set state='SUPERSEDED',closed_at=?,failure_reason=?,updated_at=? where id=?
-                    `).run(nowIso, signedCompletionPrearm
-                        ? "model-turn-complete-prearmed"
-                        : learnedCutoffTimeoutAuthorized ? "learned-host-cutoff-timeout" : "watchdog-expired", nowIso, previous.id);
+                    `).run(nowIso, inferredCutoffRecovery
+                        ? "learned-host-cutoff-timeout"
+                        : signedCompletionPrearm
+                            ? "model-turn-complete-prearmed"
+                            : "current-turn-ended", nowIso, previous.id);
                 }
                 const nextGeneration = Math.max(1, Number(current.current_generation || 0) + 1);
                 const generationId = `generation:${current.id}:${nextGeneration}`;
@@ -1870,12 +2031,13 @@ export class StructuredRuntimeState {
                     kind: "continuation-generation-ready",
                     subject: current.conversation_scope_id,
                     workspaceId: current.workspace_id ?? undefined,
-                    payload: {
-                        worksetId: current.id,
-                        generation: nextGeneration,
-                        ...(signedCompletionPrearm ? { prearmed: true, reason: "model-turn-complete" } : {}),
-                        ...(learnedCutoffTimeoutAuthorized ? { inferredTimeout: true, reason: "learned-host-cutoff-watchdog" } : {}),
-                    },
+                        payload: {
+                            worksetId: current.id,
+                            generation: nextGeneration,
+                            ...(inferredCutoffRecovery
+                                ? { inferredTimeout: true, reason: "learned-host-cutoff-watchdog", ...inferredCutoffRecovery }
+                                : signedCompletionPrearm ? { prearmed: true, reason: "model-turn-complete" } : {}),
+                        },
                 });
                 return { conversationScopeId: current.conversation_scope_id, worksetId: current.id, generation: nextGeneration, generationId };
             })();
@@ -1890,11 +2052,16 @@ export class StructuredRuntimeState {
         // generation/card for that condition.
         const deliveryAckRetryDue = this.database.sqlite.prepare(`
           select
+            t.id as taskId,
             t.conversation_scope_id as conversationScopeId,
             w.id as worksetId,
             g.generation as generation,
             g.id as generationId,
-            t.delivery_ack_retry_after_at as retryAfterAt
+            t.delivery_ack_retry_after_at as retryAfterAt,
+            g.delivered_at as deliveredAt,
+            t.cutoff_samples_json as cutoffSamplesJson,
+            t.last_model_activity_at as lastModelActivityAt,
+            t.manual_takeover_at as manualTakeoverAt
           from continuation_tasks t
           join continuation_worksets w on w.legacy_task_id=t.id
           join continuation_generations g
@@ -1915,7 +2082,141 @@ export class StructuredRuntimeState {
           order by t.delivery_ack_retry_after_at asc
           limit 128
         `).all(nowIso);
-        return { scanned: candidates.length, ready, deliveryAckRetryDue };
+        // A missed first status ACK is now a durable execution-confirmation
+        // failure, not a successful continuation.  We still cannot safely
+        // retransmit merely because the short ACK-health deadline elapsed: the
+        // Host exposes no assistant-final receipt, so a slow model might still
+        // be reasoning before its first tool call.  Instead reuse the same
+        // strict clustered-cutoff inference that protects ordinary silent Host
+        // truncation.  The clock starts at the accepted ui/message delivery,
+        // not at the previous assistant turn.  Only after that proven regime's
+        // post-cutoff deadline, with no model-originated DevSpace activity and
+        // no request in flight, may the unconfirmed generation be superseded
+        // and a fresh synthetic generation become READY.  This converts the
+        // dev80 permanent deadlock into eventual automatic recovery without a
+        // 45/60-second timer ever interrupting a genuinely live model.
+        const recoveredUnackedExecution = [];
+        for (const candidate of deliveryAckRetryDue) {
+            const learned = learnedHostCutoffFallback(candidate.cutoffSamplesJson);
+            const deliveredAtMs = Date.parse(String(candidate.deliveredAt || ""));
+            if (!learned || !Number.isFinite(deliveredAtMs)
+                || nowMs - deliveredAtMs < learned.deadlineMs)
+                continue;
+            let recovered;
+            try {
+                recovered = this.database.sqlite.transaction(() => {
+                const task = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(candidate.taskId);
+                const workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(candidate.worksetId);
+                const generation = this.database.sqlite.prepare("select * from continuation_generations where id=?").get(candidate.generationId);
+                if (!task || !workset || !generation
+                    || !["RUNNING", "SUSPECTED_STALL"].includes(String(task.state))
+                    || !["RUNNING", "SUSPECTED_STALL"].includes(String(workset.state))
+                    || String(generation.state || "") !== "DELIVERED"
+                    || generation.turn_acked_at
+                    || String(task.delivery_token || "") !== String(generation.delivery_token || "")
+                    || String(task.delivery_owner || "") !== "synthetic-pending"
+                    || Number(task.continuation_pending || 0) !== 5)
+                    return undefined;
+                if (this.continuationModelRequestInFlight(task.conversation_scope_id))
+                    return undefined;
+                const strictLearned = learnedHostCutoffFallback(task.cutoff_samples_json);
+                const freshDeliveredAtMs = Date.parse(String(generation.delivered_at || ""));
+                if (!strictLearned || !Number.isFinite(freshDeliveredAtMs)
+                    || nowMs - freshDeliveredAtMs < strictLearned.deadlineMs)
+                    return undefined;
+                const manualTakeoverAtMs = Date.parse(String(task.manual_takeover_at || ""));
+                if (Number.isFinite(manualTakeoverAtMs) && manualTakeoverAtMs >= freshDeliveredAtMs)
+                    return undefined;
+                const lastModelActivityAtMs = Date.parse(String(task.last_model_activity_at || ""));
+                if (Number.isFinite(lastModelActivityAtMs) && lastModelActivityAtMs > freshDeliveredAtMs)
+                    return undefined;
+                const token = String(generation.delivery_token || "");
+                if (!token)
+                    return undefined;
+                const closed = this.database.sqlite.prepare(`
+                  update continuation_generations set
+                    state='SUPERSEDED',closed_at=?,failure_reason='synthetic-execution-unconfirmed-cutoff',updated_at=?
+                  where id=? and state='DELIVERED' and turn_acked_at is null and delivery_token=?
+                `).run(nowIso, nowIso, generation.id, token);
+                if (Number(closed.changes || 0) !== 1)
+                    throw new Error("synthetic-execution-recovery-generation-race");
+                const cleared = this.database.sqlite.prepare(`
+                  update continuation_tasks set
+                    superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+                    delivery_token=null,continuation_pending=0,delivery_owner=null,
+                    delivery_owner_expires_at=null,delivery_ack_started_at=null,
+                    delivery_ack_retry_count=0,delivery_ack_retry_after_at=null,
+                    delivery_work_baseline_count=0,updated_at=?
+                  where id=? and delivery_token=? and delivery_owner='synthetic-pending'
+                    and continuation_pending=5
+                `).run(nowIso, task.id, token);
+                if (Number(cleared.changes || 0) !== 1)
+                    throw new Error("synthetic-execution-recovery-task-race");
+                const nextGeneration = Math.max(
+                    Number(workset.current_generation || 0),
+                    Number(generation.generation || 0),
+                ) + 1;
+                const generationId = `generation:${workset.id}:${nextGeneration}`;
+                this.database.sqlite.prepare(`
+                  insert into continuation_generations(
+                    id,workset_id,generation,owner_type,state,due_at,substantive_baseline_count,
+                    substantive_activity_count,last_activity_at,created_at,updated_at
+                  ) values(?,?,?,'synthetic','READY',?,?,?,?,?,?)
+                `).run(generationId, workset.id, nextGeneration, nowIso,
+                    Number(generation.substantive_activity_count || 0),
+                    Number(generation.substantive_activity_count || 0),
+                    generation.last_activity_at ?? generation.delivered_at ?? nowIso,
+                    nowIso, nowIso);
+                this.database.sqlite.prepare(`
+                  update continuation_worksets set
+                    state='SUSPECTED_STALL',current_generation=?,continuation_due_at=?,updated_at=?
+                  where id=?
+                `).run(nextGeneration, nowIso, nowIso, workset.id);
+                const elapsedSinceDeliveryMs = nowMs - freshDeliveredAtMs;
+                this.appendEvent({
+                    kind: "continuation-synthetic-execution-unconfirmed-recovered",
+                    subject: task.conversation_scope_id,
+                    workspaceId: task.workspace_id ?? undefined,
+                    payload: {
+                        worksetId: workset.id,
+                        supersededGeneration: Number(generation.generation || 0),
+                        generation: nextGeneration,
+                        elapsedSinceDeliveryMs,
+                        medianMs: strictLearned.medianMs,
+                        marginMs: strictLearned.marginMs,
+                        deadlineMs: strictLearned.deadlineMs,
+                        samples: strictLearned.samples,
+                    },
+                });
+                return {
+                    conversationScopeId: task.conversation_scope_id,
+                    worksetId: workset.id,
+                    generation: nextGeneration,
+                    generationId,
+                    executionUnconfirmedRecovery: true,
+                    elapsedSinceDeliveryMs,
+                };
+                })();
+            }
+            catch {
+                recovered = undefined;
+            }
+            if (recovered) {
+                recoveredUnackedExecution.push(recovered);
+                ready.push(recovered);
+            }
+        }
+        const recoveredSourceKeys = new Set(recoveredUnackedExecution.map(
+            (entry) => `${entry.worksetId}:${Number(entry.generation || 0) - 1}`,
+        ));
+        return {
+            scanned: candidates.length,
+            ready,
+            deliveryAckRetryDue: deliveryAckRetryDue.filter((entry) => !recoveredSourceKeys.has(
+                `${entry.worksetId}:${Number(entry.generation || 0)}`,
+            )),
+            recoveredUnackedExecution,
+        };
     }
     claimReadyContinuationGeneration(input = {}) {
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
@@ -2253,6 +2554,30 @@ export class StructuredRuntimeState {
             const claimDueAt = generation.due_at ? Date.parse(generation.due_at) : NaN;
             if (Number.isFinite(claimDueAt) && claimDueAt <= nowMs)
                 return { accepted: false, reason: "sender-claim-expired" };
+            // READY/CLAIMED reserve transport; neither proves the previous
+            // assistant has ended. Revalidate immediately before Host send.
+            let endedTask = task;
+            if (String(task.assistant_turn_state || "") === "COMPLETION_REQUESTED") {
+                const promotion = this.promoteMatureAssistantCompletionIntent(task.id, nowMs);
+                if (!promotion.promoted)
+                    return { accepted: false, reason: promotion.reason, retryAfterMs: promotion.retryAfterMs };
+                endedTask = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(task.id);
+            }
+            if (endedTask.state !== "RUNNING" || this.continuationModelRequestInFlight(conversationScopeId))
+                return { accepted: false, reason: "current-turn-not-deliverable" };
+            const deliveryMode = normalizedContinuationMode(endedTask.continuation_mode, "compat");
+            if (supportsAssistantTurnRecovery(deliveryMode)) {
+                const inferredSyntheticOrphanEnded = endedTask.assistant_turn_state === "ORPHANED"
+                    && endedTask.assistant_turn_completion_source === "synthetic-active-orphan-inferred";
+                const exactTurnEnded = Boolean(endedTask.turn_lease_id)
+                    && endedTask.assistant_turn_completion_lease_id === endedTask.turn_lease_id
+                    && (endedTask.assistant_turn_state === "TIMED_OUT"
+                        || (endedTask.assistant_turn_state === "COMPLETED" && allowsSignedModelCompletion(endedTask))
+                        || inferredSyntheticOrphanEnded)
+                    && endedTask.stall_state === "CONTINUATION_ARMED";
+                if (!exactTurnEnded)
+                    return { accepted: false, reason: "current-turn-end-not-authorized" };
+            }
             const changed = this.database.sqlite.prepare(`
               update continuation_generations set state='DELIVERING',due_at=?,updated_at=?
               where id=? and delivery_token=? and state='CLAIMED'
@@ -2315,6 +2640,20 @@ export class StructuredRuntimeState {
                 };
             }
             const acceptedDelivery = result === "accepted" || result === "fallback-accepted";
+            if (String(generation.state || "") === "SUPERSEDED") {
+                return { accepted: false, reason: "synthetic-ownership-superseded" };
+            }
+            // Transport callbacks describe an earlier send. They cannot
+            // override a durable delivery, model ACK, or generation closure.
+            if (generation.turn_acked_at || generation.closed_at
+                || ["DELIVERED", "TURN_ACKED", "WORK_REQUIRED"].includes(String(generation.state || ""))) {
+                return { accepted: true,
+                    reason: "generation-state-already-advanced", generation };
+            }
+            if (legacyTask && (String(legacyTask.delivery_token || "") !== deliveryToken
+                || String(legacyTask.delivery_owner || "") !== "synthetic-pending")) {
+                return { accepted: false, reason: "synthetic-ownership-superseded" };
+            }
             if (acceptedDelivery) {
                 const previousRetryCount = Math.max(0, Math.round(Number(legacyTask?.delivery_ack_retry_count || 0)));
                 const retryCount = previousRetryCount + 1;
@@ -2381,7 +2720,7 @@ export class StructuredRuntimeState {
             }
             const changed = this.database.sqlite.prepare(`
               update continuation_generations set state='NO_WORK',closed_at=?,failure_reason=?,updated_at=?
-              where delivery_token=? and state in ('CLAIMED','DELIVERING','DELIVERED','TURN_ACKED','WORK_REQUIRED')
+              where delivery_token=? and state in ('CLAIMED','DELIVERING')
             `).run(nowIso, `delivery-${result}`, nowIso, deliveryToken);
             if (Number(changed.changes || 0) !== 1)
                 return { accepted: false, reason: "delivery-token-not-claimable" };
@@ -2497,6 +2836,59 @@ export class StructuredRuntimeState {
             createdAt: row.created_at,
         }));
     }
+    recordContinuationResumeOperation(input = {}) {
+        const conversationScopeId = String(input.conversationScopeId ?? "").trim();
+        const workspaceId = String(input.workspaceId ?? "").trim();
+        if (!conversationScopeId)
+            return undefined;
+        const row = isCanonicalConversationScope(conversationScopeId)
+            ? this.database.sqlite.prepare(`
+              select * from continuation_tasks
+              where conversation_scope_id=?
+                and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
+              order by updated_at desc limit 1
+            `).get(conversationScopeId)
+            : workspaceId ? this.database.sqlite.prepare(`
+              select * from continuation_tasks
+              where workspace_id=?
+                and state not in ('SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK')
+              order by updated_at desc limit 1
+            `).get(workspaceId) : undefined;
+        if (!row)
+            return undefined;
+        const prior = parseJson(row.resume_context_json, {});
+        const priorOperations = Array.isArray(prior?.operations) ? prior.operations : [];
+        const operation = redactValue({
+            ...(input.operation && typeof input.operation === "object" ? input.operation : {}),
+            capturedAt: new Date().toISOString(),
+        });
+        let operations = [...priorOperations, operation].slice(-RESUME_CONTEXT_MAX_OPERATIONS);
+        const required = parseJson(row.required_milestones_json, []);
+        const completed = new Set(parseJson(row.completed_milestones_json, []));
+        const nextMilestone = required.find((milestone) => !completed.has(milestone));
+        const base = {
+            protocol: "devspace-resume-execution-v1",
+            capturedAt: new Date().toISOString(),
+            taskId: row.id,
+            workspaceId: workspaceId || row.workspace_id || undefined,
+            assistantTurnOwner: row.assistant_turn_owner || undefined,
+            deliveryGeneration: Number(row.delivery_generation || 0),
+            progressFingerprint: row.progress_fingerprint || undefined,
+            failureFingerprint: row.failure_fingerprint || undefined,
+            watchProcessHandles: parseJson(row.watch_process_handles_json, []),
+            nextMilestone,
+            resumeInstruction: "Resume from the latest concrete operation below. Do not redo workspace/root-cause discovery merely to reconstruct context; re-check only state that may have become stale or after an actual tool failure.",
+        };
+        let capsule = redactValue({ ...base, operations });
+        while (operations.length > 1 && JSON.stringify(capsule).length > RESUME_CONTEXT_MAX_JSON_CHARS) {
+            operations = operations.slice(1);
+            capsule = redactValue({ ...base, operations });
+        }
+        this.database.sqlite.prepare(`
+          update continuation_tasks set resume_context_json=?,updated_at=? where id=?
+        `).run(JSON.stringify(capsule), new Date().toISOString(), row.id);
+        return capsule;
+    }
     touchContinuationModelActivity(input = {}) {
         const workspaceId = String(input.workspaceId ?? "").trim();
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
@@ -2523,10 +2915,20 @@ export class StructuredRuntimeState {
             ? learnedHostCutoffFallback(row.cutoff_samples_json)
             : undefined;
         const turnStartedAtMs = Date.parse(String(row.turn_started_at || ""));
+        const inferredCutoffRevoked = Boolean(substantiveIncrement > 0
+            && String(row.assistant_turn_state || "") === "TIMED_OUT"
+            && String(row.assistant_turn_completion_source || "") === "learned-host-cutoff-inferred"
+            && Boolean(row.turn_lease_id)
+            && String(row.assistant_turn_completion_lease_id || "") === String(row.turn_lease_id));
+        const inferredSyntheticOrphanRevoked = Boolean(substantiveIncrement > 0
+            && String(row.assistant_turn_state || "") === "ORPHANED"
+            && String(row.assistant_turn_completion_source || "") === "synthetic-active-orphan-inferred"
+            && Boolean(row.turn_lease_id)
+            && String(row.assistant_turn_completion_lease_id || "") === String(row.turn_lease_id));
         const survivedLearnedCutoff = Boolean(learnedCutoff
-            && String(row.assistant_turn_state || "") === "GENERATING"
+            && (String(row.assistant_turn_state || "") === "GENERATING" || inferredCutoffRevoked)
             && Number.isFinite(turnStartedAtMs)
-            && Date.now() - turnStartedAtMs >= learnedCutoff.deadlineMs);
+            && Date.now() - turnStartedAtMs >= learnedCutoff.survivalBoundaryMs);
         if (survivedLearnedCutoff) {
             // A substantive model-originated DevSpace operation observed after
             // the learned fallback deadline proves that the current Host regime
@@ -2538,8 +2940,33 @@ export class StructuredRuntimeState {
                 confirmed_turn_limit_ms=null,confirmed_turn_limit_at=null,
                 confirmed_turn_limit_source='invalidated-by-live-turn-survival',
                 cutoff_samples_json='[]',cutoff_epoch=coalesce(cutoff_epoch,0)+1,
-                cutoff_regime_changed_at=?,updated_at=?
-              where id=? and assistant_turn_state='GENERATING'
+                cutoff_regime_changed_at=?,
+                assistant_turn_state=case
+                  when assistant_turn_state='TIMED_OUT' and assistant_turn_completion_source='learned-host-cutoff-inferred'
+                    then 'GENERATING' else assistant_turn_state end,
+                assistant_turn_completion_lease_id=case
+                  when assistant_turn_state='TIMED_OUT' and assistant_turn_completion_source='learned-host-cutoff-inferred'
+                    then null else assistant_turn_completion_lease_id end,
+                assistant_turn_completed_at=case
+                  when assistant_turn_state='TIMED_OUT' and assistant_turn_completion_source='learned-host-cutoff-inferred'
+                    then null else assistant_turn_completed_at end,
+                assistant_turn_completion_source=case
+                  when assistant_turn_state='TIMED_OUT' and assistant_turn_completion_source='learned-host-cutoff-inferred'
+                    then null else assistant_turn_completion_source end,
+                assistant_turn_completion_note=case
+                  when assistant_turn_state='TIMED_OUT' and assistant_turn_completion_source='learned-host-cutoff-inferred'
+                    then null else assistant_turn_completion_note end,
+                stall_state=case
+                  when assistant_turn_state='TIMED_OUT' and assistant_turn_completion_source='learned-host-cutoff-inferred'
+                    then 'ACTIVE' else stall_state end,
+                stall_armed_at=case
+                  when assistant_turn_state='TIMED_OUT' and assistant_turn_completion_source='learned-host-cutoff-inferred'
+                    then null else stall_armed_at end,
+                stall_evidence=case
+                  when assistant_turn_state='TIMED_OUT' and assistant_turn_completion_source='learned-host-cutoff-inferred'
+                    then null else stall_evidence end,
+                updated_at=?
+              where id=? and assistant_turn_state in ('GENERATING','TIMED_OUT')
             `).run(nowIso, nowIso, row.id);
             if (row.host_profile_id) {
                 this.database.sqlite.prepare(`
@@ -2561,6 +2988,8 @@ export class StructuredRuntimeState {
                     learnedDeadlineMs: learnedCutoff.deadlineMs,
                     observedElapsedMs: Date.now() - turnStartedAtMs,
                     samples: learnedCutoff.samples,
+                    survivalBoundaryMs: learnedCutoff.survivalBoundaryMs,
+                    inferredTimeoutRevoked: inferredCutoffRevoked,
                 },
             });
         }
@@ -2576,47 +3005,188 @@ export class StructuredRuntimeState {
               substantive_activity_count=coalesce(substantive_activity_count,0)+?,
               delivery_owner_expires_at=?,
               assistant_turn_state=case
-                when continuation_mode='completion-driven' and assistant_turn_state='COMPLETION_REQUESTED'
+                when continuation_mode in ('completion-driven','resident')
+                  and (assistant_turn_state='COMPLETION_REQUESTED'
+                    or (assistant_turn_state='ORPHANED' and assistant_turn_completion_source='synthetic-active-orphan-inferred'))
                   then 'GENERATING'
                 else assistant_turn_state
               end,
               assistant_turn_completion_lease_id=case
-                when continuation_mode='completion-driven' and assistant_turn_state='COMPLETION_REQUESTED'
+                when continuation_mode in ('completion-driven','resident')
+                  and (assistant_turn_state='COMPLETION_REQUESTED'
+                    or (assistant_turn_state='ORPHANED' and assistant_turn_completion_source='synthetic-active-orphan-inferred'))
                   then null
                 else assistant_turn_completion_lease_id
               end,
               assistant_turn_completion_requested_at=case
-                when continuation_mode='completion-driven' and assistant_turn_state='COMPLETION_REQUESTED'
+                when continuation_mode in ('completion-driven','resident')
+                  and (assistant_turn_state='COMPLETION_REQUESTED'
+                    or (assistant_turn_state='ORPHANED' and assistant_turn_completion_source='synthetic-active-orphan-inferred'))
                   then null
                 else assistant_turn_completion_requested_at
               end,
               assistant_turn_completed_at=case
-                when continuation_mode='completion-driven' and assistant_turn_state='COMPLETION_REQUESTED'
+                when continuation_mode in ('completion-driven','resident')
+                  and (assistant_turn_state='COMPLETION_REQUESTED'
+                    or (assistant_turn_state='ORPHANED' and assistant_turn_completion_source='synthetic-active-orphan-inferred'))
                   then null
                 else assistant_turn_completed_at
               end,
               assistant_turn_completion_source=case
-                when continuation_mode='completion-driven' and assistant_turn_state='COMPLETION_REQUESTED'
+                when continuation_mode in ('completion-driven','resident')
+                  and (assistant_turn_state='COMPLETION_REQUESTED'
+                    or (assistant_turn_state='ORPHANED' and assistant_turn_completion_source='synthetic-active-orphan-inferred'))
                   then null
                 else assistant_turn_completion_source
               end,
               assistant_turn_completion_note=case
-                when continuation_mode='completion-driven' and assistant_turn_state='COMPLETION_REQUESTED'
+                when continuation_mode in ('completion-driven','resident')
+                  and (assistant_turn_state='COMPLETION_REQUESTED'
+                    or (assistant_turn_state='ORPHANED' and assistant_turn_completion_source='synthetic-active-orphan-inferred'))
                   then null
                 else assistant_turn_completion_note
               end,
-              turn_lease_expires_at=case when continuation_mode='completion-driven' then ? else turn_lease_expires_at end,
-              stall_state=case when continuation_mode='completion-driven' then 'ACTIVE' else stall_state end,
-              stall_suspected_at=case when continuation_mode='completion-driven' then null else stall_suspected_at end,
-              stall_probe_count=case when continuation_mode='completion-driven' then 0 else stall_probe_count end,
-              stall_last_probe_at=case when continuation_mode='completion-driven' then null else stall_last_probe_at end,
-              stall_armed_at=case when continuation_mode='completion-driven' then null else stall_armed_at end,
-              stall_evidence=case when continuation_mode='completion-driven' then null else stall_evidence end,
+              turn_lease_expires_at=case when continuation_mode in ('completion-driven','resident') then ? else turn_lease_expires_at end,
+              stall_state=case when continuation_mode in ('completion-driven','resident') then 'ACTIVE' else stall_state end,
+              stall_suspected_at=case when continuation_mode in ('completion-driven','resident') then null else stall_suspected_at end,
+              stall_probe_count=case when continuation_mode in ('completion-driven','resident') then 0 else stall_probe_count end,
+              stall_last_probe_at=case when continuation_mode in ('completion-driven','resident') then null else stall_last_probe_at end,
+              stall_armed_at=case when continuation_mode in ('completion-driven','resident') then null else stall_armed_at end,
+              stall_evidence=case when continuation_mode in ('completion-driven','resident') then null else stall_evidence end,
               updated_at=?
           where id=?
         `).run(workspaceId || null, nowIso, nowIso, substantiveIncrement,
             syntheticOwnerExpiresAt, turnLeaseExpiresAt, nowIso, row.id);
-        if (substantiveIncrement > 0 && !syntheticOwnerActive) {
+        if (substantiveIncrement > 0 && inferredCutoffRevoked) {
+            this.database.sqlite.transaction(() => {
+                const card = this.database.sqlite.prepare(`
+                  select * from continuation_conversation_cards where conversation_scope_id=?
+                `).get(row.conversation_scope_id);
+                if (!card?.active_workset_id)
+                    return;
+                const workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(card.active_workset_id);
+                if (!workset)
+                    return;
+                const inferredGeneration = this.database.sqlite.prepare(`
+                  select * from continuation_generations
+                  where workset_id=? and owner_type='synthetic' and state in ('READY','CLAIMED')
+                  order by generation desc limit 1
+                `).get(workset.id);
+                if (!inferredGeneration)
+                    return;
+                const previous = this.database.sqlite.prepare(`
+                  select * from continuation_generations
+                  where workset_id=? and generation<? and failure_reason='learned-host-cutoff-timeout'
+                  order by generation desc limit 1
+                `).get(workset.id, Number(inferredGeneration.generation || 0));
+                if (!previous)
+                    return;
+                const superseded = this.database.sqlite.prepare(`
+                  update continuation_generations
+                  set state='SUPERSEDED',closed_at=?,failure_reason='live-turn-survived-learned-cutoff',updated_at=?
+                  where id=? and state in ('READY','CLAIMED')
+                `).run(nowIso, nowIso, inferredGeneration.id);
+                if (Number(superseded.changes || 0) !== 1)
+                    return;
+                this.database.sqlite.prepare(`
+                  update continuation_generations
+                  set state='WORK_REQUIRED',closed_at=null,failure_reason=null,last_activity_at=?,updated_at=?
+                  where id=? and state in ('NO_WORK','SUPERSEDED')
+                `).run(nowIso, nowIso, previous.id);
+                this.database.sqlite.prepare(`
+                  update continuation_worksets
+                  set current_generation=?,state='RUNNING',continuation_due_at=?,last_model_activity_at=?,updated_at=?
+                  where id=?
+                `).run(Number(previous.generation || 0), turnLeaseExpiresAt, nowIso, nowIso, workset.id);
+                const previousSynthetic = String(previous.owner_type || "") === "synthetic";
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set
+                    continuation_pending=0,delivery_owner=?,delivery_token=?,
+                    delivery_owner_expires_at=?,delivery_generation=?,
+                    delivery_ack_started_at=null,delivery_ack_retry_count=0,
+                    delivery_ack_retry_after_at=null,updated_at=?
+                  where id=?
+                `).run(previousSynthetic ? "synthetic-active" : "manual",
+                    previousSynthetic ? previous.delivery_token : null,
+                    previousSynthetic ? new Date(Date.now() + SYNTHETIC_WORK_OWNER_LEASE_MS).toISOString() : null,
+                    Number(previous.generation || 0), nowIso, row.id);
+                this.appendEvent({
+                    kind: "continuation-host-timeout-inference-revoked",
+                    subject: row.conversation_scope_id,
+                    workspaceId: workspaceId || row.workspace_id || undefined,
+                    payload: {
+                        turnLeaseId: row.turn_lease_id || undefined,
+                        inferredGeneration: Number(inferredGeneration.generation || 0),
+                        restoredGeneration: Number(previous.generation || 0),
+                        restoredOwner: previous.owner_type,
+                    },
+                });
+            })();
+        }
+        if (substantiveIncrement > 0 && inferredSyntheticOrphanRevoked) {
+            this.database.sqlite.transaction(() => {
+                const card = this.database.sqlite.prepare(`
+                  select * from continuation_conversation_cards where conversation_scope_id=?
+                `).get(row.conversation_scope_id);
+                if (!card?.active_workset_id)
+                    return;
+                const workset = this.database.sqlite.prepare("select * from continuation_worksets where id=?").get(card.active_workset_id);
+                if (!workset)
+                    return;
+                const inferredGeneration = this.database.sqlite.prepare(`
+                  select * from continuation_generations
+                  where workset_id=? and owner_type='synthetic' and state in ('READY','CLAIMED')
+                  order by generation desc limit 1
+                `).get(workset.id);
+                if (!inferredGeneration)
+                    return;
+                const previous = this.database.sqlite.prepare(`
+                  select * from continuation_generations
+                  where workset_id=? and generation<? and failure_reason='synthetic-active-orphan-inferred'
+                  order by generation desc limit 1
+                `).get(workset.id, Number(inferredGeneration.generation || 0));
+                if (!previous)
+                    return;
+                const superseded = this.database.sqlite.prepare(`
+                  update continuation_generations
+                  set state='SUPERSEDED',closed_at=?,failure_reason='live-turn-survived-synthetic-orphan',updated_at=?
+                  where id=? and state in ('READY','CLAIMED')
+                `).run(nowIso, nowIso, inferredGeneration.id);
+                if (Number(superseded.changes || 0) !== 1)
+                    return;
+                this.database.sqlite.prepare(`
+                  update continuation_generations
+                  set state='WORK_REQUIRED',closed_at=null,failure_reason=null,last_activity_at=?,updated_at=?
+                  where id=? and state='NO_WORK'
+                `).run(nowIso, nowIso, previous.id);
+                this.database.sqlite.prepare(`
+                  update continuation_worksets
+                  set current_generation=?,state='RUNNING',continuation_due_at=?,last_model_activity_at=?,updated_at=?
+                  where id=?
+                `).run(Number(previous.generation || 0), turnLeaseExpiresAt, nowIso, nowIso, workset.id);
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set
+                    continuation_pending=0,delivery_owner='synthetic-active',delivery_token=?,
+                    delivery_owner_expires_at=?,delivery_generation=?,
+                    delivery_ack_started_at=null,delivery_ack_retry_count=0,
+                    delivery_ack_retry_after_at=null,updated_at=?
+                  where id=?
+                `).run(previous.delivery_token,
+                    new Date(Date.now() + SYNTHETIC_WORK_OWNER_LEASE_MS).toISOString(),
+                    Number(previous.generation || 0), nowIso, row.id);
+                this.appendEvent({
+                    kind: "continuation-synthetic-active-orphan-revoked",
+                    subject: row.conversation_scope_id,
+                    workspaceId: workspaceId || row.workspace_id || undefined,
+                    payload: {
+                        turnLeaseId: row.turn_lease_id || undefined,
+                        inferredGeneration: Number(inferredGeneration.generation || 0),
+                        restoredGeneration: Number(previous.generation || 0),
+                    },
+                });
+            })();
+        }
+        if (substantiveIncrement > 0 && !syntheticOwnerActive && !inferredCutoffRevoked && !inferredSyntheticOrphanRevoked) {
             this.database.sqlite.transaction(() => {
                 const card = this.database.sqlite.prepare(`
                   select * from continuation_conversation_cards where conversation_scope_id=?
@@ -2938,6 +3508,7 @@ export class StructuredRuntimeState {
             requiredMilestones: parseJson(row.required_milestones_json, []),
             completedMilestones: parseJson(row.completed_milestones_json, []),
             evidence: parseJson(row.evidence_json, {}),
+            resumeContext: parseJson(row.resume_context_json, {}),
             progressFingerprint: row.progress_fingerprint ?? undefined,
             failureFingerprint: row.failure_fingerprint ?? undefined,
             continuationCount: row.continuation_count,
@@ -3022,6 +3593,41 @@ export class StructuredRuntimeState {
             createdAt: row.created_at,
             updatedAt: row.updated_at,
         }) : undefined;
+        const preCutoffHandoffForTask = (task) => {
+            if (!task)
+                return { required: false };
+            const deliveryLatencySamples = this.database.sqlite.prepare(`
+              select g.created_at,g.turn_acked_at
+              from continuation_generations g
+              join continuation_worksets w on w.id=g.workset_id
+              where w.legacy_task_id=? and g.owner_type='synthetic'
+                and g.turn_acked_at is not null
+              order by g.created_at desc limit ?
+            `).all(task.id, HOST_CUTOFF_SAMPLE_WINDOW)
+                .map((generation) => Date.parse(String(generation.turn_acked_at || ""))
+                    - Date.parse(String(generation.created_at || "")))
+                .filter((value) => Number.isFinite(value) && value >= 0);
+            const learned = learnedHostCutoffPrehandoff(task.cutoffSamples, deliveryLatencySamples);
+            const turnStartedAtMs = Date.parse(String(task.turnStartedAt || ""));
+            const elapsedTurnMs = Number.isFinite(turnStartedAtMs) ? now.getTime() - turnStartedAtMs : NaN;
+            const required = Boolean(
+                task.state === "RUNNING"
+                && ["completion-driven", "timeout-recovery"].includes(task.continuationMode)
+                && task.assistantTurnState === "GENERATING"
+                && learned
+                && Number.isFinite(elapsedTurnMs)
+                && elapsedTurnMs >= learned.handoffAtMs
+                && elapsedTurnMs < learned.deadlineMs
+            );
+            return {
+                required,
+                elapsedTurnMs: Number.isFinite(elapsedTurnMs) ? Math.max(0, elapsedTurnMs) : undefined,
+                handoffAtMs: learned?.handoffAtMs,
+                marginMs: learned?.prehandoffMarginMs,
+                deliveryMedianMs: learned?.deliveryMedianMs,
+                deadlineMs: learned?.deadlineMs,
+            };
+        };
         const taskNeedsCurrentTurnSupervisor = (row, task = rowToTask(row)) => {
             if (!row || !task || task.state !== "RUNNING" || task.continuationMode === "compat") return false;
             const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
@@ -3046,6 +3652,8 @@ export class StructuredRuntimeState {
                 remainingMilestones: [],
                 finalResponseAllowed: true,
             };
+            const preCutoffHandoff = preCutoffHandoffForTask(task);
+            const preCutoffHandoffRequired = preCutoffHandoff.required;
             const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
             const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
             const remainingMilestones = required.filter((milestone) => !completed.has(milestone));
@@ -3071,8 +3679,15 @@ export class StructuredRuntimeState {
                 syntheticWorkMustContinue,
                 preFinalControlRequired,
                 requiredBeforeFinal: preFinalControlRequired
-                    ? "continue substantive work; or call turn-complete for an intentional incomplete stage boundary; or checkpoint with waitingExternal=true only for a genuine external blocker"
+                    ? preCutoffHandoffRequired
+                        ? "learned Host cutoff handoff window reached: sign turn-complete now so the live sender can pre-arm the continuation before Host teardown"
+                        : "continue substantive work; or call turn-complete for an intentional incomplete stage boundary; or checkpoint with waitingExternal=true only for a genuine external blocker; for explicit user takeover use turn-complete completionDisposition=await-user (cached schema: checkpoint note=atcc-await-user); mark completed milestones before ending"
                     : undefined,
+                preCutoffHandoffRequired,
+                preCutoffHandoffAtMs: preCutoffHandoff.handoffAtMs,
+                preCutoffHandoffMarginMs: preCutoffHandoff.marginMs,
+                preCutoffDeliveryMedianMs: preCutoffHandoff.deliveryMedianMs,
+                elapsedTurnMs: preCutoffHandoff.elapsedTurnMs,
                 nextRequiredMilestones: continueRequired ? remainingMilestones : [],
                 taskIncomplete,
                 remainingMilestones,
@@ -3246,15 +3861,23 @@ export class StructuredRuntimeState {
                 const nextRequiredSet = new Set(nextRequired);
                 const nextCompleted = parseJson(currentRow.completed_milestones_json, [])
                     .map((value) => String(value).trim()).filter((value) => nextRequiredSet.has(value));
+                const nextEvidence = milestoneSetChanged
+                    ? evidenceForFreshWorkset(parseJson(currentRow.evidence_json, {}))
+                    : parseJson(currentRow.evidence_json, {});
                 this.database.sqlite.prepare(`
                   update continuation_tasks set
                     objective=?,required_milestones_json=?,completed_milestones_json=?,
                     progress_fingerprint=null,failure_fingerprint=null,
-                    no_progress_count=0,same_failure_count=0,updated_at=?
+                    no_progress_count=0,same_failure_count=0,
+                    deadline_at=case when ?=1 then null else deadline_at end,
+                    evidence_json=?,
+                    updated_at=?
                   where id=?
                 `).run(
                     objectiveChanged ? suppliedObjective : currentRow.objective,
-                    JSON.stringify(nextRequired), JSON.stringify(nextCompleted), nowIso, currentRow.id,
+                    JSON.stringify(nextRequired), JSON.stringify(nextCompleted),
+                    milestoneSetChanged ? 1 : 0, JSON.stringify(nextEvidence),
+                    nowIso, currentRow.id,
                 );
                 this.syncContinuationArchitectureForLegacyTask(currentRow.id,
                     milestoneSetChanged ? { forceNewWorkset: true } : {});
@@ -3275,7 +3898,7 @@ export class StructuredRuntimeState {
                     // refine/reactivate work without manufacturing a second
                     // card after the first card has already mounted.
                     const turnLeaseId = `turn_${randomUUID()}`;
-                    const turnLeaseExpiresAt = normalizedMode(row.continuation_mode, "compat") === "completion-driven"
+                    const turnLeaseExpiresAt = ["completion-driven", "resident"].includes(normalizedMode(row.continuation_mode, "compat"))
                         ? completionTurnLeaseExpiresAt()
                         : row.turn_lease_expires_at;
                     this.database.sqlite.prepare(`
@@ -3493,7 +4116,7 @@ export class StructuredRuntimeState {
                         Number(fresh.delivery_generation || 0),
                     ) + 1;
                     const turnLeaseId = `turn_${randomUUID()}`;
-                    const turnLeaseExpiresAt = normalizedMode(fresh.continuation_mode, "compat") === "completion-driven"
+                    const turnLeaseExpiresAt = ["completion-driven", "resident"].includes(normalizedMode(fresh.continuation_mode, "compat"))
                         ? completionTurnLeaseExpiresAt()
                         : fresh.turn_lease_expires_at;
                     this.database.sqlite.prepare(`
@@ -3543,7 +4166,33 @@ export class StructuredRuntimeState {
                 // revoke that synthetic owner before any manual side effect.
                 row = find();
             }
-            const syntheticOwned = row && ["synthetic-pending", "synthetic-active"].includes(String(row.delivery_owner || ""));
+            // Manual ownership must fence the authoritative generation ledger,
+            // not only the denormalized continuation_tasks.delivery_owner
+            // projection. Canonical projection recovery can legitimately
+            // rebuild the lifetime task row while a previously ACKed synthetic
+            // generation is still WORK_REQUIRED. If that recovery leaves the
+            // compatibility delivery_owner as manual/empty, keying the manual
+            // fence only off delivery_owner lets the stale synthetic generation
+            // survive the user's next message and blocks the following
+            // turn-complete from arming a fresh continuation. This was observed
+            // in production with generation 36 on dev75. Treat any live
+            // synthetic generation in the current active Workset as ownership
+            // that an explicit manualTakeover must revoke.
+            const authoritativeSyntheticGeneration = row && manualTakeover && !deliveryToken
+                && input.internalAnchorPreparation !== true
+                ? this.database.sqlite.prepare(`
+                    select g.id,g.generation,g.state,g.delivery_token
+                    from continuation_conversation_cards c
+                    join continuation_generations g on g.workset_id=c.active_workset_id
+                    where c.conversation_scope_id=? and g.owner_type='synthetic'
+                      and g.state in ('READY','CLAIMED','DELIVERING','DELIVERED','TURN_ACKED','WORK_REQUIRED')
+                    order by g.generation desc limit 1
+                  `).get(row.conversation_scope_id)
+                : undefined;
+            const syntheticOwned = row && (
+                ["synthetic-pending", "synthetic-active"].includes(String(row.delivery_owner || ""))
+                || Boolean(authoritativeSyntheticGeneration)
+            );
             if (row && syntheticOwned && manualTakeover && !deliveryToken && input.internalAnchorPreparation !== true) {
                 // The Apps SDK does not expose a generic "user sent a chat
                 // message" event. Require an explicit manualTakeover marker on
@@ -3552,7 +4201,7 @@ export class StructuredRuntimeState {
                 // automatically resumed model may simply have omitted the token,
                 // and must never be allowed to supersede itself.
                 const turnLeaseId = `turn_${randomUUID()}`;
-                const turnLeaseExpiresAt = normalizedMode(row.continuation_mode, "compat") === "completion-driven"
+                const turnLeaseExpiresAt = ["completion-driven", "resident"].includes(normalizedMode(row.continuation_mode, "compat"))
                     ? completionTurnLeaseExpiresAt()
                     : row.turn_lease_expires_at;
                 if (row.delivery_token) {
@@ -3615,13 +4264,17 @@ export class StructuredRuntimeState {
                 // no synthetic owner to supersede, a new manual round must get
                 // its own visible milestone card generation.
                 const turnLeaseId = `turn_${randomUUID()}`;
-                const turnLeaseExpiresAt = normalizedMode(row.continuation_mode, "compat") === "completion-driven"
+                const turnLeaseExpiresAt = ["completion-driven", "resident"].includes(normalizedMode(row.continuation_mode, "compat"))
                     ? completionTurnLeaseExpiresAt()
                     : row.turn_lease_expires_at;
                 this.database.sqlite.prepare(`
                   update continuation_tasks set
                     continuation_pending=0,delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,
                     delivery_work_baseline_count=coalesce(substantive_activity_count,0),manual_takeover_at=?,turn_started_at=?,
+                    state=case when state='WAITING_EXTERNAL' and assistant_turn_completion_source='model-await-user'
+                      then 'RUNNING' else state end,
+                    waiting_reason=case when assistant_turn_completion_source='model-await-user'
+                      then null else waiting_reason end,
                     turn_lease_id=?,turn_lease_expires_at=?,last_model_activity_at=?,last_activity_at=?,
                     assistant_turn_state='GENERATING',assistant_turn_owner='manual',
                     assistant_turn_completion_lease_id=null,assistant_turn_completion_requested_at=null,
@@ -3689,7 +4342,7 @@ export class StructuredRuntimeState {
                             return { accepted: false, reason: "expected-next-turn-lease-expired" };
                     }
                     const turnLeaseId = `turn_${randomUUID()}`;
-                    const turnLeaseExpiresAt = normalizedMode(fresh.continuation_mode, "compat") === "completion-driven"
+                    const turnLeaseExpiresAt = ["completion-driven", "resident"].includes(normalizedMode(fresh.continuation_mode, "compat"))
                         ? completionTurnLeaseExpiresAt()
                         : fresh.turn_lease_expires_at;
                     const syntheticOwnerExpiresAt = new Date(now.getTime() + SYNTHETIC_WORK_OWNER_LEASE_MS).toISOString();
@@ -3877,9 +4530,11 @@ export class StructuredRuntimeState {
                 const turnLeaseExpiresAt = sameTerminalManualRound && existing.turn_lease_expires_at
                     ? existing.turn_lease_expires_at
                     : completionTurnLeaseExpiresAt();
+                const reactivatedEvidence = evidenceForFreshWorkset(parseJson(existing.evidence_json, {}));
                 this.database.sqlite.prepare(`
                   update continuation_tasks set state='RUNNING', terminal_reason=null, waiting_reason=null,
                     continuation_pending=0, watch_process_handles_json='[]',
+                    deadline_at=null,evidence_json=?,
                     delivery_work_baseline_count=coalesce(substantive_activity_count,0),
                     delivery_ack_started_at=null, delivery_ack_retry_count=0, delivery_ack_retry_after_at=null,
                     turn_started_at=?, turn_lease_id=?, turn_lease_expires_at=?,
@@ -3891,7 +4546,8 @@ export class StructuredRuntimeState {
                     stall_state='ACTIVE', stall_suspected_at=null, stall_probe_count=0,
                     stall_last_probe_at=null, stall_armed_at=null, stall_evidence=null,
                     updated_at=? where id=?
-                `).run(turnStartedAt, turnLeaseId, turnLeaseExpiresAt, nowIso, nowIso, nowIso, existing.id);
+                `).run(JSON.stringify(reactivatedEvidence), turnStartedAt, turnLeaseId, turnLeaseExpiresAt,
+                    nowIso, nowIso, nowIso, existing.id);
                 existing = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(existing.id);
                 // Do not allocate the reactivated Workset yet. This same begin
                 // call may carry the new manual-round objective/milestones, and
@@ -3963,13 +4619,21 @@ export class StructuredRuntimeState {
                     const objective = String(input.objective ?? existing.objective).trim() || existing.objective;
                     const requestedWallClockMinutes = normalizeWallClockMinutes(input.wallClockMinutes);
                     const requestedDeadlineAt = requestedWallClockMinutes === undefined
-                        ? existing.deadline_at
+                        ? (replaceActiveMilestones ? null : existing.deadline_at)
                         : requestedWallClockMinutes === 0
                             ? null
                             : new Date(now.getTime() + requestedWallClockMinutes * 60_000).toISOString();
-                    const deadlineAt = existing.deadline_at && requestedDeadlineAt
+                    const deadlineAt = replaceActiveMilestones
+                        ? requestedDeadlineAt
+                        : existing.deadline_at && requestedDeadlineAt
                         ? new Date(Math.max(Date.parse(existing.deadline_at), Date.parse(requestedDeadlineAt))).toISOString()
                         : requestedDeadlineAt === null ? null : requestedDeadlineAt ?? existing.deadline_at;
+                    const existingEvidence = parseJson(existing.evidence_json, {});
+                    const suppliedEvidence = input.evidence && typeof input.evidence === 'object'
+                        ? input.evidence : undefined;
+                    const nextEvidence = replaceActiveMilestones
+                        ? { ...evidenceForFreshWorkset(existingEvidence), ...(suppliedEvidence ?? {}) }
+                        : suppliedEvidence ? { ...existingEvidence, ...suppliedEvidence } : existingEvidence;
                     const currentMode = normalizedMode(existing.continuation_mode, "compat");
                     const requestedMode = input.continuationMode === undefined
                         ? (currentMode === "compat" ? "completion-driven" : currentMode)
@@ -3977,7 +4641,7 @@ export class StructuredRuntimeState {
                     const taskSource = existing.auto_created ? "model-refined" : (existing.task_source || "explicit-anchor");
                     const sourceTool = String(input.sourceTool ?? "continuation_anchor").trim().slice(0, 120) || "continuation_anchor";
                     const turnLeaseId = existing.turn_lease_id || `turn_${randomUUID()}`;
-                    const turnLeaseExpiresAt = requestedMode === "completion-driven"
+                    const turnLeaseExpiresAt = ["completion-driven", "resident"].includes(requestedMode)
                         ? completionTurnLeaseExpiresAt()
                         : existing.turn_lease_expires_at;
                     const maxContinuations = input.maxContinuations === undefined
@@ -3986,21 +4650,23 @@ export class StructuredRuntimeState {
                     this.database.sqlite.prepare(`
                       update continuation_tasks set objective=?, required_milestones_json=?, completed_milestones_json=?,
                         continuation_mode=?, max_continuations=?, max_no_progress=?, max_same_failure=?, deadline_at=?,
+                        evidence_json=?,
                         task_source=?, source_tool=?, contract_version=?, turn_lease_id=?, turn_lease_expires_at=?,
                         workspace_id=coalesce(?,workspace_id),
                         progress_fingerprint=?,failure_fingerprint=?,no_progress_count=?,same_failure_count=?,
                         last_model_activity_at=?, last_activity_at=?,
-                        stall_state=case when ?='completion-driven' then 'ACTIVE' else stall_state end,
-                        stall_suspected_at=case when ?='completion-driven' then null else stall_suspected_at end,
-                        stall_probe_count=case when ?='completion-driven' then 0 else stall_probe_count end,
-                        stall_last_probe_at=case when ?='completion-driven' then null else stall_last_probe_at end,
-                        stall_armed_at=case when ?='completion-driven' then null else stall_armed_at end,
-                        stall_evidence=case when ?='completion-driven' then null else stall_evidence end,
+                        stall_state=case when ? in ('completion-driven','resident') then 'ACTIVE' else stall_state end,
+                        stall_suspected_at=case when ? in ('completion-driven','resident') then null else stall_suspected_at end,
+                        stall_probe_count=case when ? in ('completion-driven','resident') then 0 else stall_probe_count end,
+                        stall_last_probe_at=case when ? in ('completion-driven','resident') then null else stall_last_probe_at end,
+                        stall_armed_at=case when ? in ('completion-driven','resident') then null else stall_armed_at end,
+                        stall_evidence=case when ? in ('completion-driven','resident') then null else stall_evidence end,
                         updated_at=? where id=?
                     `).run(objective, JSON.stringify(nextRequired), JSON.stringify(nextCompleted), requestedMode,
                         maxContinuations,
                         Math.max(1, Math.min(Number(input.maxNoProgress ?? existing.max_no_progress), 20)),
                         Math.max(1, Math.min(Number(input.maxSameFailure ?? existing.max_same_failure), 20)), deadlineAt,
+                        JSON.stringify(nextEvidence),
                         taskSource, sourceTool, Math.max(Number(existing.contract_version || 0), TASK_CONTRACT_VERSION),
                         turnLeaseId, turnLeaseExpiresAt, input.workspaceId ?? null,
                         replaceActiveMilestones ? null : existing.progress_fingerprint,
@@ -4047,7 +4713,7 @@ export class StructuredRuntimeState {
             const taskSource = action === "begin-auto" ? "auto-conversation" : "explicit-anchor";
             const sourceTool = String(input.sourceTool ?? (action === "begin-auto" ? "compatibility-fallback" : "continuation_anchor")).trim().slice(0, 120);
             const turnLeaseId = `turn_${randomUUID()}`;
-            const turnLeaseExpiresAt = mode === "completion-driven" ? completionTurnLeaseExpiresAt() : null;
+            const turnLeaseExpiresAt = ["completion-driven", "resident"].includes(mode) ? completionTurnLeaseExpiresAt() : null;
             this.database.sqlite.prepare(`
               insert into continuation_tasks (
                 id, conversation_scope_id, workspace_id, objective, state, continuation_mode, required_milestones_json,
@@ -4140,9 +4806,47 @@ export class StructuredRuntimeState {
         // other checkpoint keeps its ordinary persistence semantics.
         const checkpointCompletionIntent = action === "checkpoint"
             && String(input.note ?? "").trim() === "atcc-turn-complete";
+        // User handoff preserves unfinished work without authorizing another
+        // Host turn. The exact checkpoint note supports cached tool schemas.
+        const awaitUserIntent = (action === "turn-complete" && input.completionDisposition === "await-user")
+            || (action === "checkpoint" && String(input.note ?? "").trim() === "atcc-await-user");
+        if (awaitUserIntent) {
+            if (input.coordinatorInstanceId)
+                return { accepted: false, reason: "turn-complete-model-only", task: rowToTask(row) };
+            if (terminalStates.has(row.state) || row.state === "PAUSED_BY_USER")
+                return { accepted: false, reason: "assistant-turn-not-running", task: rowToTask(row) };
+            this.database.sqlite.transaction(() => {
+                this.database.sqlite.prepare(`
+                  update continuation_tasks set state='WAITING_EXTERNAL',
+                    waiting_reason='Awaiting explicit user input; automatic continuation disabled.',
+                    continuation_pending=0,turn_lease_expires_at=null,
+                    assistant_turn_state='COMPLETED',assistant_turn_completion_lease_id=turn_lease_id,
+                    assistant_turn_completed_at=?,assistant_turn_completion_requested_at=null,
+                    assistant_turn_completion_source='model-await-user',assistant_turn_completion_note=?,
+                    superseded_delivery_token=coalesce(delivery_token,superseded_delivery_token),
+                    delivery_token=null,delivery_owner='manual',delivery_owner_expires_at=null,
+                    delivery_ack_started_at=null,delivery_ack_retry_after_at=null,
+                    stall_state='ACTIVE',stall_armed_at=null,stall_evidence='await-user',updated_at=?
+                  where id=?
+                `).run(nowIso, String(input.note ?? "await-user").slice(0, 1000), nowIso, taskId);
+                this.database.sqlite.prepare(`
+                  update continuation_generations set state='SUPERSEDED',closed_at=?,
+                    failure_reason='explicit-user-handoff',updated_at=?
+                  where workset_id in (select id from continuation_worksets where legacy_task_id=?)
+                    and state not in ('CLOSED','SUPERSEDED','NO_WORK')
+                `).run(nowIso, nowIso, taskId);
+                this.syncContinuationArchitectureForLegacyTask(taskId);
+                this.database.sqlite.prepare("update continuation_worksets set continuation_due_at=null where legacy_task_id=?")
+                    .run(taskId);
+            })();
+            const task = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId));
+            return { accepted: true, reason: "awaiting-user", task, ...continuationDirective(task) };
+        }
         if (action === "turn-complete" || checkpointCompletionIntent) {
             const mode = normalizedMode(row.continuation_mode, "compat");
-            if (mode !== "completion-driven") {
+            const preCutoffHandoff = preCutoffHandoffForTask(rowToTask(row));
+            const timeoutRecoveryPrehandoff = mode === "timeout-recovery" && preCutoffHandoff.required;
+            if (!allowsSignedModelCompletion(row) && !timeoutRecoveryPrehandoff) {
                 return { task: rowToTask(row), accepted: false, reason: "completion-driven-mode-required" };
             }
             if (row.state !== "RUNNING") {
@@ -4195,8 +4899,31 @@ export class StructuredRuntimeState {
                     ...continuationDirective(rowToTask(row)),
                 };
             }
-            const completionNote = checkpointCompletionIntent
-                ? "atcc-turn-complete (cached-schema compatibility)"
+            // A synthetic continuation is not a user-authored stage boundary.
+            // Once the Host has spent a separate user-role turn to resume an
+            // unfinished Task Contract, the resumed model must keep advancing
+            // runnable milestones until the milestone set is complete, becomes
+            // explicitly non-runnable via waitingExternal/pause/cancel/fail, or
+            // the Host truncates the turn. The four-operation rule above is only
+            // an anti-idle floor; reaching it must never unlock a voluntary
+            // incomplete-stage yield for synthetic ownership.
+            if (owner === "synthetic" && incomplete && !preCutoffHandoff.required) {
+                const remainingMilestones = required.filter((milestone) => !completed.has(milestone));
+                const task = rowToTask(row);
+                return {
+                    task,
+                    accepted: false,
+                    reason: "synthetic-turn-runnable-milestones-remain",
+                    substantiveWorkDelta: workDelta,
+                    minimumSubstantiveWorkDelta: minimumWorkDelta,
+                    remainingMilestones,
+                    ...continuationDirective(task),
+                };
+            }
+            const completionNote = preCutoffHandoff.required
+                ? "learned-host-cutoff-prehandoff"
+                : checkpointCompletionIntent
+                    ? "atcc-turn-complete (cached-schema compatibility)"
                 : String(input.note ?? "normal-stage-complete").trim().slice(0, 1000)
                     || "normal-stage-complete";
             this.database.sqlite.prepare(`
@@ -4207,10 +4934,14 @@ export class StructuredRuntimeState {
                 assistant_turn_completion_source='model-stage-complete-intent',
                 assistant_turn_completion_note=?,
                 stall_state='ACTIVE',stall_armed_at=null,
-                stall_evidence='atcc-awaiting-model-completion-handoff-grace',updated_at=?
+                stall_evidence=?,updated_at=?
               where id=? and state='RUNNING' and turn_lease_id=?
                 and assistant_turn_state in ('GENERATING','UNKNOWN')
-            `).run(owner, nowIso, completionNote, nowIso, taskId, turnLeaseId);
+            `).run(owner, nowIso, completionNote,
+                preCutoffHandoff.required
+                    ? 'learned-host-cutoff-prehandoff-awaiting-handoff-grace'
+                    : 'atcc-awaiting-model-completion-handoff-grace',
+                nowIso, taskId, turnLeaseId);
             // recoverCanonicalConversationTaskProjection() may have accepted
             // required/completed milestone hints from this turn-complete call.
             // Persist that canonical delta into the active Workset before the
@@ -4284,7 +5015,7 @@ export class StructuredRuntimeState {
             const incomplete = required.length > 0 && required.some((milestone) => !completed.has(milestone));
             const leaseExpiresAt = row.turn_lease_expires_at ? Date.parse(row.turn_lease_expires_at) : NaN;
             const leaseExpired = verifiedAnchorHeartbeat
-                && mode === "completion-driven" && row.state === "RUNNING" && incomplete
+                && allowsSignedModelCompletion(row) && row.state === "RUNNING" && incomplete
                 && Number.isFinite(leaseExpiresAt) && now.getTime() >= leaseExpiresAt;
             let stallState = String(row.stall_state || "ACTIVE");
             let stallSuspectedAt = row.stall_suspected_at ?? null;
@@ -4340,7 +5071,7 @@ export class StructuredRuntimeState {
                 && input.senderTimeoutCapabilityVerified === true
                 && Boolean(currentTurnLeaseId)
                 && String(input.expectedTurnLeaseId ?? "").trim() === currentTurnLeaseId;
-            if (["completion-driven", "timeout-recovery"].includes(mode) && ["timeout", "teardown"].includes(hostSignal)
+            if (supportsAssistantTurnRecovery(mode) && ["timeout", "teardown"].includes(hostSignal)
                 && !authoritativeLifecycleCoordinator && !exactTurnSenderTimeout) {
                 // A model can call continuation_task too, so a lifecycle signal
                 // without the verified current Workspace App coordinator is not
@@ -4429,13 +5160,13 @@ export class StructuredRuntimeState {
                     JSON.stringify(cutoffSamples), cutoffEpoch, cutoffRegimeChangedAt, nowIso, nowIso);
             }
             const completionIntentMatchesCurrentTurn = hostSignal === "teardown"
-                && mode === "completion-driven"
+                && allowsSignedModelCompletion(row)
                 && row.state === "RUNNING"
                 && String(row.assistant_turn_state || "") === "COMPLETION_REQUESTED"
                 && Boolean(currentTurnLeaseId)
                 && String(row.assistant_turn_completion_lease_id || "") === currentTurnLeaseId;
             const explicitTimeoutEndsCurrentTurn = hostSignal === "timeout"
-                && ["completion-driven", "timeout-recovery"].includes(mode)
+                && supportsAssistantTurnRecovery(mode)
                 && row.state === "RUNNING"
                 && Boolean(currentTurnLeaseId);
             const assistantTurnEnded = explicitTimeoutEndsCurrentTurn || completionIntentMatchesCurrentTurn;
@@ -4632,26 +5363,21 @@ export class StructuredRuntimeState {
             if (normalizedMode(row.continuation_mode, "compat") !== "resident") {
                 return { task: rowToTask(row), accepted: false, reason: "resident-mode-required" };
             }
+            if (!["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(row.state)) {
+                return { task: rowToTask(row), accepted: false, reason: "process-wake-does-not-end-model-turn" };
+            }
             this.database.sqlite.prepare(`
               update continuation_tasks set state='RUNNING', waiting_reason=null,
-                continuation_pending=case when continuation_pending in (1,4) then continuation_pending else 2 end,
-                turn_started_at=?, last_activity_at=?, updated_at=? where id=?
-            `).run(nowIso, nowIso, nowIso, taskId);
+                continuation_pending=case when continuation_pending in (1,3,4,5) then continuation_pending else 2 end,
+                last_activity_at=?, updated_at=? where id=?
+            `).run(nowIso, nowIso, taskId);
+            this.syncContinuationArchitectureForLegacyTask(taskId);
+            this.database.sqlite.prepare("update continuation_worksets set continuation_due_at=?,updated_at=? where legacy_task_id=? and state in ('RUNNING','SUSPECTED_STALL')")
+                .run(nowIso, nowIso, taskId);
             return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true };
         }
         if (action === "stage-complete") {
-            if (row.state === "PAUSED_BY_USER") {
-                return { task: rowToTask(row), accepted: false, reason: "task-paused-by-user" };
-            }
-            if (normalizedMode(row.continuation_mode, "compat") !== "resident") {
-                return { task: rowToTask(row), accepted: false, reason: "resident-mode-required" };
-            }
-            this.database.sqlite.prepare(`
-              update continuation_tasks set state='RUNNING', waiting_reason='Resident stage completed; next turn requested.',
-                continuation_pending=case when continuation_pending in (1,4,5) then continuation_pending else 2 end,
-                last_activity_at=?, updated_at=? where id=?
-            `).run(nowIso, nowIso, taskId);
-            return { task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)), accepted: true, reason: "resident-stage-complete" };
+            return this.continuationTask({ ...input, action: "turn-complete" });
         }
         if (action === "checkpoint") {
             const requiredBefore = parseJson(row.required_milestones_json, []);
@@ -4718,7 +5444,17 @@ export class StructuredRuntimeState {
             const fulfillsSyntheticResume = realToolAfterSyntheticAck && materialCheckpoint && syntheticTurnMayYield;
             let terminalReason = null;
             let progressWarning = null;
-            const completionDriven = normalizedMode(row.continuation_mode, "compat") === "completion-driven";
+            const continuationMode = normalizedMode(row.continuation_mode, "compat");
+            const completionDriven = continuationMode === "completion-driven" || continuationMode === "resident";
+            // timeout-recovery differs only in how an unfinished Host turn is
+            // authorized to resume. Once every required milestone is durably
+            // satisfied, it has the same terminal business semantics as a
+            // completion-driven task. Keeping a 5/5 timeout-recovery task in
+            // RUNNING leaves a stale control-plane object/card even though the
+            // Task Contract itself reports taskIncomplete=false. Resident mode
+            // remains excluded because a resident stage can finish while the
+            // long-lived monitor/task intentionally stays active.
+            const autoSealOnCompletedCheckpoint = ["completion-driven", "timeout-recovery"].includes(continuationMode);
             if (!pausedByUser && noProgress >= row.max_no_progress && !input.waitingExternal) {
                 if (row.owner_locked || completionDriven) {
                     state = "RUNNING";
@@ -4748,7 +5484,7 @@ export class StructuredRuntimeState {
             const completionEvidencePresent = hasCompletionEvidence(evidence);
             const canonicalCompletionSurfaceReady = !isCanonicalConversationScope(row.conversation_scope_id)
                 || Boolean(row.anchor_mount_verified_at);
-            const checkpointCanSealCompletion = completionDriven
+            const checkpointCanSealCompletion = autoSealOnCompletedCheckpoint
                 && state === "RUNNING"
                 && requiredMilestones.length > 0
                 && remainingAfterCheckpoint.length === 0
@@ -4765,7 +5501,7 @@ export class StructuredRuntimeState {
                 terminalReason = "completed";
                 progressWarning = null;
             }
-            const checkpointLeaseExpiresAt = normalizedMode(row.continuation_mode, "compat") === "completion-driven" && state === "RUNNING"
+            const checkpointLeaseExpiresAt = ["completion-driven", "resident"].includes(normalizedMode(row.continuation_mode, "compat")) && state === "RUNNING"
                 ? completionTurnLeaseExpiresAt()
                 : row.turn_lease_expires_at;
             this.database.sqlite.prepare(`
@@ -4778,12 +5514,12 @@ export class StructuredRuntimeState {
                 delivery_owner_expires_at=case when ? then null else delivery_owner_expires_at end,
                 delivery_ack_started_at=case when ? then null else delivery_ack_started_at end,
                 delivery_work_baseline_count=case when ? then 0 else delivery_work_baseline_count end,
-                stall_state=case when ?='RUNNING' and continuation_mode='completion-driven' then 'ACTIVE' else stall_state end,
-                stall_suspected_at=case when ?='RUNNING' and continuation_mode='completion-driven' then null else stall_suspected_at end,
-                stall_probe_count=case when ?='RUNNING' and continuation_mode='completion-driven' then 0 else stall_probe_count end,
-                stall_last_probe_at=case when ?='RUNNING' and continuation_mode='completion-driven' then null else stall_last_probe_at end,
-                stall_armed_at=case when ?='RUNNING' and continuation_mode='completion-driven' then null else stall_armed_at end,
-                stall_evidence=case when ?='RUNNING' and continuation_mode='completion-driven' then null else stall_evidence end,
+                stall_state=case when ?='RUNNING' and continuation_mode in ('completion-driven','resident') then 'ACTIVE' else stall_state end,
+                stall_suspected_at=case when ?='RUNNING' and continuation_mode in ('completion-driven','resident') then null else stall_suspected_at end,
+                stall_probe_count=case when ?='RUNNING' and continuation_mode in ('completion-driven','resident') then 0 else stall_probe_count end,
+                stall_last_probe_at=case when ?='RUNNING' and continuation_mode in ('completion-driven','resident') then null else stall_last_probe_at end,
+                stall_armed_at=case when ?='RUNNING' and continuation_mode in ('completion-driven','resident') then null else stall_armed_at end,
+                stall_evidence=case when ?='RUNNING' and continuation_mode in ('completion-driven','resident') then null else stall_evidence end,
                 updated_at=?
               where id=?
             `).run(state, JSON.stringify(requiredMilestones), JSON.stringify([...completed]), JSON.stringify(evidence), progress || null, failure || null, noProgress, sameFailure,
@@ -4796,6 +5532,7 @@ export class StructuredRuntimeState {
                 state, state, state, state, state, state, nowIso, taskId);
             if (terminalStates.has(state))
                 this.closeTerminalContinuationArtifacts(taskId, terminalReason || state, nowIso);
+            if (input.waitingExternal) this.recordContinuationExternalWait(taskId, input);
             this.syncContinuationArchitectureForLegacyTask(taskId);
             let refreshed = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
             if (syntheticMilestoneRevision && !terminalStates.has(state)) {
@@ -4832,6 +5569,7 @@ export class StructuredRuntimeState {
             this.database.sqlite.prepare("update continuation_tasks set state=?, waiting_reason=?, continuation_pending=0, turn_lease_expires_at=null, last_model_activity_at=?, last_activity_at=?, updated_at=? where id=?")
                 .run(waitingForSupervisorAck ? "WAITING_SUPERVISOR" : "WAITING_EXTERNAL",
                 String(input.note ?? "Waiting for an external condition."), nowIso, nowIso, nowIso, taskId);
+            this.recordContinuationExternalWait(taskId, input);
             this.syncContinuationArchitectureForLegacyTask(taskId);
             const task = rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId));
             return {
@@ -4842,6 +5580,8 @@ export class StructuredRuntimeState {
             };
         }
         if (action === "resume") {
+            if (row.assistant_turn_completion_source === "model-await-user" && input.coordinatorInstanceId)
+                return { accepted: false, reason: "explicit-user-input-required", task: rowToTask(row), ...continuationDirective(rowToTask(row)) };
             if (row.state === "PAUSED_BY_USER") {
                 return { task: rowToTask(row), accepted: false, reason: "task-paused-by-user" };
             }
@@ -4863,7 +5603,7 @@ export class StructuredRuntimeState {
                 };
             }
             const turnLeaseId = `turn_${randomUUID()}`;
-            const turnLeaseExpiresAt = normalizedMode(row.continuation_mode, "compat") === "completion-driven"
+            const turnLeaseExpiresAt = ["completion-driven", "resident"].includes(normalizedMode(row.continuation_mode, "compat"))
                 ? completionTurnLeaseExpiresAt()
                 : row.turn_lease_expires_at;
             this.database.sqlite.prepare(`
@@ -4980,25 +5720,31 @@ export class StructuredRuntimeState {
                 if (!current || terminalStates.has(current.state)) return { accepted: false, reason: "task-terminal", task: rowToTask(current) };
                 if (current.state === "PAUSED_BY_USER") return { accepted: false, reason: "task-paused-by-user", task: rowToTask(current) };
                 if (current.state === "WAITING_EXTERNAL") return { accepted: false, reason: "waiting-external", task: rowToTask(current) };
-                // The architecture generation row is authoritative once a
-                // delivery token has been minted by continuation_sender.  An
-                // already-open pre-generation Workspace App may still call the
-                // legacy continuation_task claim path after a live upgrade.
-                // Letting that compatibility path consume pending=4/5 mutates
-                // only continuation_tasks and tears the delivery receipt away
-                // from the still-DELIVERED generation.  Fail closed instead;
-                // the current app-only sender CAS must reclaim/release the same
-                // generation and token atomically.
-                const generationBackedDelivery = current.delivery_token
-                    ? this.database.sqlite.prepare(`
-                        select g.state,g.generation,g.delivery_token
-                        from continuation_generations g
-                        join continuation_worksets w on w.id=g.workset_id
-                        where g.delivery_token=? and w.legacy_task_id=?
-                        order by g.generation desc limit 1
-                      `).get(String(current.delivery_token), taskId)
-                    : undefined;
-                if (generationBackedDelivery) {
+                // Generation CAS becomes the sole delivery authority when a
+                // modern wake/end transition is explicitly armed, or once a
+                // live synthetic generation exists.  Do not use workset
+                // continuation_due_at as this fence: SUSPECTED_STALL telemetry
+                // may carry a due timestamp even though silence is deliberately
+                // non-authorizing.  The explicit task markers below close the
+                // real wake/end -> supervisor-sweep race without converting
+                // quiet model activity into continuation permission.
+                const liveSyntheticGeneration = this.database.sqlite.prepare(`
+                    select g.id
+                    from continuation_conversation_cards c
+                    join continuation_worksets w on w.id=c.active_workset_id
+                    join continuation_generations g on g.workset_id=w.id
+                    where c.conversation_scope_id=? and w.legacy_task_id=?
+                      and g.owner_type='synthetic'
+                      and g.state in ('READY','CLAIMED','DELIVERING','DELIVERED','TURN_ACKED','WORK_REQUIRED')
+                    limit 1
+                  `).get(String(current.conversation_scope_id || ""), taskId);
+                const exactTurnEndReserved = ["COMPLETION_REQUESTED", "COMPLETED", "TIMED_OUT"].includes(String(current.assistant_turn_state || ""))
+                    && Boolean(current.turn_lease_id)
+                    && String(current.assistant_turn_completion_lease_id || "") === String(current.turn_lease_id);
+                const generationSenderReserved = Number(current.continuation_pending || 0) === 2
+                    || exactTurnEndReserved
+                    || Boolean(liveSyntheticGeneration?.id);
+                if (generationSenderReserved) {
                     return {
                         accepted: false,
                         reason: "generation-sender-required",
@@ -5015,7 +5761,7 @@ export class StructuredRuntimeState {
                 let pendingState = Number(current.continuation_pending || 0);
                 const wakePending = pendingState === 2 || pendingState === 3 || pendingState === 4;
                 let deliveryAckRetryAuthorized = false;
-                if (wakePending && normalizedMode(current.continuation_mode, "compat") !== "resident") {
+                if (wakePending && !supportsAssistantTurnRecovery(normalizedMode(current.continuation_mode, "compat"))) {
                     this.database.sqlite.prepare("update continuation_tasks set continuation_pending=0, updated_at=? where id=?").run(nowIso, taskId);
                     return { accepted: false, reason: "resident-mode-required", task: rowToTask(this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId)) };
                 }
@@ -5055,7 +5801,7 @@ export class StructuredRuntimeState {
                     current.continuation_pending = pendingState;
                 }
                 const currentMode = normalizedMode(current.continuation_mode, "compat");
-                if (currentMode === "completion-driven"
+                if (allowsSignedModelCompletion(current)
                     && String(current.assistant_turn_state || "") === "COMPLETION_REQUESTED") {
                     this.promoteMatureAssistantCompletionIntent(current.id, now.getTime());
                     current = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
@@ -5069,7 +5815,7 @@ export class StructuredRuntimeState {
                 const assistantTurnState = String(current.assistant_turn_state || "UNKNOWN");
                 const assistantTurnLeaseId = String(current.assistant_turn_completion_lease_id || "");
                 const currentTurnLeaseId = String(current.turn_lease_id || "");
-                const assistantTurnEnded = (currentMode === "completion-driven"
+                const assistantTurnEnded = (allowsSignedModelCompletion(current)
                     ? ["COMPLETED", "TIMED_OUT"].includes(assistantTurnState)
                     : currentMode === "timeout-recovery" && assistantTurnState === "TIMED_OUT")
                     && current.state === "RUNNING"
@@ -5077,7 +5823,7 @@ export class StructuredRuntimeState {
                     && Boolean(currentTurnLeaseId)
                     && assistantTurnLeaseId === currentTurnLeaseId
                     && String(current.stall_state || "ACTIVE") === "CONTINUATION_ARMED";
-                if (!wakePending && !deliveryAckRetryAuthorized && !manualRecovery && !assistantTurnEnded) {
+                if (!deliveryAckRetryAuthorized && !manualRecovery && !assistantTurnEnded) {
                     return { accepted: false, reason: "continuation-trigger-not-authorized", task: rowToTask(current) };
                 }
                 if (!wakePending && !deliveryAckRetryAuthorized && !assistantTurnEnded
@@ -5128,16 +5874,23 @@ export class StructuredRuntimeState {
             return transaction();
         }
         if (action === "release-continuation") {
-            const generationBackedDelivery = row.delivery_token
-                ? this.database.sqlite.prepare(`
-                    select g.state,g.generation,g.delivery_token
-                    from continuation_generations g
-                    join continuation_worksets w on w.id=g.workset_id
-                    where g.delivery_token=? and w.legacy_task_id=?
-                    order by g.generation desc limit 1
-                  `).get(String(row.delivery_token), taskId)
-                : undefined;
-            if (generationBackedDelivery) {
+            const liveSyntheticGeneration = this.database.sqlite.prepare(`
+                select g.id
+                from continuation_conversation_cards c
+                join continuation_worksets w on w.id=c.active_workset_id
+                join continuation_generations g on g.workset_id=w.id
+                where c.conversation_scope_id=? and w.legacy_task_id=?
+                  and g.owner_type='synthetic'
+                  and g.state in ('READY','CLAIMED','DELIVERING','DELIVERED','TURN_ACKED','WORK_REQUIRED')
+                limit 1
+              `).get(String(row.conversation_scope_id || ""), taskId);
+            const exactTurnEndReserved = ["COMPLETION_REQUESTED", "COMPLETED", "TIMED_OUT"].includes(String(row.assistant_turn_state || ""))
+                && Boolean(row.turn_lease_id)
+                && String(row.assistant_turn_completion_lease_id || "") === String(row.turn_lease_id);
+            const generationSenderReserved = Number(row.continuation_pending || 0) === 2
+                || exactTurnEndReserved
+                || Boolean(liveSyntheticGeneration?.id);
+            if (generationSenderReserved) {
                 return {
                     accepted: false,
                     reason: "generation-sender-required",

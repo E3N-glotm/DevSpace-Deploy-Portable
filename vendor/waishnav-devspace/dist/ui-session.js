@@ -31,6 +31,7 @@ export class UiSessionLease {
                 active,
                 reason: active ? undefined : "local UI heartbeat expired",
                 leaseId: value.leaseId,
+                computerUseEnabled: value.computerUseEnabled === true,
                 openedAt: value.openedAt,
                 lastHeartbeatAt: value.lastHeartbeatAt,
                 expiresAt: value.expiresAt,
@@ -49,6 +50,13 @@ export class UiSessionLease {
         const status = this.status();
         if (!status.active) {
             throw new Error(`${capability} is available only while the local DevSpace Portable UI is open (${status.reason ?? "inactive lease"}).`);
+        }
+        return status;
+    }
+    requireComputerUseActive() {
+        const status = this.requireActive("Computer Use");
+        if (status.computerUseEnabled !== true) {
+            throw new Error("Computer Use is disabled in the local DevSpace Portable UI.");
         }
         return status;
     }

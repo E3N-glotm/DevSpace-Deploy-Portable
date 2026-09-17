@@ -69,9 +69,8 @@ const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
-const PORTABLE_VERSION = "1.1.59";
-const PORTABLE_DEV_ITERATION = "dev67";
-const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
+const PORTABLE_VERSION = "1.1.60";
+const PORTABLE_DISPLAY_VERSION = PORTABLE_VERSION;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -643,8 +642,14 @@ function setComputerUse(input) {
   if (config) writeJson(CONFIG_FILE, { ...config, features });
 
   const currentLease = readJson(UI_LEASE_FILE, null);
+  if (currentLease?.leaseId) {
+    const updatedLease = { ...currentLease, computerUseEnabled: enabled };
+    writeJson(UI_LEASE_FILE, updatedLease);
+    restrictAcl(UI_LEASE_FILE);
+  }
   let broker;
   if (!enabled) {
+    cancelComputerUseRequests(currentLease?.leaseId || null, "Computer Use is disabled in the local DevSpace Portable UI.");
     broker = { ...stopComputerUseBroker(), ready: false, running: false, disabled: true, reason: "disabled" };
   } else if (currentLease?.leaseId && Date.parse(String(currentLease.expiresAt || "")) > Date.now()) {
     broker = ensureComputerUseBroker(currentLease);
@@ -669,6 +674,7 @@ function uiLeaseValue(existing = {}) {
     expiresAt: new Date(now.getTime() + UI_LEASE_TTL_MS).toISOString(),
     portableVersion: PORTABLE_VERSION,
     portableDisplayVersion: PORTABLE_DISPLAY_VERSION,
+    computerUseEnabled: computerUseRuntimeEnabled(),
   };
 }
 
@@ -832,6 +838,9 @@ function captureComputerScreen(imageFile) {
 
 function processComputerUseRequests(lease) {
   cleanupComputerUseBroker();
+  if (!lease?.computerUseEnabled || !computerUseRuntimeEnabled()) {
+    return { processed: 0, failed: 0, disabled: true, error: "computer-use-disabled" };
+  }
   if (!fs.existsSync(COMPUTER_USE_HELPER)) return { processed: 0, failed: 0, error: "input helper missing" };
   fs.mkdirSync(COMPUTER_USE_REQUESTS, { recursive: true });
   fs.mkdirSync(COMPUTER_USE_RESPONSES, { recursive: true });
@@ -895,7 +904,7 @@ function processComputerUseRequests(lease) {
   return { processed, failed };
 }
 
-function cancelComputerUseRequests(leaseId = null) {
+function cancelComputerUseRequests(leaseId = null, reason = "The local DevSpace Portable UI was closed.") {
   if (!fs.existsSync(COMPUTER_USE_REQUESTS)) return 0;
   let cancelled = 0;
   for (const name of fs.readdirSync(COMPUTER_USE_REQUESTS).filter((entry) => entry.endsWith(".json"))) {
@@ -903,7 +912,7 @@ function cancelComputerUseRequests(leaseId = null) {
     try {
       const request = readJson(file, {});
       if (leaseId && request.leaseId !== leaseId) continue;
-      writeComputerUseResponse(request.requestId, { success: false, error: "The local DevSpace Portable UI was closed." });
+      writeComputerUseResponse(request.requestId, { success: false, error: reason });
       fs.rmSync(file, { force: true });
       cancelled += 1;
     } catch {}
@@ -1098,11 +1107,25 @@ function uiLeaseStatus() {
     ...current,
     active,
     reason: active ? null : "heartbeat expired",
-    computerUseEnabled: computerUseRuntimeEnabled(),
-    broker: computerUseRuntimeEnabled()
+    computerUseEnabled: computerUseRuntimeEnabled() && current.computerUseEnabled === true,
+    broker: computerUseRuntimeEnabled() && current.computerUseEnabled === true
       ? computerUseBrokerStatus(current.leaseId)
       : { ready: false, running: false, disabled: true, reason: "disabled" },
   };
+}
+
+async function uiRuntimePoll(input = {}) {
+  const lease = heartbeatUiLease({ leaseId: input.leaseId });
+  const value = { lease };
+  if (input.dashboard === true) value.dashboard = await dashboardStatus();
+  if (input.continuations === true) {
+    value.continuations = await runContinuationAdmin("list", {
+      includeTerminal: input.includeTerminal === true,
+      includeProvisional: input.includeProvisional === true,
+      limit: input.limit || 300,
+    });
+  }
+  return value;
 }
 
 function xmlEscape(value) {
@@ -3924,6 +3947,8 @@ async function main() {
       stdoutJson(openUiLease());
     } else if (command === "ui-heartbeat") {
       stdoutJson(heartbeatUiLease(await readStdinJson()));
+    } else if (command === "ui-runtime-poll") {
+      stdoutJson(await uiRuntimePoll(await readStdinJson()));
     } else if (command === "ui-close") {
       stdoutJson(closeUiLease(await readStdinJson()));
     } else if (command === "ui-status") {
@@ -4076,7 +4101,7 @@ async function main() {
     } else if (command === "get") {
       writeOutput(getValue(process.argv[3]) + "\n");
     } else {
-      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-stage-force-full update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete oauth-client-list oauth-client-create oauth-client-rotate-secret oauth-client-delete remote-agent-list remote-agent-create-enrollment remote-agent-revoke remote-agent-delete log-paths portable-processes get\n");
+      writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-runtime-poll ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-stage-force-full update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete oauth-client-list oauth-client-create oauth-client-rotate-secret oauth-client-delete remote-agent-list remote-agent-create-enrollment remote-agent-revoke remote-agent-delete log-paths portable-processes get\n");
     }
   } catch (error) {
     fail(error && error.stack ? error.stack : error);
@@ -4086,6 +4111,7 @@ async function main() {
 module.exports = {
   COMPUTER_USE_BROKER_FILE,
   UI_LEASE_FILE,
+  computerUseRuntimeEnabled,
   processComputerUseRequests,
   readJson,
   uiLeaseStatus,

@@ -92,6 +92,12 @@ Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-incremental-
 Write-Host "==> setup/test-incremental-chain.py"
 Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-incremental-chain.py") -FailureMessage "Test failed: setup/test-incremental-chain.py"
 
+Write-Host "==> setup/test-legacy-bootstrap-apply.py"
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-legacy-bootstrap-apply.py") -FailureMessage "Test failed: setup/test-legacy-bootstrap-apply.py"
+
+Write-Host "==> setup/test-legacy-bootstrap-policy.py"
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-legacy-bootstrap-policy.py") -FailureMessage "Test failed: setup/test-legacy-bootstrap-policy.py"
+
 Write-Host "==> setup/test-update-manifest-graph.py"
 Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-update-manifest-graph.py") -FailureMessage "Test failed: setup/test-update-manifest-graph.py"
 
@@ -131,6 +137,7 @@ $Tests = @(
     "setup/test-continuation-wire-contract.mjs",
     "setup/test-continuation-supervisor-scheduler.mjs",
     "setup/test-assistant-turn-completion-contract.mjs",
+    "setup/test-resident-turn-recovery.mjs",
     "setup/test-milestone-card-lifecycle.mjs",
     "setup/test-remote-agent-ssh-rescue.mjs",
     "setup/test-session-capabilities.mjs",

@@ -1,10 +1,10 @@
 const TASK_TOOL = "continuation_task";
 const SENDER_TOOL = "continuation_sender";
 // Increment only when the hidden sender contract changes incompatibly. The
-// server rejects all sender actions from older in-memory iframes, so an App
-// surface loaded before a live Portable upgrade cannot continue delivering
-// continuations using stale semantics.
-const CONTINUATION_SENDER_PROTOCOL_EPOCH = 12;
+// server admits only explicitly compatible epochs from in-memory iframes;
+// every admitted sender still requires current card/turn/generation authority
+// and a final authorize-delivery check before sending a continuation.
+const CONTINUATION_SENDER_PROTOCOL_EPOCH = 13;
 // The server derives this revision from the exact self-contained Workspace App
 // resource bytes and injects it before this module executes. Sender authority
 // is unavailable when it is missing: silently substituting a server-side value
@@ -36,6 +36,13 @@ const DEFAULT_TERMINAL_REFRESH_MS = 60_000;
 // Host model-context updates are advisory. They must never hold a synthetic
 // generation in CLAIMED indefinitely before the authoritative delivery CAS.
 const MODEL_CONTEXT_UPDATE_TIMEOUT_MS = 1_500;
+// While an ACKed synthetic turn is still working, periodically refresh the
+// official Host model-context channel with the unfinished execution contract.
+// This is advisory only: it sends no visible message and changes no ownership.
+// The refresh exists because a long synthetic turn can otherwise drift away
+// from the one-time startup instruction and emit an illegal early final after
+// many successful tool calls.
+const ACTIVE_SYNTHETIC_CONTEXT_REFRESH_MS = 30_000;
 // ChatGPT's native follow-up bridge can expose a thenable that never settles
 // even after the invocation has crossed the Host boundary. Waiting forever
 // strands an authorized generation in DELIVERING and prevents the durable
@@ -179,7 +186,7 @@ function residentTask(task) {
 }
 
 function completionDrivenTask(task) {
-  return task?.continuationMode === "completion-driven";
+  return ["completion-driven", "resident"].includes(task?.continuationMode);
 }
 
 function hasUnfinishedMilestones(task) {
@@ -313,24 +320,28 @@ function visibleContinuationTrigger(task, deliveryToken) {
     && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(deliveryToken)
     ? deliveryToken
     : "";
+  // Keep the Host-visible synthetic user message as close as possible to the
+  // user's proven-good manual "continue" baseline.  The detailed execution
+  // contract already lives in updateModelContext() and in the first status
+  // response.  Repeating it here made the visible user turn look like a
+  // protocol/status notification and live dev82 evidence showed that such a
+  // turn could collapse into a one-tool/status-only final.  Only the
+  // generation-bound origin capability and mandatory first status handshake
+  // need to stay visible for Hosts that require explicit turn-origin proof.
   return isChinese()
     ? [
-      "@DevSpace MCP 自动续轮：继续未完成任务。",
-      handshakeToken ? `一次性 deliveryToken：${handshakeToken}` : "",
+      "@DevSpace MCP 继续未完成任务。像人工发送“继续”一样直接继续真实工作。",
+      handshakeToken ? `deliveryToken：${handshakeToken}` : "",
       handshakeToken
-        ? "首个 DevSpace 调用必须是 continuation_task action=status，原样携带该 deliveryToken，且不要设置 manualTakeover。"
-        : "首个 DevSpace 调用必须是 continuation_task action=status，且不要设置 manualTakeover。",
-      "如果首个 status 返回 staleSyntheticTurn=true、suppressVisibleFinal=true、superseded=true，或 reason=synthetic-continuation-superseded，说明这是已被人工输入取代的 Host 延迟消息：立即静默结束，不执行任务、不再调用 DevSpace，也不要输出状态或解释。",
-      "否则立即以 status 返回的 Task Contract 为准继续真实工作；自动续轮与手动“继续”使用相同的完整执行预算。ACK 后持续推进可运行里程碑，未完成阶段至少完成 4 次实质 DevSpace 操作后才允许主动签署 turn-complete；不要只做状态检查、不要只回复进度、不要因单个命令失败或只完成一个里程碑就停止。",
+        ? "首个 DevSpace 调用：continuation_task action=status，携带该 deliveryToken，不设置 manualTakeover；随后立即按 status 返回的任务继续执行。"
+        : "首个 DevSpace 调用：continuation_task action=status，不设置 manualTakeover；随后立即按 status 返回的任务继续执行。",
     ].filter(Boolean).join("\n")
     : [
-      "@DevSpace MCP automatic continuation: continue the unfinished task.",
-      handshakeToken ? `One-time deliveryToken: ${handshakeToken}` : "",
+      "@DevSpace MCP continue the unfinished task. Continue real work exactly like a manual 'continue'.",
+      handshakeToken ? `deliveryToken: ${handshakeToken}` : "",
       handshakeToken
-        ? "The first DevSpace call must be continuation_task action=status with the exact deliveryToken above and without manualTakeover."
-        : "The first DevSpace call must be continuation_task action=status without manualTakeover.",
-      "If that first status returns staleSyntheticTurn=true, suppressVisibleFinal=true, superseded=true, or reason=synthetic-continuation-superseded, this is a delayed Host message already superseded by a manual turn: terminate silently, perform no work, make no further DevSpace call, and emit no status/explanation.",
-      "Otherwise continue immediately from the Task Contract returned by status. A synthetic turn has the same full execution budget as manual 'continue'; keep advancing runnable milestones. Before voluntarily signing an unfinished turn-complete boundary, perform at least four substantive DevSpace operations after ACK. Do not stop after status/progress-only work, one failed command, or one completed milestone.",
+        ? "First DevSpace call: continuation_task action=status with this deliveryToken and without manualTakeover; then immediately continue the returned task."
+        : "First DevSpace call: continuation_task action=status without manualTakeover; then immediately continue the returned task.",
     ].filter(Boolean).join("\n");
 }
 
@@ -342,6 +353,9 @@ function nextUnresolvedMilestone(task) {
 
 function continuationContext(task, workspaceId, reason) {
   const nextMilestone = nextUnresolvedMilestone(task);
+  const resumeContext = task?.resumeContext && typeof task.resumeContext === "object"
+    ? task.resumeContext
+    : undefined;
   const syntheticWorkMustContinue = task?.syntheticWorkMustContinue === true;
   const continueInSameTurn = task?.continueInSameTurn === true;
   const finalResponseAllowed = task?.finalResponseAllowed !== false;
@@ -354,18 +368,35 @@ function continuationContext(task, workspaceId, reason) {
     `completedMilestones: ${(task?.completedMilestones ?? []).join(" | ") || "none recorded"}`,
     `requiredMilestones: ${(task?.requiredMilestones ?? []).join(" | ") || "none recorded"}`,
     `nextUnresolvedMilestone: ${nextMilestone ?? "none"}`,
+    `resumeExecutionContext: ${resumeContext ? JSON.stringify(resumeContext) : "none recorded"}`,
     `continuationReason: ${reason}`,
     `syntheticWorkMustContinue: ${syntheticWorkMustContinue}`,
     `continueInSameTurn: ${continueInSameTurn}`,
     `finalResponseAllowed: ${finalResponseAllowed}`,
+    "If resumeExecutionContext is present, treat it as the authoritative bounded execution handoff for where the prior assistant turn actually stopped. Resume from its latest concrete operation/process/file state. Do not spend a synthetic turn rediscovering the workspace, rereading the same code, or repeating root-cause analysis merely to reconstruct context; re-check only facts that can have become stale or after a real tool failure contradicts the capsule.",
     "Before acting, reconstruct the current durable state from this Task Contract and the latest available DevSpace evidence. Verify which milestones are actually complete, identify the next unresolved runnable milestone, and check relevant failure, race, or regression risks before choosing the next action. Keep that evaluation internal: do not emit a chain-of-thought transcript, and do not substitute a plan/status-only response for execution.",
     "Tool availability is turn-scoped, not conversation authorization. If the resumed turn does not directly expose the DevSpace_MCP tool namespace, do not stop or claim that DevSpace is unavailable. Use the Host's available connector/tool discovery path first; in ChatGPT, call api_tool.list_resources for DevSpace_MCP (query continuation_task is sufficient), then invoke the discovered DevSpace_MCP tools. Only treat DevSpace as unavailable after that discovery path itself actually fails.",
     "Connector discovery and continuation_task status are control-plane setup, not successful resumed work. After the first status, obey its machine-readable continuation directive: if syntheticWorkMustContinue=true, continueInSameTurn=true, or finalResponseAllowed=false, do not produce a final response after discovery/status, one ordinary tool call, or a checkpoint. In that same assistant turn, keep invoking substantive DevSpace tools that actually advance or verify nextUnresolvedMilestone until the runnable milestone set is completed, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A discovery-only/status-only or one-tool-and-final turn is an invalid automatic continuation and must not voluntarily yield.",
     "The Host-visible ui/message that created this resumed turn is the actual user-role work request for this assistant turn, not system-only recovery metadata. The first synthetic turn must start substantive DevSpace work after its control-plane status/discovery setup. Never classify that visible request as 'only a system continuation instruction', merely restate it, or defer real work until a second synthetic continuation.",
-    "Call continuation_task status first. If the visible synthetic user-role request carries a one-time deliveryToken, echo that exact token on this first status call and omit manualTakeover; the runtime consumes it immediately when the turn-origin/ACK handshake succeeds. If no token was supplied, the runtime may compatibly claim a server-owned expected generation when the Host provides equivalent origin binding. Never invent, search for, or reuse a token after the first successful status. Then continue substantive work with the same full Host reasoning budget and sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes across multiple milestones until the current milestone set is complete, genuinely externally blocked, explicitly paused/cancelled, a genuine model-owned stage boundary is reached after sustained work, or the Host truncates the turn. A synthetic resumed turn must perform at least four substantive DevSpace operations after its ACK before it may voluntarily sign an unfinished stage boundary. This four-operation rule only rejects empty or very short handshake-and-final loops; it is not a target duration or permission to stop. Synthetic duration is never a fixed number of minutes or a learned Host-budget percentage. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId and existing process/workspace state. Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged. If and only if a status/checkpoint reports milestoneCardRequired/reanchorRequired because the synthetic checkpoint changed the required milestone set, issue continuation_anchor exactly once for that new generation; otherwise never create a duplicate card.",
-    "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. A failed command/test or a small number of quick tool calls is not a legitimate yield boundary. If runnable milestones remain, keep diagnosing and invoking the required tools in this same turn instead of promising future work. If a genuine incomplete-stage boundary is necessary after sustained work, prefer continuation_task action=turn-complete; if it reports finalResponseAllowed=false, continue substantive work. If the current cached schema does not expose that action, use continuation_task action=checkpoint with note=atcc-turn-complete. Do not voluntarily final while the returned finalResponseAllowed is false.",
+    "During sustained automatic work, emit occasional concise user-visible progress updates so the user can tell that the resumed turn is actively working. These are in-turn progress messages only: do not reveal private chain-of-thought, do not treat a progress update as a final response, and continue substantive DevSpace work immediately afterwards while runnable milestones remain.",
+    "Call continuation_task status first. If the visible synthetic user-role request carries a one-time deliveryToken, echo that exact token on this first status call and omit manualTakeover; the runtime consumes it immediately when the turn-origin/ACK handshake succeeds. If no token was supplied, the runtime may compatibly claim a server-owned expected generation when the Host provides equivalent origin binding. Never invent, search for, or reuse a token after the first successful status. Then continue substantive work with the same full Host reasoning budget and sustained execution semantics as a manual 'continue': keep reading, editing, executing, validating, and polling owned long-running processes across multiple milestones until the current milestone set is complete, genuinely externally blocked, explicitly paused/cancelled, or the Host truncates the turn. A synthetic resumed turn must perform at least four substantive DevSpace operations after its ACK before any model-owned completion control can even be considered, but four operations are only an anti-idle floor and NEVER unlock an unfinished synthetic stage boundary. While any required milestone remains runnable, synthetic turn-complete is intentionally rejected with reason=synthetic-turn-runnable-milestones-remain and the model MUST keep working in the same Host turn. Synthetic duration is never a fixed number of minutes or a learned Host-budget percentage. If work becomes genuinely non-runnable, persist that state with checkpoint waitingExternal=true (or explicit pause/cancel/fail) instead of manufacturing a stage boundary. A checkpoint persists progress but never permits an early final while runnable milestones remain. Reuse the conversation-lifetime taskId and existing process/workspace state. Synthetic continuations reuse the current visible milestone-card generation while the required milestone set is unchanged. If and only if a status/checkpoint reports milestoneCardRequired/reanchorRequired because the synthetic checkpoint changed the required milestone set, issue continuation_anchor exactly once for that new generation; otherwise never create a duplicate card.",
+    "If that first status reports staleSyntheticTurn=true, suppressVisibleFinal=true, superseded=true, or reason=synthetic-continuation-superseded, this Host-delayed synthetic message has already been replaced by a newer manual turn. Stop immediately and silently: perform no substantive work, make no further DevSpace calls, and emit no user-visible status/final.",
+    "Never end an automatically resumed turn with a placeholder/status-only reply such as '继续处理中。', '继续处理。', 'still working', or 'I will continue'. There is no background model execution after a final assistant message. A failed command/test or a small number of quick tool calls is not a legitimate yield boundary. If runnable milestones remain, keep diagnosing and invoking the required tools in this same turn instead of promising future work. Before ANY user-visible final from a synthetic turn, the final DevSpace control call must legally permit that final. If finalResponseAllowed=false or syntheticWorkMustContinue=true, a plain final is forbidden even after four or more substantive operations. If turn-complete is rejected with synthetic-turn-runnable-milestones-remain, continue substantive work instead of answering the user. If the current cached schema does not expose turn-complete, use continuation_task action=checkpoint with note=atcc-turn-complete, which is subject to the same gate. Only all milestones complete, an explicit non-runnable checkpoint/pause/cancel/fail, or a genuine Host truncation may end an unfinished synthetic work window.",
   ];
   return lines.join("\n");
+}
+
+function activeSyntheticExecutionContext(task, workspaceId, reason) {
+  return [
+    continuationContext(task, workspaceId, reason),
+    "",
+    "ACTIVE SYNTHETIC EXECUTION LEASE [CURRENT TURN]",
+    `turnLeaseId: ${task?.turnLeaseId ?? "unknown"}`,
+    `deliveryGeneration: ${Number(task?.deliveryGeneration || 0)}`,
+    `deliveryOwner: ${task?.deliveryOwner ?? "unknown"}`,
+    `nextRunnableMilestone: ${nextUnresolvedMilestone(task) ?? "none"}`,
+    "If deliveryOwner=synthetic-active and a runnable milestone remains, this assistant turn is NOT at a legal final boundary. The next action after each completed tool result is more substantive DevSpace work unless the Task Contract becomes terminal/non-runnable or the Host itself truncates execution. Never replace continued execution with a progress summary or promise to continue later.",
+  ].join("\n");
 }
 
 function renderRecoveryStatus(controller, message, tone = "info", allowManual = false) {
@@ -439,17 +470,12 @@ export function installContinuationCoordinator(app, options = {}) {
       : undefined,
     anchorMountAcked: false,
     anchorSuperseded: false,
-    // A historical visible card may outlive the manual round that created it.
-    // When a newer card generation is issued, collapse only this iframe's UI.
-    // Keep the connected App alive as a sender-only relay so a READY generation
-    // cannot be stranded merely because ChatGPT delays/omits mounting the new
-    // card iframe. Sender bind re-authenticates against the current generation;
-    // this flag never grants mount/ACK authority for the new card.
-    headlessSenderRelay: false,
     senderCapability: undefined,
     ensuringTask: undefined,
     supervisorTimer: undefined,
     wakeSource: undefined,
+    wakeFetchController: undefined,
+    wakeFetchPromise: undefined,
     lifecycleRefreshTimer: undefined,
     lifecycleCleanup: undefined,
     lastHeartbeatAt: 0,
@@ -459,6 +485,9 @@ export function installContinuationCoordinator(app, options = {}) {
     hostProfileId: undefined,
     hostContext: undefined,
     displayModeRequestInFlight: false,
+    lastSyntheticExecutionContextAt: 0,
+    lastSyntheticExecutionContextFingerprint: "",
+    syntheticExecutionContextInFlight: undefined,
     hostTelemetry: {
       openaiKeys: new Set(),
       hostContextKeys: new Set(),
@@ -499,6 +528,7 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   function activeSenderCapability() {
+    if (state.anchorSuperseded) return undefined;
     const authoritativeGeneration = Math.max(0, Number(state.task?.anchorMountGeneration || 0));
     if (state.senderCapability?.taskId === state.task?.id
       && state.senderCapability?.conversationScopeId === state.task?.conversationScopeId
@@ -556,6 +586,37 @@ export function installContinuationCoordinator(app, options = {}) {
     } finally {
       state.displayModeRequestInFlight = false;
     }
+  }
+
+  async function refreshActiveSyntheticExecutionContext(reason = "active synthetic execution") {
+    if (state.disposed || !state.connected || !state.task?.id
+        || state.task?.deliveryOwner !== "synthetic-active"
+        || !hasUnfinishedMilestones(state.task)
+        || terminal(state.task)) return false;
+    const fingerprint = JSON.stringify({
+      taskId: state.task.id,
+      turnLeaseId: state.task.turnLeaseId,
+      deliveryGeneration: Number(state.task.deliveryGeneration || 0),
+      requiredMilestones: state.task.requiredMilestones ?? [],
+      completedMilestones: state.task.completedMilestones ?? [],
+      nextMilestone: nextUnresolvedMilestone(state.task),
+    });
+    const now = Date.now();
+    const changed = fingerprint !== state.lastSyntheticExecutionContextFingerprint;
+    if (!changed && now - state.lastSyntheticExecutionContextAt < ACTIVE_SYNTHETIC_CONTEXT_REFRESH_MS) return false;
+    if (state.syntheticExecutionContextInFlight) return state.syntheticExecutionContextInFlight;
+    state.syntheticExecutionContextInFlight = updateModelContextBestEffort(app, [
+      { type: "text", text: activeSyntheticExecutionContext(state.task, state.workspaceId, reason) },
+    ]).then((accepted) => {
+      if (accepted) {
+        state.lastSyntheticExecutionContextAt = Date.now();
+        state.lastSyntheticExecutionContextFingerprint = fingerprint;
+      }
+      return accepted;
+    }).finally(() => {
+      state.syntheticExecutionContextInFlight = undefined;
+    });
+    return state.syntheticExecutionContextInFlight;
   }
 
   function buildHostProfileId() {
@@ -716,7 +777,9 @@ export function installContinuationCoordinator(app, options = {}) {
         // revalidates protocol epoch, task/conversation identity and the current
         // immutable card generation, so stale/manual-superseded capabilities
         // remain fail-closed.
-        if (!rebindAttempted && outcome?.accepted === false && outcome?.reason === "sender-rebind-required") {
+        if (!rebindAttempted && outcome?.accepted === false
+          && (outcome?.reason === "sender-rebind-required"
+            || (action === "claim" && outcome?.reason === "sender-heartbeat-stale"))) {
           const rebound = await bindSenderTransport().catch(() => undefined);
           if (!rebound?.accepted) return outcome;
           capability = activeSenderCapability();
@@ -734,6 +797,7 @@ export function installContinuationCoordinator(app, options = {}) {
 
   async function bindSenderTransport() {
     if (!state.connected || typeof app.callServerTool !== "function") return undefined;
+    if (state.anchorSuperseded) return { accepted: false, reason: "anchor-superseded" };
     // A freshly connected ordinary Workspace App can enter here before its
     // one-shot toolresult has populated state.task.  Do not classify that
     // pre-hydration state as terminal: the server can authenticate the App's
@@ -817,7 +881,7 @@ export function installContinuationCoordinator(app, options = {}) {
       // a durable READY generation, consume it immediately. Generation claim is
       // atomic, so concurrent sibling Apps safely lose the claim instead of
       // sending duplicate visible continuations.
-      return attemptContinuation(readyReason, { force: true });
+      return attemptContinuation(readyReason, { force: true, skipPrepare: true });
     }
 
     // A Host-accepted message with no model ACK is outcome-uncertain. Its
@@ -842,10 +906,7 @@ export function installContinuationCoordinator(app, options = {}) {
 
   function scheduleAuthoritativeRefresh(reason = "app lifecycle resume") {
     if (state.disposed || terminal(state.task) || !state.task?.id) return;
-    // A superseded visible card is still allowed to refresh as a headless
-    // sender relay. It may temporarily have no current-generation capability;
-    // supervisorTick() will rebind it before any sender claim is attempted.
-    if (!state.anchorSuperseded && !senderTransportAvailable()) return;
+    if (state.anchorSuperseded || !senderTransportAvailable()) return;
     if (state.lifecycleRefreshTimer) return;
     state.lifecycleRefreshTimer = setTimeout(() => {
       state.lifecycleRefreshTimer = undefined;
@@ -854,7 +915,8 @@ export function installContinuationCoordinator(app, options = {}) {
   }
 
   function startLifecycleRefresh() {
-    if (terminal(state.task) || state.lifecycleCleanup || typeof window === "undefined") return;
+    if (state.disposed || state.anchorSuperseded || terminal(state.task)
+        || state.lifecycleCleanup || typeof window === "undefined") return;
     const listeners = [];
     const add = (target, name, handler, options) => {
       target?.addEventListener?.(name, handler, options);
@@ -885,16 +947,22 @@ export function installContinuationCoordinator(app, options = {}) {
   function markAnchorSuperseded(authoritativeGeneration) {
     if (state.anchorSuperseded) return;
     state.anchorSuperseded = true;
-    state.headlessSenderRelay = true;
     state.anchorMountToken = undefined;
     state.anchorMountAcked = false;
-    // Do not stop the supervisor/lifecycle loop. The old *coordinator
-    // authority* is retired, but its already-connected App remains a transport
-    // relay. Keep the immutable historical card visible as a frozen snapshot:
+    state.senderCapability = undefined;
+    // Historical cards are presentation-only. Keeping them alive as hidden
+    // transport workers couples UI lifetime to sender scheduling, and real Host
+    // evidence shows background historical iframes can take >60 s to claim a
+    // READY generation. Retire every transport loop here; current ordinary
+    // Workspace App results inherit the private sender capability instead.
+    stopSupervisor();
+    stopWakeSource();
+    stopLifecycleRefresh();
+    state.hostTelemetry.cleanup?.();
+    state.hostTelemetry.cleanup = undefined;
+    // Keep the immutable historical card visible as a frozen snapshot:
     // clearing document.body leaves ChatGPT's outer widget shell behind as a
     // large blank card, and forcing height=0 races the Host's async size cache.
-    // The dedicated event lets the renderer label the frozen snapshot without
-    // accepting the newer generation's task payload.
     if (typeof document !== "undefined") {
       document.documentElement?.setAttribute?.("data-devspace-anchor-superseded", "true");
       window.dispatchEvent(new CustomEvent("devspace:continuation-superseded", {
@@ -922,8 +990,8 @@ export function installContinuationCoordinator(app, options = {}) {
     // concrete Host tool identity it is not proof that this iframe owns an App
     // sender transport. Real anchor surfaces and ordinary named tool relays do
     // carry that identity; anonymous recovery must remain read-only here.
-    const senderHeartbeatAuthorized = state.headlessSenderRelay
-      || (state.currentTool && (!state.anchorSurface || state.anchorMountAcked));
+    const senderHeartbeatAuthorized = state.currentTool
+      && (!state.anchorSurface || state.anchorMountAcked);
     if (senderHeartbeatAuthorized) {
       const senderHeartbeat = await callSender("heartbeat", { note }).catch(() => undefined);
       if (senderHeartbeat?.accepted === false && senderHeartbeat?.reason === "sender-rebind-required") {
@@ -1010,9 +1078,16 @@ export function installContinuationCoordinator(app, options = {}) {
   // already have crossed the Host boundary and a second request could create a
   // duplicate visible user turn.
   async function sendFollowUp(text, beforeSend) {
+    const ensureSenderLifetime = () => {
+      if (state.disposed || state.anchorSuperseded || !state.connected) {
+        throw new Error("terminal-continuation-cancelled");
+      }
+    };
     const ensureStillRunnable = async () => {
+      ensureSenderLifetime();
       if (typeof beforeSend !== "function") return;
       if (!(await beforeSend())) throw new Error("terminal-continuation-cancelled");
+      ensureSenderLifetime();
     };
     const standardUiMessage = typeof options.uiMessage === "function"
       ? options.uiMessage
@@ -1042,6 +1117,10 @@ export function installContinuationCoordinator(app, options = {}) {
       return `${prefix};payload=${payloadShape};elapsedMs=${elapsedMs};returnType=${returnType};returnKeys=${returnKeys}`;
     };
     const invokeWithSettlementBound = async (invoke, payload) => {
+      // Authorization may return after disposal or a newer manual card. Check
+      // local lifetime synchronously at the actual Host call, without another
+      // network round-trip or weakening the server authorization CAS.
+      ensureSenderLifetime();
       let timer;
       const startedAt = Date.now();
       try {
@@ -1118,18 +1197,6 @@ export function installContinuationCoordinator(app, options = {}) {
         throw standard.error;
       }
     }
-    // A superseded card is allowed to remain alive as a private sender relay so
-    // durable READY work is not stranded when ChatGPT delays mounting the next
-    // visible milestone card. That relay is not an active Host surface,
-    // however. dev52 proved that invoking the native bridge from this state can
-    // fulfill synchronously while creating no user/model generation. Keep the
-    // relay useful for ui/message, but never let it fall back to the surface-
-    // scoped native bridge and falsely mark an undelivered generation sent.
-    if (state.headlessSenderRelay) {
-      const error = new Error("headless-relay-native-follow-up-disabled");
-      error.code = "METHOD_UNSUPPORTED";
-      throw error;
-    }
     if (typeof nativeFollowUp !== "function") {
       throw new Error("The host exposes neither MCP Apps ui/message nor the legacy ChatGPT follow-up bridge.");
     }
@@ -1162,22 +1229,31 @@ export function installContinuationCoordinator(app, options = {}) {
 
   async function attemptContinuation(reason, { force = false, skipPrepare = false } = {}) {
     if (state.deliveryInFlight) return false;
-    if (state.disposed && !force) return false;
+    if (state.disposed || state.anchorSuperseded) return false;
+    if (!senderTransportAvailable()) return false;
     if (!force) return false;
     const wakeRetry = Boolean(state.task?.continuationWakePending) || reason === "watched process completed";
     state.deliveryInFlight = true;
     try {
       const prepared = skipPrepare ? true : await prepareContinuation(reason);
-      if (!prepared || !state.task || terminal(state.task) || automationSuppressed(state.task)) {
+      if (state.disposed || state.anchorSuperseded || !prepared || !state.task || terminal(state.task) || automationSuppressed(state.task)) {
         if (!wakeRetry || !state.task || terminal(state.task)) stopSupervisor();
         return false;
       }
-      const preClaim = await callTask("status").catch(() => undefined);
-      if (preClaim?.task) state.task = preClaim.task;
-      if (state.anchorSuperseded && !senderTransportAvailable()) {
-        const rebound = await bindSenderTransport().catch(() => undefined);
-        if (!rebound?.accepted || !senderTransportAvailable()) return false;
-      }
+      // Bind/status READY discovery already supplies an authoritative snapshot.
+      // Do not repeat mount ACK, heartbeat or status before claim: a Host RPC
+      // that never settles would strand READY although this iframe is alive.
+      // Claim validates the current sender; authorize-delivery remains the
+      // exact-turn/manual-takeover CAS immediately before the visible send.
+      // The model-context update is advisory and does not grant delivery
+      // authority. Start it in parallel with the durable generation claim so
+      // a background Host iframe cannot serialize two independent waits before
+      // the final authorization CAS. Manual takeover safety is unchanged: the
+      // authoritative authorize-delivery check still happens only after both
+      // operations settle and immediately before ui/message.
+      const modelContextUpdate = updateModelContextBestEffort(app, [
+        { type: "text", text: continuationContext(state.task, state.workspaceId, reason) },
+      ]);
       const claim = await callSender("claim", { note: reason });
       if (!claim?.accepted) return false;
       const deliveryToken = claim.deliveryToken;
@@ -1186,15 +1262,20 @@ export function installContinuationCoordinator(app, options = {}) {
         // Keep task ids, workspace ids, delivery tokens, recovery reasons, and
         // execution policy in model context rather than leaking the synthetic
         // recovery envelope into the visible conversation history.
-        await updateModelContextBestEffort(app, [
-          { type: "text", text: continuationContext(state.task, state.workspaceId, reason) },
-        ]);
+        await modelContextUpdate;
 
         // A manual user turn may revoke this synthetic owner while the Host
         // context update above is in flight. Re-check the exact sender
         // capability/token immediately before the irreversible user-role send.
         // If ownership was superseded, do not enqueue a stale continuation.
-        const authorized = await callSender("authorize-delivery", { deliveryToken, note: reason }).catch(() => undefined);
+        let authorized = await callSender("authorize-delivery", { deliveryToken, note: reason }).catch(() => undefined);
+        if (!authorized?.accepted && authorized?.reason === "completion-handoff-grace-active") {
+          // A pre-armed generation keeps the same claim while its signed
+          // boundary matures. Re-authorize after the grace; never send from a
+          // stale local snapshot, including when a manual turn arrived meanwhile.
+          await new Promise((resolve) => setTimeout(resolve, Math.min(10_000, Math.max(1, Number(authorized.retryAfterMs) || 1))));
+          authorized = await callSender("authorize-delivery", { deliveryToken, note: reason }).catch(() => undefined);
+        }
         if (!authorized?.accepted) return false;
 
         let hostSendAttempt = 0;
@@ -1278,7 +1359,7 @@ export function installContinuationCoordinator(app, options = {}) {
 
   async function supervisorTickImpl({ forceAuthoritative = false } = {}) {
     if (state.disposed || !state.connected || !state.task?.id) return;
-    if (!state.anchorSuperseded && !senderTransportAvailable()) return;
+    if (state.anchorSuperseded || !senderTransportAvailable()) return;
     const cachedTerminal = terminal(state.task);
     if (!forceAuthoritative && cachedTerminal && Date.now() - state.lastTerminalRefreshAt < terminalRefreshMs) return;
 
@@ -1297,20 +1378,7 @@ export function installContinuationCoordinator(app, options = {}) {
     // forever even though the server has a durable process handle registered.
     const current = await callTask("status").catch(() => undefined);
     if (current?.task) acceptTask(current.task);
-    await syncPersistentDisplayMode();
-    if (state.anchorSuperseded) {
-      // Generation rotation intentionally invalidates the old card's mount
-      // capability. Rebind only the private sender capability to the current
-      // generation. This closes the live failure where ATCC created READY but
-      // claimed_at/delivered_at stayed null until the next manual user message.
-      const rebound = await bindSenderTransport().catch(() => undefined);
-      if (!rebound?.accepted || !senderTransportAvailable()) return;
-      if (await consumeRecoveryAfterSenderBind(
-        rebound,
-        "superseded card headless relay rebound with READY generation",
-        "superseded card headless relay rebound with overdue delivery ACK retry",
-      ).catch(() => false)) return;
-    }
+    void syncPersistentDisplayMode();
     if (!state.task || terminal(state.task)) {
       state.lastTerminalRefreshAt = Date.now();
       stopSupervisor();
@@ -1319,6 +1387,7 @@ export function installContinuationCoordinator(app, options = {}) {
     }
     state.lastTerminalRefreshAt = 0;
     if (state.task.state === "PAUSED_BY_USER") return;
+    await refreshActiveSyntheticExecutionContext("authoritative synthetic supervisor refresh").catch(() => false);
 
     // READY may be created by the server-resident generation sweep *after*
     // this App already bound its sender transport.  The bind path consumes a
@@ -1329,20 +1398,25 @@ export function installContinuationCoordinator(app, options = {}) {
     // sibling Apps can safely race here without producing duplicate messages.
     const readyGeneration = Number(current?.readyGeneration || 0);
     if (Number.isInteger(readyGeneration) && readyGeneration > 0) {
-      await attemptContinuation("supervisor discovered READY generation", { force: true });
+      await attemptContinuation("supervisor discovered READY generation", { force: true, skipPrepare: true });
       return;
     }
 
     // Host acceptance is not proof that a resumed assistant turn reached
-    // DevSpace. Missing ACK is diagnostic only and must never retransmit a
-    // visible message: the first model may be alive but slow to call DevSpace.
+    // DevSpace. The short ACK deadline is diagnostic only: the first model may
+    // be alive but slow to call DevSpace, so it can never authorize a 45/60 s
+    // visible retransmission. RuntimeState may eventually supersede the
+    // unconfirmed generation only after the same strict clustered Host-cutoff
+    // boundary used for silent hard-cut recovery, or after stronger exact-turn
+    // lifecycle evidence. A resulting new READY generation is handled by the
+    // normal READY branch above.
     if (state.task.continuationDeliveryAwaitingAck) {
       if (deliveryAckRetryDue(state.task)) {
         renderRecoveryStatus(
           controller,
           isChinese()
-            ? "宿主已接受续轮消息，但尚未收到新 assistant 轮的 DevSpace ACK；为避免重复或打断正在启动的模型，本程序不会自动重发可见消息。"
-            : "The Host accepted the continuation message, but the resumed assistant has not ACKed DevSpace. To avoid duplicates or interrupting a slow-starting model, no visible message will be retransmitted.",
+            ? "宿主已接受续轮消息，但尚未收到新 assistant 轮的 DevSpace ACK。当前标记为 execution-unconfirmed；短 ACK 超时不会重发，只有确证旧轮结束或严格 clustered-cutoff 安全边界后才允许生成新的续轮。"
+            : "The Host accepted the continuation message, but the resumed assistant has not ACKed DevSpace. Execution is unconfirmed; no visible message will be retransmitted from the short ACK deadline. A new continuation is allowed only after exact turn-end evidence or the strict clustered-cutoff safety boundary.",
           "warning",
           true,
         );
@@ -1350,15 +1424,10 @@ export function installContinuationCoordinator(app, options = {}) {
       return;
     }
 
-    // Persisted process wakes are claimable by any surviving/recreated iframe.
-    // This prevents a single watch-status winner from consuming the wake and
-    // disappearing before the native Host send while sibling App cards see nothing.
-    if (state.task.continuationWakePending) {
-      if (!residentTask(state.task)) return;
-      const reason = /stage completed/i.test(String(state.task.waitingReason || ""))
-        ? "resident stage completed"
-        : "resident watched process completed";
-      await attemptContinuation(reason, { force: true });
+    // Model recovery is independent of monitored process lifetime. Check the
+    // exact ended turn first; a running process must never suppress recovery.
+    if (assistantTurnCompletionArmed(state.task) || timeoutRecoveryArmed(state.task)) {
+      await attemptContinuation("Assistant Turn Completion Contract armed", { force: true });
       return;
     }
 
@@ -1372,20 +1441,10 @@ export function installContinuationCoordinator(app, options = {}) {
 
     if (Date.now() - state.lastHeartbeatAt >= heartbeatIntervalMs) await heartbeat("adaptive supervisor");
     if (hasWatchedProcesses) {
-      if (!residentTask(state.task)) return;
       const watched = await callTask("watch-status").catch(() => undefined);
       if (watched?.task) state.task = watched.task;
-      if (watched?.wakeReady) {
-        // Current servers arm a durable wake and move the task to RUNNING.
-        // Keep the defensive resume for older/partially upgraded servers.
-        if (state.task?.state === "WAITING_EXTERNAL") {
-          const resumed = await callTask("resume", { note: "watched process completed" }).catch(() => undefined);
-          if (resumed?.task) state.task = resumed.task;
-        }
-        await attemptContinuation("resident watched process completed", { force: true });
-        return;
-      }
-      return;
+      // Process completion only refreshes durable business state. Delivery
+      // still requires the model's wait/completion signature or Host timeout.
     }
 
     if (automationSuppressed(state.task)) return;
@@ -1400,7 +1459,7 @@ export function installContinuationCoordinator(app, options = {}) {
       if (probed?.task) state.task = probed.task;
       if (state.task) publishTaskForCard(state.task);
     }
-    if (assistantTurnCompletionArmed(state.task)) {
+    if (assistantTurnCompletionArmed(state.task) || timeoutRecoveryArmed(state.task)) {
       await attemptContinuation("Assistant Turn Completion Contract armed", { force: true });
       return;
     }
@@ -1426,42 +1485,102 @@ export function installContinuationCoordinator(app, options = {}) {
     } catch {
       // Best-effort teardown only.
     }
-  }
-
-  function startWakeSource() {
-    if (state.wakeSource || state.disposed || typeof EventSource !== "function" || !CONTINUATION_WAKE_URL) return;
+    const wakeFetchController = state.wakeFetchController;
+    state.wakeFetchController = undefined;
+    state.wakeFetchPromise = undefined;
     try {
-      const source = new EventSource(CONTINUATION_WAKE_URL);
-      state.wakeSource = source;
-      source.addEventListener("wake", () => {
-        // Wake hints are never continuation authority. The forced tick re-reads
-        // durable server state and still has to win continuation_sender CAS.
-        void supervisorTick({ forceAuthoritative: true });
-      });
-      source.addEventListener("error", () => {
-        // EventSource reconnects automatically; timer/lifecycle paths remain
-        // independent fallbacks and no send is manufactured from an error.
-      });
+      wakeFetchController?.abort?.();
     } catch {
-      state.wakeSource = undefined;
+      // Best-effort teardown only.
     }
   }
 
+  function startFetchWakeSource() {
+    if (state.wakeFetchController || state.disposed || !CONTINUATION_WAKE_URL
+        || typeof globalThis.fetch !== "function" || typeof globalThis.AbortController !== "function") return;
+    const controller = new globalThis.AbortController();
+    state.wakeFetchController = controller;
+    state.wakeFetchPromise = (async () => {
+      try {
+        const response = await globalThis.fetch(CONTINUATION_WAKE_URL, {
+          method: "GET",
+          headers: { Accept: "text/event-stream" },
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response?.ok || !response.body?.getReader) return;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let pending = "";
+        while (!state.disposed && state.wakeFetchController === controller) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          pending += decoder.decode(chunk.value, { stream: true });
+          let boundary;
+          while ((boundary = pending.indexOf("\n\n")) >= 0) {
+            const frame = pending.slice(0, boundary).replace(/\r/g, "");
+            pending = pending.slice(boundary + 2);
+            if (/^event:\s*wake\s*$/m.test(frame)) {
+              // This is still only a liveness hint. Durable status and sender
+              // CAS remain authoritative, exactly like the EventSource path.
+              void supervisorTick({ forceAuthoritative: true });
+            }
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          // EventSource and the normal supervisor timer remain independent
+          // fallbacks. A failed fetch stream must never manufacture work.
+        }
+      } finally {
+        if (state.wakeFetchController === controller) {
+          state.wakeFetchController = undefined;
+          state.wakeFetchPromise = undefined;
+        }
+      }
+    })();
+  }
+
+  function startWakeSource() {
+    if (state.disposed || !CONTINUATION_WAKE_URL) return;
+    if (!state.wakeSource && typeof EventSource === "function") {
+      try {
+        const source = new EventSource(CONTINUATION_WAKE_URL);
+        state.wakeSource = source;
+        source.addEventListener("wake", () => {
+          // Wake hints are never continuation authority. The forced tick re-reads
+          // durable server state and still has to win continuation_sender CAS.
+          void supervisorTick({ forceAuthoritative: true });
+        });
+        source.addEventListener("error", () => {
+          // EventSource reconnects automatically. Keep an independent streamed
+          // fetch reader as a hedge for Host sandboxes/proxies that expose the
+          // EventSource API but throttle or buffer its callbacks in background
+          // iframes. Both paths only request an authoritative reconciliation.
+          startFetchWakeSource();
+        });
+      } catch {
+        state.wakeSource = undefined;
+      }
+    }
+    // Start the fetch stream in parallel. Duplicate wake hints are harmless
+    // because supervisorTick coalesces in-flight work and sender delivery is
+    // still generation-CAS protected. This avoids making a 2-second logical
+    // poll depend on background iframe timer scheduling.
+    startFetchWakeSource();
+  }
+
   function startSupervisor() {
+    // Async toolresult/bind chains may settle after dispose() or after this
+    // surface has been superseded.  Their finally blocks must never resurrect
+    // transport/lifecycle workers for a dead historical card.
+    if (state.disposed || state.anchorSuperseded) return;
     startWakeSource();
     // Keep a lightweight supervisor alive for non-terminal waiting tasks too. A
     // watch-process registration may arrive after the anchor is mounted, and a
     // stopped timer would otherwise never discover that new server-side watch.
-    // A superseded historical anchor is a special authenticated recovery case:
-    // it may have deliberately discarded its stale sender capability when a new
-    // card generation was issued. Allow that already-connected App to keep the
-    // supervisor alive long enough to refresh authoritative state and privately
-    // bind the current generation. supervisorTickImpl still requires the
-    // generation-safe bind/CAS before any claim/send, so this does not grant an
-    // arbitrary transport App sender authority.
-    const recoverableHeadlessRelay = state.anchorSuperseded && state.headlessSenderRelay;
     if (!timersEnabled || terminal(state.task)
-        || (!senderTransportAvailable() && !recoverableHeadlessRelay)
+        || !senderTransportAvailable()
         || state.supervisorTimer || !state.task?.id) return;
     state.supervisorTimer = setInterval(() => void supervisorTick(), supervisorTickMs);
     void supervisorTick();
@@ -1617,7 +1736,8 @@ export function installContinuationCoordinator(app, options = {}) {
         await consumeRecoveryAfterSenderBind(bound);
         return bound;
       })
-      .then(() => syncPersistentDisplayMode())
+      .then(() => { void syncPersistentDisplayMode(); })
+      .then(() => refreshActiveSyntheticExecutionContext("synthetic tool-result refresh"))
       .then(() => heartbeat("sender transport mounted"))
       .catch(() => undefined)
       .finally(() => {
@@ -1671,7 +1791,7 @@ export function installContinuationCoordinator(app, options = {}) {
         "sender transport connected with READY generation",
         "sender transport connected with overdue delivery ACK retry",
       ).catch(() => false);
-      await syncPersistentDisplayMode();
+      void syncPersistentDisplayMode();
       await heartbeat("sender transport connected").catch(() => undefined);
       await flushHostTelemetry().catch(() => false);
       startSupervisor();
@@ -1685,12 +1805,11 @@ export function installContinuationCoordinator(app, options = {}) {
     },
     async onTeardown(params) {
       if (state.disposed) return;
-      if (!state.anchorSurface || state.headlessSenderRelay) {
+      if (!state.anchorSurface || state.anchorSuperseded) {
         // Ordinary tool-result Apps may act as transport relays, but their UI
-        // teardown says only that this relay iframe is going away. The same is
-        // true for a superseded historical card after it has been demoted to a
-        // headless sender relay: it no longer owns the current visible card or
-        // Host lifecycle evidence. It is not
+        // teardown says only that this relay iframe is going away. A superseded
+        // historical card is frozen/inert and owns no current-card or Host
+        // lifecycle authority. It is not
         // evidence that the assistant turn ended, so never arm recovery from it.
         controller.dispose();
         return;

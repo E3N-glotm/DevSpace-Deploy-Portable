@@ -181,10 +181,12 @@ try {
     "sender heartbeat must refresh only an ACTIVE bound lease and require explicit rebind after restart or identity drift");
   assert.match(senderHeartbeatSource, /sender-instance-superseded/,
     "sender heartbeat must reject an already-bound competing sender instead of stealing authority");
-  assert.match(runtimeSource, /bindContinuationSender\(input = \{\}\)[\s\S]{0,9800}state='READY'[\s\S]{0,1200}readyGeneration/,
+  assert.match(senderBindSource, /state='READY'[\s\S]*readyGeneration/,
     "sender bind must reveal a durable READY generation to the newly bound ordinary App transport");
-  assert.match(coordinatorSource, /async function consumeRecoveryAfterSenderBind\([\s\S]{0,900}readyGeneration[\s\S]{0,900}attemptContinuation\(readyReason, \{ force: true \}\)/,
-    "a current ordinary Workspace App must consume READY immediately after sender rebind instead of waiting for the old milestone iframe");
+  assert.match(senderBindSource, /sender-claim-owned-by-live-sender/,
+    "a sibling App bind must not revoke a healthy sender's still-valid CLAIMED generation");
+  assert.match(coordinatorSource, /async function consumeRecoveryAfterSenderBind\([\s\S]{0,900}readyGeneration[\s\S]{0,900}attemptContinuation\(readyReason, \{ force: true, skipPrepare: true \}\)/,
+    "a current ordinary Workspace App must consume READY immediately after sender rebind without repeating pre-claim preparation RPCs or waiting for the old milestone iframe");
   const senderBindRecoverySource = coordinatorSource.match(/async function consumeRecoveryAfterSenderBind\([\s\S]*?\n  \}\n\n  function stopSupervisor/)?.[0] ?? "";
   assert.match(senderBindRecoverySource, /Host-accepted message with no model ACK is outcome-uncertain[\s\S]{0,700}return false/,
     "a replacement Workspace App must preserve an outcome-uncertain delivered generation without retransmitting a visible message");
@@ -250,8 +252,8 @@ try {
   assert.ok(runtimeSource.includes("server-turn-lease-expired-no-inflight-model-request")
     && !runtimeSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
     "the resident supervisor must keep weak lease suspicion as telemetry and remove historical-cutoff authorization");
-  assert.match(coordinatorSource, /callSender\("claim"[\s\S]{0,4200}updateModelContext[\s\S]{0,2600}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\),\s*async \(\) =>/,
-    "automatic delivery must re-authorize synthetic ownership immediately before the visible Host trigger");
+  assert.match(coordinatorSource, /const modelContextUpdate = updateModelContextBestEffort[\s\S]{0,800}callSender\("claim"[\s\S]{0,900}await modelContextUpdate[\s\S]{0,1400}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\),\s*async \(\) =>/,
+    "automatic delivery may overlap advisory context hydration with claim but must re-authorize synthetic ownership immediately before the visible Host trigger");
   {
     const authorizeIndex = coordinatorSource.indexOf('callSender("authorize-delivery"');
     const counterIndex = coordinatorSource.indexOf("let hostSendAttempt = 0", authorizeIndex);
@@ -299,8 +301,14 @@ try {
     "Host delivery results must return to the Generation FSM through the sender bridge");
   assert.doesNotMatch(coordinatorSource, /callTask\("claim-continuation"/,
     "the App delivery path must not fall back to the legacy coordinator claim API");
-  assert.match(serverSource, /createContinuationSupervisorScheduler\(\{[\s\S]{0,2200}continuationSupervisor\.start\(\)/,
-    "the continuation watchdog must stay resident in the server process through the durable supervisor scheduler");
+  assert.match(serverSource, /const continuationSupervisor = createContinuationSupervisorScheduler\(\{/,
+    "the continuation watchdog must be constructed as a durable server-owned supervisor");
+  assert.match(serverSource, /continuationSupervisor\.start\(\)/,
+    "the continuation watchdog must stay resident by explicitly starting the durable supervisor scheduler");
+  assert.doesNotMatch(serverSource, /wakeMcpAppSessions|continuation-host-metadata-wake/,
+    "READY persistence must not broadcast tool/resource catalog notifications as an unverified Host execution API");
+  assert.match(serverSource, /List-change notifications describe catalog changes; they are not a Host[\s\S]{0,500}resident sweep only advances the durable execution FSM to READY[\s\S]{0,500}sender App claims READY/,
+    "the resident server must keep READY persistence separate from the sender App that owns Host continuation delivery");
   assert.match(serverSource, /input\.action === "claim" && outcome\?\.accepted[\s\S]{0,300}scheduleClaimRecovery\?\.\(outcome\)/,
     "a successful sender claim must register its exact lease recovery with the resident supervisor");
   assert.match(supervisorSource, /run\("startup"\)[\s\S]{0,500}setInterval\(\(\) => run\("interval"\), intervalMs\)/,
@@ -315,7 +323,7 @@ try {
     "generation delivery must update the canonical continuation_tasks.last_send_result column");
 
   const migration = db.prepare("select max(version) as version from devspace_schema_migrations").get();
-  assert.equal(Number(migration.version), 34, "dev48 sender-lease migration must be applied after the lifetime singleton and ATCC migrations");
+  assert.equal(Number(migration.version), 35, "dev75 resume execution capsule migration must be applied after the sender-lease, lifetime singleton, and ATCC migrations");
   assert.equal(db.prepare("select value from continuation_runtime_meta where key='schema_epoch'").get().value, "2");
 
   const expectedTables = [
@@ -621,8 +629,39 @@ try {
   assert.equal(firstSweep.ready.length, 0,
     "an expired short model-activity lease must not independently authorize a new ChatGPT turn");
 
-  const durableProcessGuard = runtime.trackContinuationActivityProcess({
+  const nonResidentProcessGuard = runtime.trackContinuationActivityProcess({
     conversationScopeId: scope,
+    processHandle: "architecture-long-process",
+    running: true,
+  });
+  assert.equal(nonResidentProcessGuard.accepted, false,
+    "ordinary completion-driven work must not silently acquire resident process-monitoring semantics");
+  assert.equal(nonResidentProcessGuard.reason, "not-active-monitoring-task",
+    "the lower-level process tracker must reject a non-resident task before persisting any durable process handle");
+
+  const residentGuardScope = "v1/architecture-resident-process-guard";
+  const residentGuardTask = runtime.continuationTask({
+    action: "begin",
+    conversationScopeId: residentGuardScope,
+    workspaceId: "ws_architecture_resident_guard",
+    continuationMode: "resident",
+    objective: "persist a long-running process guard independently of model turn lifetime",
+    requiredMilestones: ["monitor process until done"],
+  });
+  const residentGuardMount = runtime.prepareContinuationAnchorMount({
+    taskId: residentGuardTask.task.id,
+    conversationScopeId: residentGuardScope,
+  });
+  assert.ok(residentGuardMount.anchorMountToken);
+  assert.equal(runtime.continuationTask({
+    action: "anchor-mounted",
+    taskId: residentGuardTask.task.id,
+    conversationScopeId: residentGuardScope,
+    coordinatorInstanceId: "ui_architecture_resident_guard",
+    anchorMountToken: residentGuardMount.anchorMountToken,
+  }).accepted, true);
+  const durableProcessGuard = runtime.trackContinuationActivityProcess({
+    conversationScopeId: residentGuardScope,
     processHandle: "architecture-long-process",
     running: true,
   });
@@ -636,21 +675,23 @@ try {
     new Date(Date.now() - 60_000).toISOString(),
     new Date(Date.now() - 10 * 60_000).toISOString(),
     new Date(Date.now() - 60_000).toISOString(),
-    first.task.id,
+    residentGuardTask.task.id,
   );
-  assert.equal(runtime.continuationSupervisorSweep().ready.length, 0,
-    "a durable completion-driven process guard must suppress READY even after both lease and confirmation windows have expired");
+  assert.equal(runtime.continuationSupervisorSweep().ready.some(
+    (item) => item.conversationScopeId === residentGuardScope,
+  ), false,
+    "a durable resident process guard must not let model silence manufacture READY while the external process is still running");
   assert.equal(runtime.continuationActivityProcessGuards().length, 1,
-    "the resident server must be able to discover persisted completion-driven process guards after the originating tool call returns");
+    "the resident server must be able to discover persisted resident process guards after the originating tool call returns");
   const releasedProcessGuard = runtime.trackContinuationActivityProcess({
-    conversationScopeId: scope,
+    conversationScopeId: residentGuardScope,
     processHandle: "architecture-long-process",
     running: false,
   });
   assert.equal(releasedProcessGuard.accepted, true);
   assert.deepEqual(releasedProcessGuard.handles, []);
   assert.equal(runtime.continuationActivityProcessGuards().length, 0,
-    "a completed durable process must release the guard so ordinary lease recovery can resume");
+    "a completed durable resident process must release the process guard without ending another model turn");
 
   db.prepare(`
     update continuation_tasks set turn_lease_expires_at=?,last_model_activity_at=?,
@@ -1105,7 +1146,8 @@ try {
     "a delivered synthetic turn that performs no substantive work may retry after independent Host timeout evidence proves that turn ended");
   const oldSynthetic = db.prepare("select state,failure_reason from continuation_generations where delivery_token=?").get(senderDelivered.deliveryToken);
   assert.equal(oldSynthetic.state, "NO_WORK");
-  assert.equal(oldSynthetic.failure_reason, "synthetic-no-substantive-work");
+  assert.equal(oldSynthetic.failure_reason, "assistant-turn-ended",
+    "exact Host turn-end evidence must retire an ACKed synthetic generation immediately instead of waiting for the long owner lease");
 
   assert.equal(runtime.bindContinuationSender({
     conversationScopeId: scope,
@@ -1197,7 +1239,8 @@ try {
     "a synthetic turn that made one real tool call but left pending milestones may retry after independent Host timeout evidence proves the resumed turn ended");
   const abandonedPartialGeneration = db.prepare("select state,failure_reason from continuation_generations where id=?").get(partialGenerationId);
   assert.equal(abandonedPartialGeneration.state, "NO_WORK");
-  assert.equal(abandonedPartialGeneration.failure_reason, "synthetic-resume-work-lease-expired");
+  assert.equal(abandonedPartialGeneration.failure_reason, "assistant-turn-ended",
+    "exact Host timeout evidence must retire the ended synthetic generation immediately instead of attributing recovery to the stale long owner lease");
 
   const cutoffScope = "v1/confirmed-cutoff-stall-guard";
   const cutoffTask = runtime.continuationTask({

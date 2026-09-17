@@ -2,7 +2,10 @@ param([Parameter(Mandatory=$true)][string]$FixtureRoot)
 $ErrorActionPreference = "Stop"
 $fixture = Get-Content -LiteralPath (Join-Path $FixtureRoot "fixtures.json") -Raw | ConvertFrom-Json
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-foreach ($version in @("1.1.36", "1.1.49", "1.1.58")) {
+$legacyVersions = @($fixture.legacyVersions | ForEach-Object { [string]$_ })
+$directOnlyVersions = @($fixture.directOnlyVersions | ForEach-Object { [string]$_ })
+if ($legacyVersions.Count -lt 1) { throw "Legacy bootstrap fixture has no historical versions." }
+foreach ($version in $legacyVersions) {
     $tokens = $null
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $FixtureRoot "v$version.ps1"), [ref]$tokens, [ref]$errors)
@@ -16,7 +19,7 @@ foreach ($version in @("1.1.36", "1.1.49", "1.1.58")) {
     $CurrentVersion = $version
     $direct = Get-IncrementalCandidate $fixture.baseline
     if (-not $direct -or $direct.manifest.toVersion -ne "1.1.60") { throw "Missing baseline route: $version" }
-    if ($version -eq "1.1.36") {
+    if ($directOnlyVersions -contains $version) {
         $futureDirect = Get-IncrementalCandidate $fixture.future
         if (-not $futureDirect) { throw "Direct-only legacy updater lost its future route." }
     } else {

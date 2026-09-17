@@ -86,10 +86,47 @@ lease.release();
 await Promise.resolve();
 assert.ok(protectedRegistry.size <= 3, "release must re-run deferred hard-cap trimming after an in-flight request completes");
 
+const metadataTransport = { close: async () => {} };
+const metadataServer = { marker: "mcp-server" };
+const metadataRegistry = new McpSessionRegistry({
+  maxSessions: 4,
+  hardMaxSessions: 8,
+  minRetentionMs: 0,
+  now: (() => {
+    let metadataClock = 10;
+    return () => ++metadataClock;
+  })(),
+});
+metadataRegistry.register("metadata-session", metadataTransport, {
+  server: metadataServer,
+  protocolVersion: "2025-11-25",
+  clientCapabilities: { roots: {} },
+  clientVersion: { name: "test-client", version: "1.0.0" },
+});
+let metadataEntry = metadataRegistry.entries().find((entry) => entry.sessionId === "metadata-session");
+assert.ok(metadataEntry, "session metadata must remain discoverable without changing the transport lookup contract");
+assert.equal(metadataEntry.transport, metadataTransport);
+assert.equal(metadataEntry.server, metadataServer);
+assert.equal(metadataEntry.protocolVersion, "2025-11-25");
+assert.deepEqual(metadataEntry.clientCapabilities, { roots: {} });
+assert.deepEqual(metadataEntry.clientVersion, { name: "test-client", version: "1.0.0" });
+assert.equal(metadataRegistry.get("metadata-session"), metadataTransport, "get() must continue returning only the transport");
+assert.equal(metadataRegistry.updateMetadata("metadata-session", {
+  protocolVersion: "2026-07-28",
+  clientCapabilities: { sampling: { tools: {} } },
+}), true, "existing sessions must accept post-initialize negotiated metadata");
+metadataEntry = metadataRegistry.entries().find((entry) => entry.sessionId === "metadata-session");
+assert.equal(metadataEntry.protocolVersion, "2026-07-28");
+assert.deepEqual(metadataEntry.clientCapabilities, { sampling: { tools: {} } });
+assert.equal(metadataEntry.server, metadataServer, "partial metadata updates must preserve the associated McpServer instance");
+assert.equal(metadataRegistry.updateMetadata("missing-session", { protocolVersion: "2026-07-28" }), false,
+  "metadata updates must fail closed for unknown sessions");
+
 console.log(JSON.stringify({
   boundedMcpSessions: true,
   reconnectGraceMcpSessions: true,
   inFlightMcpSessionProtection: true,
+  mcpSessionMetadataLifecycle: true,
   idleMcpSessionReaping: true,
   boundedWorkspaceCache: true,
   boundedReviewStateCache: true,

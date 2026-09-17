@@ -10,13 +10,32 @@ const root = resolve(setupDir, "..");
 const redirectHta = await readFile(join(setupDir, "Portable-Setup.hta"), "utf8");
 const rootCmd = await readFile(join(root, "DevSpace-Portable.cmd"), "utf8");
 const nativeSource = await readFile(join(setupDir, "native", "DevSpacePortableApp.cs"), "utf8");
+const featureToolsSource = await readFile(join(root, "vendor", "waishnav-devspace", "dist", "feature-tools.js"), "utf8");
+const uiSessionSource = await readFile(join(root, "vendor", "waishnav-devspace", "dist", "ui-session.js"), "utf8");
 
 assert.match(rootCmd, /DevSpace-Portable\.exe/i);
 assert.doesNotMatch(rootCmd, /start[^\r\n]*mshta\.exe/i);
 assert.match(redirectHta, /DevSpace-Portable\.exe/i);
 assert.doesNotMatch(redirectHta, /portable-manager\.cjs/i);
-assert.match(nativeSource, /_heartbeatTimer\.Interval\s*=\s*1500/);
-assert.match(nativeSource, /RunJsonAsync\("ui-heartbeat"/);
+assert.match(nativeSource, /_runtimePollTimer\.Interval\s*=\s*15000/);
+assert.match(nativeSource, /RunJsonAsync\("ui-runtime-poll"/);
+assert.match(nativeSource, /_runtimePollTimer\.Interval\s*=\s*visible \? 15000 : 30000/);
+assert.doesNotMatch(nativeSource, /_heartbeatTimer\.Interval\s*=\s*1500/);
+assert.doesNotMatch(nativeSource, /_statusTimer\.Interval\s*=\s*3000/);
+assert.doesNotMatch(nativeSource, /_continuationTimer\.Interval\s*=\s*5000/);
+assert.doesNotMatch(nativeSource, /_computerUseTimer\.Interval\s*=\s*15/);
+assert.match(nativeSource, /new FileSystemWatcher\(requests, "\*\.json"\)/);
+assert.match(nativeSource, /private bool ComputerUseLiveGateOpen\(\)[\s\S]{0,1200}computerUseEnabled[\s\S]{0,500}expiresAt/,
+  "native queue execution must consult the live UI lease instead of the 15-second runtime-poll snapshot");
+assert.doesNotMatch(nativeSource, /private async Task ProcessComputerUseQueueAsync\(\)[\s\S]{0,250}!_computerUseRuntimeEnabled/,
+  "native queue drain must still consume late requests while Computer Use is disabled so they cannot survive until re-enable");
+assert.match(nativeSource, /private void SetComputerUseRuntimeState\(bool enabled\)[\s\S]{0,1200}StartComputerUseWatcher\(\);[\s\S]{0,600}if \(!enabled\)/,
+  "the event-driven request watcher must remain active as a fail-closed boundary while Computer Use is disabled");
+assert.match(nativeSource, /Computer Use is disabled in the local DevSpace Portable UI/);
+assert.match(uiSessionSource, /requireComputerUseActive\(\)[\s\S]{0,400}computerUseEnabled !== true[\s\S]{0,250}Computer Use is disabled/,
+  "live UI lease must be the authoritative Computer Use kill-switch");
+assert.match(featureToolsSource, /function computerUseGuard\(config, uiLease\)[\s\S]{0,500}return uiLease\.requireComputerUseActive\(\)/,
+  "Computer Use tool calls must consult the live lease instead of a stale server-start config snapshot");
 assert.match(nativeSource, /RunJson\("ui-close"/);
 assert.match(nativeSource, /停止全部并退出/);
 assert.match(nativeSource, /会话与回退/);

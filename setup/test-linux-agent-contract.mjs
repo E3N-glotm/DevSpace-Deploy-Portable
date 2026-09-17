@@ -81,6 +81,9 @@ assert.doesNotMatch(agent, /landlock_runtime_device_paths[\s\S]*?"\/dev\/nvme\*/
 for (const contract of [
   /INSTALL_DIR="\$STATE_DIR\/bin"/,
   /Refusing to run the DevSpace Agent service as root/,
+  /ALLOW_ROOT_SERVICE=0/,
+  /--allow-root-service\) ALLOW_ROOT_SERVICE=1/,
+  /if \[\[ "\$ALLOW_ROOT_SERVICE" -eq 1 \]\]; then/,
   /\.local\/state/,
   /run_as_agent_user\(\)/,
   /PYTHON_BIN="\$\(command -v python3\)"/,
@@ -114,6 +117,8 @@ for (const contract of [
 ]) {
   assert.match(installer, contract);
 }
+assert.match(installer, /elif id ubuntu >\/dev\/null 2>&1; then[\s\S]{0,120}RUN_USER="ubuntu"/,
+  "ordinary root invocation must retain the historical ubuntu fallback when explicit root-service opt-in is absent");
 assert.doesNotMatch(installer, /curl is required/);
 assert.doesNotMatch(installer, /sha256sum is required/);
 assert.match(remoteAgentManager, /DEVSPACE_LINUX_AGENT_VERSION = "1\.1\.46"/);

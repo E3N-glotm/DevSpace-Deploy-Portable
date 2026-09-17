@@ -27,6 +27,12 @@ assert.match(ui, /remote-agent-create-enrollment/);
 assert.match(ui, /installCommand/);
 assert.match(ui, /BuildOfflineSshInstallScript/);
 assert.match(ui, /--agent-file/);
+assert.match(ui, /string normalizedSshUser = \(sshUser \?\? ""\)\.Trim\(\)[\s\S]{0,300}?string\.Equals\(normalizedSshUser, "root", StringComparison\.Ordinal\)[\s\S]{0,300}?--user root --allow-root-service/,
+  "local SSH install/update must explicitly opt into root service only when the configured SSH username itself is root");
+assert.match(ui, /BuildOfflineSshInstallScript\(manager, enrollment, name, roots, existingState, profile\.UserName\)/,
+  "background SSH repair must preserve the stored SSH username when deciding root-service opt-in");
+assert.match(ui, /BuildOfflineSshInstallScript\(_manager, enrollment, name, roots, stateDirOverride, \(_sshUser\.Text \?\? ""\)\.Trim\(\)\)/,
+  "interactive SSH install/update must pass the editor SSH username into the offline installer builder");
 assert.match(ui, /base64\.b64decode/);
 assert.match(ui, /AgentBundlePath\(manager, "install\.sh"\)/);
 assert.match(ui, /AgentBundlePath\(manager, "devspace-agent\.py"\)/);

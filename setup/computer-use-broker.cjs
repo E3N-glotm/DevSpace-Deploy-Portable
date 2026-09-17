@@ -6,7 +6,10 @@ const manager = require("./portable-manager.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 const leaseId = String(process.argv[2] || process.env.DEVSPACE_COMPUTER_USE_LEASE_ID || "").trim();
-const pollIntervalMs = 40;
+// Fallback broker only. The native Portable UI uses FileSystemWatcher in dev89;
+// this loop remains for non-native/compatibility hosts and therefore does not
+// need a 25 Hz idle wakeup cadence.
+const pollIntervalMs = 500;
 let stopping = false;
 let lastStateWriteAt = 0;
 let announcedRunning = false;
@@ -48,6 +51,8 @@ async function main() {
     const lease = manager.readJson(manager.UI_LEASE_FILE, null);
     const active = lease
       && lease.leaseId === leaseId
+      && lease.computerUseEnabled === true
+      && manager.computerUseRuntimeEnabled()
       && Date.parse(String(lease.expiresAt || "")) > Date.now();
     if (!active) break;
     const result = manager.processComputerUseRequests(lease);

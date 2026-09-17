@@ -1609,6 +1609,18 @@ namespace DevSpacePortable.NativeUI
                 report["remoteAgentOfflineSshInstall"] = offlineSshInstall;
                 if (!offlineSshInstall)
                     throw new InvalidOperationException("Offline SSH Agent installation script regressed.");
+                string rootOfflineInstall = RemoteAgentsDialog.BuildOfflineSshInstallScript(
+                    manager,
+                    offlineEnrollment,
+                    "self-test-agent",
+                    new[] { "/home/ubuntu/workspace" },
+                    null,
+                    "root");
+                bool rootSshInstall = rootOfflineInstall.Contains("--user root --allow-root-service")
+                    && !offlineInstall.Contains("--allow-root-service");
+                report["remoteAgentRootSshInstall"] = rootSshInstall;
+                if (!rootSshInstall)
+                    throw new InvalidOperationException("Root SSH Agent installation opt-in contract regressed.");
                 bool heartbeatStatusContract = RemoteAgentsDialog.IsAgentHeartbeatHealthy("online")
                     && RemoteAgentsDialog.IsAgentHeartbeatHealthy("online-recent")
                     && !RemoteAgentsDialog.IsAgentHeartbeatHealthy("offline")
@@ -3291,7 +3303,7 @@ namespace DevSpacePortable.NativeUI
             return Path.Combine(manager.Root, "app", "node_modules", "@waishnav", "devspace", "dist", "linux-agent", name);
         }
 
-        internal static string BuildOfflineSshInstallScript(ManagerClient manager, Dictionary<string, object> enrollmentResult, string name, string[] roots, string stateDirOverride = null)
+        internal static string BuildOfflineSshInstallScript(ManagerClient manager, Dictionary<string, object> enrollmentResult, string name, string[] roots, string stateDirOverride = null, string sshUser = null)
         {
             Dictionary<string, object> enrollment = DictionaryValue(enrollmentResult, "enrollment");
             string token = ValueText(enrollment, "token");
@@ -3350,6 +3362,9 @@ namespace DevSpacePortable.NativeUI
                 + " --install-root " + ShellQuote(installRoot)
                 + " --state-dir " + ShellQuote(stateDir)
                 + " --agent-file \"$tmp_dir/devspace-agent.py\"");
+            string normalizedSshUser = (sshUser ?? "").Trim();
+            if (string.Equals(normalizedSshUser, "root", StringComparison.Ordinal))
+                script.Append(" --user root --allow-root-service");
             foreach (string root in roots ?? new string[0])
                 script.Append(" --writable-root " + ShellQuote(root));
             script.Append("\n");
@@ -3750,7 +3765,7 @@ echo DEVSPACE_AGENT_STATE_STOPPED=""$state""
                         if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(installRoot) || (!string.Equals(accessMode, "full-access", StringComparison.OrdinalIgnoreCase) && roots.Length == 0)) continue;
                         Dictionary<string, object> enrollment = await CreateSshEnrollmentAsync(manager, notInstalled ? "" : id, name, roots, installRoot, accessMode);
                         string existingState = notInstalled ? "" : OutputMarker(recovery.Output, "DEVSPACE_AGENT_STATE=");
-                        string localInstall = BuildOfflineSshInstallScript(manager, enrollment, name, roots, existingState);
+                        string localInstall = BuildOfflineSshInstallScript(manager, enrollment, name, roots, existingState, profile.UserName);
                         SshRunResult repaired = await RunSshScriptWithProfileAsync(
                             manager,
                             profile.Host,
@@ -3826,7 +3841,7 @@ echo DEVSPACE_AGENT_STATE_STOPPED=""$state""
         {
             string command = ValueText(enrollment, "installCommand");
             if (!string.IsNullOrWhiteSpace(command)) _installCommand.Text = command;
-            string script = BuildOfflineSshInstallScript(_manager, enrollment, name, roots, stateDirOverride);
+            string script = BuildOfflineSshInstallScript(_manager, enrollment, name, roots, stateDirOverride, (_sshUser.Text ?? "").Trim());
             return await RunSshScriptAsync(script, 120000);
         }
 
@@ -4862,12 +4877,9 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private readonly DataGridView _fileGrid = CreateGrid();
         private readonly BorderlessTabControl _sessionPages = new BorderlessTabControl();
         private readonly DataGridView _memoryGrid = CreateGrid();
-        private readonly System.Windows.Forms.Timer _heartbeatTimer = new System.Windows.Forms.Timer();
-        private readonly System.Windows.Forms.Timer _statusTimer = new System.Windows.Forms.Timer();
-        private readonly System.Windows.Forms.Timer _continuationTimer = new System.Windows.Forms.Timer();
+        private readonly System.Windows.Forms.Timer _runtimePollTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _continuationCountdownTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _noticeTimer = new System.Windows.Forms.Timer();
-        private readonly System.Windows.Forms.Timer _computerUseTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _computerUseIndicatorTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _remoteAgentRecoveryTimer = new System.Windows.Forms.Timer();
         private readonly ComputerUseIndicator _computerUseIndicator = new ComputerUseIndicator();
@@ -4876,8 +4888,10 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private readonly ContextMenuStrip _trayMenu = new ContextMenuStrip();
 
         private string _leaseId = "";
-        private bool _heartbeatBusy;
+        private bool _runtimePollBusy;
         private bool _computerUseWorkerBusy;
+        private volatile bool _computerUseRuntimeEnabled;
+        private FileSystemWatcher _computerUseWatcher;
         private bool _closing;
         private bool _allowUiExit;
         private bool _closingForUpdate;
@@ -4961,18 +4975,12 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             BuildUi();
             Shown += async delegate { await RunUiActionAsync(InitializeAsync); };
             FormClosing += MainForm_FormClosing;
-            _heartbeatTimer.Interval = 1500;
-            _heartbeatTimer.Tick += async delegate { await HeartbeatAsync(); };
-            _statusTimer.Interval = 3000;
-            _statusTimer.Tick += async delegate { await RefreshDashboardStatusAsync(); };
-            _continuationTimer.Interval = 5000;
-            _continuationTimer.Tick += async delegate { await LoadContinuationsAsync(false); };
+            _runtimePollTimer.Interval = 15000;
+            _runtimePollTimer.Tick += async delegate { await RuntimePollAsync(); };
             _continuationCountdownTimer.Interval = 1000;
             _continuationCountdownTimer.Tick += delegate { UpdateContinuationCountdownDisplay(); };
             _noticeTimer.Interval = 9000;
             _noticeTimer.Tick += delegate { _noticeTimer.Stop(); _inlineNotice.Dismiss(); };
-            _computerUseTimer.Interval = 15;
-            _computerUseTimer.Tick += async delegate { await ProcessComputerUseQueueAsync(); };
             _computerUseIndicatorTimer.Interval = 100;
             _computerUseIndicatorTimer.Tick += delegate { _computerUseIndicator.Tick(); };
             _remoteAgentRecoveryTimer.Interval = 60000;
@@ -5070,6 +5078,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             ShowInTaskbar = false;
             _notifyIcon.Visible = true;
             Hide();
+            _runtimePollTimer.Interval = 30000;
             if (!_trayNoticeShown)
             {
                 _trayNoticeShown = true;
@@ -5084,6 +5093,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             ShowInTaskbar = true;
             Show();
             WindowState = FormWindowState.Normal;
+            _runtimePollTimer.Interval = 15000;
             Activate();
             BringToFront();
         }
@@ -5207,7 +5217,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.59 dev67 · Protocol 1.6";
+            _versionLabel.Text = "DevSpace Portable 1.1.60 · Protocol 1.6";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5258,6 +5268,12 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _tabs.SelectedTab.Invalidate(true);
             _tabs.SelectedTab.Update();
             ResumeLayout(true);
+            if (!string.IsNullOrEmpty(_leaseId) && !_closing)
+            {
+                _runtimePollTimer.Stop();
+                _runtimePollTimer.Interval = 250;
+                _runtimePollTimer.Start();
+            }
         }
 
         private TabPage BuildDashboardTab()
@@ -5931,12 +5947,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             try
             {
                 await AcquireLeaseAsync();
-                _heartbeatTimer.Start();
-                _statusTimer.Start();
-                _continuationTimer.Start();
                 _continuationCountdownTimer.Start();
-                _computerUseTimer.Start();
-                _computerUseIndicatorTimer.Start();
                 _remoteAgentRecoveryTimer.Start();
                 await LoadConfigurationAsync();
                 await LoadPluginsAsync();
@@ -5945,21 +5956,37 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 await LoadMemoriesAsync();
                 await LoadLogsAsync();
                 await RefreshDashboardStatusAsync();
+                _runtimePollTimer.Start();
             }
             catch (Exception ex) { ShowError(ex); }
             finally { UseWaitCursor = false; }
         }
 
-        private async Task HeartbeatAsync()
+        private async Task RuntimePollAsync()
         {
-            if (_closing || _heartbeatBusy || string.IsNullOrEmpty(_leaseId)) return;
-            _heartbeatBusy = true;
+            if (_closing || _runtimePollBusy || string.IsNullOrEmpty(_leaseId)) return;
+            _runtimePollBusy = true;
             try
             {
-                Dictionary<string, object> lease = await _manager.RunJsonAsync("ui-heartbeat", new { leaseId = _leaseId });
+                bool visible = Visible && ShowInTaskbar && WindowState != FormWindowState.Minimized;
+                bool includeDashboard = visible && _tabs.SelectedIndex == 0;
+                bool includeContinuations = visible && _tabs.SelectedIndex == 4;
+                _runtimePollTimer.Interval = visible ? 15000 : 30000;
+                Dictionary<string, object> poll = await _manager.RunJsonAsync("ui-runtime-poll", new
+                {
+                    leaseId = _leaseId,
+                    dashboard = includeDashboard,
+                    continuations = includeContinuations,
+                    includeTerminal = _showTerminalContinuations == null || _showTerminalContinuations.Checked,
+                    limit = 300,
+                });
+                Dictionary<string, object> lease = GetDictionary(poll, "lease");
                 string refreshedLeaseId = GetString(lease, "leaseId");
                 if (!string.IsNullOrEmpty(refreshedLeaseId)) _leaseId = refreshedLeaseId;
                 UpdateLeaseLabel(lease);
+                if (includeDashboard) ApplyDashboardStatus(GetDictionary(poll, "dashboard"));
+                if (includeContinuations) ApplyContinuationList(GetDictionary(poll, "continuations"), false);
+                if (_computerUseRuntimeEnabled) await ProcessComputerUseQueueAsync();
             }
             catch (Exception firstError)
             {
@@ -5970,7 +5997,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     _leaseLabel.Text = "本地桌面服务暂不可用 · " + FirstLine(recoveryError.Message ?? firstError.Message);
                 }
             }
-            finally { _heartbeatBusy = false; }
+            finally { _runtimePollBusy = false; }
         }
 
         private async Task AcquireLeaseAsync()
@@ -5987,6 +6014,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             Dictionary<string, object> broker = GetDictionary(lease, "broker");
             bool computerUseEnabled = GetBool(lease, "computerUseEnabled", !GetBool(broker, "disabled"));
             bool ready = GetBool(broker, "ready");
+            SetComputerUseRuntimeState(computerUseEnabled && !GetBool(broker, "disabled"));
             if (!computerUseEnabled || GetBool(broker, "disabled"))
             {
                 _computerUseIndicator.Hide();
@@ -6008,16 +6036,71 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             }
         }
 
+        private void SetComputerUseRuntimeState(bool enabled)
+        {
+            _computerUseRuntimeEnabled = enabled;
+            // Keep the request-directory watcher alive even while Computer Use is
+            // disabled. It is event-driven (no polling cost) and is the final
+            // fail-closed boundary for a request that was authorized before the
+            // owner flipped the switch but reached the native queue afterwards.
+            // Disabled requests must be consumed as failures, never left queued
+            // until a later re-enable.
+            StartComputerUseWatcher();
+            if (!enabled)
+            {
+                _computerUseIndicatorTimer.Stop();
+                _computerUseIndicator.Hide();
+                return;
+            }
+            if (!_computerUseIndicatorTimer.Enabled) _computerUseIndicatorTimer.Start();
+        }
+
+        private void StartComputerUseWatcher()
+        {
+            if (_computerUseWatcher != null || _closing) return;
+            string requests = Path.Combine(_root, "data", "run", "computer-use", "requests");
+            Directory.CreateDirectory(requests);
+            FileSystemWatcher watcher = new FileSystemWatcher(requests, "*.json");
+            watcher.NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.LastWrite;
+            watcher.IncludeSubdirectories = false;
+            watcher.Created += delegate { QueueComputerUseDrain(); };
+            watcher.Renamed += delegate { QueueComputerUseDrain(); };
+            watcher.Error += delegate { QueueComputerUseDrain(); };
+            watcher.EnableRaisingEvents = true;
+            _computerUseWatcher = watcher;
+        }
+
+        private void StopComputerUseWatcher()
+        {
+            FileSystemWatcher watcher = _computerUseWatcher;
+            _computerUseWatcher = null;
+            if (watcher == null) return;
+            try { watcher.EnableRaisingEvents = false; } catch { }
+            try { watcher.Dispose(); } catch { }
+        }
+
+        private void QueueComputerUseDrain()
+        {
+            if (_closing || IsDisposed || Disposing) return;
+            try
+            {
+                BeginInvoke((Action)(async delegate { await ProcessComputerUseQueueAsync(); }));
+            }
+            catch { }
+        }
+
         private async Task ComputerUseToggleChangedAsync()
         {
             if (_loadingConfiguration || _closing || _featureBoxes.Count == 0) return;
             bool enabled = _computerUseToggle.Checked;
+            if (!enabled) SetComputerUseRuntimeState(false);
             string profile = Convert.ToString(_accessProfile.SelectedItem ?? "workspace");
             if (enabled && string.Equals(profile, "workspace", StringComparison.OrdinalIgnoreCase))
             {
                 _loadingConfiguration = true;
                 _computerUseToggle.Checked = false;
                 _loadingConfiguration = false;
+                SetComputerUseRuntimeState(false);
                 ShowInlineNotice("Computer Use 需要 full-access，或在 custom 权限中允许桌面控制；已保持关闭，请先调整访问权限。", false);
                 SelectPage(1);
                 return;
@@ -6028,6 +6111,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             {
                 await _manager.RunJsonAsync("set-computer-use", new { enabled = enabled });
                 await AcquireLeaseAsync();
+                if (enabled) await ProcessComputerUseQueueAsync();
                 SetOutput(enabled ? "Computer Use 已开启。" : "Computer Use 已关闭，桌面 Broker 已停止。");
             });
         }
@@ -6061,7 +6145,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableDisplayVersion", GetString(_currentConfig, "portableVersion", "1.1.59")) + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableDisplayVersion", GetString(_currentConfig, "portableVersion", "1.1.60")) + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -6193,13 +6277,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             try
             {
                 Dictionary<string, object> status = await _manager.RunJsonAsync("dashboard-status");
-                ApplyIndicator("overall", _overallStatus, GetDictionary(status, "overall"));
-                Dictionary<string, object> indicators = GetDictionary(status, "indicators");
-                ApplyIndicator("service", _serviceStatus, GetDictionary(indicators, "service"));
-                ApplyIndicator("tunnel", _tunnelStatus, GetDictionary(indicators, "tunnel"));
-                ApplyIndicator("http", _httpStatus, GetDictionary(indicators, "http"));
-                ApplyIndicator("files", _filesStatus, GetDictionary(indicators, "files"));
-                ApplyIndicator("network", _networkStatus, GetDictionary(indicators, "network"));
+                ApplyDashboardStatus(status);
             }
             catch (Exception ex)
             {
@@ -6211,6 +6289,18 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 MarkIndicatorAwaitingRefresh(_networkStatus);
             }
             finally { _dashboardStatusBusy = false; }
+        }
+
+        private void ApplyDashboardStatus(Dictionary<string, object> status)
+        {
+            if (status == null || status.Count == 0) return;
+            ApplyIndicator("overall", _overallStatus, GetDictionary(status, "overall"));
+            Dictionary<string, object> indicators = GetDictionary(status, "indicators");
+            ApplyIndicator("service", _serviceStatus, GetDictionary(indicators, "service"));
+            ApplyIndicator("tunnel", _tunnelStatus, GetDictionary(indicators, "tunnel"));
+            ApplyIndicator("http", _httpStatus, GetDictionary(indicators, "http"));
+            ApplyIndicator("files", _filesStatus, GetDictionary(indicators, "files"));
+            ApplyIndicator("network", _networkStatus, GetDictionary(indicators, "network"));
         }
 
         private void ApplyIndicator(string key, StatusIndicatorCard card, Dictionary<string, object> value)
@@ -6587,10 +6677,22 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     includeTerminal = _showTerminalContinuations == null || _showTerminalContinuations.Checked,
                     limit = 300,
                 });
+                ApplyContinuationList(value, selectPage);
+            }
+            catch (Exception ex)
+            {
+                if (_continuationSummary != null) _continuationSummary.Text = "续轮任务读取失败：" + FirstLine(ex.Message);
+            }
+            finally { _continuationListLoading = false; }
+        }
+
+        private void ApplyContinuationList(Dictionary<string, object> value, bool selectPage)
+        {
+                if (value == null || value.Count == 0) return;
                 // Capture UI state after the awaited refresh returns. Capturing it
                 // before the await races with Ctrl/Shift selection changes made by
                 // the owner while the request is in flight and used to restore a
-                // stale selection snapshot every five seconds.
+                // stale selection snapshot during an automatic refresh.
                 HashSet<string> selectedIds = new HashSet<string>(SelectedContinuationIds(), StringComparer.OrdinalIgnoreCase);
                 string currentId = "";
                 DataGridViewRow previousCurrentRow = _continuationGrid.CurrentRow;
@@ -6643,12 +6745,6 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 }
                 RenderContinuationSummary();
                 if (selectPage) SelectPage(4);
-            }
-            catch (Exception ex)
-            {
-                if (_continuationSummary != null) _continuationSummary.Text = "续轮任务读取失败：" + FirstLine(ex.Message);
-            }
-            finally { _continuationListLoading = false; }
         }
 
         private void RenderContinuationSummary()
@@ -7408,6 +7504,22 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             finally { _computerUseWorkerBusy = false; }
         }
 
+        private bool ComputerUseLiveGateOpen()
+        {
+            try
+            {
+                string leaseFile = Path.Combine(_root, "data", "run", "ui-session.json");
+                if (!File.Exists(leaseFile)) return false;
+                Dictionary<string, object> lease = _computerUseJson.DeserializeObject(File.ReadAllText(leaseFile, Encoding.UTF8)) as Dictionary<string, object>;
+                if (lease == null || !string.Equals(GetString(lease, "leaseId"), _leaseId, StringComparison.Ordinal)) return false;
+                if (!GetBool(lease, "computerUseEnabled")) return false;
+                DateTimeOffset expiresAt;
+                if (!DateTimeOffset.TryParse(GetString(lease, "expiresAt"), out expiresAt) || expiresAt <= DateTimeOffset.UtcNow) return false;
+                return true;
+            }
+            catch { return false; }
+        }
+
         private void ProcessComputerUseQueue()
         {
             string queueRoot = Path.Combine(_root, "data", "run", "computer-use");
@@ -7429,6 +7541,8 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     Dictionary<string, object> request = _computerUseJson.DeserializeObject(File.ReadAllText(working, Encoding.UTF8)) as Dictionary<string, object>;
                     if (request == null || GetString(request, "requestId") != requestId || GetString(request, "leaseId") != _leaseId)
                         throw new InvalidOperationException("Computer Use request does not match the active native UI lease.");
+                    if (!ComputerUseLiveGateOpen())
+                        throw new InvalidOperationException("Computer Use is disabled in the local DevSpace Portable UI.");
                     Dictionary<string, object> payload = GetDictionary(request, "payload");
                     NotifyComputerUseActivity(ComputerUseWarmIndicatorHoldMs, false);
                     Dictionary<string, object> metadata = new Dictionary<string, object>();
@@ -7444,6 +7558,8 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                         List<string> actions = new List<string>();
                         foreach (Dictionary<string, object> step in steps)
                         {
+                            if (!ComputerUseLiveGateOpen())
+                                throw new InvalidOperationException("Computer Use was disabled before the queued input completed.");
                             string stepAction = GetString(step, "action");
                             if (string.IsNullOrWhiteSpace(stepAction) || string.Equals(stepAction, "snapshot", StringComparison.OrdinalIgnoreCase) || string.Equals(stepAction, "sequence", StringComparison.OrdinalIgnoreCase))
                                 throw new InvalidOperationException("Computer Use sequence contains an unsupported step action.");
@@ -7460,6 +7576,8 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     }
                     else if (!string.Equals(action, "snapshot", StringComparison.OrdinalIgnoreCase))
                     {
+                        if (!ComputerUseLiveGateOpen())
+                            throw new InvalidOperationException("Computer Use was disabled before input execution.");
                         Dictionary<string, object> inputMetadata;
                         RunNativeInput(payload, requestId, out inputMetadata, out stderr);
                         foreach (KeyValuePair<string, object> item in inputMetadata) metadata[item.Key] = item.Value;
@@ -7469,6 +7587,8 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                     bool screenshotAfter = !payload.ContainsKey("screenshotAfter") || Convert.ToBoolean(payload["screenshotAfter"]);
                     if (screenshotAfter)
                     {
+                        if (!ComputerUseLiveGateOpen())
+                            throw new InvalidOperationException("Computer Use was disabled before desktop capture.");
                         Stopwatch captureTimer = Stopwatch.StartNew();
                         string imageFile = Path.Combine(responses, requestId + ".png");
                         Dictionary<string, object> capture = CaptureInteractiveDesktop(imageFile);
@@ -7688,7 +7808,9 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 _allowUiExit = true;
             }
             _closing = true;
-            _heartbeatTimer.Stop(); _statusTimer.Stop(); _continuationTimer.Stop(); _continuationCountdownTimer.Stop(); _noticeTimer.Stop(); _computerUseTimer.Stop(); _computerUseIndicatorTimer.Stop(); _remoteAgentRecoveryTimer.Stop();
+            _runtimePollTimer.Stop(); _continuationCountdownTimer.Stop(); _noticeTimer.Stop(); _computerUseIndicatorTimer.Stop(); _remoteAgentRecoveryTimer.Stop();
+            _computerUseRuntimeEnabled = false;
+            StopComputerUseWatcher();
             _computerUseIndicator.Dispose();
             _notifyIcon.Visible = false;
             _notifyIcon.Dispose();

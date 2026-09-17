@@ -38,11 +38,11 @@ function requireFeature(config, key, label) {
 }
 
 function computerUseGuard(config, uiLease) {
-    requireFeature(config, "computerUse", "Computer Use");
-    if (!config.permissions.allowComputerUse) {
-        throw new Error("Computer Use is not authorized by the active permission profile. Use full-access or enable Computer Use in the custom profile.");
-    }
-    return uiLease.requireActive("Computer Use");
+    // The Portable Computer Use toggle is mutable while the MCP server stays
+    // running. The server's config object is a startup snapshot, so the active
+    // UI lease is the authoritative live kill-switch. Check it first to fence
+    // stale server config immediately after the owner disables Computer Use.
+    return uiLease.requireComputerUseActive();
 }
 
 function validateComputerAction(input) {

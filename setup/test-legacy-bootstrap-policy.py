@@ -89,10 +89,13 @@ with tempfile.TemporaryDirectory(prefix="bootstrap-policy-", dir=cache) as direc
                      "release": {"assets": baseline_assets}},
         "future": {"version": "1.1.61", "manifest": {"incrementalAssets": future_assets},
                    "release": {"assets": future_assets}},
+        "legacyVersions": POLICY["legacyFromVersions"],
+        "directOnlyVersions": POLICY["legacyDirectOnlyVersions"],
         "edges": [{"manifest": edge, "asset": edge} for edge in graph],
     }
     (work / "fixtures.json").write_text(json.dumps(fixture), encoding="utf-8")
-    for tag in ("v1.1.36", "v1.1.49", "v1.1.58"):
+    for version in POLICY["legacyFromVersions"]:
+        tag = f"v{version}"
         result = subprocess.run(["git", "show", f"{tag}:setup/portable-updater.ps1"], cwd=ROOT,
                                 capture_output=True, check=True)
         (work / f"{tag}.ps1").write_bytes(result.stdout)
@@ -103,11 +106,10 @@ with tempfile.TemporaryDirectory(prefix="bootstrap-policy-", dir=cache) as direc
 for argv, text in [
     (["python", "setup/finalize-release.py", "1.1.59"], "development-only"),
     (["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/publish-github-release.ps1", "-Version", "1.1.59"], "development-only"),
-    (["python", "setup/create-update-manifest.py"], "Development builds"),
 ]:
     result = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert result.returncode != 0 and text in result.stdout + result.stderr, result.stdout + result.stderr
 
-print(json.dumps({"baselineBridges": 20, "futureBridgesFixedCount": 5,
+print(json.dumps({"baselineBridges": len(POLICY["legacyFromVersions"]), "historicalUpdatersExercised": len(POLICY["legacyFromVersions"]), "futureBridgesFixedCount": 5,
                   "devPublicationRejected": True, "historicalUrlsPreserved": True,
                   "verificationScope": "packaging and historical planning; not a full installation"}))

@@ -169,6 +169,11 @@ const migrations = [
         name: "continuation-sender-lease-separation",
         up: migrateContinuationSenderLeaseSeparation,
     },
+    {
+        version: 35,
+        name: "continuation-resume-execution-context",
+        up: migrateContinuationResumeExecutionContext,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -1379,6 +1384,9 @@ function migrateContinuationSenderLeaseSeparation(sqlite) {
           sender_last_failure_at=null,
           updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');
     `);
+}
+function migrateContinuationResumeExecutionContext(sqlite) {
+    addColumnIfMissing(sqlite, "continuation_tasks", "resume_context_json", "text not null default '{}'");
 }
 function addColumnIfMissing(sqlite, table, column, definition) {
     const columns = sqlite.prepare(`pragma table_info(${table})`).all();

@@ -13,13 +13,44 @@ export class McpSessionRegistry {
     get size() {
         return this.sessions.size;
     }
-    register(sessionId, transport) {
+    register(sessionId, transport, metadata = {}) {
         this.sessions.set(sessionId, {
             transport,
+            server: metadata.server,
+            protocolVersion: metadata.protocolVersion,
+            clientCapabilities: metadata.clientCapabilities,
+            clientVersion: metadata.clientVersion,
             lastActivityAt: this.now(),
             inFlight: 0,
         });
         void this.trimTo(this.maxSessions, sessionId);
+    }
+    updateMetadata(sessionId, metadata = {}) {
+        const entry = this.sessions.get(sessionId);
+        if (!entry)
+            return false;
+        if (Object.prototype.hasOwnProperty.call(metadata, "server"))
+            entry.server = metadata.server;
+        if (Object.prototype.hasOwnProperty.call(metadata, "protocolVersion"))
+            entry.protocolVersion = metadata.protocolVersion;
+        if (Object.prototype.hasOwnProperty.call(metadata, "clientCapabilities"))
+            entry.clientCapabilities = metadata.clientCapabilities;
+        if (Object.prototype.hasOwnProperty.call(metadata, "clientVersion"))
+            entry.clientVersion = metadata.clientVersion;
+        entry.lastActivityAt = this.now();
+        return true;
+    }
+    entries() {
+        return Array.from(this.sessions, ([sessionId, entry]) => ({
+            sessionId,
+            transport: entry.transport,
+            server: entry.server,
+            protocolVersion: entry.protocolVersion,
+            clientCapabilities: entry.clientCapabilities,
+            clientVersion: entry.clientVersion,
+            lastActivityAt: entry.lastActivityAt,
+            inFlight: entry.inFlight,
+        }));
     }
     get(sessionId) {
         const entry = this.sessions.get(sessionId);

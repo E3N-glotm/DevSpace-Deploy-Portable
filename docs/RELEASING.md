@@ -138,6 +138,32 @@ target from local blocks plus missing Range data. This keeps Git history free
 of binary update artifacts and prevents the latest Release metadata from
 accumulating an unbounded historical edge graph.
 
+### 1.1.60 stable updater bootstrap
+
+`1.1.59` is development-only and is never published. `1.1.60` is the stable
+bootstrap baseline for the updater hardening accumulated after `1.1.58`.
+Installed releases from `1.1.36` through `1.1.58` (using the actually published
+version set in `setup/legacy-release-policy.json`) receive a shallow
+`file-delta-v1` bridge instead of asking their historical updater to unpack the
+modern full package. The bridge contains only the Native control center,
+`VERSION-MANIFEST.json`, `portable-updater.ps1`, `portable-manager.cjs`, and a
+bootstrap marker. On first launch, the new control center performs a hardened
+same-version `ForceFull` repair to obtain the complete `1.1.60` tree.
+
+This two-stage path is intentional: it avoids the historical deep-path/.NET ZIP
+failure before the fixed updater has been installed, while preserving `data`,
+`logs`, and `reports`. The release build publishes one exact bridge for each
+supported historical version and carries those edges into the `1.1.60`
+`update-manifest.json`. Releases after `1.1.60` retain the immutable historical
+graph plus one `1.1.60 -> current` bridge; `1.1.36`-`1.1.39` additionally keep
+direct current-version bridges because those clients predate graph routing.
+
+The guaranteed in-place compatibility floor is `1.1.36`. Versions
+`1.1.14`-`1.1.35` do not share the same validated transactional updater base
+(`1.1.14` has no updater at all, and pre-`1.1.36` Apply generations include
+known transaction defects), so release notes must not claim one-click support
+for them without a separate migration package and acceptance run.
+
 ## First bootstrap Release
 
 The first source-only repository Release could not hydrate its runtime from an

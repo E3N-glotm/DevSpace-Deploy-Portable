@@ -88,11 +88,14 @@ try {
   const before = await lease();
   const minimizeClose = closeWindow(minimized.pid);
   if (minimizeClose.status !== 0) throw new Error(`Unable to close native window for tray test: ${minimizeClose.stderr}`);
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 3500));
-  const after = await lease();
   if (!processAlive(minimized)) throw new Error("Remembered tray choice unexpectedly exited the UI process.");
-  if (!after || after.leaseId !== before.leaseId || after.lastHeartbeatAt === before.lastHeartbeatAt) {
-    throw new Error("Tray minimization did not preserve and heartbeat the UI lease.");
+  const after = await waitFor(async () => {
+    const current = await lease();
+    if (!current || current.leaseId !== before.leaseId) return null;
+    return current.lastHeartbeatAt !== before.lastHeartbeatAt ? current : null;
+  }, 40_000);
+  if (!after || Date.parse(String(after.expiresAt || "")) <= Date.now()) {
+    throw new Error("Tray minimization did not preserve a live low-frequency UI lease.");
   }
   spawnSync("taskkill.exe", ["/pid", String(minimized.pid), "/t", "/f"], { windowsHide: true, encoding: "utf8" });
   await waitFor(() => !processAlive(minimized), 15_000);
