@@ -67,6 +67,23 @@ function processExists(pid) {
   return String(result.stdout || "").includes(`\"${pid}\"`);
 }
 
+function processStartTicks(pid) {
+  const powershell = join(
+    process.env.SystemRoot || "C:\\Windows",
+    "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+  );
+  const command = [
+    `$p=Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
+    "if(-not $p){exit 0}",
+    "try{$p.StartTime.ToUniversalTime().Ticks}catch{''}",
+  ].join(";");
+  const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  return String(result.stdout || "").trim();
+}
+
 function listenerExists(port) {
   const result = spawnSync("netstat.exe", ["-ano", "-p", "tcp"], {
     encoding: "utf8",
@@ -101,6 +118,10 @@ try {
   assert.ok(Number.isInteger(externalPid) && externalPid > 0);
   assert.equal(processExists(pid), true, `orphan test process ${pid} did not start`);
   assert.equal(processExists(externalPid), true, `external descendant ${externalPid} did not start`);
+  const orphanStartTicks = processStartTicks(pid);
+  const externalStartTicks = processStartTicks(externalPid);
+  assert.ok(orphanStartTicks, `orphan test process ${pid} has no stable start identity`);
+  assert.ok(externalStartTicks, `external descendant ${externalPid} has no stable start identity`);
 
   const stopped = spawnSync(sandboxNode, [manager, "stop"], {
     cwd: root,
@@ -118,10 +139,14 @@ try {
   assert.equal(stopped.status, 0, `${stopped.stdout}\n${stopped.stderr}`);
   assert.match(stopped.stdout, /No background service PID remains/);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
-  assert.equal(processExists(pid), false, `Portable-owned orphan process ${pid} survived stop`);
+  assert.notEqual(
+    processStartTicks(pid),
+    orphanStartTicks,
+    `Portable-owned orphan process instance ${pid} survived stop`,
+  );
   assert.equal(
-    processExists(externalPid),
-    true,
+    processStartTicks(externalPid),
+    externalStartTicks,
     `Unrelated external descendant ${externalPid} was recursively terminated by Portable stop`,
   );
 
@@ -159,6 +184,10 @@ try {
   const localExternalPid = Number((await readFile(localExternalPidFile, "utf8")).trim());
   assert.equal(processExists(localServicePid), true, `orphan local MCP process ${localServicePid} did not start`);
   assert.equal(processExists(localExternalPid), true, `local unrelated descendant ${localExternalPid} did not start`);
+  const localServiceStartTicks = processStartTicks(localServicePid);
+  const localExternalStartTicks = processStartTicks(localExternalPid);
+  assert.ok(localServiceStartTicks, `orphan local MCP process ${localServicePid} has no stable start identity`);
+  assert.ok(localExternalStartTicks, `local unrelated descendant ${localExternalPid} has no stable start identity`);
   assert.equal(listenerExists(17689), true, "orphan local MCP process did not own the expected test listener");
   assert.equal(existsSync(join(runDir, "devspace.pid")), false,
     "stop-local orphan regression requires the recorded MCP PID file to be absent");
@@ -181,11 +210,11 @@ try {
   // stop-local itself owns the exit-drain contract. A successful return must
   // mean the explicitly terminated service PID is already gone; callers must
   // not need to invent an additional post-stop sleep before restart/start.
-  assert.equal(processExists(localServicePid), false,
+  assert.notEqual(processStartTicks(localServicePid), localServiceStartTicks,
     `stop-local left orphan MCP service PID ${localServicePid} alive without a PID file`);
   assert.equal(listenerExists(17689), false,
     "stop-local reported success while the orphan MCP listener still occupied the configured port");
-  assert.equal(processExists(localExternalPid), true,
+  assert.equal(processStartTicks(localExternalPid), localExternalStartTicks,
     `stop-local recursively killed unrelated descendant ${localExternalPid}`);
 
   console.log(JSON.stringify({
