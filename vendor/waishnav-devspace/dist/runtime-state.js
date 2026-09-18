@@ -4879,15 +4879,16 @@ export class StructuredRuntimeState {
             const owner = String(row.delivery_owner || "") === "synthetic-active" ? "synthetic" : "manual";
             const workDelta = Math.max(0,
                 Number(row.substantive_activity_count || 0) - Number(row.delivery_work_baseline_count || 0));
-            // Manual and synthetic turns share the same milestone-driven
-            // stopping rule, but a resumed synthetic turn has a stronger
+            // Manual and synthetic turns share the same model-owned stage
+            // boundary semantics, but a resumed synthetic turn has a stronger
             // anti-idle quality floor because the Host just spent a separate
             // user-role turn to restart it. A manual turn needs one substantive
             // operation before voluntarily yielding an unfinished stage;
             // synthetic resumes need at least four post-ACK substantive
             // operations. Four is only an anti-empty/anti-short-loop floor: it
-            // is never a target duration, a wall-clock budget, or permission to
-            // stop while runnable milestones remain.
+            // is never a target duration, a wall-clock budget, or by itself a
+            // reason to end. The model must still reach a genuine coherent
+            // stage boundary before signing turn-complete.
             const minimumWorkDelta = owner === "synthetic" ? 4 : 1;
             if (workDelta < minimumWorkDelta) {
                 return {
@@ -4897,27 +4898,6 @@ export class StructuredRuntimeState {
                     substantiveWorkDelta: workDelta,
                     minimumSubstantiveWorkDelta: minimumWorkDelta,
                     ...continuationDirective(rowToTask(row)),
-                };
-            }
-            // A synthetic continuation is not a user-authored stage boundary.
-            // Once the Host has spent a separate user-role turn to resume an
-            // unfinished Task Contract, the resumed model must keep advancing
-            // runnable milestones until the milestone set is complete, becomes
-            // explicitly non-runnable via waitingExternal/pause/cancel/fail, or
-            // the Host truncates the turn. The four-operation rule above is only
-            // an anti-idle floor; reaching it must never unlock a voluntary
-            // incomplete-stage yield for synthetic ownership.
-            if (owner === "synthetic" && incomplete && !preCutoffHandoff.required) {
-                const remainingMilestones = required.filter((milestone) => !completed.has(milestone));
-                const task = rowToTask(row);
-                return {
-                    task,
-                    accepted: false,
-                    reason: "synthetic-turn-runnable-milestones-remain",
-                    substantiveWorkDelta: workDelta,
-                    minimumSubstantiveWorkDelta: minimumWorkDelta,
-                    remainingMilestones,
-                    ...continuationDirective(task),
                 };
             }
             const completionNote = preCutoffHandoff.required

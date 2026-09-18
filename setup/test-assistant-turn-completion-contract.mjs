@@ -769,10 +769,9 @@ try {
     "duplicate timeout delivery must be idempotent and must not double-count Host calibration samples");
 
   // Synthetic resumed turns use a stronger anti-idle floor than a manual
-  // continue, but reaching the four-operation floor must not unlock an
-  // unfinished synthetic stage boundary. Synthetic ownership keeps the same
-  // runnable milestone set in the current Host turn until completion,
-  // explicit non-runnable state, or Host truncation.
+  // continue. The floor must reject empty/short loops, but after the floor a
+  // genuine model-owned stage boundary is allowed so a visible stage summary
+  // can be emitted and remaining milestones can arm the next continuation.
   const syntheticScope = "v1/atcc-synthetic-quality";
   const synthetic = begin(syntheticScope);
   mount(synthetic, syntheticScope, "ui_atcc_synthetic_quality");
@@ -804,13 +803,19 @@ try {
     taskId: synthetic.task.id,
     note: "model-owned-stage-boundary-after-real-work",
   });
-  assert.equal(syntheticRequested.accepted, false);
-  assert.equal(syntheticRequested.reason, "synthetic-turn-runnable-milestones-remain");
-  assert.equal(syntheticRequested.task.assistantTurnState, "GENERATING");
-  assert.equal(syntheticRequested.substantiveWorkDelta, 4);
-  assert.equal(syntheticRequested.minimumSubstantiveWorkDelta, 4);
-  assert.ok(Array.isArray(syntheticRequested.remainingMilestones));
-  assert.ok(syntheticRequested.remainingMilestones.length > 0);
+  assert.equal(syntheticRequested.accepted, true);
+  assert.equal(syntheticRequested.reason, "assistant-turn-completion-requested");
+  assert.equal(syntheticRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
+  assert.equal(syntheticRequested.finalResponseAllowed, true);
+  const syntheticRequestedAt = Date.parse(syntheticRequested.task.assistantTurnCompletionRequestedAt);
+  const syntheticChained = runtime.continuationSupervisorSweep({ nowMs: syntheticRequestedAt + 9_001 });
+  assert.equal(readyForScope(syntheticChained, syntheticScope).length, 1,
+    "an accepted synthetic stage boundary with remaining milestones must arm exactly one next continuation");
+  const syntheticAfterHandoff = runtime.continuationTask({
+    action: "status", taskId: synthetic.task.id, readOnlyStatus: true,
+  });
+  assert.equal(syntheticAfterHandoff.task.assistantTurnState, "COMPLETED");
+  assert.deepEqual(syntheticAfterHandoff.remainingMilestones, ["finish"]);
   assert.equal(syntheticRequested.minimumActiveWorkMs, undefined);
   assert.equal(syntheticRequested.retryAfterMs, undefined);
 
@@ -839,8 +844,8 @@ try {
     taskId: budgetSynthetic.task.id,
     note: "elapsed-time-and-owner-telemetry-do-not-gate-model-boundary",
   });
-  assert.equal(budgetRequested.accepted, false);
-  assert.equal(budgetRequested.reason, "synthetic-turn-runnable-milestones-remain");
+  assert.equal(budgetRequested.accepted, true);
+  assert.equal(budgetRequested.reason, "assistant-turn-completion-requested");
   assert.equal(budgetRequested.minimumActiveWorkMs, undefined);
   assert.equal(budgetRequested.syntheticHostBudgetRatio, undefined);
 
@@ -904,26 +909,11 @@ try {
     taskId: cachedSchema.task.id,
     note: "atcc-turn-complete",
   });
-  assert.equal(cachedRequested.accepted, false);
-  assert.equal(cachedRequested.reason, "synthetic-turn-runnable-milestones-remain");
-  assert.equal(cachedRequested.task.assistantTurnState, "GENERATING");
-  // Cached-schema compatibility remains valid for an ordinary manual turn;
-  // the synthetic runnable-milestone gate must not disable the compatibility
-  // signature globally.
-  runtime.database.sqlite.prepare(`
-    update continuation_tasks set delivery_owner='manual',assistant_turn_owner='manual'
-    where id=?
-  `).run(cachedSchema.task.id);
-  const cachedManualRequested = runtime.continuationTask({
-    action: "checkpoint",
-    taskId: cachedSchema.task.id,
-    note: "atcc-turn-complete",
-  });
-  assert.equal(cachedManualRequested.accepted, true);
-  assert.equal(cachedManualRequested.reason, "assistant-turn-completion-requested-via-checkpoint-compat");
-  assert.equal(cachedManualRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
-  assert.equal(cachedManualRequested.finalResponseAllowed, true);
-  const cachedRequestedAt = Date.parse(cachedManualRequested.task.assistantTurnCompletionRequestedAt);
+  assert.equal(cachedRequested.accepted, true);
+  assert.equal(cachedRequested.reason, "assistant-turn-completion-requested-via-checkpoint-compat");
+  assert.equal(cachedRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
+  assert.equal(cachedRequested.finalResponseAllowed, true);
+  const cachedRequestedAt = Date.parse(cachedRequested.task.assistantTurnCompletionRequestedAt);
   assert.equal(readyForScope(runtime.continuationSupervisorSweep({ nowMs: cachedRequestedAt + 1 }), cachedSchemaScope).length, 1,
     "cached-schema completion compatibility must pre-arm the same singleton READY generation as native turn-complete");
   assert.equal(runtime.continuationTask({ action: "status", taskId: cachedSchema.task.id }).task.assistantTurnState,
@@ -959,6 +949,9 @@ try {
   // Expiring the synthetic ownership lease is only stale-ownership telemetry.
   // It must never manufacture a replacement turn while ATCC still says the
   // current assistant turn is GENERATING.
+  const leaseExpiryScope = "v1/atcc-synthetic-lease-expiry";
+  const leaseExpirySynthetic = begin(leaseExpiryScope);
+  mount(leaseExpirySynthetic, leaseExpiryScope, "ui_atcc_synthetic_lease_expiry");
   runtime.database.sqlite.prepare(`
     update continuation_tasks set delivery_owner='synthetic-active',
       delivery_owner_expires_at=?,assistant_turn_state='GENERATING',
@@ -969,19 +962,19 @@ try {
     new Date(Date.now() - 15 * 60_000).toISOString(),
     new Date(Date.now() - 45 * 60_000).toISOString(),
     new Date(Date.now() - 10 * 60_000).toISOString(),
-    synthetic.task.id,
+    leaseExpirySynthetic.task.id,
   );
   const expiredOwnerClaim = runtime.continuationTask({
     action: "claim-continuation",
-    taskId: synthetic.task.id,
+    taskId: leaseExpirySynthetic.task.id,
     note: "synthetic resume work ownership lease expired",
   });
   assert.equal(expiredOwnerClaim.accepted, false);
   assert.equal(expiredOwnerClaim.reason, "continuation-trigger-not-authorized");
   const longRunningSyntheticSweep = runtime.continuationSupervisorSweep({ nowMs: Date.now() + 120_000 });
-  assert.equal(readyForScope(longRunningSyntheticSweep, syntheticScope).length, 0,
+  assert.equal(readyForScope(longRunningSyntheticSweep, leaseExpiryScope).length, 0,
     "even a >30-minute GENERATING synthetic turn with expired activity/owner leases must never manufacture a replacement turn");
-  const longRunningSyntheticStatus = runtime.continuationTask({ action: "status", taskId: synthetic.task.id });
+  const longRunningSyntheticStatus = runtime.continuationTask({ action: "status", taskId: leaseExpirySynthetic.task.id });
   assert.equal(longRunningSyntheticStatus.task.assistantTurnState, "GENERATING");
   assert.equal(longRunningSyntheticStatus.task.deliveryOwner, "synthetic-active",
     "lease expiry is telemetry only and must not revoke an actually GENERATING synthetic turn");
@@ -1327,8 +1320,9 @@ try {
     runtime.database.sqlite.prepare(`update continuation_tasks set cutoff_samples_json='[600000,601000]',
       turn_started_at=?,delivery_owner='synthetic-active',assistant_turn_owner='synthetic',
       delivery_work_baseline_count=0 where id=?`).run(new Date(Date.now() - 300_000).toISOString(), fixture.task.id);
-    const early = runtime.continuationTask({ action: "turn-complete", taskId: fixture.task.id });
-    assert.equal(early.accepted, false, "window must not authorize an early synthetic final");
+    const early = runtime.continuationTask({ action: "status", taskId: fixture.task.id, readOnlyStatus: true });
+    assert.equal(early.preCutoffHandoffRequired, false,
+      "learned cutoff telemetry must not manufacture a pre-cutoff handoff before its adaptive window");
     runtime.database.sqlite.prepare("update continuation_tasks set turn_started_at=? where id=?")
       .run(new Date(Date.now() - 560_000).toISOString(), fixture.task.id);
     const request = runtime.continuationTask({ taskId: fixture.task.id,

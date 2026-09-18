@@ -1994,7 +1994,7 @@ function isLocalMcpServiceProcess(item) {
 
 function stopLocalMcpServiceProcesses(port) {
   const killed = [];
-  const killedPids = new Set();
+  const killedPids = new Map();
   const deadline = Date.now() + PORTABLE_STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const snapshot = portableProcessSnapshot();
@@ -2023,7 +2023,7 @@ function stopLocalMcpServiceProcesses(port) {
       // logged-launcher, or the cli.js serve listener.
       runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
       killed.push({ pid: item.pid, name: item.name, executablePath: item.executablePath });
-      killedPids.add(item.pid);
+      killedPids.set(item.pid, item.creationTicks || 0);
     }
     sleepSync(300);
   }
@@ -2034,10 +2034,24 @@ function stopLocalMcpServiceProcesses(port) {
   // process table. Reuse the same overall stop deadline rather than adding a
   // second fixed grace period: the stop contract stays bounded while avoiding
   // a false-success race that can otherwise leak into an immediate restart.
-  let remainingKilledPids = [...killedPids].filter((pid) => processExists(pid));
+  const sameProcessStillExists = (pid, expectedCreationTicks) => {
+    const item = portableProcessSnapshot().find((entry) => entry.pid === pid);
+    if (!item) return false;
+    // A numeric PID can be recycled immediately on hosted Windows runners.
+    // Treat it as the same terminated service only when its process identity
+    // still matches the instance we explicitly killed.
+    if (expectedCreationTicks && item.creationTicks) {
+      return item.creationTicks === expectedCreationTicks;
+    }
+    return true;
+  };
+  let remainingKilledPids = [...killedPids.entries()]
+    .filter(([pid, creationTicks]) => sameProcessStillExists(pid, creationTicks))
+    .map(([pid]) => pid);
   while (remainingKilledPids.length && Date.now() < deadline) {
     sleepSync(Math.min(100, Math.max(1, deadline - Date.now())));
-    remainingKilledPids = remainingKilledPids.filter((pid) => processExists(pid));
+    remainingKilledPids = remainingKilledPids.filter((pid) =>
+      sameProcessStillExists(pid, killedPids.get(pid) || 0));
   }
   const remainingProcesses = portableProcessSnapshot().filter(isLocalMcpServiceProcess);
   const remainingListeners = listenerPids(port);
