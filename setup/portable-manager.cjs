@@ -2052,14 +2052,14 @@ function portableProcessSnapshot() {
   const script = [
     "$ErrorActionPreference='Stop'",
     `$root=[IO.Path]::GetFullPath(${powershellLiteral(ROOT)}).TrimEnd('\\')`,
-    "$all=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine)",
+    "$all=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,@{n='CreationTicks';e={try{$_.CreationDate.ToUniversalTime().Ticks}catch{0}}})",
     "$wrappers=@('cmd.exe','wscript.exe','cscript.exe','powershell.exe','pwsh.exe','bash.exe','sh.exe')",
     // Exclude the snapshot PowerShell itself. Its -Command text necessarily
     // contains $root, so the wrapper heuristic would otherwise classify the
     // enumerator as Portable-owned and every retry would discover a brand-new
     // powershell.exe that only exists to perform the next snapshot.
     "$owned=@($all | Where-Object {$exe=[string]$_.ExecutablePath;$cmd=[string]$_.CommandLine;$name=([string]$_.Name).ToLowerInvariant();$processId=[int]$_.ProcessId;$processId -ne $PID -and (($exe -and $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or (($wrappers -contains $name) -and $cmd -and $cmd.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0))})",
-    "$owned | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress",
+    "$owned | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationTicks | ConvertTo-Json -Compress",
   ].join(";");
   const result = childProcess.spawnSync(POWERSHELL_EXE, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
@@ -2078,6 +2078,7 @@ function portableProcessSnapshot() {
   return (Array.isArray(parsed) ? parsed : [parsed]).map((item) => ({
     pid: Number(item.ProcessId),
     parentPid: Number(item.ParentProcessId),
+    creationTicks: Number(item.CreationTicks || 0),
     name: String(item.Name || ""),
     executablePath: String(item.ExecutablePath || ""),
     commandLine: String(item.CommandLine || ""),
@@ -2302,6 +2303,16 @@ function stopPortableOwnedProcesses(excludePids = []) {
     ...excludePids,
   ].map(Number).filter((pid) => Number.isInteger(pid) && pid > 0));
   const killed = [];
+  const validParent = (child, parent) => {
+    if (!parent) return false;
+    if (!Number.isFinite(child?.creationTicks) || child.creationTicks <= 0) return true;
+    if (!Number.isFinite(parent?.creationTicks) || parent.creationTicks <= 0) return true;
+    // Windows keeps the creator PID after a parent exits. If that PID is later
+    // reused, a snapshot can otherwise invent a false ancestry edge and exempt
+    // an owned orphan merely because the new process happens to have the same
+    // numeric PID. A real parent must have existed no later than its child.
+    return parent.creationTicks <= child.creationTicks;
+  };
   const eligible = (processes) => {
     const byPid = new Map(processes.map((item) => [item.pid, item]));
     const expandedExcluded = new Set(excluded);
@@ -2312,7 +2323,8 @@ function stopPortableOwnedProcesses(excludePids = []) {
         visited.add(current.pid);
         expandedExcluded.add(current.pid);
         if (Number.isInteger(current.parentPid) && current.parentPid > 0) expandedExcluded.add(current.parentPid);
-        current = byPid.get(current.parentPid);
+        const parent = byPid.get(current.parentPid);
+        current = validParent(current, parent) ? parent : null;
       }
     }
     return processes.filter((item) => {
@@ -2321,7 +2333,8 @@ function stopPortableOwnedProcesses(excludePids = []) {
       while (current && !visited.has(current.pid)) {
         if (expandedExcluded.has(current.pid)) return false;
         visited.add(current.pid);
-        current = byPid.get(current.parentPid);
+        const parent = byPid.get(current.parentPid);
+        current = validParent(current, parent) ? parent : null;
       }
       return true;
     });
@@ -2336,8 +2349,10 @@ function stopPortableOwnedProcesses(excludePids = []) {
       const visited = new Set();
       while (current && byPid.has(current.parentPid) && !visited.has(current.pid)) {
         visited.add(current.pid);
+        const parent = byPid.get(current.parentPid);
+        if (!validParent(current, parent)) break;
         value += 1;
-        current = byPid.get(current.parentPid);
+        current = parent;
       }
       return value;
     };

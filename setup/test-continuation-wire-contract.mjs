@@ -293,11 +293,13 @@ try {
   assert.match(ack.task.executionContract.resumeInstruction, /latest concrete operation/i);
   assert.equal(ack.task.executionContract.mustContinueSameTurn, true);
   assert.equal(ack.task.executionContract.finalResponseAllowed, false);
-  assert.match(ack.requiredBeforeFinal, /MANDATORY NEXT TOOL CALL/);
-  assert.match(ack.requiredBeforeFinal, /post-ACK substantive DevSpace operation succeeds/);
-  assert.match(ack.requiredBeforeFinal, /NO assistant text\/final/);
+  assert.match(ack.requiredBeforeFinal, /MANDATORY NEXT OUTPUT/);
+  assert.match(ack.requiredBeforeFinal, /While any runnable milestone remains/);
+  assert.match(ack.requiredBeforeFinal, /NO assistant prose\/final/);
   assert.match(ack.requiredBeforeFinal, /'继续处理中'/);
-  assert.match(ack.requiredBeforeFinal, /in-turn progress is allowed/);
+  assert.match(ack.requiredBeforeFinal, /After every successful substantive tool result/);
+  assert.match(ack.requiredBeforeFinal, /another substantive DevSpace tool call/);
+  assert.doesNotMatch(ack.requiredBeforeFinal, /in-turn progress is allowed/);
   assert.match(ack.requiredBeforeFinal, /wire contract/);
   assert.match(lastWireReply.content?.[0]?.text ?? "", /DEVSPACE SYNTHETIC EXECUTION HANDOFF \[P0\]/,
     "successful synthetic ACK must put the execution handoff before the JSON payload");

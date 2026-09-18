@@ -17,11 +17,14 @@ legacy updater bootstrap into one production release.
 - Synthetic turns restore the durable objective/milestones, ACK the exact
   delivery generation, and must continue substantive work rather than ending
   after a status-only or short placeholder response.
-- After a synthetic status ACK, the first follow-up model action must be real
-  DevSpace work. Progress text such as `继续处理中` / `still working` is not
-  allowed before the first substantive operation succeeds; once work has
-  actually started, concise in-turn progress remains allowed but cannot serve
-  as a final boundary.
+- A runnable synthetic turn is tool-only. After the status ACK, and after every
+  subsequent substantive tool result, the next model output must be another
+  substantive DevSpace tool call while any milestone remains runnable. Text
+  such as `继续` / `继续处理中` / `still working`, progress summaries and
+  promises are not valid in-turn yield points: current ChatGPT Host behavior can
+  surface such prose as a real final, after which no background model execution
+  continues. The milestone card and native tool activity are the live progress
+  surface until the Task Contract reaches a terminal/non-runnable boundary.
 - The current ChatGPT Apps surface does not expose an authoritative timeout
   lifecycle event. Where required, cutoff recovery uses the separately bounded
   clustered historical-cutoff fallback and records that distinction instead of
@@ -49,6 +52,11 @@ legacy updater bootstrap into one production release.
   installer use keeps the safer ordinary-user fallback/default denial.
 - Local MCP restart, task recovery, sender rebinding and updater transactions
   retain rollback/fail-closed behavior validated throughout the dev series.
+- Portable process ownership now carries process creation identity in addition
+  to PID/ParentProcessId. A stale parent PID left behind after its creator exits
+  cannot be mistaken for a later Windows process that reused the same numeric
+  PID, preventing strict stop from incorrectly exempting an owned orphan on
+  fast-recycling Windows runners.
 
 ## Updating from older releases
 

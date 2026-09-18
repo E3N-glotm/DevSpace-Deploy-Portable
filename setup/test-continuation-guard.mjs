@@ -467,9 +467,9 @@ assert.match(coordinator, /state\.task\?\.state === "FAILED_RETRYABLE"[\s\S]{0,3
 assert.ok(visibleTriggerSource,
   "the continuation coordinator must expose one visibleContinuationTrigger(task, deliveryToken) function for the actual Host user-role turn");
 for (const [pattern, message] of [
-  [/@DevSpace MCP 继续未完成任务/, "the compact Chinese synthetic turn must explicitly activate DevSpace MCP"],
-  [/@DevSpace MCP continue the unfinished task/, "the compact English synthetic turn must explicitly activate DevSpace MCP"],
-  [/像人工发送“继续”一样直接继续真实工作/, "the Chinese visible handoff must stay close to the proven manual continue baseline"],
+  [/继续。@DevSpace MCP/, "the compact Chinese synthetic turn must begin like the proven manual continue while explicitly activating DevSpace MCP"],
+  [/Continue\. @DevSpace MCP/, "the compact English synthetic turn must begin like the proven manual continue while explicitly activating DevSpace MCP"],
+  [/像人工发送“继续”一样持续完成未完成任务/, "the Chinese visible handoff must stay close to the proven manual continue baseline"],
   [/exactly like a manual 'continue'/, "the English visible handoff must stay close to the proven manual continue baseline"],
   [/continuation_task action=status/, "the visible handoff must still require the mandatory first status call"],
 ]) {
@@ -644,7 +644,7 @@ assert.match(coordinator, /startFetchWakeSource\(\)[\s\S]{0,1800}fetch\(CONTINUA
   "the wake channel must retain a streamed-fetch hedge so background iframe timer/EventSource throttling cannot be the only READY discovery path");
 assert.match(coordinator, /const modelContextUpdate = updateModelContextBestEffort[\s\S]{0,650}const claim = await callSender\("claim"[\s\S]{0,500}await modelContextUpdate[\s\S]{0,900}callSender\("authorize-delivery"/,
   "model-context hydration must overlap the generation claim while the final authorize-delivery CAS remains immediately before Host send");
-assert.match(coordinator, /@DevSpace MCP 继续未完成任务。/,
+assert.match(coordinator, /继续。@DevSpace MCP/,
   "the compact synthetic user-role request must preserve an explicit DevSpace connector activation cue");
 assert.match(runtimeStateSource, /manual-user-turn-takeover/,
   "runtime must retain an old-schema-compatible manual takeover CAS marker on the existing note field");
@@ -684,8 +684,8 @@ assert.match(migrations, /version: 29[\s\S]{0,180}continuation-synthetic-work-ba
   "the synthetic work baseline must be added through a durable SQLite migration");
 assert.doesNotMatch(coordinator, /synthetic resume work ownership lease expired|syntheticResumeWorkRetryDue/,
   "synthetic ownership expiry must not be a client-side continuation trigger in dev12");
-assert.match(coordinator, /Never end an automatically resumed turn with a placeholder\/status-only reply[\s\S]{0,500}There is no background model execution after a final assistant message/,
-  "synthetic recovery context must explicitly forbid placeholder finals such as '继续处理中。'");
+assert.match(coordinator, /Never end or interrupt an automatically resumed runnable turn with prose[\s\S]{0,700}There is no background model execution after a final assistant message[\s\S]{0,700}runnable synthetic turn is tool-only/,
+  "synthetic recovery context must forbid both placeholder finals and progress-prose yield points after real work starts");
 assert.match(runtimeStateSource, /const syntheticTurnLeaseId = String\(syntheticOwnerTask\?\.turn_lease_id[\s\S]{0,260}const syntheticCompletionLeaseId = String\(syntheticOwnerTask\?\.assistant_turn_completion_lease_id[\s\S]{0,420}const syntheticMode = normalizedContinuationMode[\s\S]{0,420}const syntheticTurnEnded =[\s\S]{0,520}syntheticCompletionLeaseId === syntheticTurnLeaseId/,
   "synthetic retry must require a terminal ATCC state bound to the exact current resumed-turn lease");
 assert.match(runtimeStateSource, /const endedSyntheticWork =[\s\S]{0,500}syntheticTurnEnded[\s\S]{0,300}!this\.continuationModelRequestInFlight/,
@@ -736,18 +736,26 @@ assert.match(coordinator, /resumeExecutionContext:[\s\S]{0,1400}latest concrete 
   "the final Host model context must carry the durable execution resume capsule");
 assert.match(server, /requiredMilestones[\s\S]{0,700}completedMilestones[\s\S]{0,700}nextMilestone[\s\S]{0,900}executionContract/,
   "the synthetic ACK must restore the exact actionable milestone ledger omitted by the dev71 compact projection");
-assert.match(server, /MANDATORY NEXT TOOL CALL:[\s\S]{0,300}ACK\/status is not work[\s\S]{0,500}post-ACK substantive DevSpace operation succeeds[\s\S]{0,300}NO assistant text\/final[\s\S]{0,500}in-turn progress is allowed/,
-  "generation-12 style ACK-to-blank-final exits must be forbidden without suppressing in-turn visible progress");
-assert.match(coordinator, /status 成功后的第二个动作必须直接调用实质 DevSpace 工具继续任务[\s\S]{0,260}第一次实质工作前禁止回复“继续处理中”/,
-  "the visible synthetic handoff must forbid a generation-27 style ACK-to-placeholder final before real work starts");
-assert.match(coordinator, /Before the first successful post-ACK substantive DevSpace operation[\s\S]{0,360}emit no user-visible assistant text at all[\s\S]{0,500}after real work has begun/,
-  "automatic progress visibility must begin only after substantive resumed work has actually started");
-assert.match(coordinator, /During sustained automatic work[\s\S]{0,500}concise user-visible progress updates[\s\S]{0,500}do not reveal private chain-of-thought[\s\S]{0,500}continue substantive DevSpace work immediately afterwards/,
-  "synthetic turns must distinguish visible in-turn progress from an illegal progress-only final");
+assert.match(server, /MANDATORY NEXT OUTPUT:[\s\S]{0,320}ACK\/status is not work[\s\S]{0,700}NO assistant prose\/final[\s\S]{0,700}After every successful substantive tool result[\s\S]{0,700}another substantive DevSpace tool call/,
+  "generation-40/41/51 style ACK-to-zero-or-few-tools then prose final must be forbidden for the entire runnable synthetic turn");
+assert.match(coordinator, /只要还有可运行里程碑[\s\S]{0,260}连续调用实质 DevSpace 工具[\s\S]{0,320}不要输出“继续”“继续处理中”或任何进度\/状态文字/,
+  "the visible synthetic handoff must forbid both zero-work and few-tools-then-placeholder finals while milestones remain runnable");
+assert.match(coordinator, /While this synthetic turn still has any runnable milestone[\s\S]{0,320}emit no user-visible assistant prose at all between tool calls/,
+  "automatic continuation must remain prose-free across the whole runnable synthetic turn, not merely before the first tool");
+assert.match(coordinator, /after every successful substantive result[\s\S]{0,220}next model output[\s\S]{0,220}substantive DevSpace tool call/,
+  "after each real synthetic tool result the next model output must be another real tool call");
+assert.match(coordinator, /milestone card and native tool activity are the live progress surface/i,
+  "runnable synthetic turns must use the existing card/tool activity as progress instead of risky assistant prose");
+assert.doesNotMatch(coordinator, /concise user-visible progress updates|in-turn progress messages/,
+  "the old progress-prose exception must stay removed because the Host can surface it as a real final");
 assert.match(server, /DEVSPACE SYNTHETIC EXECUTION HANDOFF \[P0\][\s\S]{0,900}executionDirective/,
   "the synthetic execution directive must precede the JSON result so the resumed model sees it before status data");
-assert.match(server, /DEVSPACE PRE-FINAL BARRIER \[MUST OBEY BEFORE ANY USER-VISIBLE FINAL\][\s\S]{0,900}FINAL DevSpace control call MUST be continuation_task action=turn-complete/,
-  "the pre-final barrier must make turn-complete the explicit legal incomplete-stage boundary instead of relying on buried Task Contract prose");
+assert.match(server, /DEVSPACE PRE-FINAL BARRIER \[MUST OBEY BEFORE ANY USER-VISIBLE FINAL\][\s\S]{0,900}nextAction=\$\{barrier\.nextAction\}/,
+  "the pre-final barrier must expose a machine-readable next action before any legal final boundary");
+assert.match(server, /CALL_ANOTHER_SUBSTANTIVE_DEVSPACE_TOOL_NOW[\s\S]{0,1600}DO NOT EMIT ASSISTANT PROSE WHILE RUNNABLE MILESTONES REMAIN/,
+  "an unfinished synthetic data-plane result must demand another tool call rather than prose");
+assert.match(server, /FINAL DevSpace control call MUST be continuation_task action=turn-complete/,
+  "manual incomplete-stage boundaries must retain explicit turn-complete guidance");
 assert.match(server, /content:\s*\[\.\.\.barrierContent, \.\.\.\(Array\.isArray\(senderCapableResult\?\.content\)/,
   "the pre-final barrier must precede the ordinary tool payload so the model cannot overlook it after a successful result");
 assert.match(server, /devspacePreFinalBarrier:\s*barrier/,
@@ -764,8 +772,10 @@ assert.match(server, /Manual and synthetic turns otherwise use the same full Hos
   "the control-plane contract must preserve manual-equivalent sustained-work semantics without replaying them on every data-plane result");
 assert.match(server, /nextRequiredMilestones/,
   "Task Contract results must expose remaining milestones as structured state instead of relying on a prose ACK convention");
-assert.match(server, /taskIncomplete:\s*Boolean\(outcome\.taskIncomplete\)[\s\S]{0,420}finalResponseAllowed,[\s\S]{0,420}remainingMilestones/,
-  "ordinary DevSpace work must surface compact machine-readable incomplete/final-response/milestone state without replaying the full contract");
+assert.match(server, /taskIncomplete:\s*Boolean\(outcome\.taskIncomplete\)[\s\S]{0,520}finalResponseAllowed/,
+  "ordinary DevSpace work must surface compact machine-readable incomplete/final-response state without replaying the full contract");
+assert.match(server, /nextAction:\s*mustContinueSameTurn[\s\S]{0,520}CALL_ANOTHER_SUBSTANTIVE_DEVSPACE_TOOL_NOW[\s\S]{0,700}remainingMilestones/,
+  "the compact barrier must carry the synthetic next-tool action together with remaining milestones");
 assert.match(server, /continueInSameTurn:\s*outcome\.continueInSameTurn/,
   "continuation_task structured projection must expose the same-turn sustained-work directive without duplicating it into prose");
 assert.match(server, /syntheticWorkMustContinue:\s*outcome\.syntheticWorkMustContinue/,
@@ -919,8 +929,8 @@ assert.match(coordinator, /refreshActiveSyntheticExecutionContext\("authoritativ
   "authoritative supervisor refresh must keep the unfinished synthetic execution lease salient during long turns");
 assert.match(coordinator, /refreshActiveSyntheticExecutionContext\("synthetic tool-result refresh"\)/,
   "tool results must refresh the synthetic execution lease when milestone state changes instead of relying only on the startup prompt");
-assert.match(server, /UNFINISHED SYNTHETIC TURN: NEVER FINAL WHILE RUNNABLE MILESTONES REMAIN/,
-  "the pre-final barrier must place a compact synthetic no-final instruction ahead of ordinary tool payloads");
+assert.match(server, /UNFINISHED SYNTHETIC TURN: DO NOT EMIT ASSISTANT PROSE WHILE RUNNABLE MILESTONES REMAIN[\s\S]{0,220}NEXT MODEL OUTPUT MUST BE ANOTHER SUBSTANTIVE DEVSPACE TOOL CALL/,
+  "the pre-final barrier must place a compact tool-only synthetic instruction ahead of ordinary tool payloads");
 assert.doesNotMatch(runtimeStateSource, /function syntheticActiveOrphanFallback|const orphan = syntheticActiveOrphanFallback/,
   "DevSpace tool silence must never be promoted into synthetic turn-end authority because the Host may still be reasoning/generating outside MCP");
 assert.doesNotMatch(runtimeStateSource, /update continuation_tasks set[\s\S]{0,700}assistant_turn_state='ORPHANED'/,
@@ -1401,7 +1411,7 @@ assert.equal(await fakeController.attemptContinuation("unit test", { force: true
 assert.equal(fakeApp.messages.length, 1);
 assert.equal(fakeApp.contextUpdates.length >= 1, true);
 const visibleSyntheticText = fakeApp.messages[0]?.content?.[0]?.text ?? "";
-assert.match(visibleSyntheticText, /@DevSpace MCP 继续未完成任务|@DevSpace MCP continue the unfinished task/,
+assert.match(visibleSyntheticText, /继续。@DevSpace MCP|Continue\. @DevSpace MCP/,
   "automatic recovery must preserve an explicit compact DevSpace connector activation cue in the Host-visible user-role turn");
 assert.match(visibleSyntheticText, /continuation_task(?:\s+action=)?status/i,
   "the visible continuation trigger must tell the resumed turn how to recover authoritative durable state");
@@ -1409,7 +1419,7 @@ assert.match(visibleSyntheticText, /deliveryToken[^\n]*00000000-0000-4000-8000-0
   "the Host-visible synthetic turn must carry the exact one-time sender claim token required by the live turn-origin handshake");
 assert.match(visibleSyntheticText, /(?:不要设置|不设置) manualTakeover|without manualTakeover/i,
   "the first synthetic status must be explicitly distinguished from a manual takeover");
-assert.match(visibleSyntheticText, /像人工发送“继续”一样直接继续真实工作|exactly like a manual 'continue'/i,
+assert.match(visibleSyntheticText, /像人工发送“继续”一样持续完成未完成任务|exactly like a manual 'continue'/i,
   "the Host-visible synthetic turn must mimic the proven manual-continue execution cue instead of looking like a status protocol");
 assert.doesNotMatch(visibleSyntheticText,
   /staleSyntheticTurn=true|suppressVisibleFinal=true|synthetic-continuation-superseded|Task Contract|至少完成 4 次实质 DevSpace 操作|at least four substantive DevSpace operations|turn-complete/,

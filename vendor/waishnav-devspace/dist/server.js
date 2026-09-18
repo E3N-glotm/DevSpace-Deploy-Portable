@@ -100,6 +100,11 @@ function preFinalBarrier(outcome) {
         preFinalControlRequired,
         finalResponseAllowed,
         mustContinueSameTurn,
+        nextAction: mustContinueSameTurn
+            ? (task.deliveryOwner === "synthetic-active"
+                ? "CALL_ANOTHER_SUBSTANTIVE_DEVSPACE_TOOL_NOW"
+                : "CONTINUE_SUBSTANTIVE_WORK_OR_LEGAL_CONTROL")
+            : "FINAL_ALLOWED",
         requiredBeforeFinal: String(outcome.requiredBeforeFinal ?? "").trim()
             || "continue substantive work; or call turn-complete for an intentional incomplete stage boundary; or checkpoint with waitingExternal=true only for a genuine external blocker",
         remainingMilestones,
@@ -111,8 +116,13 @@ function preFinalBarrierText(barrier) {
     return [
         "DEVSPACE PRE-FINAL BARRIER [MUST OBEY BEFORE ANY USER-VISIBLE FINAL]",
         `taskIncomplete=${barrier.taskIncomplete}; syntheticActive=${barrier.syntheticActive}; preFinalControlRequired=${barrier.preFinalControlRequired}; finalResponseAllowed=${barrier.finalResponseAllowed}; taskId=${barrier.taskId}.`,
-        ...(barrier.syntheticActive ? ["UNFINISHED SYNTHETIC TURN: NEVER FINAL WHILE RUNNABLE MILESTONES REMAIN. NEXT ACTION MUST BE ANOTHER SUBSTANTIVE DEVSPACE TOOL."] : []),
-        "DO NOT produce a final response now. Continue substantive DevSpace work in this same assistant turn. If this incomplete stage is intentionally ready to end after sufficient work, the FINAL DevSpace control call MUST be continuation_task action=turn-complete. Only a genuine unavailable external dependency may use checkpoint waitingExternal=true. A status/progress/checkpoint summary, tool failure, SUSPECTED_STALL, or promise to continue is not a legal final boundary.",
+        `nextAction=${barrier.nextAction}.`,
+        ...(barrier.syntheticActive ? [
+            "UNFINISHED SYNTHETIC TURN: DO NOT EMIT ASSISTANT PROSE WHILE RUNNABLE MILESTONES REMAIN. THE NEXT MODEL OUTPUT MUST BE ANOTHER SUBSTANTIVE DEVSPACE TOOL CALL.",
+            "Do not use a progress/status sentence, placeholder, promise, or turn-complete as a yield boundary. Synthetic turn-complete remains illegal while runnable milestones remain. Keep issuing substantive DevSpace tools until the milestone set becomes terminal/non-runnable or the Host itself truncates the turn.",
+        ] : [
+            "DO NOT produce a final response now. Continue substantive DevSpace work in this same assistant turn. If this incomplete stage is intentionally ready to end after sufficient work, the FINAL DevSpace control call MUST be continuation_task action=turn-complete. Only a genuine unavailable external dependency may use checkpoint waitingExternal=true. A status/progress/checkpoint summary, tool failure, SUSPECTED_STALL, or promise to continue is not a legal final boundary.",
+        ]),
         `remainingMilestones=${barrier.remainingMilestones.join(" | ") || "none"}.`,
     ].join("\n");
 }
@@ -172,13 +182,13 @@ function syntheticAckWorkTicket(input, outcome) {
     const completedMilestones = Array.isArray(task?.completedMilestones) ? task.completedMilestones : [];
     const nextMilestone = remainingMilestones[0];
     const requiredBeforeFinal = [
-        "MANDATORY NEXT TOOL CALL: substantive DevSpace work.",
-        "ACK/status is not work. Until one post-ACK substantive DevSpace operation succeeds: NO assistant text/final, including '继续处理中' or 'still working'.",
-        "After real work starts, brief in-turn progress is allowed but is never a final boundary.",
+        "MANDATORY NEXT OUTPUT: a substantive DevSpace tool call.",
+        "ACK/status is not work. While any runnable milestone remains, emit NO assistant prose/final between DevSpace tool calls, including '继续处理中', '继续', 'still working', progress/status text, or promises.",
+        "After every successful substantive tool result, the next model output must be another substantive DevSpace tool call until the Task Contract becomes terminal/non-runnable or the Host truncates the turn.",
         nextMilestone
             ? `Next milestone: ${nextMilestone}`
             : "Continue from durable workspace/process state.",
-        "Continue every runnable milestone in this Host turn. Only a genuine unavailable external dependency may use waitingExternal=true.",
+        "Do not call turn-complete while runnable synthetic milestones remain. Only a genuine unavailable external dependency may use waitingExternal=true.",
     ].join(" ");
     const resumeContext = task?.resumeContext && typeof task.resumeContext === "object"
         ? task.resumeContext

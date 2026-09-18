@@ -26,6 +26,10 @@ assert.ok(restartAckIndex >= 0 && restartGraceIndex > restartAckIndex && restart
 assert.match(sourceManagerText,
   /if \(invokedFromLocalMcpServiceTree\(\)\)[\s\S]*scheduleLocalRestartController\(\)[\s\S]*else \{[\s\S]*stopLocalServiceOnly\(\);[\s\S]*startLocalOnly\(\)/,
   "restart-local must delegate only for MCP-internal callers and retain synchronous external semantics");
+assert.match(sourceManagerText, /CreationTicks/,
+  "Portable process snapshots must carry process creation identity so stale ParentProcessId values cannot invent ancestry after PID reuse");
+assert.match(sourceManagerText, /return parent\.creationTicks <= child\.creationTicks/,
+  "Portable stop ancestry must reject a reused parent PID whose current process started after the child");
 const temporary = await mkdtemp(join(tmpdir(), "devspace-strict-stop-"));
 // Run the destructive stop test from a disposable Portable root. Running the
 // real worktree manager would make ROOT point at the active source checkout and
