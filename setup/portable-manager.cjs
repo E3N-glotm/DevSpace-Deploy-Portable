@@ -1943,6 +1943,23 @@ function listenerPids(port) {
     .map((match) => Number(match[1]));
 }
 
+function localTcpPortBindable(port) {
+  const probe = [
+    "const net=require('net');",
+    "const s=net.createServer();",
+    "const done=(code)=>{try{s.close(()=>process.exit(code));}catch{process.exit(code)}};",
+    "s.once('error',()=>process.exit(2));",
+    "s.listen(" + Number(port) + ",'127.0.0.1',()=>done(0));",
+    "setTimeout(()=>process.exit(3),3000).unref();",
+  ].join("");
+  const result = childProcess.spawnSync(process.execPath, ["-e", probe], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 5_000,
+  });
+  return result.status === 0;
+}
+
 function stopRecordedProcess(pidFile, expectedImage, requiredListenerPort = null) {
   if (!fs.existsSync(pidFile)) return;
   const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
@@ -2098,7 +2115,16 @@ function stopLocalMcpServiceProcesses(port) {
       sameProcessStillExists(pid, killedPids.get(pid) || 0));
   }
   const remainingProcesses = portableProcessSnapshot().filter(isLocalMcpServiceProcess);
-  const remainingListeners = listenerPids(port);
+  let remainingListeners = listenerPids(port);
+  // Hosted Windows can retain a stale LISTENING row in netstat briefly after
+  // the owning process is already gone. The restart contract is that the local
+  // bind is actually available, not that every diagnostic view has converged.
+  // If no Portable MCP process remains and an immediate kernel-level bind probe
+  // succeeds, treat the stale netstat row as drained. A real unrelated listener
+  // still causes bind() to fail and therefore remains fail-closed.
+  if (!remainingProcesses.length && remainingListeners.length && localTcpPortBindable(port)) {
+    remainingListeners = [];
+  }
   return { killed, remainingProcesses, remainingListeners, remainingKilledPids };
 }
 

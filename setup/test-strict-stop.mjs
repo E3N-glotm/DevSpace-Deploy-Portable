@@ -127,6 +127,22 @@ function listenerExists(port) {
   return pattern.test(String(result.stdout || ""));
 }
 
+function portBindable(port) {
+  const code = [
+    "const net=require('net');",
+    "const s=net.createServer();",
+    "s.once('error',()=>process.exit(2));",
+    `s.listen(${Number(port)},'127.0.0.1',()=>s.close(()=>process.exit(0)));`,
+    "setTimeout(()=>process.exit(3),3000).unref();",
+  ].join("");
+  const result = spawnSync(process.execPath, ["-e", code], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 5_000,
+  });
+  return result.status === 0;
+}
+
 try {
   await mkdir(sandboxSetupDir, { recursive: true });
   await mkdir(sandboxNodeDir, { recursive: true });
@@ -255,8 +271,8 @@ try {
     false,
     `stop-local left orphan MCP service ${localServicePid} visible to the ownership snapshot`,
   );
-  assert.equal(listenerExists(17689), false,
-    "stop-local reported success while the orphan MCP listener still occupied the configured port");
+  assert.equal(portBindable(17689), true,
+    "stop-local reported success while 127.0.0.1:17689 still rejected an immediate replacement bind");
   assert.equal(processStartTicks(localExternalPid), localExternalStartTicks,
     `stop-local recursively killed unrelated descendant ${localExternalPid}`);
 

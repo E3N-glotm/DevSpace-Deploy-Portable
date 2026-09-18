@@ -196,6 +196,39 @@ function syntheticAckWorkTicket(input, outcome) {
     const resumeContext = task?.resumeContext && typeof task.resumeContext === "object"
         ? task.resumeContext
         : undefined;
+    const clipResumeText = (value, max = 900) => {
+        const text = String(value ?? "");
+        return text.length <= max ? text : `${text.slice(0, max)}…`;
+    };
+    const boundedResumeContext = resumeContext
+        ? {
+            protocol: resumeContext.protocol,
+            capturedAt: resumeContext.capturedAt,
+            taskId: resumeContext.taskId,
+            workspaceId: resumeContext.workspaceId,
+            assistantTurnOwner: resumeContext.assistantTurnOwner,
+            deliveryGeneration: resumeContext.deliveryGeneration,
+            progressFingerprint: resumeContext.progressFingerprint,
+            watchProcessHandles: resumeContext.watchProcessHandles,
+            nextMilestone: resumeContext.nextMilestone,
+            resumeInstruction: resumeContext.resumeInstruction,
+            operations: Array.isArray(resumeContext.operations)
+                ? resumeContext.operations.slice(-4).map((operation) => ({
+                    tool: operation?.tool,
+                    success: operation?.success,
+                    workspaceId: operation?.workspaceId,
+                    path: operation?.path,
+                    command: operation?.command ? clipResumeText(operation.command, 1200) : undefined,
+                    processHandle: operation?.processHandle,
+                    running: operation?.running,
+                    exitCode: operation?.exitCode,
+                    files: operation?.files,
+                    resultSummary: operation?.resultSummary ? clipResumeText(operation.resultSummary, 1200) : undefined,
+                    capturedAt: operation?.capturedAt,
+                }))
+                : [],
+        }
+        : undefined;
     const executionContract = {
         protocol: "devspace-synthetic-execution-v3",
         taskId: task?.id,
@@ -244,7 +277,7 @@ function syntheticAckWorkTicket(input, outcome) {
             requiredMilestones,
             completedMilestones,
             nextMilestone,
-            resumeContext,
+            resumeContext: boundedResumeContext,
             executionContract,
             ...(task.watchProcessHandles?.length ? { watchProcessHandles: task.watchProcessHandles } : {}),
         },

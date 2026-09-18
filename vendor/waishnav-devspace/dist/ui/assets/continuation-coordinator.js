@@ -351,11 +351,44 @@ function nextUnresolvedMilestone(task) {
   return required.find((milestone) => !completed.has(milestone));
 }
 
+function boundedResumeContext(resumeContext) {
+  if (!resumeContext || typeof resumeContext !== "object") return undefined;
+  const clip = (value, max = 900) => {
+    const text = String(value ?? "");
+    return text.length <= max ? text : `${text.slice(0, max)}…`;
+  };
+  return {
+    protocol: resumeContext.protocol,
+    capturedAt: resumeContext.capturedAt,
+    taskId: resumeContext.taskId,
+    workspaceId: resumeContext.workspaceId,
+    assistantTurnOwner: resumeContext.assistantTurnOwner,
+    deliveryGeneration: resumeContext.deliveryGeneration,
+    progressFingerprint: resumeContext.progressFingerprint,
+    watchProcessHandles: resumeContext.watchProcessHandles,
+    nextMilestone: resumeContext.nextMilestone,
+    resumeInstruction: resumeContext.resumeInstruction,
+    operations: Array.isArray(resumeContext.operations)
+      ? resumeContext.operations.slice(-4).map((operation) => ({
+          tool: operation?.tool,
+          success: operation?.success,
+          workspaceId: operation?.workspaceId,
+          path: operation?.path,
+          command: operation?.command ? clip(operation.command, 1200) : undefined,
+          processHandle: operation?.processHandle,
+          running: operation?.running,
+          exitCode: operation?.exitCode,
+          files: operation?.files,
+          resultSummary: operation?.resultSummary ? clip(operation.resultSummary, 1200) : undefined,
+          capturedAt: operation?.capturedAt,
+        }))
+      : [],
+  };
+}
+
 function continuationContext(task, workspaceId, reason) {
   const nextMilestone = nextUnresolvedMilestone(task);
-  const resumeContext = task?.resumeContext && typeof task.resumeContext === "object"
-    ? task.resumeContext
-    : undefined;
+  const resumeContext = boundedResumeContext(task?.resumeContext);
   const syntheticWorkMustContinue = task?.syntheticWorkMustContinue === true;
   const continueInSameTurn = task?.continueInSameTurn === true;
   const finalResponseAllowed = task?.finalResponseAllowed !== false;
