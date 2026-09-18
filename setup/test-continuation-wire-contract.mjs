@@ -193,7 +193,7 @@ try {
   assert.equal(cachedBound.accepted, false, JSON.stringify(cachedBound));
   assert.equal(cachedBound.reason, "sender-asset-revision-mismatch");
   const normalizedCard = runtime.database.sqlite.prepare(
-    "select sender_protocol_epoch,sender_asset_revision,sender_lease_state,mount_generation from continuation_conversation_cards where conversation_scope_id=?"
+    "select sender_protocol_epoch,sender_asset_revision,sender_lease_state,mount_generation,mount_state from continuation_conversation_cards where conversation_scope_id=?"
   ).get(scope);
   assert.equal(normalizedCard.sender_protocol_epoch, 13);
   assert.equal(normalizedCard.sender_asset_revision, runtime.continuationSenderAssetRevision,
@@ -201,6 +201,14 @@ try {
   assert.equal(normalizedCard.sender_lease_state, "NEED_REBIND",
     "revision mismatch must revoke transport until the current immutable resource rebinds");
   assert.equal(normalizedCard.mount_generation, mount.anchorMountGeneration);
+  assert.equal(normalizedCard.mount_state, "UNMOUNTED",
+    "revision mismatch must request a same-generation current-resource remount instead of leaving stale VERIFIED bytes authoritative");
+  const recoveryAnchor = await wire("continuation_anchor", { taskId: started.task.id });
+  assert.equal(recoveryAnchor.continuationAnchor, true, JSON.stringify(recoveryAnchor));
+  assert.equal(recoveryAnchor.anchorMountVerified, false,
+    "asset-revision recovery must issue a fresh same-generation mount request");
+  assert.equal(recoveryAnchor.anchorMountGeneration, mount.anchorMountGeneration,
+    "asset-revision recovery must reuse the immutable card generation");
   // Restore the current-revision sender on the same immutable card generation
   // and use that authority for the remainder of the real MCP wire fixture.
   bindArgs.senderProtocolEpoch = runtime.continuationSenderProtocolEpoch;

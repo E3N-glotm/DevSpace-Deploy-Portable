@@ -3091,6 +3091,29 @@ try {
     "sender-asset-revision-mismatch",
     "revision drift must remain explicit durable diagnostics rather than silently recovering stale code",
   );
+  const senderRestartRecoveryTaskRow = senderRestartRuntimeB.database.sqlite.prepare(
+    "select anchor_mount_generation,anchor_mount_requested_at,anchor_mount_verified_at from continuation_tasks where id=?",
+  ).get(senderRestartTask.task.id);
+  const senderRestartRecoveryCardRow = senderRestartRuntimeB.database.sqlite.prepare(
+    "select mount_generation,mount_state,mount_requested_at,mount_verified_at from continuation_conversation_cards where conversation_scope_id=?",
+  ).get(senderRestartScope);
+  assert.equal(senderRestartRecoveryTaskRow.anchor_mount_requested_at, null,
+    "asset drift must make the same lifetime card eligible for a current-resource remount");
+  assert.equal(senderRestartRecoveryTaskRow.anchor_mount_verified_at, null,
+    "stale executable bytes must not leave the old VERIFIED mount authoritative");
+  assert.equal(senderRestartRecoveryCardRow.mount_state, "UNMOUNTED");
+  assert.equal(
+    Number(senderRestartRecoveryCardRow.mount_generation),
+    Number(senderRestartAnchor.anchorMountGeneration),
+    "asset-drift recovery must preserve the existing card generation rather than minting a duplicate",
+  );
+  const senderRestartRecoveryStatus = senderRestartRuntimeB.continuationTask({
+    action: "status",
+    taskId: senderRestartTask.task.id,
+    conversationScopeId: senderRestartScope,
+  });
+  assert.equal(senderRestartRecoveryStatus.reanchorRequired, true,
+    "after stale executable fencing, status must request a same-generation current-resource reanchor");
   const senderRestartDiagnosticsAfterStale = senderRestartRuntimeB.continuationSenderDiagnostics();
   assert.equal(Number(senderRestartDiagnosticsAfterStale.upgradeRequiredCount || 0), 0,
     "same-epoch asset drift requires resource rebind, not an ABI upgrade");
@@ -3104,6 +3127,25 @@ try {
   assert.equal(senderRestartStaleHeartbeat.accepted, false);
   assert.equal(senderRestartStaleHeartbeat.reason, "sender-asset-revision-mismatch",
     "stale revision heartbeat must not recreate or prolong sender authority");
+  const senderRestartRemount = senderRestartRuntimeB.prepareContinuationAnchorMount({
+    taskId: senderRestartTask.task.id,
+    conversationScopeId: senderRestartScope,
+  });
+  assert.equal(senderRestartRemount.accepted, true, JSON.stringify(senderRestartRemount));
+  assert.equal(
+    Number(senderRestartRemount.anchorMountGeneration),
+    Number(senderRestartAnchor.anchorMountGeneration),
+    "current-resource recovery must remount the same visible card generation",
+  );
+  const senderRestartRemountAck = senderRestartRuntimeB.continuationTask({
+    action: "anchor-mounted",
+    taskId: senderRestartTask.task.id,
+    conversationScopeId: senderRestartScope,
+    coordinatorInstanceId: "ui_sender_restart_current",
+    anchorMountToken: senderRestartRemount.anchorMountToken,
+    anchorMountGeneration: senderRestartRemount.anchorMountGeneration,
+  });
+  assert.equal(senderRestartRemountAck.accepted, true, JSON.stringify(senderRestartRemountAck));
   const senderRestartCurrentRebound = senderRestartRuntimeB.bindContinuationSender(withTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,

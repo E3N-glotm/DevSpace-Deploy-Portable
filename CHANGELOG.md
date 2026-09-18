@@ -17,6 +17,14 @@
   进程已消失且内核立即可重新 bind 本地端口”。若 bind 成功则把残留 netstat 行视为陈旧
   诊断视图；若端口仍被真实/无关进程占用则 bind 失败并继续 fail-closed。新的 bind-probe
   strict-stop 本地连续 20/20 通过。
+- dev94 补上 dev93 热部署实机立即暴露的同卡自愈缺口：exact asset-revision fence
+  能正确拒绝旧 iframe，但此前 lifetime card 已是 VERIFIED，拒绝后仍不会重新请求
+  continuation_anchor，导致 sender 永久停在 NEED_REBIND，直到下一次人工消息碰巧轮换新卡。
+  现在仅在当前卡尚无其他新 sender、且确认发生 sender-asset-revision-mismatch 时，把同一
+  card generation 的 mount 状态降回 UNMOUNTED，同时保留原 mount token/generation；
+  下一次 status 明确返回 reanchorRequired，新的 revisioned resource URI 可以在**同一张卡**
+  上重新挂载当前 coordinator。不会增加 milestone/card generation，也不会让旧 iframe
+  越过 revision fence；若当前新 sender 已绑定，迟到旧 iframe 也不能触发降级。
 - dev92 fixes the live-only stale Workspace App sender regression exposed after
   the dev91 hot deployment. The real generation-6 continuation was delivered
   and ACKed but performed zero substantive DevSpace work because an older
