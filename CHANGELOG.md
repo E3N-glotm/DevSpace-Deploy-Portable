@@ -2,12 +2,20 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
-## 1.1.59 dev97（开发中，暂停发布）
+## 1.1.59 dev99（开发中，暂停发布）
+
+- completion-driven 长进程现在在工具结果离开服务端前持久化 processHandle；若 Host/连接器丢失工具结果但命令已真实启动，下一 synthetic ACK 会优先暴露该 handle，并要求 attach/poll 既有进程后再决定是否重跑。
+- synthetic ACK 新增有界 `nextExecutableStep`，仅从持久 checkpoint 的 `evidence.pending/nextStep` 投影具体下一步，避免恢复轮只拿到宽泛里程碑和不可执行的 progress fingerprint。
+- 该长进程持久化不赋予 completion-driven resident 后台唤醒语义：显式 `watch-process` 和 process-completion wake 仍保持 resident-only，避免后台进程完成时打断正在推理的模型轮。
+- `ui/message` 已接受但模型未 ACK 仍视为 delivery-ambiguous，不盲目重发可见用户消息；稳定前继续禁止 1.1.60 Release。
+
+## 1.1.59 dev98（开发历史）
 
 - 保留当前代码及修复历史，撤下 1.1.60 发布线，继续作为 1.1.59 dev 迭代。
 - generation 23 实际只产生一次 post-ACK 实质调用（930→931），后台压测进度不构成模型持续工作的证据。
 - 统一中英文续轮消息并去掉任意阶段总结诱因；未完成 synthetic 只能在服务端报告 Host cutoff 交接窗口时签署 turn-complete，四次调用或部分测试进度不再放行。
 - underfloor 静默仅作诊断，不能推断 Host 已结束；保留历史状态兼容、sender revision fence、同卡自愈、紧凑 resume 上下文及 strict-stop 修复。
+- dev98 修正 dev92–dev97 的 sender 授权边界：protocol epoch 才是 wire 兼容性硬门槛；同 epoch 的 Workspace App asset revision 漂移继续记录为 provenance/diagnostic telemetry，但不再因为构建 hash 不同撤销 sender。仍严格要求非空 revision、当前 task/card generation/mount token、当前 server boot、fresh heartbeat、manual takeover fencing 和 authorize-delivery CAS。该修改针对实机已确认的“Host 保留旧 iframe、却不可靠重挂同 generation 卡片”死锁，不回退此前长轮执行、早退防护和 stale generation CAS。
 - 真实长轮与连续交接仍需验收，不因单元测试通过宣告稳定，不发布 Release。
 
 ## 1.1.60（发布已撤回，以下为开发历史）

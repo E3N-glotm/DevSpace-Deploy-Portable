@@ -629,15 +629,27 @@ try {
   assert.equal(firstSweep.ready.length, 0,
     "an expired short model-activity lease must not independently authorize a new ChatGPT turn");
 
-  const nonResidentProcessGuard = runtime.trackContinuationActivityProcess({
+  const completionDrivenProcessGuard = runtime.trackContinuationActivityProcess({
     conversationScopeId: scope,
     processHandle: "architecture-long-process",
     running: true,
   });
-  assert.equal(nonResidentProcessGuard.accepted, false,
-    "ordinary completion-driven work must not silently acquire resident process-monitoring semantics");
-  assert.equal(nonResidentProcessGuard.reason, "not-active-monitoring-task",
-    "the lower-level process tracker must reject a non-resident task before persisting any durable process handle");
+  assert.equal(completionDrivenProcessGuard.accepted, true,
+    "completion-driven work must persist the handle of a running process so a later synthetic turn can resume it");
+  assert.deepEqual(completionDrivenProcessGuard.handles, ["architecture-long-process"]);
+  assert.equal(runtime.continuationActivityProcessGuards().some(
+    (guard) => guard.conversationScopeId === scope
+      && guard.processHandles.includes("architecture-long-process"),
+  ), false,
+    "completion-driven handles must remain model-resumable and must not acquire resident background-wake semantics");
+  const releasedCompletionDrivenProcessGuard = runtime.trackContinuationActivityProcess({
+    conversationScopeId: scope,
+    processHandle: "architecture-long-process",
+    running: false,
+  });
+  assert.equal(releasedCompletionDrivenProcessGuard.accepted, true);
+  assert.deepEqual(releasedCompletionDrivenProcessGuard.handles, [],
+    "observing completion through a model/process tool must release the completion-driven activity handle");
 
   const residentGuardScope = "v1/architecture-resident-process-guard";
   const residentGuardTask = runtime.continuationTask({

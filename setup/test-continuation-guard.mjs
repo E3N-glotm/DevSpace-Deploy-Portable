@@ -440,10 +440,10 @@ assert.match(server, /sender-asset-revision-required/,
   "the hidden sender bridge must still require the iframe to identify its concrete resource revision");
 assert.match(runtimeStateSource, /assetRevisionDrift:/,
   "resource revision drift must remain observable in diagnostics");
-assert.match(runtimeStateSource, /Protocol epoch is the broad wire-compatibility boundary[\s\S]{0,500}exact executable-provenance[\s\S]{0,80}boundary/,
-  "runtime must document the separate wire-ABI and exact executable sender authority boundaries");
-assert.match(runtimeStateSource, /reason: "sender-asset-revision-mismatch"/,
-  "runtime must fail closed when a same-epoch sender carries stale executable App bytes");
+assert.match(runtimeStateSource, /Protocol epoch is the wire-compatibility boundary[\s\S]{0,700}same-epoch revision[\s\S]{0,180}not itself an authorization failure/,
+  "runtime must document protocol epoch as the compatibility fence while treating same-epoch asset drift as telemetry");
+assert.match(runtimeStateSource, /kind: "continuation-sender-asset-drift"/,
+  "runtime must journal same-epoch executable revision drift without revoking sender authority");
 assert.match(server, /action: "status", taskId: input\.taskId, readOnlyStatus: true/,
   "server-internal taskId-to-scope lookups must use side-effect-free status rather than consuming synthetic delivery ownership");
 assert.match(server, /if \(input\.action === "watch-status"\)[\s\S]{0,700}readOnlyStatus: true/,
@@ -721,8 +721,8 @@ assert.match(server, /const finalResponseAllowed = outcome\.finalResponseAllowed
   "Task Contract rendering must preserve the structured finalResponseAllowed gate");
 assert.match(server, /protocol:\s*"devspace-pre-final-barrier-v1"[\s\S]{0,900}mustContinueSameTurn/,
   "ordinary DevSpace results must expose a compact machine-readable pre-final barrier while unfinished work remains");
-assert.match(server, /workTicket:\s*"synthetic-execution-v3"[\s\S]{0,1200}nextAction:\s*"CALL_SUBSTANTIVE_DEVSPACE_TOOL_NOW"/,
-  "a resumed synthetic ACK must be an execution handoff, not a generic status ticket");
+assert.match(server, /workTicket:\s*"synthetic-execution-v3"[\s\S]{0,1800}ATTACH_OR_POLL_DURABLE_PROCESS_NOW[\s\S]{0,1800}CALL_SUBSTANTIVE_DEVSPACE_TOOL_NOW/,
+  "a resumed synthetic ACK must route either to durable-process recovery or immediate substantive work, never a generic status ticket");
 assert.match(server, /recordContinuationResumeOperation\([\s\S]{0,1800}continuationResumeOperation\(name, input, result\)/,
   "ordinary successful tools must persist a bounded execution resume capsule");
 assert.match(runtimeStateSource, /resumeContext:\s*parseJson\(row\.resume_context_json, \{\}\)/,
@@ -3071,22 +3071,24 @@ try {
     senderInstanceId: "ui_sender_restart",
     anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
   }));
-  assert.equal(senderRestartRebound.accepted, false, JSON.stringify(senderRestartRebound));
-  assert.equal(senderRestartRebound.reason, "sender-asset-revision-mismatch",
-    "a cached same-epoch iframe must not regain sender authority after executable App bytes change");
+  assert.equal(senderRestartRebound.accepted, true, JSON.stringify(senderRestartRebound));
+  assert.equal(senderRestartRebound.senderStatus?.eligible, true,
+    "a cached same-epoch iframe must be allowed to rebind after an MCP hot update");
+  assert.equal(senderRestartRebound.senderStatus?.assetRevisionDrift, true,
+    "same-epoch executable drift must remain explicit diagnostics after successful rebind");
   assert.equal(
     senderRestartRuntimeB.database.sqlite.prepare(
       "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
     ).get(senderRestartScope)?.sender_instance_id,
-    null,
-    "revision-drifted sender must leave the lifetime card unbound until the current resource rebinds",
+    "ui_sender_restart",
+    "compatible cached sender must regain process-local authority on the same lifetime card",
   );
   assert.equal(
     senderRestartRuntimeB.database.sqlite.prepare(
-      "select sender_last_failure_reason from continuation_conversation_cards where conversation_scope_id=?",
-    ).get(senderRestartScope)?.sender_last_failure_reason,
-    "sender-asset-revision-mismatch",
-    "revision drift must remain explicit durable diagnostics rather than silently recovering stale code",
+      "select sender_lease_state from continuation_conversation_cards where conversation_scope_id=?",
+    ).get(senderRestartScope)?.sender_lease_state,
+    "ACTIVE",
+    "compatible same-epoch drift must not strand the card in NEED_REBIND",
   );
   const senderRestartRecoveryTaskRow = senderRestartRuntimeB.database.sqlite.prepare(
     "select anchor_mount_generation,anchor_mount_requested_at,anchor_mount_verified_at from continuation_tasks where id=?",
@@ -3094,26 +3096,28 @@ try {
   const senderRestartRecoveryCardRow = senderRestartRuntimeB.database.sqlite.prepare(
     "select mount_generation,mount_state,mount_requested_at,mount_verified_at from continuation_conversation_cards where conversation_scope_id=?",
   ).get(senderRestartScope);
-  assert.equal(senderRestartRecoveryTaskRow.anchor_mount_requested_at, null,
-    "asset drift must make the same lifetime card eligible for a current-resource remount");
-  assert.equal(senderRestartRecoveryTaskRow.anchor_mount_verified_at, null,
-    "stale executable bytes must not leave the old VERIFIED mount authoritative");
-  assert.equal(senderRestartRecoveryCardRow.mount_state, "UNMOUNTED");
+  assert.ok(senderRestartRecoveryTaskRow.anchor_mount_requested_at,
+    "same-epoch asset drift must preserve the already-issued lifetime card");
+  assert.ok(senderRestartRecoveryTaskRow.anchor_mount_verified_at,
+    "same-epoch asset drift must preserve the verified card instead of requiring an unreliable Host remount");
+  assert.equal(senderRestartRecoveryCardRow.mount_state, "VERIFIED");
   assert.equal(
     Number(senderRestartRecoveryCardRow.mount_generation),
     Number(senderRestartAnchor.anchorMountGeneration),
-    "asset-drift recovery must preserve the existing card generation rather than minting a duplicate",
+    "asset-drift recovery must preserve the existing card generation",
   );
   const senderRestartRecoveryStatus = senderRestartRuntimeB.continuationTask({
     action: "status",
     taskId: senderRestartTask.task.id,
     conversationScopeId: senderRestartScope,
   });
-  assert.equal(senderRestartRecoveryStatus.reanchorRequired, true,
-    "after stale executable fencing, status must request a same-generation current-resource reanchor");
+  assert.notEqual(senderRestartRecoveryStatus.reanchorRequired, true,
+    "same-epoch asset drift must not depend on a Host remount to restore sender transport");
   const senderRestartDiagnosticsAfterStale = senderRestartRuntimeB.continuationSenderDiagnostics();
   assert.equal(Number(senderRestartDiagnosticsAfterStale.upgradeRequiredCount || 0), 0,
-    "same-epoch asset drift requires resource rebind, not an ABI upgrade");
+    "same-epoch asset drift is not an ABI upgrade");
+  assert.ok(Number(senderRestartDiagnosticsAfterStale.assetRevisionDriftCount || 0) >= 1,
+    "same-epoch asset drift must remain visible in diagnostics");
   const senderRestartStaleHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withStaleTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,
@@ -3121,28 +3125,8 @@ try {
     anchorMountToken: senderRestartAnchor.anchorMountToken,
     anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
   }));
-  assert.equal(senderRestartStaleHeartbeat.accepted, false);
-  assert.equal(senderRestartStaleHeartbeat.reason, "sender-asset-revision-mismatch",
-    "stale revision heartbeat must not recreate or prolong sender authority");
-  const senderRestartRemount = senderRestartRuntimeB.prepareContinuationAnchorMount({
-    taskId: senderRestartTask.task.id,
-    conversationScopeId: senderRestartScope,
-  });
-  assert.equal(senderRestartRemount.accepted, true, JSON.stringify(senderRestartRemount));
-  assert.equal(
-    Number(senderRestartRemount.anchorMountGeneration),
-    Number(senderRestartAnchor.anchorMountGeneration),
-    "current-resource recovery must remount the same visible card generation",
-  );
-  const senderRestartRemountAck = senderRestartRuntimeB.continuationTask({
-    action: "anchor-mounted",
-    taskId: senderRestartTask.task.id,
-    conversationScopeId: senderRestartScope,
-    coordinatorInstanceId: "ui_sender_restart_current",
-    anchorMountToken: senderRestartRemount.anchorMountToken,
-    anchorMountGeneration: senderRestartRemount.anchorMountGeneration,
-  });
-  assert.equal(senderRestartRemountAck.accepted, true, JSON.stringify(senderRestartRemountAck));
+  assert.equal(senderRestartStaleHeartbeat.accepted, true,
+    "the rebound same-epoch iframe must be able to refresh its current-process sender lease");
   const senderRestartCurrentRebound = senderRestartRuntimeB.bindContinuationSender(withTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,
@@ -3151,7 +3135,7 @@ try {
   }));
   assert.equal(senderRestartCurrentRebound.accepted, true, JSON.stringify(senderRestartCurrentRebound));
   assert.equal(senderRestartCurrentRebound.anchorMountGeneration, senderRestartAnchor.anchorMountGeneration,
-    "a current-revision iframe must rebind the existing lifetime card generation rather than minting a duplicate card");
+    "a later current-revision iframe may replace the compatible cached sender without minting a duplicate card");
   assert.equal(senderRestartCurrentRebound.senderStatus?.assetRevisionMatches, true);
   const senderRestartHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withTestSenderProtocol({
     conversationScopeId: senderRestartScope,

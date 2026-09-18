@@ -1,7 +1,7 @@
 # Release pause — 2026-09-18
 
 The 1.1.60 candidate has been withdrawn. Current implementation continues as
-1.1.59 dev97 without reverting source history. Release and incremental-backfill
+1.1.59 dev99 without reverting source history. Release and incremental-backfill
 workflows are disabled, and DEVSPACE_RELEASE_APPROVED is false. Do not publish
 or recreate 1.1.60 tags/assets while real continuation acceptance is pending.
 The existing development-manifest check also blocks the manual publisher.

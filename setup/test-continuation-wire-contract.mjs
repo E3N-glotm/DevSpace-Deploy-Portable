@@ -184,31 +184,27 @@ try {
   "a current-epoch App surface must replace the upgrade-required stale sender lease");
   // Reproduce the exact cached epoch/revision shape observed on D-live. The
   // Host may cache the registered outputTemplate and referenced App body
-  // across a Portable hot update. Same-protocol revision drift must now fail
-  // closed: executable continuation semantics changed even though the wire ABI
-  // did not, so stale JavaScript must not regain sender authority.
+  // across a Portable hot update. Epoch 12 is wire-compatible with current
+  // epoch 13, so revision drift must remain diagnostic rather than stranding
+  // READY work behind a Host remount that may never occur.
   bindArgs.senderProtocolEpoch = 12;
   bindArgs.senderAssetRevision = "c71b36ee04631e0a";
   const cachedBound = await wire("continuation_sender", bindArgs);
-  assert.equal(cachedBound.accepted, false, JSON.stringify(cachedBound));
-  assert.equal(cachedBound.reason, "sender-asset-revision-mismatch");
+  assert.equal(cachedBound.accepted, true, JSON.stringify(cachedBound));
+  assert.equal(cachedBound.senderStatus?.eligible, true);
+  assert.equal(cachedBound.senderStatus?.assetRevisionDrift, true,
+    "compatible cached App bytes must remain visible as provenance drift");
   const normalizedCard = runtime.database.sqlite.prepare(
     "select sender_protocol_epoch,sender_asset_revision,sender_lease_state,mount_generation,mount_state from continuation_conversation_cards where conversation_scope_id=?"
   ).get(scope);
   assert.equal(normalizedCard.sender_protocol_epoch, 13);
-  assert.equal(normalizedCard.sender_asset_revision, runtime.continuationSenderAssetRevision,
-    "rejected stale bind must not overwrite the current resource provenance");
-  assert.equal(normalizedCard.sender_lease_state, "NEED_REBIND",
-    "revision mismatch must revoke transport until the current immutable resource rebinds");
+  assert.equal(normalizedCard.sender_asset_revision, "c71b36ee04631e0a",
+    "accepted cached bind must preserve the observed executable provenance");
+  assert.equal(normalizedCard.sender_lease_state, "ACTIVE",
+    "same-protocol revision drift must not revoke transport");
   assert.equal(normalizedCard.mount_generation, mount.anchorMountGeneration);
-  assert.equal(normalizedCard.mount_state, "UNMOUNTED",
-    "revision mismatch must request a same-generation current-resource remount instead of leaving stale VERIFIED bytes authoritative");
-  const recoveryAnchor = await wire("continuation_anchor", { taskId: started.task.id });
-  assert.equal(recoveryAnchor.continuationAnchor, true, JSON.stringify(recoveryAnchor));
-  assert.equal(recoveryAnchor.anchorMountVerified, false,
-    "asset-revision recovery must issue a fresh same-generation mount request");
-  assert.equal(recoveryAnchor.anchorMountGeneration, mount.anchorMountGeneration,
-    "asset-revision recovery must reuse the immutable card generation");
+  assert.notEqual(normalizedCard.mount_state, "UNMOUNTED",
+    "compatible drift must preserve the current card issuance state rather than forcing a Host remount");
   // Restore the current-revision sender on the same immutable card generation
   // and use that authority for the remainder of the real MCP wire fixture.
   bindArgs.senderProtocolEpoch = runtime.continuationSenderProtocolEpoch;
@@ -338,6 +334,30 @@ try {
     "the durable resume capsule is control-plane state, not per-operation payload");
   assert.ok(Buffer.byteLength(JSON.stringify(read)) < ackBytes,
     "a small ordinary result must stay below the one-time bounded synthetic execution ACK");
+  const durableProcess = await wire("exec_command", { workspaceId: workspace.workspaceId,
+    argv: [process.execPath, "-e", "setTimeout(() => {}, 60000)"], yieldTimeMs: 10 }, modelMeta);
+  assert.equal(durableProcess.running, true,
+    "wire fixture must create a real running process for completion-driven continuity coverage");
+  const duringDurableProcess = await wire("continuation_task", {
+    action: "status", taskId: started.task.id, readOnlyStatus: true,
+  });
+  assert.ok(duringDurableProcess.task.watchProcessHandles.includes(durableProcess.processHandle),
+    "a running process returned by a completion-driven model tool must be persisted before the Host receives the tool result");
+  await wire("process_kill", { workspaceId: workspace.workspaceId,
+    processHandle: durableProcess.processHandle, signal: "SIGTERM" }, modelMeta);
+  let durableProcessCompletion = await wire("process_attach", { workspaceId: workspace.workspaceId,
+    processHandle: durableProcess.processHandle, yieldTimeMs: 1000 }, modelMeta);
+  for (let attempt = 0; durableProcessCompletion.running && attempt < 5; attempt += 1) {
+    durableProcessCompletion = await wire("process_attach", { workspaceId: workspace.workspaceId,
+      processHandle: durableProcess.processHandle, yieldTimeMs: 1000 }, modelMeta);
+  }
+  assert.equal(durableProcessCompletion.running, false,
+    "the fixture must observe the process exit before expecting the durable handle to be released");
+  const afterDurableProcess = await wire("continuation_task", {
+    action: "status", taskId: started.task.id, readOnlyStatus: true,
+  });
+  assert.equal(afterDurableProcess.task.watchProcessHandles.includes(durableProcess.processHandle), false,
+    "a model-observed process completion/kill must release the durable completion-driven handle");
   let processResult = await wire("exec_command", { workspaceId: workspace.workspaceId,
     argv: [process.execPath, "-e", "console.log('continuation-wire-ok')"], yieldTimeMs: 1000 }, modelMeta);
   let processOutput = processResult.result;
@@ -365,7 +385,7 @@ try {
   // Exercise actual wire replies on alternate paths too. Fixtures and Host
   // delivery receipts below are isolated simulations, never live ChatGPT ACKs.
   for (const epoch of [12, runtime.continuationSenderProtocolEpoch]) {
-  for (const scenario of ["timeout", "manual-takeover", "rejected", "failed", "fallback-accepted"]) {
+  for (const scenario of ["timeout", "manual-takeover", "rejected", "failed", "fallback-accepted", "process-resume"]) {
     const scenarioScope = `${scope}/epoch-${epoch}/${scenario}`;
     const scenarioTask = runtime.continuationTask({ action: "begin", conversationScopeId: scenarioScope,
       objective: `Validate ${scenario} wire responses`, requiredMilestones: [scenario],
@@ -391,6 +411,15 @@ try {
     assert.equal(staleTimeout.accepted, false);
     assert.equal(staleTimeout.reason, "stale-sender-turn-lease");
     runtime.touchContinuationModelActivity({ conversationScopeId: scenarioScope, substantive: true });
+    if (scenario === "process-resume") {
+      const processResumeCheckpoint = await wire("continuation_task", {
+        taskId: scenarioTask.id,
+        action: "checkpoint",
+        evidence: { pending: "poll wire-long-process before rerunning the command" },
+        progressFingerprint: "wire-process-resume-handoff",
+      });
+      assert.equal(processResumeCheckpoint.accepted, true);
+    }
     if (scenario === "timeout") {
       const current = await wire("continuation_task", { ...coordinator, action: "status", readOnlyStatus: true });
       const timedOut = await wire("continuation_anchor", { ...sender, bridgeAction: "sender-host-timeout",
@@ -424,7 +453,7 @@ try {
       assert.equal((await wire("continuation_sender", { ...delivery, action: "delivery-result", result: "accepted" })).accepted, false);
       assert.equal((await wire("continuation_sender", { ...sender, action: "heartbeat" })).accepted, false);
     } else {
-      const result = scenario === "timeout" ? "accepted" : scenario;
+      const result = scenario === "timeout" || scenario === "process-resume" ? "accepted" : scenario;
       const receipt = await wire("continuation_anchor", { ...delivery, bridgeAction: "sender-delivery-result",
         result, method: "isolated-wire-test" });
       assert.equal(receipt.accepted, true);
@@ -436,11 +465,34 @@ try {
         assert.equal(deliveryProbe.deliveryDiagnostics.turnAckedAt, null);
         assert.equal(deliveryProbe.deliveryDiagnostics.blockReason, null);
         assert.equal(JSON.stringify(deliveryProbe.deliveryDiagnostics).includes(acquired.deliveryToken), false);
+        if (scenario === "process-resume") {
+          const tracked = runtime.trackContinuationActivityProcess({
+            conversationScopeId: scenarioScope,
+            processHandle: "wire-long-process",
+            running: true,
+          });
+          assert.equal(tracked.accepted, true,
+            "completion-driven process liveness must survive a lost tool-result boundary");
+        }
         const resumed = await wire("continuation_task", { taskId: scenarioTask.id, action: "status",
           ...(scenario === "fallback-accepted" ? {} : { deliveryToken: acquired.deliveryToken }) });
         assert.equal(resumed.accepted, true);
         assert.equal(resumed.task.workTicket, "synthetic-execution-v3", "token and compatible tokenless ACKs both stay execution-focused");
-        assert.equal(resumed.task.nextAction, "CALL_SUBSTANTIVE_DEVSPACE_TOOL_NOW");
+        assert.equal(resumed.task.nextAction,
+          scenario === "process-resume" ? "ATTACH_OR_POLL_DURABLE_PROCESS_NOW" : "CALL_SUBSTANTIVE_DEVSPACE_TOOL_NOW");
+        if (scenario === "process-resume") {
+          assert.deepEqual(resumed.task.watchProcessHandles, ["wire-long-process"]);
+          assert.match(resumed.requiredBeforeFinal, /attach\/poll the durable DevSpace process wire-long-process/);
+          assert.equal(resumed.task.nextExecutableStep, "poll wire-long-process before rerunning the command");
+          assert.equal(resumed.task.executionContract.nextExecutableStep,
+            "poll wire-long-process before rerunning the command");
+          assert.match(resumed.requiredBeforeFinal, /Immediate durable next step: poll wire-long-process/);
+          runtime.trackContinuationActivityProcess({
+            conversationScopeId: scenarioScope,
+            processHandle: "wire-long-process",
+            running: false,
+          });
+        }
         assert.equal(resumed.task.executionContract.mustContinueSameTurn, true);
         assert.equal(resumed.task.nextMilestone, scenario);
         assert.equal(resumed.finalResponseAllowed, false);

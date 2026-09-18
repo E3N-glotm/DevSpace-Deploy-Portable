@@ -183,15 +183,28 @@ function syntheticAckWorkTicket(input, outcome) {
     const requiredMilestones = Array.isArray(task?.requiredMilestones) ? task.requiredMilestones : [];
     const completedMilestones = Array.isArray(task?.completedMilestones) ? task.completedMilestones : [];
     const nextMilestone = remainingMilestones[0];
+    const durableProcessHandles = Array.isArray(task?.watchProcessHandles)
+        ? task.watchProcessHandles.map((value) => String(value || "").trim()).filter(Boolean).slice(0, 8)
+        : [];
+    const hasDurableProcess = durableProcessHandles.length > 0;
+    const nextExecutableStepRaw = typeof task?.evidence?.pending === "string"
+        ? task.evidence.pending
+        : typeof task?.evidence?.nextStep === "string" ? task.evidence.nextStep : "";
+    const nextExecutableStep = String(nextExecutableStepRaw || "").trim().slice(0, 700) || undefined;
     const requiredBeforeFinal = [
-        "MANDATORY NEXT OUTPUT: substantive DevSpace tool call; ACK/status is not work.",
+        hasDurableProcess
+            ? "MANDATORY NEXT OUTPUT: attach/poll the durable DevSpace process " + durableProcessHandles[0] + "; ACK/status is not work."
+            : "MANDATORY NEXT OUTPUT: substantive DevSpace tool call; ACK/status is not work.",
         "Continue this task in the same turn across all runnable milestones.",
         "A partial test batch, running process, checkpoint, or operation count never permits a final.",
-        "Poll owned work to its result; then execute the next runnable step.",
+        hasDurableProcess
+            ? "Recover the existing process result before rerunning or replacing its command; then execute the next runnable step."
+            : "Poll owned work to its result; then execute the next runnable step.",
         "Use turn-complete only when the server reports preCutoffHandoffRequired=true.",
         "Otherwise finish all required work or persist a genuine unavailable external dependency.",
+        nextExecutableStep ? "Immediate durable next step: " + nextExecutableStep : undefined,
         nextMilestone ? `Next milestone: ${nextMilestone}` : "Continue from durable workspace/process state.",
-    ].join(" ");
+    ].filter(Boolean).join(" ");
     const resumeContext = task?.resumeContext && typeof task.resumeContext === "object"
         ? task.resumeContext
         : undefined;
@@ -244,6 +257,7 @@ function syntheticAckWorkTicket(input, outcome) {
                 || outcome.finalResponseAllowed === false),
         nextMilestone,
         remainingMilestones,
+        ...(nextExecutableStep ? { nextExecutableStep } : {}),
         // Keep the resume capsule in exactly one place: task.resumeContext.
         // Duplicating the same operations again inside executionContract made
         // first synthetic ACKs exceed the bounded wire budget even though the
@@ -265,7 +279,7 @@ function syntheticAckWorkTicket(input, outcome) {
         reason: outcome.reason,
         task: {
             workTicket: "synthetic-execution-v3",
-            nextAction: "CALL_SUBSTANTIVE_DEVSPACE_TOOL_NOW",
+            nextAction: hasDurableProcess ? "ATTACH_OR_POLL_DURABLE_PROCESS_NOW" : "CALL_SUBSTANTIVE_DEVSPACE_TOOL_NOW",
             id: task.id,
             workspaceId: task.workspaceId,
             objective: task.objective,
@@ -276,9 +290,10 @@ function syntheticAckWorkTicket(input, outcome) {
             requiredMilestones,
             completedMilestones,
             nextMilestone,
+            ...(nextExecutableStep ? { nextExecutableStep } : {}),
             resumeContext: boundedResumeContext,
             executionContract,
-            ...(task.watchProcessHandles?.length ? { watchProcessHandles: task.watchProcessHandles } : {}),
+            ...(hasDurableProcess ? { watchProcessHandles: durableProcessHandles } : {}),
         },
         continueRequired: outcome.continueRequired,
         remainingMilestones,
