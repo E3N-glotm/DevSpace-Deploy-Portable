@@ -190,7 +190,22 @@ function syntheticAckWorkTicket(input, outcome) {
     const nextExecutableStepRaw = typeof task?.evidence?.pending === "string"
         ? task.evidence.pending
         : typeof task?.evidence?.nextStep === "string" ? task.evidence.nextStep : "";
-    const nextExecutableStep = String(nextExecutableStepRaw || "").trim().slice(0, 700) || undefined;
+    const nextExecutableStepText = String(nextExecutableStepRaw || "").trim();
+    // A checkpoint can outlive the process it referred to.  Do not project a
+    // stale "attach proc_X" instruction into a later synthetic ACK after that
+    // exact process has already left watchProcessHandles.  Known process
+    // handles come from the durable resume operation capsule, so ordinary text
+    // that happens to contain the word "process" is unaffected.
+    const knownResumeProcessHandles = Array.isArray(task?.resumeContext?.operations)
+        ? task.resumeContext.operations
+            .map((operation) => String(operation?.processHandle || "").trim())
+            .filter(Boolean)
+        : [];
+    const referencedKnownProcessHandles = knownResumeProcessHandles.filter((handle) => nextExecutableStepText.includes(handle));
+    const staleProcessStep = referencedKnownProcessHandles.some((handle) => !durableProcessHandles.includes(handle));
+    const nextExecutableStep = staleProcessStep
+        ? undefined
+        : nextExecutableStepText.slice(0, 700) || undefined;
     const requiredBeforeFinal = [
         hasDurableProcess
             ? "MANDATORY NEXT OUTPUT: attach/poll the durable DevSpace process " + durableProcessHandles[0] + "; ACK/status is not work."

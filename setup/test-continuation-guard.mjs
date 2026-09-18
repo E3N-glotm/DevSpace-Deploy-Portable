@@ -729,6 +729,8 @@ assert.match(server, /protocol:\s*"devspace-pre-final-barrier-v1"[\s\S]{0,900}mu
   "ordinary DevSpace results must expose a compact machine-readable pre-final barrier while unfinished work remains");
 assert.match(server, /workTicket:\s*"synthetic-execution-v3"[\s\S]{0,1800}ATTACH_OR_POLL_DURABLE_PROCESS_NOW[\s\S]{0,1800}CALL_SUBSTANTIVE_DEVSPACE_TOOL_NOW/,
   "a resumed synthetic ACK must route either to durable-process recovery or immediate substantive work, never a generic status ticket");
+assert.match(server, /knownResumeProcessHandles[\s\S]{0,900}referencedKnownProcessHandles[\s\S]{0,700}staleProcessStep[\s\S]{0,500}!durableProcessHandles\.includes\(handle\)/,
+  "synthetic ACK must suppress a stale checkpoint step that names a process already absent from the durable watch set");
 assert.match(server, /recordContinuationResumeOperation\([\s\S]{0,1800}continuationResumeOperation\(name, input, result\)/,
   "ordinary successful tools must persist a bounded execution resume capsule");
 assert.match(runtimeStateSource, /resumeContext:\s*parseJson\(row\.resume_context_json, \{\}\)/,

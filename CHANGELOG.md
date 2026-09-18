@@ -2,7 +2,12 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
-## 1.1.59 dev100（开发中，暂停发布）
+## 1.1.59 dev101（开发中，暂停发布）
+
+- generation 44 实机恢复时发现 checkpoint 中旧 `proc_963...` 已完成且 `watchProcessHandles=[]`，但 `evidence.pending` 仍被投影成 `nextExecutableStep`。dev101 在 synthetic ACK 投影时用 durable resume operations 识别具体历史 processHandle；若该 handle 已不在当前 watch set，则丢弃这条陈旧 process 指令，避免下一轮重复 attach 已结束进程或被旧步骤带偏。
+- 保留 dev100 的首个 status transport-failure 同轮重试规则与 dev99 的 completion-driven durable process 恢复；稳定前继续禁止 1.1.60 Release。
+
+## 1.1.59 dev100（开发历史）
 
 - generation 42 实机证明 `ui/message` 已 accepted，但模型首个 `continuation_task status` 在到达 DevSpace 服务端前被 Host/connector internal error 丢弃：generation 无 `turn_acked_at`，对应时间窗内 `structured_tool_calls` 为 0。该失败不能由服务端重放可见 user message，否则可能制造重复模型轮。
 - synthetic 可见 handoff 与隐藏 context 现在明确要求：首个 status 若仅遇到 tool-internal/connector transport failure 且尚未 ACK，在同一模型轮内重试相同 status，最多 3 次；一次传输错误不能结束自动续轮。deliveryToken 仍只在 ACK 成功后立即消费，避免重复授权。
