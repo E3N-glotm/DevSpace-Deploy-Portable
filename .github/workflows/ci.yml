@@ -22,6 +22,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Source regression executes historical updater scripts from every
+          # supported legacy tag. A shallow checkout can make the product
+          # tests fail even though the historical tags exist remotely.
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4

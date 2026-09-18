@@ -88,16 +88,24 @@ function processStartTicks(pid) {
   return String(result.stdout || "").trim();
 }
 
-function portableOwnedBySnapshot(pid, portableRoot) {
+function portableOwnedBySnapshot(pid, portableRoot, expectedStartTicks = "") {
   const powershell = join(
     process.env.SystemRoot || "C:\\Windows",
     "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
   );
   const escapedRoot = String(resolve(portableRoot)).replaceAll("'", "''");
+  const expectedTicks = /^\d+$/.test(String(expectedStartTicks || ""))
+    ? String(expectedStartTicks)
+    : "";
   const command = [
     `$root='${escapedRoot}'`,
     `$p=Get-CimInstance Win32_Process -Filter \"ProcessId=${Number(pid)}\" -ErrorAction SilentlyContinue`,
     "if(-not $p){exit 0}",
+    "if([int]$p.ProcessId -eq $PID){exit 0}",
+    ...(expectedTicks ? [
+      "try{$ticks=$p.CreationDate.ToUniversalTime().Ticks}catch{$ticks=0}",
+      `if([string]$ticks -ne '${expectedTicks}'){exit 0}`,
+    ] : []),
     "$exe=[string]$p.ExecutablePath",
     "$cmd=[string]$p.CommandLine",
     "if(($exe -and $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or ($cmd -and $cmd.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0)){'owned'}",
@@ -172,7 +180,7 @@ try {
   // ownership snapshot, so do not make the test stricter than the product
   // contract by requiring immediate process-object disappearance here.
   assert.equal(
-    portableOwnedBySnapshot(pid, root),
+    portableOwnedBySnapshot(pid, root, orphanStartTicks),
     false,
     `Portable-owned orphan process ${pid} is still visible to the ownership snapshot after stop`,
   );
@@ -243,7 +251,7 @@ try {
   // mean the explicitly terminated service PID is already gone; callers must
   // not need to invent an additional post-stop sleep before restart/start.
   assert.equal(
-    portableOwnedBySnapshot(localServicePid, root),
+    portableOwnedBySnapshot(localServicePid, root, localServiceStartTicks),
     false,
     `stop-local left orphan MCP service ${localServicePid} visible to the ownership snapshot`,
   );
