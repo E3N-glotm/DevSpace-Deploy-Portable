@@ -237,6 +237,8 @@ try {
     "the Host-visible synthetic request must receive the exact claimed one-time delivery token for the first status ACK");
   assert.match(coordinatorSource, /visibleContinuationTrigger[\s\S]{0,2400}deliveryToken[\s\S]{0,1200}continuation_task action=status/,
     "the visible handoff must instruct the resumed turn to echo the claimed token only on its mandatory first continuation status call");
+  assert.match(coordinatorSource, /tool-internal or connector error before ACK[\s\S]{0,500}up to 3 attempts/,
+    "the Host-visible handoff must retry a transient first-status transport failure instead of collapsing into an unacked synthetic turn");
   assert.match(runtimeSource, /COMPLETION_STALL_SUSPECT_MS = 25_000/,
     "the primary completion-driven inactivity lease must remain below the one-minute ceiling");
   assert.doesNotMatch(runtimeSource, /COMPLETION_SERVER_QUIET_BACKSTOP_MS/,

@@ -2,7 +2,13 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
-## 1.1.59 dev99（开发中，暂停发布）
+## 1.1.59 dev100（开发中，暂停发布）
+
+- generation 42 实机证明 `ui/message` 已 accepted，但模型首个 `continuation_task status` 在到达 DevSpace 服务端前被 Host/connector internal error 丢弃：generation 无 `turn_acked_at`，对应时间窗内 `structured_tool_calls` 为 0。该失败不能由服务端重放可见 user message，否则可能制造重复模型轮。
+- synthetic 可见 handoff 与隐藏 context 现在明确要求：首个 status 若仅遇到 tool-internal/connector transport failure 且尚未 ACK，在同一模型轮内重试相同 status，最多 3 次；一次传输错误不能结束自动续轮。deliveryToken 仍只在 ACK 成功后立即消费，避免重复授权。
+- 保留 dev99 已实证的 completion-driven durable process 恢复：工具结果丢失但进程真实启动时，processHandle 仍持久化并可由后续轮 attach/poll；稳定前继续禁止 1.1.60 Release。
+
+## 1.1.59 dev99（开发历史）
 
 - completion-driven 长进程现在在工具结果离开服务端前持久化 processHandle；若 Host/连接器丢失工具结果但命令已真实启动，下一 synthetic ACK 会优先暴露该 handle，并要求 attach/poll 既有进程后再决定是否重跑。
 - synthetic ACK 新增有界 `nextExecutableStep`，仅从持久 checkpoint 的 `evidence.pending/nextStep` 投影具体下一步，避免恢复轮只拿到宽泛里程碑和不可执行的 progress fingerprint。

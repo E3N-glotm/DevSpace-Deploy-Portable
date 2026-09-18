@@ -240,6 +240,10 @@ assert.match(visibleTriggerSource, /deliveryToken：\$\{handshakeToken\}/,
   "the compact live synthetic user-role handoff must still carry the sender-issued one-time delivery token so Host turn-origin binding can complete before substantive work");
 assert.match(visibleTriggerSource, /continuation_task action=status[\s\S]{0,220}deliveryToken[\s\S]{0,220}(?:不要设置|不设置) manualTakeover/,
   "the resumed turn must be instructed to echo the exact one-time delivery token on its first status without impersonating a manual takeover");
+assert.match(visibleTriggerSource, /工具内部错误或连接错误[\s\S]{0,220}最多 3 次[\s\S]{0,180}不要因为一次传输错误结束本轮/,
+  "the visible Chinese handoff must retry a transient first-status connector failure instead of allowing a zero-work final");
+assert.match(visibleTriggerSource, /tool-internal or connector error[\s\S]{0,220}up to 3 attempts[\s\S]{0,220}never end the turn because of one transport failure/,
+  "the visible English handoff must retry a transient first-status connector failure instead of allowing a zero-work final");
 assert.match(coordinator, /visibleContinuationTrigger\(state\.task, deliveryToken\)/,
   "the exact token returned by continuation_sender claim must flow into the Host-visible synthetic handoff");
 assert.doesNotMatch(coordinator, /do not search for, expose, or pass a continuation token/,
@@ -487,6 +491,8 @@ assert.match(coordinator, /function continuationContext\(/,
   "the coordinator must define hidden continuation context for resumed turns");
 assert.match(coordinator, /Call continuation_task status first\.[\s\S]{0,500}one-time deliveryToken[\s\S]{0,500}echo that exact token[\s\S]{0,500}omit manualTakeover[\s\S]{0,500}consumes it immediately/,
   "hidden context must require the exact one-time deliveryToken on the first synthetic status while keeping manualTakeover absent");
+assert.match(coordinator, /internal\/transport failure before the ACK reaches DevSpace[\s\S]{0,260}retry that exact first status call[\s\S]{0,220}up to three attempts[\s\S]{0,240}do not emit a final/,
+  "hidden context must explicitly retry a transient first-status transport failure within the same synthetic turn");
 assert.match(coordinator, /Tool availability is turn-scoped[\s\S]{0,900}api_tool\.list_resources[\s\S]{0,300}DevSpace_MCP[\s\S]{0,300}continuation_task/,
   "synthetic continuation hidden context must discover DevSpace_MCP through the Host connector path when tool schemas were not preloaded for the resumed turn");
 assert.match(coordinator, /do not stop or claim that DevSpace is unavailable/,
