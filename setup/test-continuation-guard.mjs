@@ -660,7 +660,7 @@ assert.match(runtimeStateSource, /syntheticResumeWorkRequired:\s*row\.delivery_o
   "runtime status must retain a durable resumed-turn work obligation after the connectivity ACK");
 assert.match(runtimeStateSource, /SYNTHETIC_WORK_OWNER_LEASE_MS = 30 \* 60_000/,
   "synthetic ownership must remain durable across manual-like reasoning/execution intervals rather than expiring after a few tens of seconds");
-assert.match(runtimeStateSource, /const minimumWorkDelta = owner === "synthetic" \? 4 : 1/,
+assert.match(runtimeStateSource, /const minimumWorkDelta = owner === "synthetic" \? SYNTHETIC_MIN_SUBSTANTIVE_WORK_DELTA : 1/,
   "manual turn-complete must keep the one-operation anti-empty floor while synthetic resumes require four post-ACK substantive operations");
 assert.doesNotMatch(runtimeStateSource, /SYNTHETIC_MIN_ACTIVE_WORK_MS|syntheticMinimumActiveWorkMs/,
   "synthetic voluntary completion must not retain a fixed-duration fallback");
@@ -688,10 +688,10 @@ assert.doesNotMatch(coordinator, /synthetic resume work ownership lease expired|
   "synthetic ownership expiry must not be a client-side continuation trigger in dev12");
 assert.match(coordinator, /Never end an automatically resumed turn with prose[\s\S]{0,700}There is no background model execution after a plain assistant final[\s\S]{0,900}turn-complete[\s\S]{0,600}concise visible progress summary/,
   "synthetic recovery context must forbid placeholder finals while allowing a legal visible stage summary after turn-complete");
-assert.match(runtimeStateSource, /const syntheticTurnLeaseId = String\(syntheticOwnerTask\?\.turn_lease_id[\s\S]{0,260}const syntheticCompletionLeaseId = String\(syntheticOwnerTask\?\.assistant_turn_completion_lease_id[\s\S]{0,420}const syntheticMode = normalizedContinuationMode[\s\S]{0,420}const syntheticTurnEnded =[\s\S]{0,520}syntheticCompletionLeaseId === syntheticTurnLeaseId/,
+assert.match(runtimeStateSource, /const syntheticTurnLeaseId = String\(syntheticOwnerTask\?\.turn_lease_id[\s\S]{0,500}const syntheticCompletionLeaseId = String\(syntheticOwnerTask\?\.assistant_turn_completion_lease_id[\s\S]{0,1200}const syntheticTurnEnded =[\s\S]{0,1200}syntheticCompletionLeaseId === syntheticTurnLeaseId/,
   "synthetic retry must require a terminal ATCC state bound to the exact current resumed-turn lease");
-assert.match(runtimeStateSource, /const endedSyntheticWork =[\s\S]{0,500}syntheticTurnEnded[\s\S]{0,300}!this\.continuationModelRequestInFlight/,
-  "a synthetic generation may be retired immediately only after exact ended-turn evidence and with no model request still in flight");
+assert.match(runtimeStateSource, /const endedSyntheticWork =[\s\S]{0,500}\(syntheticTurnEnded \|\| underfloorRecoveryTriggered\)[\s\S]{0,300}!this\.continuationModelRequestInFlight/,
+  "a synthetic generation may be retired only after exact ended-turn evidence or the narrow underfloor watchdog, and never while a model request is in flight");
 assert.ok(runtimeStateSource.includes("lease expiry alone never retires a live turn")
   && runtimeStateSource.includes("Waiting for a 30-minute owner lease after a proven")
   && runtimeStateSource.includes("strands healthy long-running monitoring work"),
@@ -931,8 +931,20 @@ assert.match(server, /UNFINISHED SYNTHETIC TURN: A PLAIN OR EMPTY FINAL IS FORBI
   "the pre-final barrier must expose a compact legal synthetic stage-boundary contract ahead of ordinary tool payloads");
 assert.doesNotMatch(runtimeStateSource, /function syntheticActiveOrphanFallback|const orphan = syntheticActiveOrphanFallback/,
   "DevSpace tool silence must never be promoted into synthetic turn-end authority because the Host may still be reasoning/generating outside MCP");
-assert.doesNotMatch(runtimeStateSource, /update continuation_tasks set[\s\S]{0,700}assistant_turn_state='ORPHANED'/,
-  "completion-driven/resident runtime must not create new ORPHANED assistant turns from cadence/quiet inference");
+assert.match(runtimeStateSource,
+  /SYNTHETIC_UNDERFLOOR_RECOVERY_MS = 120_000[\s\S]{0,2000}SYNTHETIC_UNDERFLOOR_COMPLETION_SOURCE/,
+  "the production gen19 short-turn path requires a narrow, explicit underfloor watchdog rather than a generic quiet heuristic");
+assert.match(runtimeStateSource,
+  /syntheticMode === "completion-driven"[\s\S]{0,1200}syntheticWorkDelta < SYNTHETIC_MIN_SUBSTANTIVE_WORK_DELTA[\s\S]{0,1000}!this\.continuationModelRequestInFlight/,
+  "underfloor recovery must be restricted to unfinished completion-driven synthetic turns below their mandatory work floor and outside an in-flight request");
+const orphanAssignments = [...runtimeStateSource.matchAll(/assistant_turn_state='ORPHANED',/g)];
+assert.equal(orphanAssignments.length, 1,
+  "runtime must keep exactly one new ORPHANED assignment, reserved for the narrow underfloor watchdog");
+assert.match(runtimeStateSource.slice(Math.max(0, orphanAssignments[0].index - 1800), orphanAssignments[0].index + 2200),
+  /SYNTHETIC_UNDERFLOOR_(?:RECOVERY_MS|COMPLETION_SOURCE|STALL_EVIDENCE)/,
+  "ORPHANED assignment must stay physically scoped to the underfloor watchdog guards");
+assert.doesNotMatch(runtimeStateSource, /assistant_turn_completion_source='synthetic-active-orphan-inferred',/,
+  "the removed broad cadence/orphan inference must not regain write authority");
 assert.match(runtimeStateSource, /continuation-synthetic-active-orphan-revoked/,
   "historical ORPHANED rows from older dev builds must remain revocable during live upgrade compatibility cleanup");
 assert.doesNotMatch(coordinator, /window\.parent\.postMessage|querySelector\([^)]*(?:textarea|composer|send)/i, "continuation must use the connected App rather than raw host/DOM automation");

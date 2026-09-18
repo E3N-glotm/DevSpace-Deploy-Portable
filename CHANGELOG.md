@@ -32,6 +32,15 @@
   每 250 ms 直接做 bind probe；一旦可 bind 立即成功，真实占用则直到总窗口结束仍
   fail-closed。strict-stop harness 的外层 timeout 相应放宽到 90 秒，避免测试先于产品
   的最坏路径结束。
+- dev96 针对真实 generation 19 再次出现的“synthetic 已 delivery+ACK，但仅执行 2 次
+  substantive DevSpace 调用后约 57 秒结束且没有 turn-complete”增加窄化的 underfloor
+  watchdog。它不是恢复旧的通用静默/orphan 推断：只作用于 completion-driven、
+  synthetic-active、仍低于 4 次强制工作下限、无 watched process、无 in-flight model
+  request 且当前 sender 已验证可用的轮次。90 秒仅记 SUSPECTED_STALL，持续到 120 秒才
+  将该违反执行契约的轮次标记为 underfloor orphan，并在 10 秒 quarantine 后允许同一
+  workset 创建下一 synthetic generation；达到 4 次工作的健康 synthetic、resident
+  监控轮、人工轮和真实长工具调用仍不会被静默规则续轮。这样把“短轮后永久卡住”的路径
+  收敛为自动重试，同时继续保留长期思考/人工优先级保护。
 - dev92 fixes the live-only stale Workspace App sender regression exposed after
   the dev91 hot deployment. The real generation-6 continuation was delivered
   and ACKed but performed zero substantive DevSpace work because an older
