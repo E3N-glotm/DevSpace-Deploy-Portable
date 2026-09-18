@@ -930,6 +930,27 @@ function processExists(pid) {
   }
 }
 
+function processCreationTicks(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return 0;
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue`,
+    "if($null -eq $p){exit 3}",
+    "$ticks=try{$p.CreationDate.ToUniversalTime().Ticks}catch{0}",
+    "[Console]::Out.Write([string]$ticks)",
+  ].join(";");
+  const result = childProcess.spawnSync(POWERSHELL_EXE, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+  ], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 10_000,
+  });
+  if (result.status !== 0) return 0;
+  const ticks = Number(String(result.stdout || "").trim());
+  return Number.isFinite(ticks) && ticks > 0 ? ticks : 0;
+}
+
 function computerUseBrokerStatus(leaseId = null) {
   const state = readJson(COMPUTER_USE_BROKER_FILE, null);
   if (!state || !Number.isInteger(Number(state.pid))) {
@@ -2023,6 +2044,19 @@ function stopLocalMcpServiceProcesses(port) {
       // left to kill. Reuse the existing bounded stop deadline and wait for the
       // listener view to converge. A genuinely unrelated listener will remain
       // visible until the deadline and still fail closed below.
+      // If netstat still reports a PID that we already proved belonged to this
+      // exact service instance, retry the direct kill while that PID's creation
+      // identity still matches. Hosted Windows can leave the process alive
+      // after the first taskkill even after its command line stops satisfying
+      // the ownership snapshot. Never kill a recycled/unknown listener PID.
+      for (const pid of listeners) {
+        const expectedCreationTicks = killedPids.get(pid) || 0;
+        if (!expectedCreationTicks) continue;
+        const currentCreationTicks = processCreationTicks(pid);
+        if (currentCreationTicks && currentCreationTicks === expectedCreationTicks) {
+          runProgram("taskkill.exe", ["/pid", String(pid), "/f"], { ignoreExitCode: true });
+        }
+      }
       sleepSync(Math.min(100, Math.max(1, deadline - Date.now())));
       continue;
     }
@@ -2045,13 +2079,13 @@ function stopLocalMcpServiceProcesses(port) {
   // second fixed grace period: the stop contract stays bounded while avoiding
   // a false-success race that can otherwise leak into an immediate restart.
   const sameProcessStillExists = (pid, expectedCreationTicks) => {
-    const item = portableProcessSnapshot().find((entry) => entry.pid === pid);
-    if (!item) return false;
+    const currentCreationTicks = processCreationTicks(pid);
+    if (!currentCreationTicks) return false;
     // A numeric PID can be recycled immediately on hosted Windows runners.
     // Treat it as the same terminated service only when its process identity
     // still matches the instance we explicitly killed.
-    if (expectedCreationTicks && item.creationTicks) {
-      return item.creationTicks === expectedCreationTicks;
+    if (expectedCreationTicks) {
+      return currentCreationTicks === expectedCreationTicks;
     }
     return true;
   };

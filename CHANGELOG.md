@@ -13,6 +13,12 @@
   revision is also an exact executable-authority gate: revision drift is
   rejected as `sender-asset-revision-mismatch`, cannot heartbeat or protect a
   CLAIMED generation, and must be replaced by the current revision on the same
+  card generation. The release CI also exposed a rarer Windows stop-local race:
+  after the service command line disappeared, `netstat` could keep reporting
+  the same listener PID while the first `taskkill /F` had not actually removed
+  that exact process instance. The bounded stop loop now retries only a listener
+  whose PID and CreationDate still match the already-proven service instance;
+  recycled or unrelated listener PIDs remain fail-closed.
   card generation. This preserves one-card-per-manual-round semantics while
   preventing stale coordinator JavaScript from controlling a newly released
   runtime. dev92 also closes the remaining hosted-Windows strict-stop race by
