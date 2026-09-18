@@ -76,6 +76,7 @@ const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
 const SERVICE_START_ATTEMPTS = 3;
 const PORTABLE_STOP_TIMEOUT_MS = 20_000;
+const LOCAL_PORT_DRAIN_TIMEOUT_MS = 30_000;
 const DASHBOARD_PUBLIC_PROBE_SUCCESS_TTL_MS = 15_000;
 const DASHBOARD_PUBLIC_PROBE_FAILURE_TTL_MS = 2_000;
 const COMPUTER_USE_STALE_MS = 5 * 60_000;
@@ -2122,8 +2123,20 @@ function stopLocalMcpServiceProcesses(port) {
   // If no Portable MCP process remains and an immediate kernel-level bind probe
   // succeeds, treat the stale netstat row as drained. A real unrelated listener
   // still causes bind() to fail and therefore remains fail-closed.
-  if (!remainingProcesses.length && remainingListeners.length && localTcpPortBindable(port)) {
-    remainingListeners = [];
+  if (!remainingProcesses.length && remainingListeners.length) {
+    const portDrainDeadline = Date.now() + LOCAL_PORT_DRAIN_TIMEOUT_MS;
+    while (remainingListeners.length && Date.now() < portDrainDeadline) {
+      if (localTcpPortBindable(port)) {
+        remainingListeners = [];
+        break;
+      }
+      sleepSync(Math.min(250, Math.max(1, portDrainDeadline - Date.now())));
+      remainingListeners = listenerPids(port);
+    }
+    // One final kernel-level check wins over a lagging diagnostic snapshot.
+    // If a real process still owns the socket this stays false and stop-local
+    // continues to fail closed.
+    if (remainingListeners.length && localTcpPortBindable(port)) remainingListeners = [];
   }
   return { killed, remainingProcesses, remainingListeners, remainingKilledPids };
 }
@@ -2519,7 +2532,7 @@ function stopLocalServiceOnly(options = {}) {
       ...serviceStop.remainingListeners.map((pid) => `${pid} still listens on 127.0.0.1:${port}`),
       ...serviceStop.remainingKilledPids.map((pid) => `${pid} was terminated by stop-local but remains observable in the process table`),
     ];
-    throw new Error(`Local MCP stop did not fully release 127.0.0.1:${port}:\n${details.join("\n")}`);
+    throw new Error(`Local MCP stop did not fully release 127.0.0.1:${port} within ${(PORTABLE_STOP_TIMEOUT_MS + LOCAL_PORT_DRAIN_TIMEOUT_MS) / 1000} seconds:\n${details.join("\n")}`);
   }
   if (!options.leaveDisabled && owned && wasEnabled) setOwnedTaskEnabled(TASK_MCP, true);
   return `Local MCP service stopped. Public tunnel state was left unchanged.`;

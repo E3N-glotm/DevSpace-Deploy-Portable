@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.60",
-  "builtAt": "2026-09-18T15:14:09+08:00",
+  "builtAt": "2026-09-18T15:43:04+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -711,7 +711,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "2e99d2d93fb6cafb637801f1d0abacd3d55cdb3676ba48cebb1ce1076d59dcd1",
+    "setup/portable-manager.cjs.sha256": "fdabd609fbd20568617d346fbd36849c5ebb04ee41599e8ed9218296ed77b985",
     "setup/portable-updater.ps1.sha256": "5944c39ad725a31365d2bdc07d7a9fe9d1fb255e81c77c190ae286304a6ed8c1",
     "setup/test-blockmap-update.mjs.sha256": "b6eb64f2a63f8fdb494eaa6efd15cfaca22bf60e684c94cd78793434b77b82fe",
     "setup/test-codex-runtime-bridge.mjs.sha256": "e9b7985d7eff121d7725460a273d9b956e740bb418b518dcb9657e292e489d11",
@@ -747,7 +747,7 @@
     "setup/test-selected-file-diff.mjs.sha256": "1ed95d7171abcf933f33012eb09ff5fed043390311a3a62e83b13e1ee3a888d0",
     "setup/test-session-capabilities.mjs.sha256": "736d246f98ba16c76d16967271a25ab079a17b9acc400b453f8113021ae11fd3",
     "setup/test-standalone-updater.mjs.sha256": "0f3de17818ff80cc3eccf0e8973f3b17a36c56d9ee765807c86db6d3ade36b20",
-    "setup/test-strict-stop.mjs.sha256": "b8399d89b726f49f6cbb91004b11d745940d2ae87fe96694c420f9a65a790677",
+    "setup/test-strict-stop.mjs.sha256": "3dd993fc70ae10024fdfb227abc7fd3a32aa67e58503a853ee35d0f74beb31f3",
     "setup/test-tunnel-network-coexistence.mjs.sha256": "30b4800f2b45ec8482d4b99e0465c9df301b789cbe532d9abd8286ee2530eff7",
     "setup/test-update-launch-ack.mjs.sha256": "dd294a7fc5829514f1642703b1e20f9ba4f6303648c7fae612f2da1b1b674321",
     "setup/test-update-manifest-graph.py.sha256": "5e1c8cd326f9be230766515cd5f7a975d4e7bddcf558eac5d19b37f3224ca9be",

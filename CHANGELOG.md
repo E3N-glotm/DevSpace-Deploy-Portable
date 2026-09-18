@@ -25,6 +25,13 @@
   下一次 status 明确返回 reanchorRequired，新的 revisioned resource URI 可以在**同一张卡**
   上重新挂载当前 coordinator。不会增加 milestone/card generation，也不会让旧 iframe
   越过 revision fence；若当前新 sender 已绑定，迟到旧 iframe 也不能触发降级。
+- dev95 根据 GitHub hosted Windows run 35318942006 的真实失败继续收口 strict-stop：
+  该 runner 在 Portable 进程已消失后仍让 127.0.0.1 listener 保持不可重新 bind 超过原
+  20 秒窗口，因此不是单纯 netstat 文本滞后。进程清理预算仍保持 20 秒，但仅在“已无
+  Portable MCP 进程、listener 仍残留”的 Windows 内核端口 drain 阶段额外给 30 秒，
+  每 250 ms 直接做 bind probe；一旦可 bind 立即成功，真实占用则直到总窗口结束仍
+  fail-closed。strict-stop harness 的外层 timeout 相应放宽到 90 秒，避免测试先于产品
+  的最坏路径结束。
 - dev92 fixes the live-only stale Workspace App sender regression exposed after
   the dev91 hot deployment. The real generation-6 continuation was delivered
   and ACKed but performed zero substantive DevSpace work because an older

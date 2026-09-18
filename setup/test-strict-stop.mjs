@@ -184,7 +184,7 @@ try {
     },
     encoding: "utf8",
     windowsHide: true,
-    timeout: 60_000,
+    timeout: 90_000,
   });
   assert.equal(stopped.status, 0, `${stopped.stdout}\n${stopped.stderr}`);
   assert.match(stopped.stdout, /No background service PID remains/);
