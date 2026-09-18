@@ -30,6 +30,10 @@ assert.match(sourceManagerText, /CreationTicks/,
   "Portable process snapshots must carry process creation identity so stale ParentProcessId values cannot invent ancestry after PID reuse");
 assert.match(sourceManagerText, /return parent\.creationTicks <= child\.creationTicks/,
   "Portable stop ancestry must reject a reused parent PID whose current process started after the child");
+assert.match(sourceManagerText, /const provenListenerPids = new Map\(\)[\s\S]{0,2200}byPid\.get\(pid\)[\s\S]{0,900}provenListenerPids\.set\(pid, creationTicks\)/,
+  "stop-local must durably remember the exact identity of a listener already proven to belong to the Portable root");
+assert.match(sourceManagerText, /portDrainDeadline[\s\S]{0,1800}provenListenerPids\.get\(pid\)[\s\S]{0,700}currentCreationTicks === expectedCreationTicks[\s\S]{0,500}taskkill\.exe/,
+  "the port-drain phase must keep terminating only the exact previously-proven listener identity instead of merely extending a timeout");
 const temporary = await mkdtemp(join(tmpdir(), "devspace-strict-stop-"));
 // Run the destructive stop test from a disposable Portable root. Running the
 // real worktree manager would make ROOT point at the active source checkout and

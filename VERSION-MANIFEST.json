@@ -1,12 +1,12 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.59",
-  "builtAt": "2026-09-19T00:40:15+08:00",
+  "builtAt": "2026-09-19T01:11:55+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
   },
-  "displayVersion": "1.1.59 dev101",
+  "displayVersion": "1.1.59 dev102",
   "runtime": {
     "node": "24.18.1",
     "gitForWindows": "2.51.2.windows.1",
@@ -544,7 +544,7 @@
   },
   "keyFiles": {
     "DevSpace-Portable.cmd.sha256": "cd10ca0aae1c499835cdf28ef1328f8b90f8dc790ff81eb63a4247bc8cdad3ea",
-    "DevSpace-Portable.exe.sha256": "565eaf9016775bc67e8a0c649168759f8c677a71e5edf3df036d84565df6c4a4",
+    "DevSpace-Portable.exe.sha256": "71930cd00cfc4c5e27565eac9e6ffb216992d5fe2bb2efcf0a12b3dcd7845038",
     "DevSpace-SshAskPass.exe.sha256": "ce6e7251e751da4faec1d75f5b32588e971e9eea474dc2cf5b26e282dad514e1",
     "Update.exe.sha256": "370bdcba2f8863d09b622bfee12502fe734860f51481b4b4633cbbc06dba38b4",
     "app/DevSpace-Plugin.cmd.sha256": "aa0fbe0e7f248476ac425ffc0d17752e2c14351b8079ab1d3d2cc56d0104c338",
@@ -586,13 +586,13 @@
     "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-coordinator.js.sha256": "861276c93bf4c4574274413847904c2031ed58d62c3d7dc72d550b80feff4fbc",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-guard.js.sha256": "bbda61fe239f34fb3037c55588f10b2bccc0554f16371be2dcb583ffec27814a",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.css.sha256": "a036708e820b58f75cdb6211066a875ae1382e8d8a7cbfb127283965d88b91cf",
-    "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js.sha256": "28a1a42b2f7c67f9be9ea0357d86e5c135e3d8bf7fbd266909ed616a9b106cfe",
+    "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js.sha256": "b9cb99eea31e57e30d726f9cdc7a2955ac24d109506a34f76fa544b28c3f5df6",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-timeline.css.sha256": "619ba8244f3f4fb8e7635224781b1a0afc625a6fea8bd6a3140919a1fb46a80f",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/session-review.css.sha256": "43bcb84871dc9bb00cd51b65b3ac18cb43743c40b7e2a3893bf5041923a3acd4",
     "app/node_modules/@waishnav/devspace/dist/ui/workspace-app.html.sha256": "4e46ef208890c63c599acaa9fc86b10dd14fee6e5ac786731c4cfdf00c5de15a",
     "app/node_modules/@waishnav/devspace/dist/workspace-store.js.sha256": "0c465194a343c63dcf66976295890e21a95955960f7dd821ba3620d25b44afe0",
     "app/node_modules/@waishnav/devspace/dist/workspaces.js.sha256": "8ed1f40b419c8fc96214cd1d40424bd2afea8bf8fc4bc1d358635ddb22e7e963",
-    "app/package-lock.json.sha256": "c155e51120f98c3f20278460ba5ffb3adb1c80066580b4a53701e3850568e0bb",
+    "app/package-lock.json.sha256": "a4475d74e588f75abc98ab0416f754c65cf2fab9601ac87ce6351ad0a52fd520",
     "app/package.json.sha256": "1ca85e305f18c92eb44bb68954892743bda1b17bc1379e43bc9e9d541cd43867",
     "app/plugin-admin.mjs.sha256": "33941a87c72221008b67cb2229cfbd9225bf5035ef52e75897f06953f8b50136",
     "app/plugin-dispatcher.mjs.sha256": "e2389bb5b07947b0f0a8699b5784d3bbf4ec24d4a8d91a8286634e30ff14a87c",
@@ -669,14 +669,14 @@
     "docs/releases/HOTFIX-1.1.7.md.sha256": "ff933198773788193d73d87f861d7abaabd0b3299f6e87090c049b7d5589899e",
     "docs/releases/HOTFIX-1.1.8.md.sha256": "6cf9c3997017b030d57ff095c87aaf0b5299c24c141fe42f015a7ec00bd71f09",
     "docs/releases/HOTFIX-1.1.9.md.sha256": "0bb546acfafaa0ea69d83790eb95a6bea2f113b936cb5116ec7968ad58da218e",
-    "packages/waishnav-devspace-1.0.7.tgz.sha256": "3df677ed1193065b426e8b24ffd403e4312fd1bb21e7f07e2d2b1554cfeca5ab",
+    "packages/waishnav-devspace-1.0.7.tgz.sha256": "f9cd4b0e6341cbd5d1e8a420c6938d8bb0b4fbfd93ad1a2eefc69d26daa07f29",
     "runtime/node/node.exe.sha256": "ac51903c4c111815d52280b1fdcc8da067cbb37e2fe1a765097b85c3292c8582",
     "scripts/bootstrap-dev.ps1.sha256": "cdb31440e4f389e67d7e2ab51efcdd0fb8110980b24e4489dc488198ae3decd5",
     "scripts/hydrate-runtime-from-release.ps1.sha256": "84052dc514b0e25d2915851fd8aeb5132e449867fc4753bdfd9cb006c10d0fd0",
     "scripts/pack-devspace-core.mjs.sha256": "f10359ddc0dd7162c01ffd6fdc0f14dbadfb7f19dd9593a16c0c52e0af7c48ba",
     "scripts/pack-devspace-core.py.sha256": "be1cdacc75ea78fef74827bda58dbe63b4a9a39fa13ac92faedb17bf5c53ede5",
     "scripts/publish-github-release.ps1.sha256": "6baa870fc662f3ab5b19942f5773ba0906b62fa34639f60c6c2fd9537d50efec",
-    "scripts/start-devspace.sh.sha256": "ed22a4168b2615d93d45aa5ed49ba69c0336e577c8e9abd1a2fbe3dba0d00f85",
+    "scripts/start-devspace.sh.sha256": "0743c98779254f9ffb7563a11fe69067d7321da90cf00f3ff5fd9eecef3c3894",
     "scripts/start-tunnel.cmd.sha256": "7f46d9acf63e632fff252d6302a4aa28a7dd23d355f3b4d4ac14bf78199178c9",
     "scripts/start-tunnel.sh.sha256": "1065b667659a26560dd2c7c108b63cc68f511a08ee6305623abd51e6408c2b87",
     "scripts/test-source.ps1.sha256": "e1920331f7c9dea06130b1a8c3da470c4251271394a39c70f4b90a186c72b581",
@@ -703,7 +703,7 @@
     "setup/legacy/Portable-Setup-1.1.8.hta.sha256": "bb1568b7dcc606d0f6f19f78625a3bb18115190399761a8869abb95b84768b94",
     "setup/logged-launcher.cjs.sha256": "f5831f29ab3b5294fdf0304de1f681e0a1cd57148ebaa79df8a15c3e6ac2db5a",
     "setup/native/DevSpaceBrandIcon.cs.sha256": "b8094cc3c68f7ba4962a8ac1d2aef7107dd08d2cc7f6eed93c49bfb4c189e96c",
-    "setup/native/DevSpacePortableApp.cs.sha256": "12a7ea2fbc1b6287bc96a4ddb8d5b63f7a3d6919efd66aabe4383045fef18877",
+    "setup/native/DevSpacePortableApp.cs.sha256": "8f50c2532c4d7ac68b2370f69e15a2ee1513f4dccfe98c81dc92d0bd6b2cb1ab",
     "setup/native/DevSpaceSshAskPass.cs.sha256": "cc532a01d394b9815d1ff7c7ee24485c962b01c36d9739f6471de3cb12353753",
     "setup/native/DevSpaceUpdaterApp.cs.sha256": "6558569d8230d0d14b71c27c82c442cd3a4f31f71fbb9f93daf746a81ca3c6df",
     "setup/native/computer-use-capture.cpp.sha256": "2ffa35a5b6b941e2aa87173621f7ab5393c5d67871d18652a723afd8e2aef0a1",
@@ -711,7 +711,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "285a2348df0172e59aa2e36c3b27bfc0961f379950a29e48af6233bd08e306d4",
+    "setup/portable-manager.cjs.sha256": "1e2821a9a1b60eb27dfddc088fa87b04a99f23feb949e309201db1b983b9f8ec",
     "setup/portable-updater.ps1.sha256": "5944c39ad725a31365d2bdc07d7a9fe9d1fb255e81c77c190ae286304a6ed8c1",
     "setup/test-blockmap-update.mjs.sha256": "b6eb64f2a63f8fdb494eaa6efd15cfaca22bf60e684c94cd78793434b77b82fe",
     "setup/test-codex-runtime-bridge.mjs.sha256": "e9b7985d7eff121d7725460a273d9b956e740bb418b518dcb9657e292e489d11",
@@ -747,7 +747,7 @@
     "setup/test-selected-file-diff.mjs.sha256": "1ed95d7171abcf933f33012eb09ff5fed043390311a3a62e83b13e1ee3a888d0",
     "setup/test-session-capabilities.mjs.sha256": "736d246f98ba16c76d16967271a25ab079a17b9acc400b453f8113021ae11fd3",
     "setup/test-standalone-updater.mjs.sha256": "0f3de17818ff80cc3eccf0e8973f3b17a36c56d9ee765807c86db6d3ade36b20",
-    "setup/test-strict-stop.mjs.sha256": "3dd993fc70ae10024fdfb227abc7fd3a32aa67e58503a853ee35d0f74beb31f3",
+    "setup/test-strict-stop.mjs.sha256": "4ef1ae4f21469069bb279de7bb89d596ac15a222305aa1b702aa3f743473275d",
     "setup/test-tunnel-network-coexistence.mjs.sha256": "30b4800f2b45ec8482d4b99e0465c9df301b789cbe532d9abd8286ee2530eff7",
     "setup/test-update-launch-ack.mjs.sha256": "dd294a7fc5829514f1642703b1e20f9ba4f6303648c7fae612f2da1b1b674321",
     "setup/test-update-manifest-graph.py.sha256": "5e1c8cd326f9be230766515cd5f7a975d4e7bddcf558eac5d19b37f3224ca9be",
@@ -771,7 +771,7 @@
   },
   "development": {
     "channel": "dev",
-    "iteration": 101,
-    "label": "dev101"
+    "iteration": 102,
+    "label": "dev102"
   }
 }

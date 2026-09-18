@@ -70,7 +70,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.59";
-const PORTABLE_DEV_ITERATION = "dev101";
+const PORTABLE_DEV_ITERATION = "dev102";
 const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
@@ -2035,6 +2035,15 @@ function isLocalMcpServiceProcess(item) {
 function stopLocalMcpServiceProcesses(port) {
   const killed = [];
   const killedPids = new Map();
+  // A listener on the configured MCP port is also safely attributable to this
+  // Portable root when the same PID appears in portableProcessSnapshot().
+  // This is deliberately stronger than "PID owns port": the snapshot already
+  // proves the executable/command belongs to ROOT. Hosted Windows can blank or
+  // mutate CommandLine during process teardown, so isLocalMcpServiceProcess()
+  // alone can lose sight of the real listener before the socket is released.
+  // Keep the exact creation identity once this conjunction is observed and
+  // only ever re-kill that same process instance.
+  const provenListenerPids = new Map();
   const deadline = Date.now() + PORTABLE_STOP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const snapshot = portableProcessSnapshot();
@@ -2043,6 +2052,14 @@ function stopLocalMcpServiceProcesses(port) {
     if (!serviceProcesses.length && !listeners.length) break;
 
     const byPid = new Map(snapshot.map((item) => [item.pid, item]));
+    for (const pid of listeners) {
+      const item = byPid.get(pid);
+      if (!item) continue;
+      const creationTicks = item.creationTicks || processCreationTicks(pid) || 0;
+      if (creationTicks > 0 && !provenListenerPids.has(pid)) {
+        provenListenerPids.set(pid, creationTicks);
+      }
+    }
     const depth = (item) => {
       let value = 0;
       let current = item;
@@ -2054,7 +2071,12 @@ function stopLocalMcpServiceProcesses(port) {
       }
       return value;
     };
-    const candidates = serviceProcesses.sort((left, right) => depth(right) - depth(left));
+    const candidateMap = new Map(serviceProcesses.map((item) => [item.pid, item]));
+    for (const pid of listeners) {
+      const item = byPid.get(pid);
+      if (item && provenListenerPids.has(pid)) candidateMap.set(pid, item);
+    }
+    const candidates = [...candidateMap.values()].sort((left, right) => depth(right) - depth(left));
     if (!candidates.length) {
       // taskkill can remove the owning process from CIM before netstat stops
       // reporting its LISTENING row. A successful stop-local contract requires
@@ -2069,7 +2091,7 @@ function stopLocalMcpServiceProcesses(port) {
       // after the first taskkill even after its command line stops satisfying
       // the ownership snapshot. Never kill a recycled/unknown listener PID.
       for (const pid of listeners) {
-        const expectedCreationTicks = killedPids.get(pid) || 0;
+        const expectedCreationTicks = killedPids.get(pid) || provenListenerPids.get(pid) || 0;
         if (!expectedCreationTicks) continue;
         const currentCreationTicks = processCreationTicks(pid);
         if (currentCreationTicks && currentCreationTicks === expectedCreationTicks) {
@@ -2086,7 +2108,8 @@ function stopLocalMcpServiceProcesses(port) {
       // logged-launcher, or the cli.js serve listener.
       runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
       killed.push({ pid: item.pid, name: item.name, executablePath: item.executablePath });
-      killedPids.set(item.pid, item.creationTicks || 0);
+      const creationTicks = item.creationTicks || provenListenerPids.get(item.pid) || processCreationTicks(item.pid) || 0;
+      killedPids.set(item.pid, creationTicks);
     }
     sleepSync(300);
   }
@@ -2130,6 +2153,18 @@ function stopLocalMcpServiceProcesses(port) {
       if (localTcpPortBindable(port)) {
         remainingListeners = [];
         break;
+      }
+      // If the socket is still held by the exact Portable-owned process we
+      // proved above, keep terminating that identity throughout the kernel
+      // drain window. This covers hosted runners where CIM stops returning the
+      // original command line long before the process/socket is actually gone.
+      for (const pid of remainingListeners) {
+        const expectedCreationTicks = killedPids.get(pid) || provenListenerPids.get(pid) || 0;
+        if (!expectedCreationTicks) continue;
+        const currentCreationTicks = processCreationTicks(pid);
+        if (currentCreationTicks > 0 && currentCreationTicks === expectedCreationTicks) {
+          runProgram("taskkill.exe", ["/pid", String(pid), "/f"], { ignoreExitCode: true });
+        }
       }
       sleepSync(Math.min(250, Math.max(1, portDrainDeadline - Date.now())));
       remainingListeners = listenerPids(port);

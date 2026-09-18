@@ -2,7 +2,13 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
-## 1.1.59 dev101（开发中，暂停发布）
+## 1.1.59 dev102（开发中，暂停发布）
+
+- GitHub Windows CI 再次复现 strict-stop：`stop-local` 50 秒后仍有 PID 6760 监听 `127.0.0.1:17689`。继续延长 timeout 没有意义。dev102 将“监听目标 MCP 端口且同一 PID 同时被 Portable root ownership snapshot 证明归属”的进程保存为 `(PID, CreationTicks)` 精确身份；即使 hosted Windows 在退出期丢失/改变 CommandLine，也只对这个已经证明归属的同一进程实例继续直接终止，PID 重用或根目录外的未知监听者仍 fail-closed。
+- 该精确 listener identity 在原 process-stop 窗口和后续 kernel port-drain 窗口都生效，解决“进程签名先消失、socket 仍真实占用”的 CI 竞态，而不是再堆叠等待时间。
+- 保留 dev101 stale process resume 抑制、dev100 首 status transport 重试和 dev99 durable process 恢复；1.1.60 继续禁止发布。
+
+## 1.1.59 dev101（开发历史）
 
 - generation 44 实机恢复时发现 checkpoint 中旧 `proc_963...` 已完成且 `watchProcessHandles=[]`，但 `evidence.pending` 仍被投影成 `nextExecutableStep`。dev101 在 synthetic ACK 投影时用 durable resume operations 识别具体历史 processHandle；若该 handle 已不在当前 watch set，则丢弃这条陈旧 process 指令，避免下一轮重复 attach 已结束进程或被旧步骤带偏。
 - 保留 dev100 的首个 status transport-failure 同轮重试规则与 dev99 的 completion-driven durable process 恢复；稳定前继续禁止 1.1.60 Release。
