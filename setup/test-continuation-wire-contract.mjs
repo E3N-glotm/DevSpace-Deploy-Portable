@@ -306,11 +306,10 @@ try {
   assert.equal(ack.task.executionContract.finalResponseAllowed, false);
   assert.match(ack.requiredBeforeFinal, /MANDATORY NEXT OUTPUT/);
   assert.match(ack.requiredBeforeFinal, /MANDATORY NEXT OUTPUT: substantive DevSpace tool call/);
-  assert.match(ack.requiredBeforeFinal, /'继续处理中'/);
-  assert.match(ack.requiredBeforeFinal, /genuine stage boundary/);
+  assert.match(ack.requiredBeforeFinal, /partial test batch/);
+  assert.match(ack.requiredBeforeFinal, /preCutoffHandoffRequired=true/);
   assert.match(ack.requiredBeforeFinal, /turn-complete/);
-  assert.match(ack.requiredBeforeFinal, /concise visible progress summary/);
-  assert.match(ack.requiredBeforeFinal, /auto-resume in the next synthetic turn/);
+  assert.doesNotMatch(ack.requiredBeforeFinal, /genuine stage boundary|auto-resume in the next synthetic turn/);
   assert.match(ack.requiredBeforeFinal, /wire contract/);
   assert.match(lastWireReply.content?.[0]?.text ?? "", /DEVSPACE SYNTHETIC EXECUTION HANDOFF \[P0\]/,
     "successful synthetic ACK must put the execution handoff before the JSON payload");

@@ -20,7 +20,8 @@ concurrency:
 
 jobs:
   build-release:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.ref_name != 'v1.1.14' }}
+    # Publishing stays off until real continuation acceptance and explicit approval.
+    if: ${{ vars.DEVSPACE_RELEASE_APPROVED == 'true' && (github.event_name == 'workflow_dispatch' || github.ref_name != 'v1.1.14') }}
     runs-on: windows-2025
     timeout-minutes: 120
 

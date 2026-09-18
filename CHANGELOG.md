@@ -2,7 +2,15 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
-## 1.1.60
+## 1.1.59 dev97（开发中，暂停发布）
+
+- 保留当前代码及修复历史，撤下 1.1.60 发布线，继续作为 1.1.59 dev 迭代。
+- generation 23 实际只产生一次 post-ACK 实质调用（930→931），后台压测进度不构成模型持续工作的证据。
+- 统一中英文续轮消息并去掉任意阶段总结诱因；未完成 synthetic 只能在服务端报告 Host cutoff 交接窗口时签署 turn-complete，四次调用或部分测试进度不再放行。
+- underfloor 静默仅作诊断，不能推断 Host 已结束；保留历史状态兼容、sender revision fence、同卡自愈、紧凑 resume 上下文及 strict-stop 修复。
+- 真实长轮与连续交接仍需验收，不因单元测试通过宣告稳定，不发布 Release。
+
+## 1.1.60（发布已撤回，以下为开发历史）
 
 - dev93 根据最终验收现场的 generation 10/11/12 零工作记录继续收口：三轮都已由
   Host 成功创建并完成 synthetic status ACK，但数据库中的

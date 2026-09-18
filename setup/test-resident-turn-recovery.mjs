@@ -248,12 +248,9 @@ try {
   assert.equal(runtime.claimReadyContinuationGeneration(recoverEarlyFinal.sender).accepted, false,
     "without model completion or Host-timeout recovery there must be no replacement generation to claim");
 
-  // Production generation 19 (2026-09-18) delivered and ACKed correctly, ran
-  // only two substantive DevSpace tools, then the Host/model turn disappeared
-  // without turn-complete.  This is not ordinary healthy synthetic silence:
-  // it violates the resumed turn's mandatory four-operation anti-idle floor.
-  // Recover that exact narrow state after a two-stage quiet window while
-  // preserving the old no-silence-inference rule for healthy/resident turns.
+  // A short production turn and legitimate long reasoning are observationally
+  // identical at the MCP boundary. The dev96 120-second watchdog must only
+  // diagnose underfloor quiet; it cannot authorize a replacement Host turn.
   const underfloor = fixture("completion-driven", { watch: false });
   assert.equal(timeout(underfloor).accepted, true);
   assert.equal(ready(underfloor).length, 1);
@@ -261,45 +258,20 @@ try {
   work(underfloor);
   work(underfloor);
   const underfloorAge = ageSyntheticUnderfloor(underfloor, 130_000);
-  assert.equal(ready(underfloor, underfloorAge.nowMs).length, 0,
-    "the first underfloor watchdog sweep must only persist SUSPECTED_STALL");
-  const underfloorSuspected = status(underfloor);
-  assert.equal(underfloorSuspected.stallState, "SUSPECTED_STALL");
-  assert.equal(underfloorSuspected.stallEvidence, "synthetic-underfloor-stall-watchdog");
-  const recoveredUnderfloor = ready(underfloor, underfloorAge.nowMs + 31_000);
-  assert.equal(recoveredUnderfloor.length, 1,
-    "an ACKed completion-driven synthetic turn still below the four-tool floor must recover after sustained quiet");
-  const orphanedUnderfloor = status(underfloor);
-  assert.equal(orphanedUnderfloor.assistantTurnState, "ORPHANED");
-  assert.equal(orphanedUnderfloor.assistantTurnCompletionSource, "synthetic-underfloor-stall-inferred");
-  const retiredUnderfloorGeneration = runtime.database.sqlite.prepare(`
-    select state,failure_reason,substantive_activity_count,substantive_baseline_count
-    from continuation_generations where id=?
-  `).get(underfloorAge.generation.id);
-  assert.equal(retiredUnderfloorGeneration.state, "NO_WORK");
-  assert.equal(retiredUnderfloorGeneration.failure_reason, "synthetic-underfloor-stall-recovered");
-  assert.equal(
-    Number(retiredUnderfloorGeneration.substantive_activity_count)
-      - Number(retiredUnderfloorGeneration.substantive_baseline_count),
-    2,
-  );
+  assert.equal(ready(underfloor, underfloorAge.nowMs).length, 0);
+  assert.equal(status(underfloor).stallState, "SUSPECTED_STALL");
+  for (const quietOffset of [31_000, 120_000, 300_000]) {
+    assert.equal(ready(underfloor, underfloorAge.nowMs + quietOffset).length, 0,
+      "underfloor quiet must never manufacture completion or a new generation");
+    assert.equal(status(underfloor).assistantTurnState, "GENERATING");
+  }
   assert.equal(runtime.pollEvents({
-    kind: "continuation-synthetic-underfloor-recovered",
-    subject: underfloor.scope,
-    limit: 20,
-  }).events.length, 1);
-  const quarantinedClaim = runtime.claimReadyContinuationGeneration(underfloor.sender);
-  assert.equal(quarantinedClaim.accepted, false);
-  assert.equal(quarantinedClaim.reason, "generation-not-due",
-    "underfloor replacement must keep a short quarantine before visible Host delivery");
-  runtime.database.sqlite.prepare(`
-    update continuation_generations set due_at=?
-    where workset_id=(select active_workset_id from continuation_conversation_cards where conversation_scope_id=?)
-      and owner_type='synthetic' and state='READY'
-  `).run(new Date(Date.now() - 1_000).toISOString(), underfloor.scope);
-  const postQuarantineClaim = runtime.claimReadyContinuationGeneration(underfloor.sender);
-  assert.equal(postQuarantineClaim.accepted, true,
-    "the replacement generation must become claimable after its short quarantine");
+    kind: "continuation-synthetic-underfloor-recovered", subject: underfloor.scope, limit: 20,
+  }).events.length, 0);
+  assert.equal(runtime.claimReadyContinuationGeneration(underfloor.sender).accepted, false);
+  work(underfloor);
+  assert.equal(status(underfloor).assistantTurnState, "GENERATING",
+    "late work must remain in the original turn, without duplicate delivery");
   runtime.continuationTask({ action: "cancel", taskId: underfloor.taskId, note: "fixture complete" });
 
   const underfloorLongThink = fixture("completion-driven", { watch: false });
@@ -351,8 +323,8 @@ try {
   assert.equal(ready(underfloorInFlight, inFlightAge.nowMs + 31_000).length, 0,
     "an in-flight model-originated DevSpace request must fence underfloor recovery");
   releaseInFlight();
-  assert.equal(ready(underfloorInFlight, inFlightAge.nowMs + 32_000).length, 1,
-    "underfloor recovery may proceed after the exact model request has drained");
+  assert.equal(ready(underfloorInFlight, inFlightAge.nowMs + 32_000).length, 0,
+    "a drained MCP request still cannot prove that Host reasoning ended");
   runtime.continuationTask({ action: "cancel", taskId: underfloorInFlight.taskId, note: "fixture complete" });
 
   const longThink = fixture("resident", { watch: false });

@@ -72,29 +72,15 @@ const DELIVERY_ACK_RETRY_MAX_MS = 60_000;
 // synthetic work.  Manual takeover can revoke this ownership immediately and
 // therefore remains the higher-priority preemption mechanism.
 const SYNTHETIC_WORK_OWNER_LEASE_MS = 30 * 60_000;
-// A resumed synthetic turn has an explicit minimum execution contract: before
-// it may voluntarily yield unfinished work it must perform at least four
-// substantive DevSpace operations.  Live generation 19 on 2026-09-18 proved a
-// different failure mode from ordinary long reasoning: the Host delivered and
-// ACKed the synthetic turn, it executed only two substantive tools, then the
-// assistant turn vanished without signing turn-complete.  Leaving that state
-// behind for the 25-minute learned Host cutoff recreates the old "57 seconds
-// then nothing" failure even though delivery itself succeeded.
-//
-// Do NOT restore the old general cadence/orphan heuristic.  Silence after a
-// healthy synthetic turn (>= four substantive operations), any manual turn,
-// resident/process-watching work, or an in-flight model request remains purely
-// diagnostic and can never authorize another Host turn.  The narrow watchdog
-// below applies only while the synthetic turn is still below its own mandatory
-// anti-idle floor.  It uses a two-stage quiet window longer than the largest
-// healthy production inter-tool gap observed during generation 8 (~87 s), and
-// requires a fresh verified sender before it can infer the underfloor turn was
-// abandoned.  This is a bounded recovery for a violated execution contract,
-// not a generic "model is quiet" completion detector.
+// The operation floor is only an anti-empty guard, never evidence that an
+// unfinished synthetic stage may end. A runnable synthetic turn may hand off
+// only in the server-reported learned Host cutoff window.
+// Quiet below the floor is diagnostic too: a model can reason for longer than
+// any previously observed inter-tool gap. Do not infer Host termination from
+// 120 seconds of silence or manufacture another user turn.
 const SYNTHETIC_MIN_SUBSTANTIVE_WORK_DELTA = 4;
 const SYNTHETIC_UNDERFLOOR_SUSPECT_MS = 90_000;
-const SYNTHETIC_UNDERFLOOR_RECOVERY_MS = 120_000;
-const SYNTHETIC_UNDERFLOOR_DELIVERY_QUARANTINE_MS = 10_000;
+// Read/revoke compatibility for rows already written by dev96.
 const SYNTHETIC_UNDERFLOOR_COMPLETION_SOURCE = "synthetic-underfloor-stall-inferred";
 const SYNTHETIC_UNDERFLOOR_STALL_EVIDENCE = "synthetic-underfloor-stall-watchdog";
 // The sender owns CLAIMED while it performs bounded MCP retries, the advisory
@@ -1981,7 +1967,6 @@ export class StructuredRuntimeState {
                 if ((!Number.isFinite(worksetDue) || worksetDue > nowMs) && !expiredSenderClaim)
                     return undefined;
                 let retryAuthorized = false;
-                let underfloorRecoveryTriggered = false;
                 if (liveSynthetic) {
                     const syntheticOwnerTask = current.legacy_task_id
                         ? this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(current.legacy_task_id)
@@ -2061,79 +2046,23 @@ export class StructuredRuntimeState {
                                 workDelta: syntheticWorkDelta,
                                 minimumWorkDelta: SYNTHETIC_MIN_SUBSTANTIVE_WORK_DELTA,
                                 quietMs: syntheticQuietMs,
-                                recoveryAfterMs: SYNTHETIC_UNDERFLOOR_RECOVERY_MS,
+                                diagnosticOnly: true,
                             },
                         });
                     }
-                    const refreshedSyntheticOwnerTask = syntheticOwnerTask
-                        ? this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(syntheticOwnerTask.id)
-                        : undefined;
-                    const underfloorSuspectedAtMs = Date.parse(String(refreshedSyntheticOwnerTask?.stall_suspected_at || ""));
-                    const underfloorRecoveryAuthorized = Boolean(
-                        syntheticUnderfloorCandidate
-                        && syntheticQuietMs >= SYNTHETIC_UNDERFLOOR_RECOVERY_MS
-                        && String(refreshedSyntheticOwnerTask?.stall_state || "") === "SUSPECTED_STALL"
-                        && String(refreshedSyntheticOwnerTask?.stall_evidence || "") === SYNTHETIC_UNDERFLOOR_STALL_EVIDENCE
-                        && Number.isFinite(underfloorSuspectedAtMs)
-                        && nowMs - underfloorSuspectedAtMs >= Math.max(
-                            1,
-                            SYNTHETIC_UNDERFLOOR_RECOVERY_MS - SYNTHETIC_UNDERFLOOR_SUSPECT_MS,
-                        )
-                        && !this.continuationModelRequestInFlight(current.conversation_scope_id)
-                    );
-                    if (underfloorRecoveryAuthorized) {
-                        const orphaned = this.database.sqlite.prepare(`
-                          update continuation_tasks set
-                            assistant_turn_state='ORPHANED',
-                            assistant_turn_completion_lease_id=turn_lease_id,
-                            assistant_turn_completed_at=?,
-                            assistant_turn_completion_source=?,
-                            assistant_turn_completion_note=?,
-                            stall_state='CONTINUATION_ARMED',stall_armed_at=?,
-                            stall_evidence=?,updated_at=?
-                          where id=? and state='RUNNING' and continuation_mode='completion-driven'
-                            and assistant_turn_state='GENERATING' and delivery_owner='synthetic-active'
-                            and turn_lease_id=?
-                        `).run(
-                            nowIso,
-                            SYNTHETIC_UNDERFLOOR_COMPLETION_SOURCE,
-                            `synthetic-underfloor-work-delta-${syntheticWorkDelta}`,
-                            nowIso,
-                            SYNTHETIC_UNDERFLOOR_STALL_EVIDENCE,
-                            nowIso,
-                            syntheticOwnerTask.id,
-                            syntheticTurnLeaseId,
-                        );
-                        if (Number(orphaned.changes || 0) === 1) {
-                            underfloorRecoveryTriggered = true;
-                            this.appendEvent({
-                                kind: "continuation-synthetic-underfloor-recovered",
-                                subject: current.conversation_scope_id,
-                                workspaceId: current.workspace_id ?? undefined,
-                                payload: {
-                                    worksetId: current.id,
-                                    generation: Number(liveSynthetic.generation || 0),
-                                    workDelta: syntheticWorkDelta,
-                                    minimumWorkDelta: SYNTHETIC_MIN_SUBSTANTIVE_WORK_DELTA,
-                                    quietMs: syntheticQuietMs,
-                                    turnLeaseId: syntheticTurnLeaseId,
-                                },
-                            });
-                        }
-                    }
+                    // Low activity remains telemetry. Neither a fresh sender nor
+                    // a drained MCP request proves that Host reasoning has ended.
                     // Exact turn-end evidence retires worked and empty turns
                     // alike. Waiting for a 30-minute owner lease after a proven
                     // timeout strands healthy long-running monitoring work.
                     // Conversely lease expiry alone never retires a live turn.
                     const endedSyntheticWork = ["TURN_ACKED", "WORK_REQUIRED"].includes(String(liveSynthetic.state))
-                        && (syntheticTurnEnded || underfloorRecoveryTriggered)
+                        && syntheticTurnEnded
                         && !this.continuationModelRequestInFlight(current.conversation_scope_id);
                     if (!senderClaimExpired && !endedSyntheticWork)
                         return undefined;
                     const failureReason = senderClaimExpired
                         ? (liveSynthetic.state === "DELIVERING" ? "sender-delivery-expired" : "sender-claim-expired")
-                        : underfloorRecoveryTriggered
-                            ? "synthetic-underfloor-stall-recovered"
                         : inferredCutoffRecovery
                             ? "learned-host-cutoff-timeout"
                             : "assistant-turn-ended";
@@ -2226,12 +2155,8 @@ export class StructuredRuntimeState {
                 }
                 const nextGeneration = Math.max(1, Number(current.current_generation || 0) + 1);
                 const generationId = `generation:${current.id}:${nextGeneration}`;
-                const nextGenerationDueAt = underfloorRecoveryTriggered
-                    ? new Date(nowMs + SYNTHETIC_UNDERFLOOR_DELIVERY_QUARANTINE_MS).toISOString()
-                    : nowIso;
-                const nextGenerationFailureReason = underfloorRecoveryTriggered
-                    ? "synthetic-underfloor-delivery-quarantine"
-                    : null;
+                const nextGenerationDueAt = nowIso;
+                const nextGenerationFailureReason = null;
                 this.database.sqlite.prepare(`
                   insert into continuation_generations(
                     id,workset_id,generation,owner_type,state,due_at,substantive_baseline_count,
@@ -2252,12 +2177,6 @@ export class StructuredRuntimeState {
                             generation: nextGeneration,
                             ...(inferredCutoffRecovery
                                 ? { inferredTimeout: true, reason: "learned-host-cutoff-watchdog", ...inferredCutoffRecovery }
-                                : underfloorRecoveryTriggered
-                                    ? {
-                                        underfloorRecovery: true,
-                                        reason: "synthetic-underfloor-stall-recovered",
-                                        notBefore: nextGenerationDueAt,
-                                    }
                                 : signedCompletionPrearm ? { prearmed: true, reason: "model-turn-complete" } : {}),
                         },
                 });
@@ -3929,7 +3848,9 @@ export class StructuredRuntimeState {
                 requiredBeforeFinal: preFinalControlRequired
                     ? preCutoffHandoffRequired
                         ? "learned Host cutoff handoff window reached: sign turn-complete now so the live sender can pre-arm the continuation before Host teardown"
-                        : "continue substantive work; or call turn-complete for an intentional incomplete stage boundary; or checkpoint with waitingExternal=true only for a genuine external blocker; for explicit user takeover use turn-complete completionDisposition=await-user (cached schema: checkpoint note=atcc-await-user); mark completed milestones before ending"
+                        : syntheticWorkMustContinue
+                            ? "continue substantive work in this same turn across runnable milestones; poll running processes to completion. An unfinished synthetic turn-complete is forbidden unless preCutoffHandoffRequired=true. Complete verified work or checkpoint waitingExternal=true only for a genuine external blocker."
+                            : "continue substantive work; or call turn-complete for an intentional incomplete stage boundary; or checkpoint with waitingExternal=true only for a genuine external blocker; for explicit user takeover use turn-complete completionDisposition=await-user (cached schema: checkpoint note=atcc-await-user); mark completed milestones before ending"
                     : undefined,
                 preCutoffHandoffRequired,
                 preCutoffHandoffAtMs: preCutoffHandoff.handoffAtMs,
@@ -5147,16 +5068,9 @@ export class StructuredRuntimeState {
             const owner = String(row.delivery_owner || "") === "synthetic-active" ? "synthetic" : "manual";
             const workDelta = Math.max(0,
                 Number(row.substantive_activity_count || 0) - Number(row.delivery_work_baseline_count || 0));
-            // Manual and synthetic turns share the same model-owned stage
-            // boundary semantics, but a resumed synthetic turn has a stronger
-            // anti-idle quality floor because the Host just spent a separate
-            // user-role turn to restart it. A manual turn needs one substantive
-            // operation before voluntarily yielding an unfinished stage;
-            // synthetic resumes need at least four post-ACK substantive
-            // operations. Four is only an anti-empty/anti-short-loop floor: it
-            // is never a target duration, a wall-clock budget, or by itself a
-            // reason to end. The model must still reach a genuine coherent
-            // stage boundary before signing turn-complete.
+            // Manual stages retain their existing completion contract.
+            // Synthetic work additionally needs the server's Host cutoff
+            // window below. The operation floor alone never grants a handoff.
             const minimumWorkDelta = owner === "synthetic" ? SYNTHETIC_MIN_SUBSTANTIVE_WORK_DELTA : 1;
             if (workDelta < minimumWorkDelta) {
                 return {
@@ -5165,6 +5079,15 @@ export class StructuredRuntimeState {
                     reason: "assistant-turn-substantive-work-required",
                     substantiveWorkDelta: workDelta,
                     minimumSubstantiveWorkDelta: minimumWorkDelta,
+                    ...continuationDirective(rowToTask(row)),
+                };
+            }
+            if (owner === "synthetic" && !preCutoffHandoff.required) {
+                return {
+                    task: rowToTask(row),
+                    accepted: false,
+                    reason: "synthetic-turn-runnable-milestones-remain",
+                    substantiveWorkDelta: workDelta,
                     ...continuationDirective(rowToTask(row)),
                 };
             }

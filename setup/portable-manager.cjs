@@ -69,8 +69,9 @@ const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
-const PORTABLE_VERSION = "1.1.60";
-const PORTABLE_DISPLAY_VERSION = PORTABLE_VERSION;
+const PORTABLE_VERSION = "1.1.59";
+const PORTABLE_DEV_ITERATION = "dev97";
+const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -2400,6 +2401,7 @@ function stopPortableOwnedProcesses(excludePids = []) {
     ...excludePids,
   ].map(Number).filter((pid) => Number.isInteger(pid) && pid > 0));
   const killed = [];
+  const killedIdentities = new Map();
   const validParent = (child, parent) => {
     if (!parent) return false;
     if (!Number.isFinite(child?.creationTicks) || child.creationTicks <= 0) return true;
@@ -2455,7 +2457,30 @@ function stopPortableOwnedProcesses(excludePids = []) {
     };
     const processes = eligible(snapshot)
       .sort((left, right) => depth(right) - depth(left));
-    if (!processes.length) break;
+    if (!processes.length) {
+      // taskkill /F may return before the exact process object has fully
+      // disappeared on hosted Windows. During that exit window CIM can also
+      // transiently omit the command line/executable path that made the process
+      // Portable-owned, so a fresh ownership snapshot alone is not a sufficient
+      // success condition. Once a PID has been proven owned and selected for
+      // termination, retain its immutable creation identity until it is gone.
+      // This does not broaden the kill surface: a recycled PID is ignored when
+      // its CreationTicks differ, and unrelated descendants were never inserted
+      // into killedIdentities in the first place.
+      const lingeringOwnedPids = [...killedIdentities.entries()]
+        .filter(([pid, creationTicks]) => {
+          const currentCreationTicks = processCreationTicks(pid);
+          return currentCreationTicks > 0
+            && creationTicks > 0 && currentCreationTicks === creationTicks;
+        })
+        .map(([pid]) => pid);
+      if (!lingeringOwnedPids.length) break;
+      for (const pid of lingeringOwnedPids) {
+        runProgram("taskkill.exe", ["/pid", String(pid), "/f"], { ignoreExitCode: true });
+      }
+      sleepSync(Math.min(200, Math.max(1, deadline - Date.now())));
+      continue;
+    }
     for (const item of processes) {
       // Do not use taskkill /T here. DevSpace can launch arbitrary user tools
       // as children of the MCP server; recursively killing the process tree can
@@ -2465,11 +2490,21 @@ function stopPortableOwnedProcesses(excludePids = []) {
       // and leave unrelated descendants alone.
       runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
       killed.push({ pid: item.pid, name: item.name, executablePath: item.executablePath });
+      if (!killedIdentities.has(item.pid)) {
+        killedIdentities.set(item.pid, item.creationTicks || 0);
+      }
     }
     sleepSync(400);
   }
   const remaining = eligible(portableProcessSnapshot());
-  return { killed, remaining, excluded: [...excluded] };
+  const remainingKilledPids = [...killedIdentities.entries()]
+    .filter(([pid, creationTicks]) => {
+      const currentCreationTicks = processCreationTicks(pid);
+      return currentCreationTicks > 0
+        && (!creationTicks || currentCreationTicks === creationTicks);
+    })
+    .map(([pid]) => pid);
+  return { killed, remaining, remainingKilledPids, excluded: [...excluded] };
 }
 
 function stopOrphanedComputerUseBrokers() {
@@ -2501,9 +2536,11 @@ function stopServices(options = {}) {
   cleanupRunState();
   const remainingPids = new Set(processResult.remaining.map((item) => item.pid));
   const listenerRemaining = listenerPids(Number(deployment.port || 7676)).filter((pid) => remainingPids.has(pid));
-  if (processResult.remaining.length || listenerRemaining.length) {
+  if (processResult.remaining.length || processResult.remainingKilledPids.length || listenerRemaining.length) {
     const details = [
       ...processResult.remaining.map((item) => `${item.pid} ${item.name} ${item.executablePath}`),
+      ...processResult.remainingKilledPids.map((pid) =>
+        `${pid} was proven Portable-owned and terminated but remains the same process instance`),
       ...listenerRemaining.map((pid) => `${pid} still listens on 127.0.0.1:${deployment.port || 7676}`),
     ];
     throw new Error(`Portable stop could not terminate these owned processes within ${PORTABLE_STOP_TIMEOUT_MS / 1000} seconds:\n${details.join("\n")}`);

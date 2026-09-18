@@ -1,3 +1,7 @@
+# 发布已撤回
+
+2026-09-18：自动续轮稳定性未验收通过，暂停 1.1.60 发布；保留实现，继续以 1.1.59 dev97 修复。下文是历史候选说明，不代表已发布或已通过实机验收。
+
 # DevSpace Portable 1.1.60
 
 `1.1.60` is the first stable release after the internal `1.1.59 dev*` series.

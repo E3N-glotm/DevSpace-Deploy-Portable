@@ -768,10 +768,9 @@ try {
   assert.equal(duplicateSenderTimeout.task.hostTimeoutSamples, senderTimeoutSamples,
     "duplicate timeout delivery must be idempotent and must not double-count Host calibration samples");
 
-  // Synthetic resumed turns use a stronger anti-idle floor than a manual
-  // continue. The floor must reject empty/short loops, but after the floor a
-  // genuine model-owned stage boundary is allowed so a visible stage summary
-  // can be emitted and remaining milestones can arm the next continuation.
+  // Production gen23: polling part of a 12-run test batch is not completion.
+  // Neither four calls nor many calls may unlock an unfinished synthetic final.
+  // Only a server-reported Host cutoff window permits an incomplete handoff.
   const syntheticScope = "v1/atcc-synthetic-quality";
   const synthetic = begin(syntheticScope);
   mount(synthetic, syntheticScope, "ui_atcc_synthetic_quality");
@@ -803,21 +802,20 @@ try {
     taskId: synthetic.task.id,
     note: "model-owned-stage-boundary-after-real-work",
   });
-  assert.equal(syntheticRequested.accepted, true);
-  assert.equal(syntheticRequested.reason, "assistant-turn-completion-requested");
-  assert.equal(syntheticRequested.task.assistantTurnState, "COMPLETION_REQUESTED");
-  assert.equal(syntheticRequested.finalResponseAllowed, true);
-  const syntheticRequestedAt = Date.parse(syntheticRequested.task.assistantTurnCompletionRequestedAt);
-  const syntheticChained = runtime.continuationSupervisorSweep({ nowMs: syntheticRequestedAt + 9_001 });
-  assert.equal(readyForScope(syntheticChained, syntheticScope).length, 1,
-    "an accepted synthetic stage boundary with remaining milestones must arm exactly one next continuation");
-  const syntheticAfterHandoff = runtime.continuationTask({
-    action: "status", taskId: synthetic.task.id, readOnlyStatus: true,
+  assert.equal(syntheticRequested.accepted, false);
+  assert.equal(syntheticRequested.reason, "synthetic-turn-runnable-milestones-remain");
+  assert.equal(syntheticRequested.task.assistantTurnState, "GENERATING");
+  assert.equal(syntheticRequested.finalResponseAllowed, false);
+  assert.equal(syntheticRequested.syntheticWorkMustContinue, true);
+  work(synthetic, syntheticScope, 16);
+  const stillRunnable = runtime.continuationTask({
+    action: "checkpoint", taskId: synthetic.task.id, note: "atcc-turn-complete",
   });
-  assert.equal(syntheticAfterHandoff.task.assistantTurnState, "COMPLETED");
-  assert.deepEqual(syntheticAfterHandoff.remainingMilestones, ["finish"]);
-  assert.equal(syntheticRequested.minimumActiveWorkMs, undefined);
-  assert.equal(syntheticRequested.retryAfterMs, undefined);
+  assert.equal(stillRunnable.accepted, false, "cached schemas must not bypass the same gate");
+  assert.equal(stillRunnable.reason, "synthetic-turn-runnable-milestones-remain");
+  assert.equal(readyForScope(runtime.continuationSupervisorSweep(), syntheticScope).length, 0);
+  assert.equal(stillRunnable.task.assistantTurnState, "GENERATING");
+  assert.deepEqual(stillRunnable.remainingMilestones, ["finish"]);
 
   // Confirmed or learned Host windows remain timeout diagnostics. They must
   // never create a shorter synthetic completion budget or percentage gate.
@@ -844,8 +842,8 @@ try {
     taskId: budgetSynthetic.task.id,
     note: "elapsed-time-and-owner-telemetry-do-not-gate-model-boundary",
   });
-  assert.equal(budgetRequested.accepted, true);
-  assert.equal(budgetRequested.reason, "assistant-turn-completion-requested");
+  assert.equal(budgetRequested.accepted, false);
+  assert.equal(budgetRequested.reason, "synthetic-turn-runnable-milestones-remain");
   assert.equal(budgetRequested.minimumActiveWorkMs, undefined);
   assert.equal(budgetRequested.syntheticHostBudgetRatio, undefined);
 
@@ -904,6 +902,13 @@ try {
   });
   assert.equal(cachedHostForgery.accepted, false);
   assert.equal(cachedHostForgery.reason, "turn-complete-model-only");
+  const cachedEarly = runtime.continuationTask({
+    action: "checkpoint", taskId: cachedSchema.task.id, note: "atcc-turn-complete",
+  });
+  assert.equal(cachedEarly.accepted, false);
+  assert.equal(cachedEarly.reason, "synthetic-turn-runnable-milestones-remain");
+  runtime.database.sqlite.prepare(`update continuation_tasks set cutoff_samples_json='[600000,601000]',
+    turn_started_at=? where id=?`).run(new Date(Date.now() - 560_000).toISOString(), cachedSchema.task.id);
   const cachedRequested = runtime.continuationTask({
     action: "checkpoint",
     taskId: cachedSchema.task.id,

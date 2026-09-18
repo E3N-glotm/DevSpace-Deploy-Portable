@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   backfill:
+    if: ${{ vars.DEVSPACE_RELEASE_APPROVED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
