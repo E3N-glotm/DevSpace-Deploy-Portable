@@ -374,13 +374,12 @@ export class StructuredRuntimeState {
         if (!conversationScopeId)
             return { accepted: false, reason: "conversation-scope-required" };
         const nowIso = new Date().toISOString();
-        // Protocol epoch is the execution-compatibility boundary. The concrete
-        // Workspace App resource revision remains provenance only: ChatGPT can
-        // cache both the tool descriptor and referenced App document across a
-        // Portable hot update, so treating the whole resource hash as an ABI
-        // fence can permanently strand an otherwise wire-compatible sender.
-        // Incompatible sender behavior must explicitly bump the protocol epoch;
-        // revision drift remains observable in diagnostics.
+        // Protocol epoch is the broad wire-compatibility boundary, while the
+        // concrete Workspace App revision is the exact executable-provenance
+        // boundary. A cached same-epoch iframe may still contain older
+        // continuation semantics, so revision drift must fail closed and ask
+        // the current immutable resource to rebind. Keep revision mismatch as
+        // NEED_REBIND rather than UPGRADE_REQUIRED: no ABI migration is needed.
         const upgradeRequired = reason === "sender-protocol-epoch-mismatch";
         const changed = this.database.sqlite.prepare(`
           update continuation_conversation_cards
@@ -437,6 +436,8 @@ export class StructuredRuntimeState {
             reason = "sender-not-bound";
         else if (expectedProtocolEpoch > 0 && observedProtocolEpoch !== expectedProtocolEpoch)
             reason = "sender-protocol-epoch-mismatch";
+        else if (!assetRevisionMatches)
+            reason = "sender-asset-revision-mismatch";
         else if (!observedBootId || observedBootId !== this.continuationSenderServerBootId)
             reason = "sender-server-boot-mismatch";
         else if (observedGeneration !== cardGeneration)
@@ -942,9 +943,32 @@ export class StructuredRuntimeState {
             return { accepted: false, reason: "sender-protocol-epoch-mismatch" };
         if (!senderAssetRevision)
             return { accepted: false, reason: "sender-asset-revision-required" };
-        // senderAssetRevision is mandatory provenance, not an ABI gate. A
-        // cached same-epoch Workspace App may rebind after a hot update;
-        // continuationSenderStatus exposes assetRevisionDrift for diagnostics.
+        // Sender revision is executable provenance, not just diagnostics. A
+        // same-epoch iframe can survive an MCP hot update with older
+        // continuation prompt/coordination code. Letting it rebind grants
+        // stale JavaScript authority to create the next ChatGPT turn even
+        // though the server/source have already moved on. Fail closed on any
+        // revision drift; a current immutable resource URI can rebind the same
+        // card generation without minting a duplicate card.
+        if (this.continuationSenderAssetRevision
+            && senderAssetRevision !== this.continuationSenderAssetRevision) {
+            const failureScope = trustedConversationScopeId || claimedConversationScopeId;
+            if (failureScope) {
+                this.recordContinuationSenderFailure({
+                    conversationScopeId: failureScope,
+                    senderInstanceId,
+                    senderProtocolEpoch,
+                    senderAssetRevision,
+                    reason: "sender-asset-revision-mismatch",
+                });
+            }
+            return {
+                accepted: false,
+                reason: "sender-asset-revision-mismatch",
+                expectedSenderAssetRevision: this.continuationSenderAssetRevision,
+                observedSenderAssetRevision: senderAssetRevision,
+            };
+        }
         // Prefer the authenticated Host request scope. Some App->MCP calls do
         // not preserve it, so allow a narrow app-only fallback bound to the
         // exact random taskId + canonical conversation scope + current manual-
@@ -1016,6 +1040,11 @@ export class StructuredRuntimeState {
                         === this.continuationSenderServerBootId;
                     const currentSenderProtocolMatches = Number(currentCard.sender_protocol_epoch || 0)
                         === Number(this.continuationSenderProtocolEpoch || 0);
+                    const currentSenderAssetMatches = Boolean(
+                        String(currentCard.sender_asset_revision || "").trim()
+                        && String(currentCard.sender_asset_revision || "").trim()
+                            === String(this.continuationSenderAssetRevision || "").trim()
+                    );
                     const currentSenderGenerationMatches = Number(currentCard.sender_mount_generation || 0)
                         === Number(currentCard.mount_generation || 0);
                     const currentSenderLeaseActive = String(currentCard.sender_lease_state || "") === "ACTIVE";
@@ -1036,6 +1065,7 @@ export class StructuredRuntimeState {
                     // takeover/recovery behavior below.
                     if (currentSenderOwnsCurrentRuntime
                         && currentSenderProtocolMatches
+                        && currentSenderAssetMatches
                         && currentSenderGenerationMatches
                         && currentSenderLeaseActive
                         && currentSenderHeartbeatFresh
@@ -2334,6 +2364,21 @@ export class StructuredRuntimeState {
         if (!senderAssetRevision)
             return { accepted: false, reason: "sender-asset-revision-required",
                 senderStatus: this.continuationSenderStatus({ taskId, conversationScopeId }) };
+        if (this.continuationSenderAssetRevision
+            && senderAssetRevision !== this.continuationSenderAssetRevision) {
+            this.recordContinuationSenderFailure({
+                conversationScopeId,
+                senderInstanceId,
+                senderProtocolEpoch,
+                senderAssetRevision,
+                reason: "sender-asset-revision-mismatch",
+            });
+            return {
+                accepted: false,
+                reason: "sender-asset-revision-mismatch",
+                senderStatus: this.continuationSenderStatus({ taskId, conversationScopeId }),
+            };
+        }
         const task = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
         if (!task || String(task.conversation_scope_id || "") !== conversationScopeId)
             return { accepted: false, reason: task ? "conversation-task-mismatch" : "task-not-found" };

@@ -439,9 +439,11 @@ assert.match(server, /sender-protocol-epoch-mismatch/,
 assert.match(server, /sender-asset-revision-required/,
   "the hidden sender bridge must still require the iframe to identify its concrete resource revision");
 assert.match(runtimeStateSource, /assetRevisionDrift:/,
-  "resource revision drift must remain observable in diagnostics without becoming a second ABI boundary");
-assert.match(runtimeStateSource, /Protocol epoch is the execution-compatibility boundary/,
-  "runtime must document that sender protocol epoch, not the whole App resource hash, is the compatibility boundary");
+  "resource revision drift must remain observable in diagnostics");
+assert.match(runtimeStateSource, /Protocol epoch is the broad wire-compatibility boundary[\s\S]{0,500}exact executable-provenance[\s\S]{0,80}boundary/,
+  "runtime must document the separate wire-ABI and exact executable sender authority boundaries");
+assert.match(runtimeStateSource, /reason: "sender-asset-revision-mismatch"/,
+  "runtime must fail closed when a same-epoch sender carries stale executable App bytes");
 assert.match(server, /action: "status", taskId: input\.taskId, readOnlyStatus: true/,
   "server-internal taskId-to-scope lookups must use side-effect-free status rather than consuming synthetic delivery ownership");
 assert.match(server, /if \(input\.action === "watch-status"\)[\s\S]{0,700}readOnlyStatus: true/,
@@ -3072,29 +3074,26 @@ try {
     senderInstanceId: "ui_sender_restart",
     anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
   }));
-  assert.equal(senderRestartRebound.accepted, true, JSON.stringify(senderRestartRebound));
-  assert.equal(senderRestartRebound.senderStatus?.assetRevisionMatches, false,
-    "a cached same-epoch iframe may recover sender authority while preserving exact provenance drift");
-  assert.equal(senderRestartRebound.senderStatus?.assetRevisionDrift, true);
+  assert.equal(senderRestartRebound.accepted, false, JSON.stringify(senderRestartRebound));
+  assert.equal(senderRestartRebound.reason, "sender-asset-revision-mismatch",
+    "a cached same-epoch iframe must not regain sender authority after executable App bytes change");
   assert.equal(
     senderRestartRuntimeB.database.sqlite.prepare(
       "select sender_instance_id from continuation_conversation_cards where conversation_scope_id=?",
     ).get(senderRestartScope)?.sender_instance_id,
-    "ui_sender_restart",
-    "a same-epoch cached sender must rebind the existing lifetime card after a Portable hot update",
+    null,
+    "revision-drifted sender must leave the lifetime card unbound until the current resource rebinds",
   );
   assert.equal(
     senderRestartRuntimeB.database.sqlite.prepare(
       "select sender_last_failure_reason from continuation_conversation_cards where conversation_scope_id=?",
     ).get(senderRestartScope)?.sender_last_failure_reason,
-    null,
-    "asset revision drift is provenance and must not leave the card in a failure state",
+    "sender-asset-revision-mismatch",
+    "revision drift must remain explicit durable diagnostics rather than silently recovering stale code",
   );
   const senderRestartDiagnosticsAfterStale = senderRestartRuntimeB.continuationSenderDiagnostics();
-  assert.ok(Number(senderRestartDiagnosticsAfterStale.assetRevisionDriftCount || 0) >= 1,
-    "doctor diagnostics must still expose cached resource revision drift");
   assert.equal(Number(senderRestartDiagnosticsAfterStale.upgradeRequiredCount || 0), 0,
-    "same-epoch asset drift must not be misclassified as an ABI upgrade requirement");
+    "same-epoch asset drift requires resource rebind, not an ABI upgrade");
   const senderRestartStaleHeartbeat = senderRestartRuntimeB.heartbeatContinuationSender(withStaleTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,
@@ -3102,8 +3101,9 @@ try {
     anchorMountToken: senderRestartAnchor.anchorMountToken,
     anchorMountGeneration: senderRestartAnchor.anchorMountGeneration,
   }));
-  assert.equal(senderRestartStaleHeartbeat.accepted, true,
-    "the same cached sender must be able to keep its rebound lease alive after hot update");
+  assert.equal(senderRestartStaleHeartbeat.accepted, false);
+  assert.equal(senderRestartStaleHeartbeat.reason, "sender-asset-revision-mismatch",
+    "stale revision heartbeat must not recreate or prolong sender authority");
   const senderRestartCurrentRebound = senderRestartRuntimeB.bindContinuationSender(withTestSenderProtocol({
     conversationScopeId: senderRestartScope,
     taskId: senderRestartTask.task.id,

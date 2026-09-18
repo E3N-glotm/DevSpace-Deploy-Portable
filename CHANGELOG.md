@@ -4,6 +4,21 @@
 
 ## 1.1.60
 
+- dev92 fixes the live-only stale Workspace App sender regression exposed after
+  the dev91 hot deployment. The real generation-6 continuation was delivered
+  and ACKed but performed zero substantive DevSpace work because an older
+  same-protocol iframe was still allowed to rebind after the MCP restart and
+  therefore sent the pre-dev91 continuation prompt. Sender protocol epoch now
+  remains the broad wire-ABI gate, while the immutable Workspace App asset
+  revision is also an exact executable-authority gate: revision drift is
+  rejected as `sender-asset-revision-mismatch`, cannot heartbeat or protect a
+  CLAIMED generation, and must be replaced by the current revision on the same
+  card generation. This preserves one-card-per-manual-round semantics while
+  preventing stale coordinator JavaScript from controlling a newly released
+  runtime. dev92 also closes the remaining hosted-Windows strict-stop race by
+  waiting, within the existing bounded stop deadline, for a killed listener's
+  transient `netstat` row to disappear after CIM has already removed the
+  process.
 - dev91 修复 1.1.60 tool-only synthetic 策略在真实网页中暴露的两个相邻 P0：自动续轮可以持续调用大量工具但整轮没有任何可见 assistant 输出；随后如果模型结束而里程碑仍未完成，又因为 synthetic turn-complete 被硬性禁止而无法签署阶段边界，导致没有下一轮 READY。现在恢复与人工“继续”一致的 model-owned stage boundary：synthetic 首轮仍必须先完成 status ACK 并至少执行 4 次 post-ACK 实质操作，且 4 次只作为 anti-idle 下限，不能作为结束理由；当一个真实、连贯的工作阶段完成后，synthetic 可调用 turn-complete，随后必须给出简短可见进展摘要，若仍有未完成里程碑则 completion-driven 自动创建下一轮。普通进度占位、空 final、少量快速工具调用后提前结束仍被禁止；Host 工具间文本渲染不可靠，因此可见性依赖合法阶段摘要，而不是中间 prose。该调整不重新启用 quiet/lease/orphan 推断，不会在模型仍思考/回复时凭静默抢占。
 - 最终发布收口修复两处实机/CI 边界：① generation 40/41/51 证明旧的“实质工作开始后允许中间进度文字”仍可能被当前 ChatGPT Host 当成真实 assistant final，表现为 ACK 后 0～2 次工具调用便只回复“继续/继续处理中”并停止；因此 runnable synthetic turn 现在全程改为 **tool-only**，status ACK 后及每次实质工具结果后，下一个模型输出都必须继续调用实质 DevSpace 工具，直到里程碑终态、真实外部阻塞或 Host 截断，milestone card 与原生工具卡作为工作中可见进度。② Windows `ParentProcessId` 在父进程退出后会保留旧 PID，而该数字可被新进程快速复用；strict-stop 现在把 `CreationTicks` 纳入进程身份并拒绝“父进程创建时间晚于子进程”的伪祖先关系，避免 GitHub Runner 上 Portable-owned orphan 因 PID reuse 被错误排除。新增 generation 40/41/51 tool-only 回归、wire 门禁和 strict-stop PID-reuse 契约；本地 strict-stop 连续 12/12 通过。
 

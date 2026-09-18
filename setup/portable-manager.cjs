@@ -2015,7 +2015,17 @@ function stopLocalMcpServiceProcesses(port) {
       return value;
     };
     const candidates = serviceProcesses.sort((left, right) => depth(right) - depth(left));
-    if (!candidates.length) break;
+    if (!candidates.length) {
+      // taskkill can remove the owning process from CIM before netstat stops
+      // reporting its LISTENING row. A successful stop-local contract requires
+      // both identities to disappear, so do not convert that short Windows
+      // teardown lag into an immediate failure merely because there is nothing
+      // left to kill. Reuse the existing bounded stop deadline and wait for the
+      // listener view to converge. A genuinely unrelated listener will remain
+      // visible until the deadline and still fail closed below.
+      sleepSync(Math.min(100, Math.max(1, deadline - Date.now())));
+      continue;
+    }
     for (const item of candidates) {
       // Never use /T here. The MCP server may have user-launched descendants
       // that do not belong to the Portable service chain. Kill only processes

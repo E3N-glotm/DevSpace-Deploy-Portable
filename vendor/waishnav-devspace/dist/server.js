@@ -68,8 +68,10 @@ const CONTINUATION_SENDER_PROTOCOL_EPOCH = 13;
 // dev78's cutoff inference and revocation are enforced by RuntimeState, not by
 // the cached iframe. Admit only the verified compatible epoch 12 and normalize
 // it at both App bridges; all card, boot, turn and generation CAS checks remain
-// strict inside RuntimeState. Asset revision records the actual cached bytes.
-// Do not accept arbitrary older or future epochs.
+// strict inside RuntimeState. The exact immutable asset revision is an
+// additional executable-authority fence, so a wire-compatible but stale App
+// cannot rebind after continuation semantics change. Do not accept arbitrary
+// older or future epochs.
 const CONTINUATION_SENDER_COMPATIBLE_PROTOCOL_EPOCHS = new Set([12, CONTINUATION_SENDER_PROTOCOL_EPOCH]);
 let structuredRuntimeState;
 let continuationTaskContractsEnabled = false;
@@ -855,6 +857,7 @@ function continuationTransportOutputFields() {
         retryAfterMs: z.number().int().nonnegative().optional(),
         expectedSenderProtocolEpoch: z.number().int().positive().optional(),
         expectedSenderAssetRevision: z.string().optional(),
+        observedSenderAssetRevision: z.string().optional(),
         serverBootId: z.string().optional(),
         senderStatus: z.unknown().optional(),
         reanchorRequired: z.boolean().optional(),

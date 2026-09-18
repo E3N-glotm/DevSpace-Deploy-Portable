@@ -184,19 +184,22 @@ try {
   "a current-epoch App surface must replace the upgrade-required stale sender lease");
   // Reproduce the exact cached epoch/revision shape observed on D-live. The
   // Host may cache the registered outputTemplate and referenced App body
-  // across a Portable hot update, so same-protocol revision drift must remain
-  // usable while being reported as provenance drift.
+  // across a Portable hot update. Same-protocol revision drift must now fail
+  // closed: executable continuation semantics changed even though the wire ABI
+  // did not, so stale JavaScript must not regain sender authority.
   bindArgs.senderProtocolEpoch = 12;
   bindArgs.senderAssetRevision = "c71b36ee04631e0a";
   const cachedBound = await wire("continuation_sender", bindArgs);
-  assert.equal(cachedBound.accepted, true, JSON.stringify(cachedBound));
-  assert.equal(cachedBound.senderStatus?.assetRevisionDrift, true);
+  assert.equal(cachedBound.accepted, false, JSON.stringify(cachedBound));
+  assert.equal(cachedBound.reason, "sender-asset-revision-mismatch");
   const normalizedCard = runtime.database.sqlite.prepare(
     "select sender_protocol_epoch,sender_asset_revision,sender_lease_state,mount_generation from continuation_conversation_cards where conversation_scope_id=?"
   ).get(scope);
   assert.equal(normalizedCard.sender_protocol_epoch, 13);
-  assert.equal(normalizedCard.sender_asset_revision, "c71b36ee04631e0a");
-  assert.equal(normalizedCard.sender_lease_state, "ACTIVE");
+  assert.equal(normalizedCard.sender_asset_revision, runtime.continuationSenderAssetRevision,
+    "rejected stale bind must not overwrite the current resource provenance");
+  assert.equal(normalizedCard.sender_lease_state, "NEED_REBIND",
+    "revision mismatch must revoke transport until the current immutable resource rebinds");
   assert.equal(normalizedCard.mount_generation, mount.anchorMountGeneration);
   // Restore the current-revision sender on the same immutable card generation
   // and use that authority for the remainder of the real MCP wire fixture.
