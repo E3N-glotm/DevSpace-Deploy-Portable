@@ -2,6 +2,12 @@
 
 本文件提供版本索引；每个版本的完整设计、修复、测试和兼容性说明位于 [`docs/releases/`](docs/releases/)。
 
+## 1.1.59 dev103（开发中，暂停发布）
+
+- 已真实观测 manual→synthetic→synthetic 同一任务、同一进程句柄跨轮接管，持续进程最终 exit 0；人工优先的真实并发插入及 Host 截断归因仍待单独验收，不能据此宣告全部完成。
+- 只读卡片投影将同一任务中已获得模型 ACK 的 canonical synthetic generations 计入“续轮”数字；旧计数字段及预算、Host 发送和锁保护不变，待部署后再实测可见卡片。
+- 继续保留 dev102 严格停止的精确监听进程身份修复；当前只在 E 盘原有源码目录迭代，D-live 暂不升级，1.1.60 继续禁止发布。
+
 ## 1.1.59 dev102（开发中，暂停发布）
 
 - GitHub Windows CI 再次复现 strict-stop：`stop-local` 50 秒后仍有 PID 6760 监听 `127.0.0.1:17689`。继续延长 timeout 没有意义。dev102 将“监听目标 MCP 端口且同一 PID 同时被 Portable root ownership snapshot 证明归属”的进程保存为 `(PID, CreationTicks)` 精确身份；即使 hosted Windows 在退出期丢失/改变 CommandLine，也只对这个已经证明归属的同一进程实例继续直接终止，PID 重用或根目录外的未知监听者仍 fail-closed。

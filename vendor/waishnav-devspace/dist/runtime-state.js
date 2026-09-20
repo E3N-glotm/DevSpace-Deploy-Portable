@@ -3622,7 +3622,16 @@ export class StructuredRuntimeState {
             resumeContext: parseJson(row.resume_context_json, {}),
             progressFingerprint: row.progress_fingerprint ?? undefined,
             failureFingerprint: row.failure_fingerprint ?? undefined,
-            continuationCount: row.continuation_count,
+            // Canonical sender generations do not use the legacy
+            // release-continuation counter. Project only *ACKed* synthetic
+            // generations into the user-facing count; leave the legacy DB
+            // counter and its budget enforcement untouched.
+            continuationCount: Math.max(Number(row.continuation_count || 0), Number(this.database.sqlite.prepare(`
+              select count(*) as n from continuation_generations g
+              join continuation_worksets w on w.id=g.workset_id
+              where w.legacy_task_id=? and g.owner_type='synthetic'
+                and g.turn_acked_at is not null
+            `).get(row.id)?.n || 0)),
             noProgressCount: row.no_progress_count,
             sameFailureCount: row.same_failure_count,
             maxContinuations: row.max_continuations,

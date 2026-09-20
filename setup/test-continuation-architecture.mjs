@@ -1131,6 +1131,8 @@ try {
     "the generation FSM must persist the server-owned expected-turn claim");
   assert.ok(claimedGeneration.turn_acked_at,
     "the generation FSM must persist the exact time when the resumed synthetic turn performs its first status ACK");
+  assert.ok(syntheticAck.task.continuationCount >= 1,
+    "the visible continuation count must include canonical synthetic generations once the real turn ACKs");
   const authorizedSyntheticTool = runtime.continuationModelToolAuthorization({ conversationScopeId: scope });
   assert.equal(authorizedSyntheticTool.accepted, true,
     "after status claim, an ordinary substantive call must be authorized without a delivery token");
