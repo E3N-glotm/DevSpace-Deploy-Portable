@@ -13,7 +13,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 if ($Version -eq "1.1.59") {
-    throw "1.1.59 is development-only and must never be published. The next stable release is 1.1.60."
+    throw "1.1.59 is development-only and must never be published. The next stable release is 1.1.61."
 }
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root

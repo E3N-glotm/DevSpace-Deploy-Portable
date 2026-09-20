@@ -1,6 +1,6 @@
 {
   "developmentOnlyVersions": ["1.1.59"],
-  "bootstrapVersion": "1.1.60",
+  "bootstrapVersion": "1.1.61",
   "legacyDirectOnlyVersions": ["1.1.36", "1.1.37", "1.1.38", "1.1.39"],
   "legacyFromVersions": [
     "1.1.36", "1.1.37", "1.1.38", "1.1.39", "1.1.40", "1.1.41",

@@ -2,8 +2,8 @@
 
 面向 Windows x64 的 DevSpace 便携部署、原生控制中心、Computer Use、插件管理、会话审阅与显式 Memories 集成项目。
 
-当前稳定版本：**1.1.58**
-当前源码待验收候选：**1.1.59**（尚未发布，不替代现有稳定版）
+当前稳定版本：以 [GitHub Releases](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/releases/latest) 中最新的非预发布版本为准。
+当前源码正式版候选：**1.1.61**（未通过发布 CI 前不能视为已发布版本）
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 

@@ -18,12 +18,12 @@ foreach ($version in $legacyVersions) {
     # Only pure planner functions execute; no old updater startup/side effects.
     $CurrentVersion = $version
     $direct = Get-IncrementalCandidate $fixture.baseline
-    if (-not $direct -or $direct.manifest.toVersion -ne "1.1.60") { throw "Missing baseline route: $version" }
+    if (-not $direct -or $direct.manifest.toVersion -ne ([string]$fixture.baseline.version)) { throw "Missing baseline route: $version" }
     if ($directOnlyVersions -contains $version) {
         $futureDirect = Get-IncrementalCandidate $fixture.future
         if (-not $futureDirect) { throw "Direct-only legacy updater lost its future route." }
     } else {
-        $plan = Resolve-IncrementalGraphPlan @($fixture.edges) "1.1.61"
+        $plan = Resolve-IncrementalGraphPlan @($fixture.edges) ([string]$fixture.future.version)
         if (-not $plan -or @($plan.steps).Count -ne 2) { throw "Historical two-hop route failed: $version" }
     }
     $archive = Join-Path $FixtureRoot $direct.manifest.name

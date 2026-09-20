@@ -41,7 +41,9 @@ assert.match(workflow, /"DevSpacePortable-Update-\*-to-\$env:VERSION\.zip"/);
 assert.match(workflow, /"DevSpacePortable-Windows-x64-\$env:VERSION\.blockmap"/);
 assert.match(workflow, /"release-assets\/update-manifest\.json"/);
 assert.match(workflow, /"release-assets\/SHA256SUMS-release\.txt"/);
-assert.match(workflow, /\$env:VERSION -in @\("1\.1\.40", "1\.1\.41", "1\.1\.42"\)/);
+assert.match(workflow, /\$env:VERSION -in @\("1\.1\.40", "1\.1\.41", "1\.1\.42", "1\.1\.61"\)/);
+assert.match(workflow, /First stable bootstrap requires all/);
+assert.match(workflow, /DevSpacePortable-Rescue-1\.1\.33-to-1\.1\.61\.zip/);
 assert.match(workflow, /\$patterns \+= "DevSpacePortable-Rescue-\*-to-\$env:VERSION\.zip"/);
 assert.match(workflow, /files: \$\{\{ steps\.release_files\.outputs\.files \}\}/);
 assert.match(workflow, /fail_on_unmatched_files: true/);
@@ -65,6 +67,7 @@ console.log(JSON.stringify({
   noNewCarryForwardGraphAfter1142: true,
   carryForwardGraphRetainedForCompatibilityReleases: true,
   legacy113RescueOnCompatibilityReleases: true,
+  firstStableBootstrap: "1.1.61",
   sameVersionRepackUsesPreviousStableBase: true,
   backfillPreservesBlockmapMetadata: true,
 }));

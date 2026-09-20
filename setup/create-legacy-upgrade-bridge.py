@@ -103,7 +103,7 @@ def create_bridge(from_version: str, target_zip: Path, output: Path | None = Non
     allowed_sources = (policy["legacyFromVersions"] if target_version == bootstrap
                        else [bootstrap, *policy["legacyDirectOnlyVersions"]])
     if target_version in policy["developmentOnlyVersions"] or from_version not in allowed_sources:
-        raise ValueError("Legacy bridges must use the stable 1.1.60 bootstrap policy")
+        raise ValueError(f"Legacy bridges must use the stable {bootstrap} bootstrap policy")
 
     output = (
         output.resolve()

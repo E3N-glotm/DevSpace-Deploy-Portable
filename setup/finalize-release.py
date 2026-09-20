@@ -54,7 +54,7 @@ def normalize_dev_iteration(dev_iteration: str | None) -> tuple[int | None, str 
 
 def validate_release_version(version: str, dev_iteration: str | None = None) -> None:
     if version == "1.1.59" and not normalize_dev_iteration(dev_iteration)[1]:
-        raise SystemExit("1.1.59 is development-only; use --dev N. The next stable release is 1.1.60.")
+        raise SystemExit("1.1.59 is development-only; use --dev N. The next stable release is 1.1.61.")
     package_version = json.loads(ROOT_PACKAGE_JSON.read_text(encoding="utf-8"))["version"]
     if package_version != version:
         raise SystemExit(

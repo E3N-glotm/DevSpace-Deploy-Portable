@@ -67,27 +67,29 @@ with tempfile.TemporaryDirectory(prefix="bootstrap-policy-", dir=cache) as direc
             "downloadUrl": f"https://github.com/{repository}/releases/download/v{delta['toVersion']}/{path.name}",
         }
 
-    baseline = target("1.1.60")
+    bootstrap_version = POLICY["bootstrapVersion"]
+    future_version = "1.1.62" if bootstrap_version == "1.1.61" else "1.1.61"
+    baseline = target(bootstrap_version)
     baseline_assets = [asset(bridge.create_bridge(source, baseline)) for source in POLICY["legacyFromVersions"]]
     assert len(baseline_assets) == 20
-    future = target("1.1.61")
+    future = target(future_version)
     future_assets = [asset(bridge.create_bridge(source, future))
-                     for source in ["1.1.60", *POLICY["legacyDirectOnlyVersions"]]]
+                     for source in [bootstrap_version, *POLICY["legacyDirectOnlyVersions"]]]
     assert len(future_assets) == 5
     graph = manifest_builder.merge_incremental_graph(repository, future_assets, {
         "repository": repository, "incrementalGraphAssets": baseline_assets,
     })
     assert len(graph) == 25
-    assert all("/v1.1.60/" in edge["downloadUrl"] for edge in graph if edge["toVersion"] == "1.1.60")
+    assert all(f"/v{bootstrap_version}/" in edge["downloadUrl"] for edge in graph if edge["toVersion"] == bootstrap_version)
     expect_rejected(lambda: bridge.create_bridge("1.1.49", future), "bootstrap policy")
     expect_rejected(lambda: bridge.create_bridge("1.1.49", target("1.1.59", True)), "bootstrap policy")
-    expect_rejected(lambda: bridge.create_bridge("1.1.49", target("1.1.60", True)), "stable Portable metadata")
-    expect_rejected(lambda: bridge.create_bridge("1.1.61", future), "forward")
+    expect_rejected(lambda: bridge.create_bridge("1.1.49", target(bootstrap_version, True)), "stable Portable metadata")
+    expect_rejected(lambda: bridge.create_bridge(future_version, future), "forward")
 
     fixture = {
-        "baseline": {"version": "1.1.60", "manifest": {"incrementalAssets": baseline_assets},
+        "baseline": {"version": bootstrap_version, "manifest": {"incrementalAssets": baseline_assets},
                      "release": {"assets": baseline_assets}},
-        "future": {"version": "1.1.61", "manifest": {"incrementalAssets": future_assets},
+        "future": {"version": future_version, "manifest": {"incrementalAssets": future_assets},
                    "release": {"assets": future_assets}},
         "legacyVersions": POLICY["legacyFromVersions"],
         "directOnlyVersions": POLICY["legacyDirectOnlyVersions"],
