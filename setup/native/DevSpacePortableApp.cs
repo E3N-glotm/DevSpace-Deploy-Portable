@@ -5228,7 +5228,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.59 dev105 · Protocol 1.6";
+            _versionLabel.Text = "DevSpace Portable 1.1.59 dev106 · Protocol 1.6";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5575,7 +5575,9 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             TabPage page = new TabPage("续轮任务");
             TableLayoutPanel layout = NewTable(1, 4);
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 94));
+            // The estimate editor is content-sized: a fixed 94/43px pair clipped
+            // the 42px save button after its margins/padding at normal DPI.
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
@@ -5604,13 +5606,17 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             TableLayoutPanel estimatePanel = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+                AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 Padding = new Padding(4), BackColor = UiPalette.Surface,
             };
-            estimatePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
-            estimatePanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            estimatePanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            estimatePanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             FlowLayoutPanel estimateBar = NewButtonBar();
-            estimateBar.WrapContents = false;
-            estimateBar.AutoScroll = true;
+            // Allow the controls to wrap at narrower window widths; the parent
+            // grows with the resulting rows instead of adding an inner scrollbar.
+            estimateBar.WrapContents = true;
+            estimateBar.AutoScroll = false;
+            estimateBar.MinimumSize = new Size(0, 56);
             Label cutoffTitle = new Label
             {
                 Text = "Host 截断预估（分钟）", AutoSize = true,
@@ -5629,8 +5635,9 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _hostCutoffEstimateLocked.BackColor = Color.Transparent;
             _hostCutoffEstimateLocked.ForeColor = UiPalette.Text;
             _hostCutoffEstimateLocked.Margin = new Padding(4, 12, 9, 0);
-            _hostCutoffEstimateStatus.AutoSize = false;
+            _hostCutoffEstimateStatus.AutoSize = true;
             _hostCutoffEstimateStatus.Dock = DockStyle.Fill;
+            _hostCutoffEstimateStatus.MinimumSize = new Size(0, 40);
             _hostCutoffEstimateStatus.ForeColor = UiPalette.TextMuted;
             _hostCutoffEstimateStatus.Text = "正在读取历史观测；预估值不控制 ChatGPT 实际时长或自动续轮触发阈值。";
             _hostCutoffEstimateStatus.Margin = new Padding(9, 1, 0, 0);
@@ -6222,7 +6229,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableDisplayVersion", GetString(_currentConfig, "portableVersion", "1.1.59 dev105")) + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableDisplayVersion", GetString(_currentConfig, "portableVersion", "1.1.59 dev106")) + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }

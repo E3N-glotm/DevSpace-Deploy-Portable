@@ -92,6 +92,19 @@ try {
   assert.match(native, /_hostCutoffEstimateLocked\.Text = "锁定预估值"/);
   assert.match(native, /estimatePanel\.Controls\.Add\(_hostCutoffEstimateStatus, 0, 1\)/,
     'the observation source and informational-only warning must stay visible on a separate UI row');
+  const estimateLayout = native.split('private TabPage BuildContinuationsTab()')[1]
+    ?.split('private TabPage BuildSessionsTab()')[0];
+  assert.ok(estimateLayout, 'continuation page must retain a dedicated estimate editor');
+  assert.match(estimateLayout, /layout\.RowStyles\.Add\(new RowStyle\(SizeType\.AutoSize\)\);\s*\/\/ The estimate editor/,
+    'editor outer row must derive height from its contents, not clip at fixed 94px');
+  assert.match(estimateLayout, /estimatePanel\.RowStyles\.Add\(new RowStyle\(SizeType\.AutoSize\)\);\s*estimatePanel\.RowStyles\.Add\(new RowStyle\(SizeType\.AutoSize\)\)/,
+    'both editor and observation rows must size to their content');
+  assert.match(estimateLayout, /estimateBar\.WrapContents = true;\s*estimateBar\.AutoScroll = false;/,
+    'narrow layouts must wrap without an inner scrollbar clipping the save button');
+  assert.match(estimateLayout, /estimateBar\.MinimumSize = new Size\(0, 56\)/,
+    'minimum editor row must include button height, vertical margins and padding');
+  assert.match(estimateLayout, /_hostCutoffEstimateStatus\.AutoSize = true;/,
+    'two-line source and warning must remain visible without a fixed label height');
   assert.match(native, /RunJsonAsync\("continuation-cutoff-estimate-set"/);
   assert.match(native, /ApplyHostCutoffEstimate\(GetDictionary\(value, "cutoffEstimate"\)\)/);
   assert.match(native, /锁定不改变 ChatGPT Host 时长或自动续轮触发条件/);
@@ -100,7 +113,8 @@ try {
   console.log(JSON.stringify({ noFabricatedEstimate: true, historicalHostEstimate: 25.9,
     unlockedManualPersistsUntilNewObservation: true, dynamicUpdate: [40, 50, 60],
     lockPersistsAcrossUpdates: true, unrelatedHostIgnored: true,
-    invalidValuesRejected: true, informationalOnly: true, nativeUiWired: true }));
+    invalidValuesRejected: true, informationalOnly: true, nativeUiWired: true,
+    contentSizedEstimateRows: true, responsiveEditorWrap: true, noInnerScrollbar: true }));
 } finally {
   db?.close();
   rmSync(scratch, { recursive: true, force: true });
