@@ -55,7 +55,7 @@
 <body>
   <header class="top"><div class="topRow">
     <div class="logo">D</div>
-    <div class="brand"><b>DevSpace Mobile</b><small id="version">Android lifecycle-ui</small></div>
+    <div class="brand"><b>DevSpace Mobile</b><small id="version">Android network-health</small></div>
     <span id="liveDot" class="liveDot"></span>
   </div></header>
 
@@ -68,7 +68,7 @@
       <div class="statusGrid">
         <div class="statusCard"><div class="k">总体状态</div><div class="dotline"><span id="serviceDot" class="tinyDot"></span><b id="serviceText">已停止</b></div><small id="uptimeText">Uptime 0s</small></div>
         <div class="statusCard"><div class="k">MCP</div><div class="dotline"><span id="mcpDot" class="tinyDot"></span><b id="mcpText">stopped</b></div><small id="mcpUrlText">127.0.0.1:7676</small></div>
-        <div class="statusCard"><div class="k">Tunnel</div><div class="dotline"><span id="tunnelDot" class="tinyDot"></span><b id="tunnelText">stopped</b></div><small id="providerText">provider: none</small></div>
+        <div class="statusCard"><div class="k">公网端到端检测</div><div class="dotline"><span id="tunnelDot" class="tinyDot"></span><b id="tunnelText">stopped</b></div><small id="providerText">尚未检测</small></div>
         <div class="statusCard"><div class="k">Root</div><div class="dotline"><span id="rootDot" class="tinyDot"></span><b id="rootText">未检测</b></div><small>Magisk / KernelSU / APatch</small></div>
       </div>
       <div class="sectionLabel">生命周期规则</div>
@@ -102,7 +102,7 @@
           <label class="field"><span>Named Tunnel Token</span><input id="cloudflareToken" type="password" placeholder="留空保持已保存 Token"></label>
           <div class="row"><button class="fill ghost" onclick="openExternal('cloudflare')">打开 Cloudflare</button><button class="small danger" onclick="clearCloudflare()">清除 Token</button></div>
         </div>
-        <div class="note bad">切换 Tunnel 提供商后先保存配置，再重启服务；运行中的服务不会热切换底层 Tunnel 进程。</div>
+        <div class="note bad">切换 Tunnel 提供商后先保存配置，再重启服务。运行中每约 20 秒检测本地 /health 与公网 /mcp；进程存活不代表公网在线。锁屏状态也会继续检测。</div>
       </div>
     </section>
 
@@ -166,8 +166,8 @@
     function prettyState(v){return ({STOPPED:'已停止',STARTING:'启动中',RUNNING:'运行正常',DEGRADED:'部分异常',ERROR:'运行异常',STOPPING:'停止中'})[v]||v||'未知'}
     function formatUptime(ms){ms=Number(ms||0);if(ms<1000)return'Uptime 0s';const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return'Uptime '+(h?h+'h ':'')+(m?m+'m ':'')+(s%60)+'s'}
     function renderStatus(s){lastState=s||{};const sc=statusClass(s.state);$('version').textContent=(s.appVersion||'DevSpace Mobile')+' · '+(s.ngrokRuntime||'ngrok')+' · cloudflared '+(s.cloudflaredRuntime||'');$('headline').textContent=s.headline||prettyState(s.state);$('detail').textContent=s.detail||'MCP 与公网 Tunnel 均未运行';$('stateBadge').textContent=s.state||'STOPPED';$('stateBadge').className='stateBadge '+sc;$('liveDot').className='liveDot '+sc;$('serviceDot').className='tinyDot '+sc;$('serviceText').textContent=prettyState(s.state);$('uptimeText').textContent=formatUptime(s.uptimeMs);
-      const mc=statusClass(s.mcpState);$('mcpDot').className='tinyDot '+mc;$('mcpText').textContent=s.mcpState||'stopped';$('mcpUrlText').textContent='127.0.0.1:'+(s.localPort||7676)+'/mcp';const tc=statusClass(s.tunnelState);$('tunnelDot').className='tinyDot '+tc;$('tunnelText').textContent=s.tunnelState||'stopped';$('providerText').textContent='provider: '+(s.tunnelProvider||'none');$('rootDot').className='tinyDot '+(s.rootGranted?'ok':'bad');$('rootText').textContent=s.rootGranted?'已授权':'未授权';$('ownerHint').textContent=s.ownerPasswordConfigured?'已安全保存':'尚未保存';$('ngrokStatus').textContent=s.ngrokConfigured?'Authtoken 已保存':'Authtoken 未配置';$('ngrokTokenHint').textContent=s.ngrokConfigured?'已安全保存':'尚未保存';$('apiKeyHint').textContent=s.ngrokApiKeyConfigured?'API Key 已安全保存':'可选';$('cloudflareStatus').textContent=s.cloudflareConfigured?'Token 已保存':'Token 未配置';
-      $('console').textContent='STATE    '+(s.state||'STOPPED')+'\nHEADLINE '+(s.headline||'')+'\nMODE     '+(s.runMode||'manual')+'\nROOT     '+(s.rootGranted?'ready':'missing')+'\nMCP      '+(s.mcpState||'stopped')+'\nTUNNEL   '+(s.tunnelState||'stopped')+'\nPROVIDER '+(s.tunnelProvider||'none')+'\nPUBLIC   '+(s.publicBaseUrl||'未配置')+'\nLOCAL    http://127.0.0.1:'+(s.localPort||7676)+'/mcp\nUPTIME   '+formatUptime(s.uptimeMs).replace('Uptime ','')+(s.lastError?'\nERROR    '+s.lastError:'')+(s.detail?'\n\n'+s.detail:'')}
+      const mc=statusClass(s.mcpState);$('mcpDot').className='tinyDot '+mc;$('mcpText').textContent=s.mcpState||'stopped';$('mcpUrlText').textContent='127.0.0.1:'+(s.localPort||7676)+'/mcp';const tc=statusClass(s.tunnelState);$('tunnelDot').className='tinyDot '+tc;$('tunnelText').textContent=s.tunnelState||'stopped';$('providerText').textContent=(s.activeNetwork||'unknown')+' · '+(s.tunnelProvider||'none');$('rootDot').className='tinyDot '+(s.rootGranted?'ok':'bad');$('rootText').textContent=s.rootGranted?'已授权':'未授权';$('ownerHint').textContent=s.ownerPasswordConfigured?'已安全保存':'尚未保存';$('ngrokStatus').textContent=s.ngrokConfigured?'Authtoken 已保存':'Authtoken 未配置';$('ngrokTokenHint').textContent=s.ngrokConfigured?'已安全保存':'尚未保存';$('apiKeyHint').textContent=s.ngrokApiKeyConfigured?'API Key 已安全保存':'可选';$('cloudflareStatus').textContent=s.cloudflareConfigured?'Token 已保存':'Token 未配置';
+      $('console').textContent='STATE    '+(s.state||'STOPPED')+'\nHEADLINE '+(s.headline||'')+'\nMODE     '+(s.runMode||'manual')+'\nROOT     '+(s.rootGranted?'ready':'missing')+'\nMCP      '+(s.mcpState||'stopped')+'\nTUNNEL   '+(s.tunnelState||'stopped')+'\nNETWORK  '+(s.activeNetwork||'unknown')+'\nPROVIDER '+(s.tunnelProvider||'none')+'\nPROBED   '+(s.lastProbeAt?new Date(s.lastProbeAt).toLocaleTimeString():'尚未检测')+'\nHEALTHY  '+(s.lastHealthyAt?new Date(s.lastHealthyAt).toLocaleTimeString():'尚未通过端到端检测')+'\nPUBLIC   '+(s.publicBaseUrl||'未配置')+'\nLOCAL    http://127.0.0.1:'+(s.localPort||7676)+'/mcp\nUPTIME   '+formatUptime(s.uptimeMs).replace('Uptime ','')+(s.lastProbeError?'\nPROBE    '+s.lastProbeError:'')+(s.lastError?'\nERROR    '+s.lastError:'')+(s.lastTunnelDiagnostic?'\nTUNNEL_LOG '+s.lastTunnelDiagnostic:'')+(s.detail?'\n\n'+s.detail:'')}
     window.DevSpaceUI={onState(s){if(!initialized)setInitial(s);renderStatus(s)},onEvent(name,data){if(name==='ngrokDomains'&&data.ok){const a=data.domains||[],sel=$('domainSelect');sel.innerHTML='';a.forEach(d=>{const o=document.createElement('option');o.value=d;o.textContent=d;sel.appendChild(o)});$('domainList').classList.toggle('show',a.length>0);if(a.length){useDomain();toast('已读取 '+a.length+' 个 ngrok 域名')}else toast('账户没有返回可用 reserved domain',false)}else toast(data.message||name,!!data.ok)}};
     window.addEventListener('load',()=>{try{const s=JSON.parse(DevSpaceNative.getState());setInitial(s);renderStatus(s)}catch(e){toast('Native bridge 初始化失败: '+e,false)}setInterval(()=>{try{renderStatus(JSON.parse(DevSpaceNative.getState()))}catch(e){}},1200)});
   </script>

@@ -25,6 +25,7 @@ public final class DevSpaceAgentService extends Service {
     private volatile McpHttpServer mcpServer;
     private volatile CloudflareTunnelManager tunnelManager;
     private volatile NgrokTunnelManager ngrokTunnelManager;
+    private volatile EndpointHealthMonitor healthMonitor;
     private AgentConfig config;
     private RootShell rootShell;
     private PowerManager.WakeLock wakeLock;
@@ -88,19 +89,56 @@ public final class DevSpaceAgentService extends Service {
             current.start();
             ServiceRuntimeStatus.mcpReady();
             CloudflareTunnelManager tunnel = new CloudflareTunnelManager(this, config, rootShell,
-                    (state, detail) -> onTunnelState("cloudflare", state, detail));
+                    new CloudflareTunnelManager.Listener() {
+                        @Override public void onTunnelState(String state, String detail) {
+                            DevSpaceAgentService.this.onTunnelState("cloudflare", state, detail);
+                        }
+
+                        @Override public void onTunnelDiagnostic(String detail) {
+                            ServiceRuntimeStatus.tunnelDiagnostic(detail);
+                        }
+                    });
             tunnelManager = tunnel;
             tunnel.start();
             NgrokTunnelManager ngrok = new NgrokTunnelManager(this, config, rootShell,
                     (state, detail) -> onTunnelState("ngrok", state, detail));
             ngrokTunnelManager = ngrok;
             ngrok.start();
+            EndpointHealthMonitor monitor = new EndpointHealthMonitor(this, config,
+                    new EndpointHealthMonitor.Listener() {
+                        @Override public void onProbe(boolean localOk, boolean publicOk,
+                                                      String network, String issue) {
+                            if (!running.get()) return;
+                            ServiceRuntimeStatus.probe(localOk, publicOk,
+                                    !"none".equals(config.tunnelProvider()), network, issue);
+                            updateNotificationFromRuntime();
+                        }
+
+                        @Override public void onNetworkLost() {
+                            if (!running.get()) return;
+                            ServiceRuntimeStatus.networkLost("默认网络已断开；本地 MCP 可能仍可用，公网待重连");
+                            updateNotificationFromRuntime();
+                        }
+
+                        @Override public void onNetworkChanged(String reason) {
+                            if (!running.get() || !config.tunnelAutoReconnect()) return;
+                            CloudflareTunnelManager cloudflare = tunnelManager;
+                            if (cloudflare != null) cloudflare.requestReconnect(reason);
+                            NgrokTunnelManager activeNgrok = ngrokTunnelManager;
+                            if (activeNgrok != null) activeNgrok.requestReconnect(reason);
+                        }
+                    });
+            healthMonitor = monitor;
+            monitor.start();
             if (!config.cloudflareTunnelEnabled() && !config.ngrokTunnelEnabled()) {
                 onState("MCP 已启动", "仅本机监听；公网 Tunnel 未启用", rootShell.isRootAvailable());
             }
         } catch (Throwable error) {
             running.set(false);
             config.serviceRequested(false);
+            EndpointHealthMonitor monitor = healthMonitor;
+            healthMonitor = null;
+            if (monitor != null) monitor.close();
             NgrokTunnelManager ngrok = ngrokTunnelManager;
             ngrokTunnelManager = null;
             if (ngrok != null) ngrok.close();
@@ -123,6 +161,9 @@ public final class DevSpaceAgentService extends Service {
     private synchronized void stopAgent() {
         boolean wasRunning = running.getAndSet(false);
         if (wasRunning) ServiceRuntimeStatus.stopping("正在关闭 MCP、ngrok 与 Cloudflare");
+        EndpointHealthMonitor monitor = healthMonitor;
+        healthMonitor = null;
+        if (monitor != null) monitor.close();
         NgrokTunnelManager ngrok = ngrokTunnelManager;
         ngrokTunnelManager = null;
         if (ngrok != null) ngrok.close();
@@ -148,15 +189,27 @@ public final class DevSpaceAgentService extends Service {
 
     private void onTunnelState(String provider, String state, String detail) {
         String normalized = state == null ? "" : state;
-        if (normalized.contains("已在线") || normalized.contains("已启动")) {
-            ServiceRuntimeStatus.tunnelReady(detail);
-        } else if (normalized.contains("正在") || normalized.contains("连接")) {
-            ServiceRuntimeStatus.tunnelStarting(detail);
-        } else if (normalized.contains("失败") || normalized.contains("错误")
+        if (normalized.contains("失败") || normalized.contains("错误")
                 || normalized.contains("异常") || normalized.contains("退出")) {
             ServiceRuntimeStatus.tunnelProblem((provider == null ? "Tunnel" : provider) + " · " + detail);
+        } else if (normalized.contains("已在线")) {
+            // A registered connection is only provisional: the HTTP health
+            // monitor must verify an actual public request before green.
+            ServiceRuntimeStatus.tunnelStarting("已建立边缘连接，等待公网 /health 检测");
+        } else if (normalized.contains("正在") || normalized.contains("连接") || normalized.contains("已启动")) {
+            ServiceRuntimeStatus.tunnelStarting(detail);
         }
         onState(state, detail, rootShell != null && rootShell.isRootAvailable());
+    }
+
+    private void updateNotificationFromRuntime() {
+        if (!running.get()) return;
+        org.json.JSONObject current = ServiceRuntimeStatus.json();
+        String title = current.optString("headline", "连接状态未知");
+        String detail = current.optString("detail", "");
+        config.runtimeState(title, detail, config.rootGranted());
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) manager.notify(NOTIFICATION_ID, notification(title, detail));
     }
 
     private void cleanupTunnelResidue() {

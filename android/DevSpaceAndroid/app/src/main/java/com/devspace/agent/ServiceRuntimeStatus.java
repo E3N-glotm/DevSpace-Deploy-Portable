@@ -15,6 +15,11 @@ final class ServiceRuntimeStatus {
     private static String rootState = "unknown";
     private static String publicBaseUrl = "";
     private static String lastError = "";
+    private static String lastProbeError = "";
+    private static String lastTunnelDiagnostic = "";
+    private static String activeNetwork = "unknown";
+    private static long lastProbeAt = 0L;
+    private static long lastHealthyAt = 0L;
     private static long startedAt = 0L;
     private static long updatedAt = System.currentTimeMillis();
 
@@ -29,6 +34,11 @@ final class ServiceRuntimeStatus {
         mcpState = "stopped";
         tunnelState = "stopped";
         lastError = "";
+        lastProbeError = "";
+        lastTunnelDiagnostic = "";
+        activeNetwork = "unknown";
+        lastProbeAt = 0L;
+        lastHealthyAt = 0L;
         startedAt = 0L;
         updatedAt = System.currentTimeMillis();
     }
@@ -43,6 +53,10 @@ final class ServiceRuntimeStatus {
         tunnelState = "none".equals(provider) ? "disabled" : "starting";
         publicBaseUrl = url == null ? "" : url;
         lastError = "";
+        lastProbeError = "";
+        lastTunnelDiagnostic = "";
+        lastProbeAt = 0L;
+        lastHealthyAt = 0L;
         startedAt = System.currentTimeMillis();
         updatedAt = startedAt;
     }
@@ -55,6 +69,40 @@ final class ServiceRuntimeStatus {
     static synchronized void mcpReady() {
         mcpState = "ready";
         recompute();
+    }
+
+    static synchronized void probe(boolean localOk, boolean publicOk, boolean publicEnabled,
+                                   String network, String issue) {
+        if (state == State.STOPPED || state == State.STOPPING || state == State.ERROR) return;
+        lastProbeAt = System.currentTimeMillis();
+        activeNetwork = network == null ? "unknown" : network;
+        lastProbeError = issue == null ? "" : issue;
+        mcpState = localOk ? "ready" : "error";
+        tunnelState = publicEnabled ? (publicOk ? "ready" : "error") : "disabled";
+        if (localOk && (!publicEnabled || publicOk)) {
+            lastHealthyAt = lastProbeAt;
+            lastError = "";
+            detail = publicEnabled ? "本地 MCP 与公网 /health 均已验证" : "本地 MCP 已验证；公网未启用";
+        } else {
+            lastError = lastProbeError.isEmpty() ? "端到端连接检测失败" : lastProbeError;
+            detail = lastError;
+        }
+        recompute();
+    }
+
+    static synchronized void networkLost(String issue) {
+        if (state == State.STOPPED || state == State.STOPPING || state == State.ERROR) return;
+        activeNetwork = "offline";
+        if (!"disabled".equals(tunnelState)) tunnelState = "error";
+        lastProbeError = issue;
+        lastError = issue;
+        detail = issue;
+        recompute();
+    }
+
+    static synchronized void tunnelDiagnostic(String line) {
+        if (line == null) return;
+        lastTunnelDiagnostic = line.length() > 380 ? line.substring(0, 380) : line;
     }
 
     static synchronized void tunnelReady(String message) {
@@ -96,9 +144,10 @@ final class ServiceRuntimeStatus {
             state = State.RUNNING;
             headline = "运行正常";
             if ("disabled".equals(tunnelState)) detail = "本地 MCP 正常；公网 Tunnel 未启用";
-        } else if ("ready".equals(mcpState) && "error".equals(tunnelState)) {
+        } else if (("ready".equals(mcpState) && "error".equals(tunnelState))
+                || "error".equals(mcpState)) {
             state = State.DEGRADED;
-            headline = "本地正常，公网异常";
+            headline = "连接异常";
         } else if ("ready".equals(mcpState)) {
             state = State.STARTING;
             headline = "MCP 已就绪，Tunnel 连接中";
@@ -108,6 +157,16 @@ final class ServiceRuntimeStatus {
 
     static synchronized JSONObject json() {
         try {
+            // An old green status must never survive missed callbacks, a
+            // stalled probe thread, screen-off doze or a network change.
+            long now = System.currentTimeMillis();
+            if ((state == State.RUNNING || state == State.DEGRADED)
+                    && (lastProbeAt == 0L || now - lastProbeAt > 60_000L)) {
+                state = State.DEGRADED;
+                headline = "连接状态待验证";
+                if (!"disabled".equals(tunnelState)) tunnelState = "unknown";
+                mcpState = "unknown";
+            }
             return new JSONObject()
                     .put("state", state.name())
                     .put("headline", headline)
@@ -119,6 +178,11 @@ final class ServiceRuntimeStatus {
                     .put("rootState", rootState)
                     .put("publicBaseUrl", publicBaseUrl)
                     .put("lastError", lastError)
+                    .put("lastProbeError", lastProbeError)
+                    .put("lastTunnelDiagnostic", lastTunnelDiagnostic)
+                    .put("activeNetwork", activeNetwork)
+                    .put("lastProbeAt", lastProbeAt)
+                    .put("lastHealthyAt", lastHealthyAt)
                     .put("startedAt", startedAt)
                     .put("updatedAt", updatedAt)
                     .put("uptimeMs", startedAt == 0L ? 0L : Math.max(0L, System.currentTimeMillis() - startedAt));

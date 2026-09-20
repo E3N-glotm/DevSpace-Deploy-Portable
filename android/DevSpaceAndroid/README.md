@@ -1,4 +1,12 @@
-# DevSpace Mobile 1.1.43 Android Standalone MCP
+# DevSpace Mobile 1.1.44 Android Standalone MCP
+
+### 1.1.44：锁屏与 Wi-Fi／移动数据切换诊断
+
+- 前台服务继续尊重用户的“保持 CPU WakeLock”开关；锁屏本身不表示公网连接一定存活。
+- 对本地 `/health` 与公网 `/mcp` 进行后台端到端检测；公网 `GET /mcp` 必须返回手机自身的 `405 Method not allowed`，才显示为在线。仅有 cloudflared PID 或注册日志时，UI 显示“连接中”，不再误报全绿。
+- 默认网络切换时主动重连隧道；Wi-Fi 优先尝试 HTTP/2（TCP），连续公网探测失败后切换传输协议重试。保持用户手动停止和“不随开机启动”的既有行为。
+- 网络、最近一次探测、最近一次确认在线及最新隧道诊断显示在 UI 的 Runtime diagnostics；约每 20 秒检测一次，超过 60 秒没有成功运行探测时不显示绿灯。
+- 端到端检测不发送 OAuth 凭据，不在日志输出 Tunnel Token。Wi-Fi 和运营商／路由器策略不同，HTTP/2 不是所有网络的通用保证；遇到失败应以新诊断中的 HTTP 状态和最近隧道日志定位。
 
 DevSpace Mobile 是与 Windows Portable **相互独立**的 Android 产品线。APK 自己就是 MCP/OAuth 控制平面，直接在手机本机调用 Root 文件系统、Root shell、截图、输入、应用管理和长进程能力；它不是 Desktop DevSpace 的 Remote Agent，也不需要 Windows DevSpace 在线。
 

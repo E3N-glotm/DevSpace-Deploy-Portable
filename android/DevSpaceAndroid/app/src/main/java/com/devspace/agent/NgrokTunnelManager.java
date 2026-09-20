@@ -50,6 +50,13 @@ final class NgrokTunnelManager implements AutoCloseable {
     private volatile Thread worker;
     private volatile Process process;
 
+    void requestReconnect(String reason) {
+        if (!running.get()) return;
+        listener.onTunnelState("ngrok 连接中", reason);
+        Process current = process;
+        if (current != null) current.destroy();
+    }
+
     NgrokTunnelManager(Context context, AgentConfig config, RootShell rootShell, Listener listener) {
         this.context = context.getApplicationContext();
         this.config = config;
