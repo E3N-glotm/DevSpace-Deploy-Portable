@@ -55,7 +55,7 @@ cd "$ROOT/app"
 PATH_NODE="$(command -v node 2>/dev/null || true)"
 PATH_GIT="$(command -v git 2>/dev/null || true)"
 PATH_SSH="$(command -v ssh 2>/dev/null || true)"
-printf '\n[%s] Starting portable DevSpace 1.1.59 dev104, tool mode=%s, access profile=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$TOOL_MODE" "$ACCESS_PROFILE" >> "$LOG_FILE"
+printf '\n[%s] Starting portable DevSpace 1.1.59 dev105, tool mode=%s, access profile=%s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$TOOL_MODE" "$ACCESS_PROFILE" >> "$LOG_FILE"
 printf '[provenance] root=%s node=%s path-node=%s git=%s ssh=%s\n' "$ROOT_WIN" "$NODE_EXE" "$PATH_NODE" "$PATH_GIT" "$PATH_SSH" >> "$LOG_FILE"
 if [[ "$PATH_NODE" != "$ROOT/runtime/node/node" && "$PATH_NODE" != "$ROOT/runtime/node/node.exe" ]]; then
   printf '[warning] Portable Node is not first on PATH: %s\n' "$PATH_NODE" >> "$LOG_FILE"

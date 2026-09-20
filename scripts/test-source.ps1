@@ -135,6 +135,7 @@ $Tests = @(
     "setup/test-continuation-guard.mjs",
     "setup/test-continuation-architecture.mjs",
     "setup/test-auto-continuation-toggle.mjs",
+    "setup/test-host-cutoff-estimate.mjs",
     "setup/test-continuation-wire-contract.mjs",
     "setup/test-continuation-supervisor-scheduler.mjs",
     "setup/test-assistant-turn-completion-contract.mjs",

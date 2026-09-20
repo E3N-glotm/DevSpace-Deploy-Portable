@@ -16,6 +16,7 @@ const CONFIG_DIR = process.env.DEVSPACE_PORTABLE_CONFIG_DIR
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 // User-owned setting, deliberately separate from deployment and Computer Use.
 const AUTO_CONTINUATION_FILE = path.join(CONFIG_DIR, "auto-continuation.json");
+const HOST_CUTOFF_ESTIMATE_FILE = path.join(CONFIG_DIR, "host-cutoff-estimate.json");
 const AUTH_FILE = path.join(CONFIG_DIR, "auth.json");
 const NGROK_CONFIG = path.join(CONFIG_DIR, "ngrok.yml");
 const CLOUDFLARE_TOKEN_FILE = path.join(CONFIG_DIR, "cloudflare.token");
@@ -72,7 +73,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.59";
-const PORTABLE_DEV_ITERATION = "dev104";
+const PORTABLE_DEV_ITERATION = "dev105";
 const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
@@ -1486,6 +1487,59 @@ async function runContinuationAdmin(action, payload = {}) {
   const parse = (value, fallback) => {
     try { return JSON.parse(String(value || "")); } catch { return fallback; }
   };
+  // A shared ChatGPT Host estimate is informational: neither this preference
+  // nor its lock modifies the Host's actual timeout or the sender's existing
+  // learned-cutoff authorization. Exclude unrelated smoke-test Host profiles.
+  const observedHostCutoff = () => {
+    const profiles = database.sqlite.prepare(`
+      select id, cutoff_samples_json, confirmed_turn_limit_ms,
+        confirmed_turn_limit_at, last_timeout_at, timeout_samples
+      from continuation_host_profiles where id like 'chatgpt@%'
+      order by coalesce(last_timeout_at,confirmed_turn_limit_at,'') desc limit 32
+    `).all();
+    const observations = profiles.map((profile) => {
+      const samples = parse(profile.cutoff_samples_json, []).map(Number)
+        .filter((ms) => Number.isFinite(ms) && ms >= 60_000 && ms <= 240 * 60_000).sort((a, b) => a - b);
+      const confirmed = Number(profile.confirmed_turn_limit_ms || 0);
+      if (!samples.length && !(confirmed >= 60_000 && confirmed <= 240 * 60_000)) return null;
+      const middle = Math.floor(samples.length / 2);
+      const observedMs = samples.length
+        ? (samples.length % 2 ? samples[middle] : (samples[middle - 1] + samples[middle]) / 2)
+        : confirmed;
+      const observedAt = [profile.last_timeout_at, profile.confirmed_turn_limit_at]
+        .map((value) => String(value || '')).sort().pop() || '';
+      return { minutes: Math.round(observedMs / 6000) / 10,
+        fingerprint: `${profile.id}:${observedAt}:${samples.join(',')}:${confirmed}`,
+        observedAt, sampleCount: samples.length || Number(profile.timeout_samples || 0),
+        source: Number(profile.timeout_samples || 0) > 0 && profile.last_timeout_at === observedAt
+          ? 'Host 超时观测' : '任务历史样本（未独立核实）' };
+    }).filter(Boolean).sort((a, b) => b.observedAt.localeCompare(a.observedAt));
+    return observations[0] || null;
+  };
+  const cutoffPreference = () => {
+    let saved = {};
+    try { saved = readJson(HOST_CUTOFF_ESTIMATE_FILE, {}) || {}; }
+    catch { saved = {}; }
+    const observed = observedHostCutoff();
+    const manualMinutes = Number(saved.manualMinutes);
+    const hasManual = saved.manualMinutes != null && Number.isFinite(manualMinutes)
+      && manualMinutes >= 1 && manualMinutes <= 240;
+    const locked = saved.locked === true && hasManual;
+    const manuallyEditedThisObservation = hasManual
+      && String(saved.observedFingerprint || '') === String(observed?.fingerprint || '');
+    const minutes = locked || manuallyEditedThisObservation || (!observed && hasManual)
+      ? manualMinutes : observed?.minutes ?? null;
+    return {
+      minutes, locked, hasEstimate: minutes !== null,
+      source: locked ? '人工锁定' : manuallyEditedThisObservation || (!observed && hasManual)
+        ? '人工参考值（未锁定）' : observed?.source || '暂无可用观测',
+      observedMinutes: observed?.minutes ?? null,
+      observedAt: observed?.observedAt || null,
+      sampleCount: observed?.sampleCount || 0,
+      // Do not expose internal signature or allow the client to forge it.
+      informationalOnly: true,
+    };
+  };
   const taskFromRow = (row) => {
     const required = parse(row.required_milestones_json, []);
     const completed = parse(row.completed_milestones_json, []);
@@ -1562,6 +1616,21 @@ async function runContinuationAdmin(action, payload = {}) {
     };
   };
   try {
+    if (action === 'cutoff-estimate-get') return { cutoffEstimate: cutoffPreference() };
+    if (action === 'cutoff-estimate-set') {
+      const old = cutoffPreference();
+      const minutes = payload.minutes === undefined ? old.minutes : Number(payload.minutes);
+      if (!Number.isFinite(minutes) || minutes < 1 || minutes > 240
+          || Math.abs(minutes * 10 - Math.round(minutes * 10)) > 1e-7)
+        throw new Error('Estimated Host cutoff must be 1.0 to 240.0 minutes in 0.1-minute steps.');
+      if (typeof payload.locked !== 'boolean') throw new Error('Cutoff estimate lock must be a boolean.');
+      const observed = observedHostCutoff();
+      writeJson(HOST_CUTOFF_ESTIMATE_FILE, {
+        formatVersion: 1, manualMinutes: minutes, locked: payload.locked,
+        observedFingerprint: observed?.fingerprint || '', updatedAt: new Date().toISOString(),
+      });
+      return { ok: true, cutoffEstimate: cutoffPreference() };
+    }
     if (action === "list") {
       const abandonedCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const abandonedAt = new Date().toISOString();
@@ -1601,6 +1670,7 @@ async function runContinuationAdmin(action, payload = {}) {
       const rows = database.sqlite.prepare(`select * from continuation_tasks ${where} order by updated_at desc limit ?`).all(limit);
       return {
         tasks: rows.map(taskFromRow),
+        cutoffEstimate: cutoffPreference(),
         activeCount: rows.filter((row) => !new Set(['SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK']).has(row.state)).length,
       };
     }
@@ -4250,6 +4320,10 @@ async function main() {
       stdoutJson(runPluginAdmin("unbind-slot", await readStdinJson()));
     } else if (command === "continuation-list") {
       stdoutJson(await runContinuationAdmin("list", await readStdinJson()));
+    } else if (command === "continuation-cutoff-estimate-get") {
+      stdoutJson(await runContinuationAdmin("cutoff-estimate-get"));
+    } else if (command === "continuation-cutoff-estimate-set") {
+      stdoutJson(await runContinuationAdmin("cutoff-estimate-set", await readStdinJson()));
     } else if (command === "continuation-lock") {
       stdoutJson(await runContinuationAdmin("lock", await readStdinJson()));
     } else if (command === "continuation-unlock") {

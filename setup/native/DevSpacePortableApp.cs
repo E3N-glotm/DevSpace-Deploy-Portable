@@ -4874,6 +4874,9 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private readonly DataGridView _pluginGrid = CreateGrid();
         private readonly DataGridView _slotGrid = CreateGrid();
         private readonly DataGridView _continuationGrid = CreateGrid();
+        private readonly NumericUpDown _hostCutoffMinutes = new NumericUpDown();
+        private readonly CheckBox _hostCutoffEstimateLocked = new CheckBox();
+        private readonly Label _hostCutoffEstimateStatus = new Label();
         private readonly DataGridView _sessionGrid = CreateGrid();
         private readonly DataGridView _fileGrid = CreateGrid();
         private readonly BorderlessTabControl _sessionPages = new BorderlessTabControl();
@@ -4899,6 +4902,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private bool _trayNoticeShown;
         private bool _sessionListLoading;
         private bool _continuationListLoading;
+        private bool _loadingHostCutoffEstimate;
         private bool _memoryListLoading;
         private bool _loadingConfiguration;
         private bool _dashboardStatusBusy;
@@ -5224,7 +5228,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.59 dev104 · Protocol 1.6";
+            _versionLabel.Text = "DevSpace Portable 1.1.59 dev105 · Protocol 1.6";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5569,8 +5573,9 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private TabPage BuildContinuationsTab()
         {
             TabPage page = new TabPage("续轮任务");
-            TableLayoutPanel layout = NewTable(1, 3);
+            TableLayoutPanel layout = NewTable(1, 4);
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 94));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
@@ -5596,6 +5601,47 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             actions.Controls.Add(_showTerminalContinuations);
             layout.Controls.Add(actions, 0, 0);
 
+            TableLayoutPanel estimatePanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2,
+                Padding = new Padding(4), BackColor = UiPalette.Surface,
+            };
+            estimatePanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 43));
+            estimatePanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            FlowLayoutPanel estimateBar = NewButtonBar();
+            estimateBar.WrapContents = false;
+            estimateBar.AutoScroll = true;
+            Label cutoffTitle = new Label
+            {
+                Text = "Host 截断预估（分钟）", AutoSize = true,
+                Font = UiTypography.Ui(9.5F), ForeColor = UiPalette.Text,
+                Margin = new Padding(9, 13, 8, 0),
+            };
+            _hostCutoffMinutes.DecimalPlaces = 1;
+            _hostCutoffMinutes.Minimum = 1;
+            _hostCutoffMinutes.Maximum = 240;
+            _hostCutoffMinutes.Increment = 0.1M;
+            _hostCutoffMinutes.Value = 25;
+            _hostCutoffMinutes.Width = 78;
+            _hostCutoffMinutes.Margin = new Padding(0, 9, 9, 0);
+            _hostCutoffEstimateLocked.Text = "锁定预估值";
+            _hostCutoffEstimateLocked.AutoSize = true;
+            _hostCutoffEstimateLocked.BackColor = Color.Transparent;
+            _hostCutoffEstimateLocked.ForeColor = UiPalette.Text;
+            _hostCutoffEstimateLocked.Margin = new Padding(4, 12, 9, 0);
+            _hostCutoffEstimateStatus.AutoSize = false;
+            _hostCutoffEstimateStatus.Dock = DockStyle.Fill;
+            _hostCutoffEstimateStatus.ForeColor = UiPalette.TextMuted;
+            _hostCutoffEstimateStatus.Text = "正在读取历史观测；预估值不控制 ChatGPT 实际时长或自动续轮触发阈值。";
+            _hostCutoffEstimateStatus.Margin = new Padding(9, 1, 0, 0);
+            estimateBar.Controls.Add(cutoffTitle);
+            estimateBar.Controls.Add(_hostCutoffMinutes);
+            estimateBar.Controls.Add(_hostCutoffEstimateLocked);
+            estimateBar.Controls.Add(ActionButton("保存预估", async delegate { await SaveHostCutoffEstimateAsync(); }, true));
+            estimatePanel.Controls.Add(estimateBar, 0, 0);
+            estimatePanel.Controls.Add(_hostCutoffEstimateStatus, 0, 1);
+            layout.Controls.Add(estimatePanel, 0, 1);
+
             _continuationSummary = new Label
             {
                 Dock = DockStyle.Fill,
@@ -5606,7 +5652,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 Font = UiTypography.Ui(9.25F),
                 Text = "1.1.58 修复自动续轮的任务语义断层：即使 Host 没有把隐藏 updateModelContext 重放给新的 assistant turn，真实 app.sendMessage 用户消息也会携带当前任务目标、下一未完成里程碑和 DevSpace_MCP 恢复指令，不再只说泛化的“继续未完成任务”。",
             };
-            layout.Controls.Add(_continuationSummary, 0, 1);
+            layout.Controls.Add(_continuationSummary, 0, 2);
 
             _continuationGrid.AutoGenerateColumns = false;
             _continuationGrid.MultiSelect = true;
@@ -5621,7 +5667,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationUpdated", HeaderText = "最近活动", Width = 158 });
             _continuationGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "continuationObjective", HeaderText = "任务目标", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 320 });
             _continuationGrid.SelectionChanged += delegate { RenderContinuationSummary(); };
-            layout.Controls.Add(WrapSurface(_continuationGrid), 0, 2);
+            layout.Controls.Add(WrapSurface(_continuationGrid), 0, 3);
             page.Controls.Add(layout);
             return page;
         }
@@ -6176,7 +6222,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableDisplayVersion", GetString(_currentConfig, "portableVersion", "1.1.59 dev104")) + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableDisplayVersion", GetString(_currentConfig, "portableVersion", "1.1.59 dev105")) + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }
@@ -6697,6 +6743,65 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             RenderContinuationSummary();
         }
 
+        private void ApplyHostCutoffEstimate(Dictionary<string, object> estimate)
+        {
+            if (estimate == null || estimate.Count == 0) return;
+            bool locked = GetBool(estimate, "locked");
+            bool available = GetBool(estimate, "hasEstimate");
+            // Never overwrite a half-edited number or checkbox while a 15s
+            // background poll refreshes the continuation task list.
+            if (!_loadingHostCutoffEstimate && !_hostCutoffMinutes.Focused && !_hostCutoffEstimateLocked.Focused)
+            {
+                _loadingHostCutoffEstimate = true;
+                try
+                {
+                    if (available)
+                    {
+                        object raw;
+                        if (estimate.TryGetValue("minutes", out raw) && raw != null)
+                        {
+                            decimal minutes = Convert.ToDecimal(raw);
+                            _hostCutoffMinutes.Value = Math.Max(_hostCutoffMinutes.Minimum,
+                                Math.Min(_hostCutoffMinutes.Maximum, minutes));
+                        }
+                    }
+                    _hostCutoffEstimateLocked.Checked = locked;
+                }
+                finally { _loadingHostCutoffEstimate = false; }
+            }
+            string source = GetString(estimate, "source", "暂无可用观测");
+            string observed = GetString(estimate, "observedAt");
+            DateTimeOffset observedTime;
+            if (DateTimeOffset.TryParse(observed, out observedTime)) observed = observedTime.ToLocalTime().ToString("MM-dd HH:mm");
+            _hostCutoffEstimateStatus.Text = (available ? source : "暂无观测，请输入预估分钟数并保存") +
+                (string.IsNullOrWhiteSpace(observed) ? "" : " · 观测 " + observed) + Environment.NewLine +
+                "仅预估值；锁定不改变 ChatGPT Host 时长或自动续轮触发条件。";
+        }
+
+        private async Task SaveHostCutoffEstimateAsync()
+        {
+            if (_loadingHostCutoffEstimate || _closing) return;
+            decimal minutes = _hostCutoffMinutes.Value;
+            bool locked = _hostCutoffEstimateLocked.Checked;
+            _hostCutoffMinutes.Enabled = false;
+            _hostCutoffEstimateLocked.Enabled = false;
+            try
+            {
+                Dictionary<string, object> updated = await _manager.RunJsonAsync("continuation-cutoff-estimate-set",
+                    new { minutes = minutes, locked = locked });
+                if (!GetBool(updated, "ok")) throw new InvalidOperationException("保存 Host 截断预估失败。");
+                ApplyHostCutoffEstimate(GetDictionary(updated, "cutoffEstimate"));
+                SetOutput(locked ? "已锁定手动设置的 Host 截断预估值。实际 Host 时长未改变。"
+                    : "已保存未锁定的 Host 截断预估值；取得新的 Host 观测后自动调整。");
+            }
+            catch (Exception ex) { ShowError(ex); }
+            finally
+            {
+                _hostCutoffMinutes.Enabled = true;
+                _hostCutoffEstimateLocked.Enabled = true;
+            }
+        }
+
         private async Task LoadContinuationsAsync(bool selectPage)
         {
             if (_continuationListLoading) return;
@@ -6720,6 +6825,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private void ApplyContinuationList(Dictionary<string, object> value, bool selectPage)
         {
                 if (value == null || value.Count == 0) return;
+                ApplyHostCutoffEstimate(GetDictionary(value, "cutoffEstimate"));
                 // Capture UI state after the awaited refresh returns. Capturing it
                 // before the await races with Ctrl/Shift selection changes made by
                 // the owner while the request is in flight and used to restore a
