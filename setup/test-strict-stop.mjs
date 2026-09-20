@@ -32,7 +32,9 @@ assert.match(sourceManagerText, /return parent\.creationTicks <= child\.creation
   "Portable stop ancestry must reject a reused parent PID whose current process started after the child");
 assert.match(sourceManagerText, /const provenListenerPids = new Map\(\)[\s\S]{0,2200}byPid\.get\(pid\)[\s\S]{0,900}provenListenerPids\.set\(pid, creationTicks\)/,
   "stop-local must durably remember the exact identity of a listener already proven to belong to the Portable root");
-assert.match(sourceManagerText, /portDrainDeadline[\s\S]{0,1800}provenListenerPids\.get\(pid\)[\s\S]{0,700}currentCreationTicks === expectedCreationTicks[\s\S]{0,500}taskkill\.exe/,
+assert.match(sourceManagerText, /const terminateExactServiceInstance = \(pid, expectedCreationTicks = 0, freshOwnershipProof = false\)[\s\S]{0,1000}processCreationTicks\(pid\)[\s\S]{0,1000}taskkill\.exe/,
+  "the central listener termination helper must compare process creation identities before directly killing the service");
+assert.match(sourceManagerText, /portDrainDeadline[\s\S]{0,1800}provenListenerPids\.get\(pid\)[\s\S]{0,800}terminateExactServiceInstance\(pid, expectedCreationTicks\)/,
   "the port-drain phase must keep terminating only the exact previously-proven listener identity instead of merely extending a timeout");
 const temporary = await mkdtemp(join(tmpdir(), "devspace-strict-stop-"));
 // Run the destructive stop test from a disposable Portable root. Running the

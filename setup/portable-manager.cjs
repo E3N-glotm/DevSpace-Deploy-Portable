@@ -2123,6 +2123,20 @@ function isLocalMcpServiceProcess(item) {
 function stopLocalMcpServiceProcesses(port) {
   const killed = [];
   const killedPids = new Map();
+  const terminationDiagnostics = [];
+  const terminateExactServiceInstance = (pid, expectedCreationTicks = 0, freshOwnershipProof = false) => {
+    // The caller has already established ownership by Portable root and/or
+    // exact listener identity. Never kill an unproven listener on this port.
+    const observed = processCreationTicks(pid);
+    if (expectedCreationTicks && observed && observed !== expectedCreationTicks) return;
+    // A fresh owned-root snapshot still permits a direct kill if Get-Process
+    // briefly cannot return StartTime; a *stored* PID identity does not.
+    if (expectedCreationTicks && !observed && !freshOwnershipProof) return;
+    const result = runProgram("taskkill.exe", ["/pid", String(pid), "/f"], { ignoreExitCode: true });
+    if (result.status !== 0) {
+      terminationDiagnostics.push(`${pid} taskkill exit=${result.status}: ${result.output.slice(0, 280)}`);
+    }
+  };
   // A listener on the configured MCP port is also safely attributable to this
   // Portable root when the same PID appears in portableProcessSnapshot().
   // This is deliberately stronger than "PID owns port": the snapshot already
@@ -2183,7 +2197,7 @@ function stopLocalMcpServiceProcesses(port) {
         if (!expectedCreationTicks) continue;
         const currentCreationTicks = processCreationTicks(pid);
         if (currentCreationTicks && currentCreationTicks === expectedCreationTicks) {
-          runProgram("taskkill.exe", ["/pid", String(pid), "/f"], { ignoreExitCode: true });
+          terminateExactServiceInstance(pid, expectedCreationTicks);
         }
       }
       sleepSync(Math.min(100, Math.max(1, deadline - Date.now())));
@@ -2194,7 +2208,7 @@ function stopLocalMcpServiceProcesses(port) {
       // that do not belong to the Portable service chain. Kill only processes
       // whose own command line identifies them as start-devspace wrappers,
       // logged-launcher, or the cli.js serve listener.
-      runProgram("taskkill.exe", ["/pid", String(item.pid), "/f"], { ignoreExitCode: true });
+      terminateExactServiceInstance(item.pid, item.creationTicks || provenListenerPids.get(item.pid) || 0, true);
       killed.push({ pid: item.pid, name: item.name, executablePath: item.executablePath });
       const creationTicks = item.creationTicks || provenListenerPids.get(item.pid) || processCreationTicks(item.pid) || 0;
       killedPids.set(item.pid, creationTicks);
@@ -2251,7 +2265,7 @@ function stopLocalMcpServiceProcesses(port) {
         if (!expectedCreationTicks) continue;
         const currentCreationTicks = processCreationTicks(pid);
         if (currentCreationTicks > 0 && currentCreationTicks === expectedCreationTicks) {
-          runProgram("taskkill.exe", ["/pid", String(pid), "/f"], { ignoreExitCode: true });
+          terminateExactServiceInstance(pid, expectedCreationTicks);
         }
       }
       sleepSync(Math.min(250, Math.max(1, portDrainDeadline - Date.now())));
@@ -2262,7 +2276,7 @@ function stopLocalMcpServiceProcesses(port) {
     // continues to fail closed.
     if (remainingListeners.length && localTcpPortBindable(port)) remainingListeners = [];
   }
-  return { killed, remainingProcesses, remainingListeners, remainingKilledPids };
+  return { killed, remainingProcesses, remainingListeners, remainingKilledPids, terminationDiagnostics };
 }
 
 function powershellLiteral(value) {
@@ -2691,6 +2705,7 @@ function stopLocalServiceOnly(options = {}) {
       ...serviceStop.remainingProcesses.map((item) => `${item.pid} ${item.name} ${item.commandLine}`),
       ...serviceStop.remainingListeners.map((pid) => `${pid} still listens on 127.0.0.1:${port}`),
       ...serviceStop.remainingKilledPids.map((pid) => `${pid} was terminated by stop-local but remains observable in the process table`),
+      ...serviceStop.terminationDiagnostics,
     ];
     throw new Error(`Local MCP stop did not fully release 127.0.0.1:${port} within ${(PORTABLE_STOP_TIMEOUT_MS + LOCAL_PORT_DRAIN_TIMEOUT_MS) / 1000} seconds:\n${details.join("\n")}`);
   }
