@@ -28,6 +28,8 @@ assert.match(sourceManagerText,
   "restart-local must delegate only for MCP-internal callers and retain synchronous external semantics");
 assert.match(sourceManagerText, /CreationTicks/,
   "Portable process snapshots must carry process creation identity so stale ParentProcessId values cannot invent ancestry after PID reuse");
+assert.match(sourceManagerText, /\$exactCli=\(\$name -eq 'node\.exe' -and \$cmd -and \$normalizedCmd\.IndexOf\(\$cli,\[StringComparison\]::OrdinalIgnoreCase\) -ge 0\)/,
+  "Portable ownership must recognize an exact root-scoped cli.js process even when hosted Windows expands an 8.3 executable path");
 assert.match(sourceManagerText, /return parent\.creationTicks <= child\.creationTicks/,
   "Portable stop ancestry must reject a reused parent PID whose current process started after the child");
 assert.match(sourceManagerText, /const provenListenerPids = new Map\(\)[\s\S]{0,2200}byPid\.get\(pid\)[\s\S]{0,900}provenListenerPids\.set\(pid, creationTicks\)/,

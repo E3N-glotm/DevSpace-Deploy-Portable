@@ -2293,7 +2293,12 @@ function portableProcessSnapshot() {
     // contains $root, so the wrapper heuristic would otherwise classify the
     // enumerator as Portable-owned and every retry would discover a brand-new
     // powershell.exe that only exists to perform the next snapshot.
-    "$owned=@($all | Where-Object {$exe=[string]$_.ExecutablePath;$cmd=[string]$_.CommandLine;$name=([string]$_.Name).ToLowerInvariant();$processId=[int]$_.ProcessId;$processId -ne $PID -and (($exe -and $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or (($wrappers -contains $name) -and $cmd -and $cmd.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0))})",
+    // Hosted Windows sometimes expands an 8.3 TEMP root (RUNNER~1) in CIM
+    // ExecutablePath while preserving the short Portable cli.js path in the
+    // service argv. Trust only the exact root-scoped CLI path, not an arbitrary
+    // node.exe merely listening on the configured port or mentioning DevSpace.
+    "$cli=($root+'\\app\\node_modules\\@waishnav\\devspace\\dist\\cli.js').Replace('\\','/')",
+    "$owned=@($all | Where-Object {$exe=[string]$_.ExecutablePath;$cmd=[string]$_.CommandLine;$name=([string]$_.Name).ToLowerInvariant();$processId=[int]$_.ProcessId;$normalizedCmd=$cmd.Replace('\\','/');$exactCli=($name -eq 'node.exe' -and $cmd -and $normalizedCmd.IndexOf($cli,[StringComparison]::OrdinalIgnoreCase) -ge 0);$processId -ne $PID -and (($exe -and $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or (($wrappers -contains $name) -and $cmd -and $cmd.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0) -or $exactCli)})",
     "$owned | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationTicks | ConvertTo-Json -Compress",
   ].join(";");
   const result = childProcess.spawnSync(POWERSHELL_EXE, [
@@ -2701,9 +2706,12 @@ function stopLocalServiceOnly(options = {}) {
   const serviceStop = stopLocalMcpServiceProcesses(port);
   fs.rmSync(MCP_PID_FILE, { force: true });
   if (serviceStop.remainingProcesses.length || serviceStop.remainingListeners.length || serviceStop.remainingKilledPids.length) {
+    // Failure-only evidence makes hosted Windows CI regressions actionable
+    // without exposing command lines, credentials or expanding kill scope.
+    const finalOwnedPids = new Set(portableProcessSnapshot().map((item) => item.pid));
     const details = [
       ...serviceStop.remainingProcesses.map((item) => `${item.pid} ${item.name} ${item.commandLine}`),
-      ...serviceStop.remainingListeners.map((pid) => `${pid} still listens on 127.0.0.1:${port}`),
+      ...serviceStop.remainingListeners.map((pid) => `${pid} still listens on 127.0.0.1:${port}; ownedSnapshot=${finalOwnedPids.has(pid)}; previouslyKilled=${serviceStop.killed.some((item) => item.pid === pid)}; image=${processImageName(pid)}; creationTicksAvailable=${processCreationTicks(pid) > 0}`),
       ...serviceStop.remainingKilledPids.map((pid) => `${pid} was terminated by stop-local but remains observable in the process table`),
       ...serviceStop.terminationDiagnostics,
     ];
