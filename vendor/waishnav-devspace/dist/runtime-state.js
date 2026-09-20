@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { openDatabase } from "./db/client.js";
 import { redactValue, redactedJson } from "./redaction.js";
 
@@ -333,11 +335,16 @@ function adaptHostCutoffRegime({ elapsedMs, confirmedTurnLimitMs, confirmedTurnL
 
 export class StructuredRuntimeState {
     database;
+    autoContinuationPolicyFile;
     continuationModelRequests = new Map();
     continuationSenderServerBootId = randomUUID();
     continuationSenderProtocolEpoch = 0;
     continuationSenderAssetRevision = "";
     constructor(stateDir) {
+        this.autoContinuationPolicyFile = resolve(
+            process.env.DEVSPACE_PORTABLE_CONFIG_DIR || resolve(stateDir, "..", "config"),
+            "auto-continuation.json",
+        );
         this.database = openDatabase(stateDir);
         // A continuation sender is an in-memory Workspace App transport bound
         // to the currently running MCP process.  Persisting sender_instance_id
@@ -359,6 +366,16 @@ export class StructuredRuntimeState {
                 else 'UNBOUND'
               end
         `).run();
+    }
+    autoContinuationEnabled() {
+        try {
+            return JSON.parse(readFileSync(this.autoContinuationPolicyFile, "utf8")).enabled !== false;
+        }
+        catch (error) {
+            // Existing installations have no policy file and retain the old
+            // enabled default. A malformed/unreadable explicit file fails closed.
+            return error?.code === "ENOENT";
+        }
     }
     configureContinuationSenderTransport(input = {}) {
         const protocolEpoch = Number(input.protocolEpoch || 0);
@@ -1790,6 +1807,11 @@ export class StructuredRuntimeState {
         return transaction();
     }
     continuationSupervisorSweep(input = {}) {
+        // Off suppresses new READY/retry generations, not active manual work,
+        // checkpoint persistence, card rendering, or durable process watches.
+        if (!this.autoContinuationEnabled()) {
+            return { scanned: 0, ready: [], deliveryAckRetryDue: [], recoveredUnackedExecution: [] };
+        }
         const nowMs = Number.isFinite(Number(input.nowMs)) ? Number(input.nowMs) : Date.now();
         const nowIso = new Date(nowMs).toISOString();
         const candidates = this.database.sqlite.prepare(`
@@ -2319,6 +2341,8 @@ export class StructuredRuntimeState {
         };
     }
     claimReadyContinuationGeneration(input = {}) {
+        if (!this.autoContinuationEnabled())
+            return { accepted: false, reason: "automatic-continuation-disabled" };
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
         const taskId = String(input.taskId ?? "").trim();
         const senderInstanceId = String(input.senderInstanceId ?? "").trim();
@@ -2603,6 +2627,10 @@ export class StructuredRuntimeState {
         return { accepted: true, eventSequence, senderStatus };
     }
     authorizeContinuationGenerationDelivery(input = {}) {
+        // Re-read after claim: switching off while the sender prepares its
+        // Host request prevents an as-yet-unauthorized visible follow-up.
+        if (!this.autoContinuationEnabled())
+            return { accepted: false, reason: "automatic-continuation-disabled" };
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
         const taskId = String(input.taskId ?? "").trim();
         const senderInstanceId = String(input.senderInstanceId ?? "").trim();

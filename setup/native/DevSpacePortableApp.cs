@@ -4858,6 +4858,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
         private readonly Label _pageTitle = new Label();
         private readonly List<ModernNavButton> _navButtons = new List<ModernNavButton>();
         private readonly ModernToggle _computerUseToggle = new ModernToggle();
+        private readonly ModernToggle _autoContinuationToggle = new ModernToggle();
         private readonly StatusIndicatorCard _overallStatus = new StatusIndicatorCard();
         private readonly StatusIndicatorCard _serviceStatus = new StatusIndicatorCard();
         private readonly StatusIndicatorCard _tunnelStatus = new StatusIndicatorCard();
@@ -5155,11 +5156,17 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _computerUseToggle.Width = 168;
             _computerUseToggle.BackColor = UiPalette.Surface;
             _computerUseToggle.CheckedChanged += async delegate { await RunUiActionAsync(ComputerUseToggleChangedAsync); };
-            Panel headerActions = new Panel { Dock = DockStyle.Right, Width = 212, BackColor = Color.Transparent };
+            _autoContinuationToggle.Text = "自动续轮";
+            _autoContinuationToggle.Width = 168;
+            _autoContinuationToggle.BackColor = UiPalette.Surface;
+            _autoContinuationToggle.CheckedChanged += async delegate { await AutoContinuationToggleChangedAsync(); };
+            Panel headerActions = new Panel { Dock = DockStyle.Right, Width = 396, BackColor = Color.Transparent };
             headerActions.Controls.Add(_computerUseToggle);
+            headerActions.Controls.Add(_autoContinuationToggle);
             Action centerHeaderToggle = delegate
             {
-                _computerUseToggle.Location = new Point(20, Math.Max(0, (headerActions.ClientSize.Height - _computerUseToggle.Height) / 2));
+                _autoContinuationToggle.Location = new Point(16, Math.Max(0, (headerActions.ClientSize.Height - _autoContinuationToggle.Height) / 2));
+                _computerUseToggle.Location = new Point(212, Math.Max(0, (headerActions.ClientSize.Height - _computerUseToggle.Height) / 2));
             };
             headerActions.Resize += delegate { centerHeaderToggle(); };
             centerHeaderToggle();
@@ -5217,7 +5224,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.59 dev103 · Protocol 1.6";
+            _versionLabel.Text = "DevSpace Portable 1.1.59 dev104 · Protocol 1.6";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -6089,6 +6096,29 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             catch { }
         }
 
+        private async Task AutoContinuationToggleChangedAsync()
+        {
+            if (_loadingConfiguration || _closing) return;
+            bool enabled = _autoContinuationToggle.Checked;
+            _autoContinuationToggle.Enabled = false;
+            try
+            {
+                Dictionary<string, object> result = await _manager.RunJsonAsync("set-auto-continuation", new { enabled = enabled });
+                if (!GetBool(result, "ok") || GetBool(result, "enabled", !enabled) != enabled)
+                    throw new InvalidOperationException("未能保存自动续轮开关。原设置保持不变。");
+                _currentConfig["autoContinuationEnabled"] = enabled;
+                SetOutput(enabled ? "自动续轮已开启，未完成任务可以在当前轮结束后继续。" : "自动续轮已关闭；手动 MCP 操作与里程碑卡片不受影响。");
+            }
+            catch (Exception ex)
+            {
+                _loadingConfiguration = true;
+                _autoContinuationToggle.Checked = !enabled;
+                _loadingConfiguration = false;
+                ShowError(ex);
+            }
+            finally { _autoContinuationToggle.Enabled = true; }
+        }
+
         private async Task ComputerUseToggleChangedAsync()
         {
             if (_loadingConfiguration || _closing || _featureBoxes.Count == 0) return;
@@ -6140,12 +6170,13 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             Dictionary<string, object> features = GetDictionary(_currentConfig, "features");
             foreach (KeyValuePair<string, CheckBox> item in _featureBoxes) item.Value.Checked = GetBool(features, item.Key, item.Key != "computerUse");
             _computerUseToggle.Checked = GetBool(features, "computerUse");
+            _autoContinuationToggle.Checked = GetBool(_currentConfig, "autoContinuationEnabled", true);
             _roots.Text = string.Join(Environment.NewLine, GetStringList(_currentConfig, "allowedRoots"));
             _allDrives.Checked = GetString(_currentConfig, "permissionMode") == "all-drive-roots";
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
             _tunnelNetworkCompatibility.Checked = GetBool(_currentConfig, "tunnelNetworkCompatibility", true);
             _ngrokCas.Checked = GetBool(_currentConfig, "ngrokConnectCasHost");
-            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableDisplayVersion", GetString(_currentConfig, "portableVersion", "1.1.59 dev103")) + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
+            _versionLabel.Text = "DevSpace Portable " + GetString(_currentConfig, "portableDisplayVersion", GetString(_currentConfig, "portableVersion", "1.1.59 dev104")) + " · Protocol " + GetString(_currentConfig, "protocolVersion", "1.5");
             PopulateMemoryWorkspaces();
             }
             finally { _loadingConfiguration = false; }

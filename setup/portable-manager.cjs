@@ -14,6 +14,8 @@ const CONFIG_DIR = process.env.DEVSPACE_PORTABLE_CONFIG_DIR
   ? path.resolve(process.env.DEVSPACE_PORTABLE_CONFIG_DIR)
   : path.join(DATA_DIR, "config");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
+// User-owned setting, deliberately separate from deployment and Computer Use.
+const AUTO_CONTINUATION_FILE = path.join(CONFIG_DIR, "auto-continuation.json");
 const AUTH_FILE = path.join(CONFIG_DIR, "auth.json");
 const NGROK_CONFIG = path.join(CONFIG_DIR, "ngrok.yml");
 const CLOUDFLARE_TOKEN_FILE = path.join(CONFIG_DIR, "cloudflare.token");
@@ -70,7 +72,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.59";
-const PORTABLE_DEV_ITERATION = "dev103";
+const PORTABLE_DEV_ITERATION = "dev104";
 const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
@@ -621,6 +623,22 @@ async function configure(input) {
     ownerToken: generatedOwnerToken ? ownerToken : null,
     preservedOAuthState: fs.existsSync(path.join(STATE_DIR, "devspace.sqlite")),
   };
+}
+
+function autoContinuationEnabled() {
+  try { return readJson(AUTO_CONTINUATION_FILE, { enabled: true }).enabled !== false; }
+  catch { return false; }
+}
+
+function setAutoContinuation(input) {
+  if (typeof input?.enabled !== "boolean")
+    throw new Error("set-auto-continuation requires boolean enabled.");
+  writeJson(AUTO_CONTINUATION_FILE, {
+    formatVersion: 1,
+    enabled: input.enabled,
+    updatedAt: new Date().toISOString(),
+  });
+  return { ok: true, enabled: autoContinuationEnabled(), requiresRestart: false };
 }
 
 function setComputerUse(input) {
@@ -4053,6 +4071,7 @@ function showConfig() {
   };
   if (!providerUrls[tunnelProvider] && config.publicBaseUrl) providerUrls[tunnelProvider] = config.publicBaseUrl;
   return {
+    autoContinuationEnabled: autoContinuationEnabled(),
     configured: fs.existsSync(CONFIG_FILE) && fs.existsSync(AUTH_FILE),
     tunnelProvider,
     toolMode: normalizeToolMode(deployment.toolMode || "full"),
@@ -4125,6 +4144,8 @@ async function main() {
       stdoutJson(await configure(await readStdinJson()));
     } else if (command === "set-computer-use") {
       stdoutJson(setComputerUse(await readStdinJson()));
+    } else if (command === "set-auto-continuation") {
+      stdoutJson(setAutoContinuation(await readStdinJson()));
     } else if (command === "show-config") {
       stdoutJson(showConfig());
     } else if (command === "ui-open") {
