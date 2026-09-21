@@ -2050,6 +2050,40 @@ function localTcpPortBindable(port) {
   return result.status === 0;
 }
 
+function provenPortableRuntimeListener(pid) {
+  // Some hosted Windows CIM enumerations omit a process from the root-scoped
+  // snapshot when the same TEMP directory is presented under 8.3 and long
+  // path aliases. A matching port alone is NOT ownership evidence. Instead,
+  // independently compare the kernel file identities of the process image and
+  // this installation's bundled runtime/node/node.exe. Hard-fail closed if
+  // either image cannot be queried or its file identity cannot be established.
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const installedNode = path.join(ROOT, "runtime", "node", "node.exe");
+  let installed;
+  try { installed = fs.statSync(installedNode, { bigint: true }); } catch { return null; }
+  if (!installed.ino || !installed.dev) return null;
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue`,
+    "if($null -eq $p){exit 3}",
+    "$p | Select-Object Name,ExecutablePath,@{n='CreationTicks';e={try{$_.CreationDate.ToUniversalTime().Ticks}catch{0}}} | ConvertTo-Json -Compress",
+  ].join(";");
+  const observed = childProcess.spawnSync(POWERSHELL_EXE, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
+  ], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+  if (observed.status !== 0) return null;
+  let processInfo;
+  try { processInfo = JSON.parse(String(observed.stdout || "")); } catch { return null; }
+  if (String(processInfo.Name || "").toLowerCase() !== "node.exe" || !processInfo.ExecutablePath) return null;
+  let image;
+  try { image = fs.statSync(processInfo.ExecutablePath, { bigint: true }); } catch { return null; }
+  if (installed.ino !== image.ino || installed.dev !== image.dev) return null;
+  const creationTicks = Number(processInfo.CreationTicks);
+  if (!Number.isFinite(creationTicks) || creationTicks <= 0) return null;
+  return { pid, parentPid: 0, name: "node.exe", executablePath: processInfo.ExecutablePath,
+    commandLine: "", creationTicks };
+}
+
 function stopRecordedProcess(pidFile, expectedImage, requiredListenerPort = null) {
   if (!fs.existsSync(pidFile)) return;
   const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
@@ -2155,6 +2189,12 @@ function stopLocalMcpServiceProcesses(port) {
 
     const byPid = new Map(snapshot.map((item) => [item.pid, item]));
     for (const pid of listeners) {
+      // The fallback is only consulted for the already-observed listener PID.
+      // It cannot expand the stop scope to arbitrary node.exe processes.
+      if (!byPid.has(pid)) {
+        const verified = provenPortableRuntimeListener(pid);
+        if (verified) byPid.set(pid, verified);
+      }
       const item = byPid.get(pid);
       if (!item) continue;
       const creationTicks = item.creationTicks || processCreationTicks(pid) || 0;

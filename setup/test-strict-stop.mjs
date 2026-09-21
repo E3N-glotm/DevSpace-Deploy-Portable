@@ -220,6 +220,13 @@ try {
   // listener survives but its recorded PID file is missing/stale. stop-local
   // must discover the Portable MCP service by command-line signature and the
   // real listener, without recursively killing unrelated user descendants.
+  // Reproduce the hosted-Windows 8.3 alias fault in the disposable manager
+  // copy: CIM may omit the live service PID from the root-filtered snapshot.
+  // The production manager is never modified by this injected test failure.
+  const originalSnapshotLine = "const snapshot = portableProcessSnapshot();\n    const serviceProcesses = snapshot.filter(isLocalMcpServiceProcess);";
+  assert.ok(sourceManagerText.includes(originalSnapshotLine), "snapshot fault injection target changed");
+  const hiddenSnapshotLine = `const snapshot = portableProcessSnapshot().filter(item => item.pid !== Number(fs.readFileSync(${JSON.stringify(localServicePidFile)}, 'utf8')));\n    const serviceProcesses = snapshot.filter(isLocalMcpServiceProcess);`;
+  await writeFile(manager, sourceManagerText.replace(originalSnapshotLine, hiddenSnapshotLine), "utf8");
   const localCliPath = join(root, "app", "node_modules", "@waishnav", "devspace", "dist", "cli.js");
   const localServiceCode = [
     "const cp=require('child_process'),fs=require('fs'),net=require('net');",
@@ -293,6 +300,7 @@ try {
     unrelatedDescendantPreserved: true,
     externalPid,
     stopLocalOrphanRecovery: true,
+    missingSnapshotListenerFallbackVerified: true,
     localServicePid,
     localExternalDescendantPreserved: true,
     localExternalPid,

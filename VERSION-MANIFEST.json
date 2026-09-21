@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.61",
-  "builtAt": "2026-09-21T00:56:53+08:00",
+  "builtAt": "2026-09-21T10:06:25+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -712,7 +712,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "a2c9bfd745696ddab86db31fcd1ee2572a522f88d6aac07d5fbf1cc21012e5ba",
+    "setup/portable-manager.cjs.sha256": "cfc25a33b996e161e825f0aba85af628a294fcb3c23519f309c7bbb967dd235c",
     "setup/portable-updater.ps1.sha256": "5944c39ad725a31365d2bdc07d7a9fe9d1fb255e81c77c190ae286304a6ed8c1",
     "setup/test-blockmap-update.mjs.sha256": "b6eb64f2a63f8fdb494eaa6efd15cfaca22bf60e684c94cd78793434b77b82fe",
     "setup/test-codex-runtime-bridge.mjs.sha256": "e9b7985d7eff121d7725460a273d9b956e740bb418b518dcb9657e292e489d11",
@@ -738,7 +738,7 @@
     "setup/test-plugin-manager.mjs.sha256": "b304bea5b33126b450d34277d959570992140ae84b1c2689f57d4728e842cf52",
     "setup/test-portable-ui-heartbeat.mjs.sha256": "38b9577bf094b67d7cfc905f014500aecd1b424c19bdfdd924b396389b757a85",
     "setup/test-portable-ui-workflows.mjs.sha256": "8f868eda03882b37ba8fe8a5557d07ff1e8f627fb890a088401583393a8a46cf",
-    "setup/test-release-migration-contract.mjs.sha256": "01c1dbf93518efe8fc055059698fd69a8068379003e922db0888a5cc8cbd9ae8",
+    "setup/test-release-migration-contract.mjs.sha256": "444eb949210edefd6e44e036aa12ee56a3716862ee0be6824cdaf8bb2a272fee",
     "setup/test-release-plugin-layout.py.sha256": "9f13e316146cef90dc0550ee39ccdc657c77e2153b72f34080842444dec60835",
     "setup/test-remote-agent-ssh-rescue.mjs.sha256": "a29e54485c389dcd5526b9730e915438f4051240db9a97137e1b4dfbc81f4dbd",
     "setup/test-remote-workspace-backend.mjs.sha256": "0b227dc5e4f2d5a80b0cee0e52b12105a7398241e3ed6668228db4c48d6536df",
@@ -748,7 +748,7 @@
     "setup/test-selected-file-diff.mjs.sha256": "1ed95d7171abcf933f33012eb09ff5fed043390311a3a62e83b13e1ee3a888d0",
     "setup/test-session-capabilities.mjs.sha256": "736d246f98ba16c76d16967271a25ab079a17b9acc400b453f8113021ae11fd3",
     "setup/test-standalone-updater.mjs.sha256": "0f3de17818ff80cc3eccf0e8973f3b17a36c56d9ee765807c86db6d3ade36b20",
-    "setup/test-strict-stop.mjs.sha256": "4ef1ae4f21469069bb279de7bb89d596ac15a222305aa1b702aa3f743473275d",
+    "setup/test-strict-stop.mjs.sha256": "b92795be0429dd4fbef0881c8ee6d46eb94101f00c99fcf3d12e3b9fb3fd200f",
     "setup/test-tunnel-network-coexistence.mjs.sha256": "30b4800f2b45ec8482d4b99e0465c9df301b789cbe532d9abd8286ee2530eff7",
     "setup/test-update-launch-ack.mjs.sha256": "dd294a7fc5829514f1642703b1e20f9ba4f6303648c7fae612f2da1b1b674321",
     "setup/test-update-manifest-graph.py.sha256": "5e1c8cd326f9be230766515cd5f7a975d4e7bddcf558eac5d19b37f3224ca9be",
