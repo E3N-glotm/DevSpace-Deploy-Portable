@@ -130,6 +130,28 @@ function portableOwnedBySnapshot(pid, portableRoot, expectedStartTicks = "") {
   return String(result.stdout || "").trim() === "owned";
 }
 
+function managerRecognizesFixture(pid) {
+  // Ask the *same* ownership enumerator used by stop(), rather than relying
+  // on the deliberately broader stand-alone fixture predicate. In particular,
+  // command-line root matches alone do not establish ownership of node.exe.
+  const probe = spawnSync(sandboxNode, [manager, "portable-processes"], {
+    cwd: root,
+    env: {
+      ...process.env,
+      DEVSPACE_PORTABLE_CONFIG_DIR: configDir,
+      DEVSPACE_PORTABLE_STATE_DIR: stateDir,
+      DEVSPACE_PORTABLE_RUN_DIR: runDir,
+    },
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 30_000,
+  });
+  assert.equal(probe.status, 0, `Portable ownership probe failed (exit=${probe.status})`);
+  const reported = JSON.parse(probe.stdout);
+  const matches = (reported.processes || []).filter((item) => item.pid === pid);
+  return { recognized: matches.length === 1, rootAlias: matches[0]?.executablePath || "" };
+}
+
 
 function listenerExists(port) {
   const result = spawnSync("netstat.exe", ["-ano", "-p", "tcp"], {
@@ -202,6 +224,10 @@ try {
     `orphan test process ${pid} never entered the Portable ownership snapshot before stop; `
     + `alive=${processExists(pid)}; startIdentityUnchanged=${processStartTicks(pid) === orphanStartTicks}; `
     + `ownedWithoutStartIdentity=${portableOwnedBySnapshot(pid, root)}`);
+  const managerBefore = managerRecognizesFixture(pid);
+  assert.equal(managerBefore.recognized, true,
+    `Fixture ${pid} is not recognized by the production Portable ownership enumerator before stop; `
+    + `broaderFixturePredicate=${portableOwnedBySnapshot(pid, root, orphanStartTicks)}`);
 
   const stopped = spawnSync(sandboxNode, [manager, "stop"], {
     cwd: root,
@@ -225,11 +251,14 @@ try {
   // GitHub runner even after the manager has already removed it from the
   // ownership snapshot, so do not make the test stricter than the product
   // contract by requiring immediate process-object disappearance here.
-  assert.equal(
-    portableOwnedBySnapshot(pid, root, orphanStartTicks),
-    false,
-    `Portable-owned orphan process ${pid} is still visible to the ownership snapshot after stop`,
-  );
+  const orphanRemainsOwned = portableOwnedBySnapshot(pid, root, orphanStartTicks);
+  if (orphanRemainsOwned) {
+    const managerAfter = managerRecognizesFixture(pid);
+    assert.equal(orphanRemainsOwned, false,
+      `Portable-owned orphan ${pid} remains after stop; managerRecognizedBefore=${managerBefore.recognized}; `
+      + `managerRecognizedAfter=${managerAfter.recognized}; sameCreationIdentity=${processStartTicks(pid) === orphanStartTicks}; `
+      + `managerStopOutput=${JSON.stringify(String(stopped.stdout || "").trim())}`);
+  }
   assert.equal(
     processStartTicks(externalPid),
     externalStartTicks,
