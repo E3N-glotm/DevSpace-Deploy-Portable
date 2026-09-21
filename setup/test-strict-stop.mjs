@@ -30,6 +30,10 @@ assert.match(sourceManagerText, /CreationTicks/,
   "Portable process snapshots must carry process creation identity so stale ParentProcessId values cannot invent ancestry after PID reuse");
 assert.match(sourceManagerText, /canonicalRoot = fs\.realpathSync\.native\(ROOT\)/,
   "Portable ownership must resolve Windows short and long filesystem aliases to the same existing root");
+assert.match(sourceManagerText, /\$root=\(\$?[^\r\n]+\)\.TrimEnd\('\\\\'\)/,
+  "Portable ownership must preserve the literal absolute root before adding GetFullPath aliases");
+assert.match(sourceManagerText, /\$roots=@\(\$root,\$canonicalRoot,\[IO\.Path\]::GetFullPath\(\$root\),\[IO\.Path\]::GetFullPath\(\$canonicalRoot\)\)/,
+  "Path-normalized roots must supplement rather than replace original process-path spellings");
 assert.match(sourceManagerText, /\$cliPaths=@\(\$roots \| ForEach-Object[\s\S]{0,2500}\$exactCli=\(\$name -eq 'node\.exe' -and \$cmd[\s\S]{0,150}\.IndexOf\(\$_,\[StringComparison\]::OrdinalIgnoreCase\)/,
   "Only exact root-scoped cli.js arguments may establish fallback ownership across 8.3 aliases");
 assert.match(sourceManagerText, /return parent\.creationTicks <= child\.creationTicks/,

@@ -2332,8 +2332,13 @@ function portableProcessSnapshot() {
   try { canonicalRoot = fs.realpathSync.native(ROOT); } catch {}
   const script = [
     "$ErrorActionPreference='Stop'",
-    `$root=[IO.Path]::GetFullPath(${powershellLiteral(ROOT)}).TrimEnd('\\')`,
-    `$canonicalRoot=[IO.Path]::GetFullPath(${powershellLiteral(canonicalRoot)}).TrimEnd('\\')`,
+    // Preserve the exact root spelling supplied by Node. On hosted Windows,
+    // GetFullPath() can add an extended-path prefix (three extra characters)
+    // to an already absolute root; a CIM ExecutablePath/CommandLine that uses
+    // the ordinary spelling then fails every rooted StartsWith/IndexOf check.
+    // Include normalized spellings as additional aliases, never as replacements.
+    `$root=(${powershellLiteral(ROOT)}).TrimEnd('\\')`,
+    `$canonicalRoot=(${powershellLiteral(canonicalRoot)}).TrimEnd('\\')`,
     "$all=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,@{n='CreationTicks';e={try{$_.CreationDate.ToUniversalTime().Ticks}catch{0}}})",
     "$wrappers=@('cmd.exe','wscript.exe','cscript.exe','powershell.exe','pwsh.exe','bash.exe','sh.exe')",
     // Exclude the snapshot PowerShell itself. Its -Command text necessarily
@@ -2344,7 +2349,7 @@ function portableProcessSnapshot() {
     // ExecutablePath while preserving the short Portable cli.js path in the
     // service argv. Trust only the exact root-scoped CLI path, not an arbitrary
     // node.exe merely listening on the configured port or mentioning DevSpace.
-    "$roots=@($root,$canonicalRoot) | Select-Object -Unique",
+    "$roots=@($root,$canonicalRoot,[IO.Path]::GetFullPath($root),[IO.Path]::GetFullPath($canonicalRoot)) | Select-Object -Unique",
     "$cliPaths=@($roots | ForEach-Object { ($_+'\\app\\node_modules\\@waishnav\\devspace\\dist\\cli.js').Replace('\\','/') })",
     // A Windows runner can report the long executable path even when ROOT
     // and realpathSync.native(ROOT) still contain an 8.3 directory alias.
