@@ -87,9 +87,12 @@ function processStartTicks(pid) {
     "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
   );
   const command = [
-    `$p=Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue`,
+    // Match the production manager's Win32_Process.CreationDate identity.
+    // Get-Process.StartTime may differ in tick precision/rounding, causing a
+    // still-running owned child to be misclassified as a recycled PID.
+    `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}" -ErrorAction SilentlyContinue`,
     "if(-not $p){exit 0}",
-    "try{$p.StartTime.ToUniversalTime().Ticks}catch{''}",
+    "try{$p.CreationDate.ToUniversalTime().Ticks}catch{''}",
   ].join(";");
   const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
     encoding: "utf8",
@@ -182,6 +185,23 @@ try {
   const externalStartTicks = processStartTicks(externalPid);
   assert.ok(orphanStartTicks, `orphan test process ${pid} has no stable start identity`);
   assert.ok(externalStartTicks, `external descendant ${externalPid} has no stable start identity`);
+  // Process existence and a Get-Process StartTime do not establish that the
+  // detached child is already visible to the CIM ownership enumerator used by
+  // stopPortableOwnedProcesses(). Hosted Windows can publish those observations
+  // in different orders. Do not race stop against a fixture it cannot yet see:
+  // this test must start from a proven Portable-owned process, not merely a PID.
+  let ownershipReady = false;
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    if (portableOwnedBySnapshot(pid, root, orphanStartTicks)) {
+      ownershipReady = true;
+      break;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+  }
+  assert.equal(ownershipReady, true,
+    `orphan test process ${pid} never entered the Portable ownership snapshot before stop; `
+    + `alive=${processExists(pid)}; startIdentityUnchanged=${processStartTicks(pid) === orphanStartTicks}; `
+    + `ownedWithoutStartIdentity=${portableOwnedBySnapshot(pid, root)}`);
 
   const stopped = spawnSync(sandboxNode, [manager, "stop"], {
     cwd: root,

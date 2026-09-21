@@ -119,11 +119,20 @@ function curlErrorKind(exitCode, stderr) {
 }
 
 function curlHttpObservation(url, network, timeoutMs = 4_000) {
-  const forced = String(process.env.DEVSPACE_TEST_PUBLIC_HEALTH || "").trim().toLowerCase();
+  // Fixture inputs are accepted only through the dedicated self-test entry.
+  // Normal tunnel operation must always use a real health observation.
+  const forced = isPublicHealthSelfTest
+    ? String(process.env.DEVSPACE_TEST_PUBLIC_HEALTH || "").trim().toLowerCase()
+    : "";
   const local = /^http:\/\/(?:127\.0\.0\.1|localhost|\[?::1\]?)(?::|\/)/i.test(String(url));
   if (forced === "healthy") return { status: 401, exitCode: 0, errorKind: "", errorDetail: "" };
   if (forced === "local-failing") return { status: 0, exitCode: 7, errorKind: "connect", errorDetail: "test local failure" };
-  if (!local && ["failing", "dns-failing", "connect-failing", "timeout-failing", "tls-failing"].includes(forced)) {
+  const forcedPublicFailure = ["failing", "dns-failing", "connect-failing", "timeout-failing", "tls-failing"].includes(forced);
+  // A simulated PUBLIC failure must not probe a real loopback MCP listener.
+  // Such a listener exists on developer machines but not on GitHub runners,
+  // making the old fixture host-dependent and masking the missing test stub.
+  if (local && forcedPublicFailure) return { status: 401, exitCode: 0, errorKind: "", errorDetail: "" };
+  if (!local && forcedPublicFailure) {
     const map = {
       failing: [28, "timeout"],
       "dns-failing": [6, "dns"],

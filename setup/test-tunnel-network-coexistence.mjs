@@ -125,8 +125,9 @@ try {
   const publicBroken = resolvePublicHealth("failing");
   assert.equal(publicBroken.actionable, true,
     `public-health fixture must be actionable even on hosted Windows; observation=${JSON.stringify(publicBroken)}`);
+  assert.equal(publicBroken.localStatus, 401,
+    "public-failure simulation must not depend on any real MCP listener at the fixture port");
   assert.equal(publicBroken.healthy, false);
-  assert.equal(publicBroken.localStatus, 401);
   assert.equal(publicBroken.publicStatus, 0);
   assert.equal(publicBroken.publicCurlExitCode, 28);
   assert.equal(publicBroken.publicErrorKind, "timeout");
