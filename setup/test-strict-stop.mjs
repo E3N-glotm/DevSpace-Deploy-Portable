@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -152,6 +152,44 @@ function managerRecognizesFixture(pid) {
   return { recognized: matches.length === 1, rootAlias: matches[0]?.executablePath || "" };
 }
 
+function diagnoseFixtureOwnership(pid) {
+  // Emit only structural evidence. Never print the full command line, which
+  // could contain unrelated credentials on a shared CI or developer machine.
+  const powershell = join(process.env.SystemRoot || "C:\\Windows",
+    "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const cmd = `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}' -ErrorAction SilentlyContinue; if($p){$p | Select-Object Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress}`;
+  const probe = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", cmd], {
+    encoding: "utf8", windowsHide: true, timeout: 10_000,
+  });
+  if (probe.status !== 0 || !String(probe.stdout || "").trim()) {
+    return { cimReadable: false, exitCode: probe.status };
+  }
+  const item = JSON.parse(probe.stdout);
+  const norm = (value) => String(value || "").replaceAll("\\", "/").toLowerCase();
+  const exe = norm(item.ExecutablePath);
+  const args = norm(item.CommandLine);
+  const portableRoot = norm(root);
+  const sandboxExecutable = norm(sandboxNode);
+  let actualIdentity = null;
+  let expectedIdentity = null;
+  try { actualIdentity = statSync(item.ExecutablePath, { bigint: true }); } catch {}
+  try { expectedIdentity = statSync(sandboxNode, { bigint: true }); } catch {}
+  return {
+    cimReadable: true,
+    processName: String(item.Name || ""),
+    executableInsideRoot: exe.startsWith(`${portableRoot}/`),
+    executableMatchesLiteralSandboxPath: exe === sandboxExecutable,
+    executableEndsWithBundledRuntime: exe.endsWith("/runtime/node/node.exe"),
+    commandMentionsRoot: args.includes(`${portableRoot}/`),
+    commandMentionsExactCli: args.includes(`${portableRoot}/app/node_modules/@waishnav/devspace/dist/cli.js`),
+    expectedFileIdAvailable: Boolean(expectedIdentity && expectedIdentity.ino !== 0n),
+    actualFileIdAvailable: Boolean(actualIdentity && actualIdentity.ino !== 0n),
+    sameRuntimeFile: Boolean(actualIdentity && expectedIdentity
+      && actualIdentity.ino !== 0n && actualIdentity.dev === expectedIdentity.dev
+      && actualIdentity.ino === expectedIdentity.ino),
+  };
+}
+
 
 function listenerExists(port) {
   const result = spawnSync("netstat.exe", ["-ano", "-p", "tcp"], {
@@ -227,7 +265,8 @@ try {
   const managerBefore = managerRecognizesFixture(pid);
   assert.equal(managerBefore.recognized, true,
     `Fixture ${pid} is not recognized by the production Portable ownership enumerator before stop; `
-    + `broaderFixturePredicate=${portableOwnedBySnapshot(pid, root, orphanStartTicks)}`);
+    + `broaderFixturePredicate=${portableOwnedBySnapshot(pid, root, orphanStartTicks)}; `
+    + `structuralEvidence=${JSON.stringify(managerBefore.recognized ? null : diagnoseFixtureOwnership(pid))}`);
 
   const stopped = spawnSync(sandboxNode, [manager, "stop"], {
     cwd: root,
