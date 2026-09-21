@@ -6,7 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 // Test data stays under the existing E-drive source tree, not a C-drive worktree.
-const sandbox = mkdtempSync(join(root, "reports", ".tmp-auto-continuation-"));
+// A fresh CI checkout does not contain the gitignored reports directory.
+const reportsDir = join(root, "reports");
+mkdirSync(reportsDir, { recursive: true });
+const sandbox = mkdtempSync(join(reportsDir, ".tmp-auto-continuation-"));
 const stateDir = join(sandbox, "state");
 const configDir = join(sandbox, "config");
 mkdirSync(stateDir);
