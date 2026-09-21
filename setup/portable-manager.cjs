@@ -2284,9 +2284,16 @@ function powershellLiteral(value) {
 }
 
 function portableProcessSnapshot() {
+  // A Windows runner may launch the Portable manager under an 8.3 path such
+  // as RUNNER~1 while Win32_Process reports the same executable's long path.
+  // Resolve both root aliases from the *existing root itself*; never match a
+  // generic cli.js basename or claim an unrelated node.exe by its port.
+  let canonicalRoot = ROOT;
+  try { canonicalRoot = fs.realpathSync.native(ROOT); } catch {}
   const script = [
     "$ErrorActionPreference='Stop'",
     `$root=[IO.Path]::GetFullPath(${powershellLiteral(ROOT)}).TrimEnd('\\')`,
+    `$canonicalRoot=[IO.Path]::GetFullPath(${powershellLiteral(canonicalRoot)}).TrimEnd('\\')`,
     "$all=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,@{n='CreationTicks';e={try{$_.CreationDate.ToUniversalTime().Ticks}catch{0}}})",
     "$wrappers=@('cmd.exe','wscript.exe','cscript.exe','powershell.exe','pwsh.exe','bash.exe','sh.exe')",
     // Exclude the snapshot PowerShell itself. Its -Command text necessarily
@@ -2297,8 +2304,9 @@ function portableProcessSnapshot() {
     // ExecutablePath while preserving the short Portable cli.js path in the
     // service argv. Trust only the exact root-scoped CLI path, not an arbitrary
     // node.exe merely listening on the configured port or mentioning DevSpace.
-    "$cli=($root+'\\app\\node_modules\\@waishnav\\devspace\\dist\\cli.js').Replace('\\','/')",
-    "$owned=@($all | Where-Object {$exe=[string]$_.ExecutablePath;$cmd=[string]$_.CommandLine;$name=([string]$_.Name).ToLowerInvariant();$processId=[int]$_.ProcessId;$normalizedCmd=$cmd.Replace('\\','/');$exactCli=($name -eq 'node.exe' -and $cmd -and $normalizedCmd.IndexOf($cli,[StringComparison]::OrdinalIgnoreCase) -ge 0);$processId -ne $PID -and (($exe -and $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or (($wrappers -contains $name) -and $cmd -and $cmd.IndexOf($root,[StringComparison]::OrdinalIgnoreCase) -ge 0) -or $exactCli)})",
+    "$roots=@($root,$canonicalRoot) | Select-Object -Unique",
+    "$cliPaths=@($roots | ForEach-Object { ($_+'\\app\\node_modules\\@waishnav\\devspace\\dist\\cli.js').Replace('\\','/') })",
+    "$owned=@($all | Where-Object {$exe=[string]$_.ExecutablePath;$cmd=[string]$_.CommandLine;$name=([string]$_.Name).ToLowerInvariant();$processId=[int]$_.ProcessId;$normalizedCmd=$cmd.Replace('\\','/');$exactCli=($name -eq 'node.exe' -and $cmd -and @($cliPaths | Where-Object {$normalizedCmd.IndexOf($_,[StringComparison]::OrdinalIgnoreCase) -ge 0}).Count -gt 0);$ownedExe=($exe -and @($roots | Where-Object {$exe.StartsWith(($_+'\\'),[StringComparison]::OrdinalIgnoreCase)}).Count -gt 0);$ownedWrapper=(($wrappers -contains $name) -and $cmd -and @($roots | Where-Object {$cmd.IndexOf(($_+'\\'),[StringComparison]::OrdinalIgnoreCase) -ge 0}).Count -gt 0);$processId -ne $PID -and ($ownedExe -or $ownedWrapper -or $exactCli)})",
     "$owned | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationTicks | ConvertTo-Json -Compress",
   ].join(";");
   const result = childProcess.spawnSync(POWERSHELL_EXE, [
