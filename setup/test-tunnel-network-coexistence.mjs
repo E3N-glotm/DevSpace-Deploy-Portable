@@ -123,7 +123,8 @@ try {
   assert.equal(publicHealthy.localStatus, 401);
   assert.equal(publicHealthy.publicStatus, 401);
   const publicBroken = resolvePublicHealth("failing");
-  assert.equal(publicBroken.actionable, true);
+  assert.equal(publicBroken.actionable, true,
+    `public-health fixture must be actionable even on hosted Windows; observation=${JSON.stringify(publicBroken)}`);
   assert.equal(publicBroken.healthy, false);
   assert.equal(publicBroken.localStatus, 401);
   assert.equal(publicBroken.publicStatus, 0);
