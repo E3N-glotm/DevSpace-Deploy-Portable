@@ -30,7 +30,7 @@ assert.match(sourceManagerText, /CreationTicks/,
   "Portable process snapshots must carry process creation identity so stale ParentProcessId values cannot invent ancestry after PID reuse");
 assert.match(sourceManagerText, /canonicalRoot = fs\.realpathSync\.native\(ROOT\)/,
   "Portable ownership must resolve Windows short and long filesystem aliases to the same existing root");
-assert.match(sourceManagerText, /\$cliPaths=@\(\$roots \| ForEach-Object[\s\S]{0,350}\$exactCli=\(\$name -eq 'node\.exe' -and \$cmd[\s\S]{0,150}\.IndexOf\(\$_,\[StringComparison\]::OrdinalIgnoreCase\)/,
+assert.match(sourceManagerText, /\$cliPaths=@\(\$roots \| ForEach-Object[\s\S]{0,2500}\$exactCli=\(\$name -eq 'node\.exe' -and \$cmd[\s\S]{0,150}\.IndexOf\(\$_,\[StringComparison\]::OrdinalIgnoreCase\)/,
   "Only exact root-scoped cli.js arguments may establish fallback ownership across 8.3 aliases");
 assert.match(sourceManagerText, /return parent\.creationTicks <= child\.creationTicks/,
   "Portable stop ancestry must reject a reused parent PID whose current process started after the child");

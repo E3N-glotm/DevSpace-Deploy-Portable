@@ -2346,7 +2346,11 @@ function portableProcessSnapshot() {
     // node.exe merely listening on the configured port or mentioning DevSpace.
     "$roots=@($root,$canonicalRoot) | Select-Object -Unique",
     "$cliPaths=@($roots | ForEach-Object { ($_+'\\app\\node_modules\\@waishnav\\devspace\\dist\\cli.js').Replace('\\','/') })",
-    "$owned=@($all | Where-Object {$exe=[string]$_.ExecutablePath;$cmd=[string]$_.CommandLine;$name=([string]$_.Name).ToLowerInvariant();$processId=[int]$_.ProcessId;$normalizedCmd=$cmd.Replace('\\','/');$exactCli=($name -eq 'node.exe' -and $cmd -and @($cliPaths | Where-Object {$normalizedCmd.IndexOf($_,[StringComparison]::OrdinalIgnoreCase) -ge 0}).Count -gt 0);$ownedExe=($exe -and @($roots | Where-Object {$exe.StartsWith(($_+'\\'),[StringComparison]::OrdinalIgnoreCase)}).Count -gt 0);$ownedWrapper=(($wrappers -contains $name) -and $cmd -and @($roots | Where-Object {$cmd.IndexOf(($_+'\\'),[StringComparison]::OrdinalIgnoreCase) -ge 0}).Count -gt 0);$processId -ne $PID -and ($ownedExe -or $ownedWrapper -or $exactCli)})",
+    // A Windows runner can report the long executable path even when ROOT
+    // and realpathSync.native(ROOT) still contain an 8.3 directory alias.
+    // Only admit such node.exe candidates for a *second*, exact file-identity
+    // check in Node below; a matching basename or command line is insufficient.
+    "$owned=@($all | Where-Object {$exe=[string]$_.ExecutablePath;$cmd=[string]$_.CommandLine;$name=([string]$_.Name).ToLowerInvariant();$processId=[int]$_.ProcessId;$normalizedCmd=$cmd.Replace('\\','/');$exactCli=($name -eq 'node.exe' -and $cmd -and @($cliPaths | Where-Object {$normalizedCmd.IndexOf($_,[StringComparison]::OrdinalIgnoreCase) -ge 0}).Count -gt 0);$ownedExe=($exe -and @($roots | Where-Object {$exe.StartsWith(($_+'\\'),[StringComparison]::OrdinalIgnoreCase)}).Count -gt 0);$ownedWrapper=(($wrappers -contains $name) -and $cmd -and @($roots | Where-Object {$cmd.IndexOf(($_+'\\'),[StringComparison]::OrdinalIgnoreCase) -ge 0}).Count -gt 0);$nodeAliasCandidate=($name -eq 'node.exe' -and $exe -and $exe.EndsWith('\\runtime\\node\\node.exe',[StringComparison]::OrdinalIgnoreCase) -and $cmd -and @($roots | Where-Object {$cmd.IndexOf(($_+'\\'),[StringComparison]::OrdinalIgnoreCase) -ge 0}).Count -gt 0);$processId -ne $PID -and ($ownedExe -or $ownedWrapper -or $exactCli -or $nodeAliasCandidate)})",
     "$owned | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationTicks | ConvertTo-Json -Compress",
   ].join(";");
   const result = childProcess.spawnSync(POWERSHELL_EXE, [
@@ -2363,6 +2367,10 @@ function portableProcessSnapshot() {
   const text = String(result.stdout || "").trim();
   if (!text) return [];
   const parsed = JSON.parse(text);
+  const roots = [ROOT, canonicalRoot].map((item) => item.toLowerCase().replace(/\\/g, "/"));
+  const expectedNodeIdentity = (() => {
+    try { return fs.statSync(NODE_EXE, { bigint: true }); } catch { return null; }
+  })();
   return (Array.isArray(parsed) ? parsed : [parsed]).map((item) => ({
     pid: Number(item.ProcessId),
     parentPid: Number(item.ParentProcessId),
@@ -2370,7 +2378,27 @@ function portableProcessSnapshot() {
     name: String(item.Name || ""),
     executablePath: String(item.ExecutablePath || ""),
     commandLine: String(item.CommandLine || ""),
-  })).filter((item) => Number.isInteger(item.pid) && item.pid > 0);
+  })).filter((item) => {
+    if (!Number.isInteger(item.pid) || item.pid <= 0) return false;
+    // Preserve every process already proven owned by the original path/CLI
+    // predicate. The extra Windows 8.3 candidate must resolve to the exact
+    // bundled runtime file on the same volume (NTFS dev + file ID), and its
+    // command line must still refer to this Portable root. This never claims
+    // another node.exe merely for sharing a basename, image, or port.
+    if (item.name.toLowerCase() !== "node.exe"
+      || !item.executablePath.toLowerCase().replace(/\\/g, "/").endsWith("/runtime/node/node.exe")) return true;
+    const exe = item.executablePath.toLowerCase().replace(/\\/g, "/");
+    const cmd = item.commandLine.toLowerCase().replace(/\\/g, "/");
+    if (roots.some((root) => exe.startsWith(`${root}/`)
+      || cmd.includes(`${root}/app/node_modules/@waishnav/devspace/dist/cli.js`))) return true;
+    if (!expectedNodeIdentity || expectedNodeIdentity.ino === 0n
+      || !roots.some((root) => cmd.includes(`${root}/`))) return false;
+    try {
+      const actual = fs.statSync(item.executablePath, { bigint: true });
+      return actual.ino !== 0n && actual.dev === expectedNodeIdentity.dev
+        && actual.ino === expectedNodeIdentity.ino;
+    } catch { return false; }
+  });
 }
 
 function invokedFromLocalMcpServiceTree() {
