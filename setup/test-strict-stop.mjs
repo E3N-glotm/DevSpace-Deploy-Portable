@@ -157,7 +157,7 @@ function diagnoseFixtureOwnership(pid) {
   // could contain unrelated credentials on a shared CI or developer machine.
   const powershell = join(process.env.SystemRoot || "C:\\Windows",
     "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const cmd = `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}' -ErrorAction SilentlyContinue; if($p){$p | Select-Object Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress}`;
+  const cmd = `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}' -ErrorAction SilentlyContinue; if($p){$bulk=@(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq ${Number(pid)} }); [pscustomobject]@{Name=$p.Name;ExecutablePath=$p.ExecutablePath;CommandLine=$p.CommandLine;BulkVisible=($bulk.Count -eq 1)} | ConvertTo-Json -Compress}`;
   const probe = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", cmd], {
     encoding: "utf8", windowsHide: true, timeout: 10_000,
   });
@@ -176,6 +176,7 @@ function diagnoseFixtureOwnership(pid) {
   try { expectedIdentity = statSync(sandboxNode, { bigint: true }); } catch {}
   return {
     cimReadable: true,
+    bulkEnumerationVisible: Boolean(item.BulkVisible),
     processName: String(item.Name || ""),
     executableInsideRoot: exe.startsWith(`${portableRoot}/`),
     executableMatchesLiteralSandboxPath: exe === sandboxExecutable,
@@ -262,7 +263,14 @@ try {
     `orphan test process ${pid} never entered the Portable ownership snapshot before stop; `
     + `alive=${processExists(pid)}; startIdentityUnchanged=${processStartTicks(pid) === orphanStartTicks}; `
     + `ownedWithoutStartIdentity=${portableOwnedBySnapshot(pid, root)}`);
-  const managerBefore = managerRecognizesFixture(pid);
+  let managerBefore = managerRecognizesFixture(pid);
+  // Hosted Windows can publish the targeted CIM process before it appears in
+  // the bulk snapshot. Probe the actual production predicate, not a weaker
+  // fixture-specific approximation, before starting an ownership-based stop.
+  for (let attempt = 0; attempt < 12 && !managerBefore.recognized; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+    managerBefore = managerRecognizesFixture(pid);
+  }
   assert.equal(managerBefore.recognized, true,
     `Fixture ${pid} is not recognized by the production Portable ownership enumerator before stop; `
     + `broaderFixturePredicate=${portableOwnedBySnapshot(pid, root, orphanStartTicks)}; `
