@@ -157,7 +157,7 @@ function diagnoseFixtureOwnership(pid) {
   // could contain unrelated credentials on a shared CI or developer machine.
   const powershell = join(process.env.SystemRoot || "C:\\Windows",
     "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-  const cmd = `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}' -ErrorAction SilentlyContinue; if($p){$bulk=@(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq ${Number(pid)} }); [pscustomobject]@{Name=$p.Name;ExecutablePath=$p.ExecutablePath;CommandLine=$p.CommandLine;BulkVisible=($bulk.Count -eq 1)} | ConvertTo-Json -Compress}`;
+  const cmd = `$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${Number(pid)}' -ErrorAction SilentlyContinue; if($p){$bulk=@(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -eq ${Number(pid)} }); [pscustomobject]@{Name=$p.Name;ExecutablePath=$p.ExecutablePath;CommandLine=$p.CommandLine;BulkVisible=($bulk.Count -eq 1);BulkExecutablePopulated=([bool]$bulk[0].ExecutablePath);BulkCommandPopulated=([bool]$bulk[0].CommandLine);BulkExecutableEqualsTarget=([string]$bulk[0].ExecutablePath -eq [string]$p.ExecutablePath);BulkCommandEqualsTarget=([string]$bulk[0].CommandLine -eq [string]$p.CommandLine)} | ConvertTo-Json -Compress}`;
   const probe = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", cmd], {
     encoding: "utf8", windowsHide: true, timeout: 10_000,
   });
@@ -197,6 +197,10 @@ function diagnoseFixtureOwnership(pid) {
   return {
     cimReadable: true,
     bulkEnumerationVisible: Boolean(item.BulkVisible),
+    bulkExecutablePopulated: Boolean(item.BulkExecutablePopulated),
+    bulkCommandPopulated: Boolean(item.BulkCommandPopulated),
+    bulkExecutableEqualsTarget: Boolean(item.BulkExecutableEqualsTarget),
+    bulkCommandEqualsTarget: Boolean(item.BulkCommandEqualsTarget),
     processName: String(item.Name || ""),
     executableInsideRoot: exe.startsWith(`${portableRoot}/`),
     executableMatchesLiteralSandboxPath: exe === sandboxExecutable,
@@ -209,6 +213,8 @@ function diagnoseFixtureOwnership(pid) {
       && actualIdentity.ino !== 0n && actualIdentity.dev === expectedIdentity.dev
       && actualIdentity.ino === expectedIdentity.ino),
     powershellPredicate: predicateEvidence,
+    literalRootLength: String(root).length,
+    literalRootMatchesPredicateLength: String(root).length === Number(predicateEvidence.RootLength),
   };
 }
 
