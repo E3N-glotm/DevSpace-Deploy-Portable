@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -44,7 +43,10 @@ assert.match(sourceManagerText, /const terminateExactServiceInstance = \(pid, ex
   "the central listener termination helper must compare process creation identities before directly killing the service");
 assert.match(sourceManagerText, /portDrainDeadline[\s\S]{0,1800}provenListenerPids\.get\(pid\)[\s\S]{0,800}terminateExactServiceInstance\(pid, expectedCreationTicks\)/,
   "the port-drain phase must keep terminating only the exact previously-proven listener identity instead of merely extending a timeout");
-const temporary = await mkdtemp(join(tmpdir(), "devspace-strict-stop-"));
+// Keep disposable test trees under the original E-drive source checkout.
+// No C-drive worktrees or temporary Portable roots are permitted.
+await mkdir(join(sourceRoot, "reports"), {recursive:true});
+const temporary = await mkdtemp(join(sourceRoot,"reports",".tmp-devspace-strict-stop-"));
 // Run the destructive stop test from a disposable Portable root. Running the
 // real worktree manager would make ROOT point at the active source checkout and
 // can terminate unrelated DevSpace test/tool processes that happen to belong to
@@ -255,6 +257,7 @@ try {
   await mkdir(stateDir, { recursive: true });
   await mkdir(runDir, { recursive: true });
   await copyFile(sourceManager, manager);
+  await copyFile(join(setupDir, "remote-ssh-admin.cjs"), join(sandboxSetupDir, "remote-ssh-admin.cjs"));
   await copyFile(process.execPath, sandboxNode);
   await writeFile(join(configDir, "deployment.json"), JSON.stringify({ port: 17689, tunnelProvider: "ngrok" }), "utf8");
   const launched = spawnSync(sandboxNode, ["-e", launcherCode], {

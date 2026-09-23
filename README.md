@@ -7,6 +7,8 @@
 Portable Protocol：**1.5**  
 上游核心基线：[`Waishnav/devspace`](https://github.com/Waishnav/devspace) `1.0.7`（选择性同步，不覆盖 Portable 扩展）
 
+> **桌面端开发版更新（1.1.62 dev4）：** 当前开发分支的发行包由 Electron + React 桌面界面替代旧版 WinForms；`DevSpace-Portable.exe` 与 `DevSpace-Portable-Next.exe` 都启动同一个新界面，旧 UI 不随 dev4 发行包分发。下面的旧控制中心截图和部分操作说明属于历史版本文档，不代表 dev4 的实际界面。dev4 仍需 Remote Agent / Computer Use 的真实环境验收；正式 D-live 未随源码构建自动升级。详见 [dev4 说明](docs/releases/DEV-1.1.62-dev4.md)。
+
 > 本仓库只维护源码、构建脚本、测试、文档和体积可控的 Portable 核心分支。Node、Git、cloudflared、ngrok、完整 `node_modules`、运行状态与发行 ZIP 不进入 Git 历史；完整 Windows 便携包发布在 GitHub Releases。
 
 ![DevSpace Portable 控制中心](docs/assets/devspace-portable-control-center.png)

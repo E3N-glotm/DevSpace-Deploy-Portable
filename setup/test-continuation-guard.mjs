@@ -509,10 +509,14 @@ assert.match(coordinator, /do not produce a final response after discovery\/stat
   "hidden recovery context must forbid early finalization while runnable milestones remain");
 assert.match(coordinator, /discovery-only\/status-only or one-tool-and-final turn is an invalid automatic continuation/,
   "hidden recovery context must make substantive post-status work mandatory whenever runnable milestones remain");
-assert.match(coordinator, /const modelContextUpdate = updateModelContextBestEffort[\s\S]{0,800}callSender\("claim"[\s\S]{0,900}await modelContextUpdate[\s\S]{0,1400}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task,\s*deliveryToken\),\s*async \(\) =>/,
+assert.match(coordinator, /const modelContextUpdate = updateModelContextBestEffort[\s\S]{0,800}callSender\("claim"[\s\S]{0,900}await modelContextUpdate[\s\S]{0,1400}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task,\s*deliveryToken\),\s*\(\) =>/,
   "automatic delivery may overlap advisory model-context hydration with claim, but must still re-authorize synthetic ownership immediately before the visible Host trigger");
-assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task,\s*deliveryToken\),\s*async \(\) => \{[\s\S]{0,800}callTask\("status"\)[\s\S]{0,600}!terminal\(latest\.task\)/,
-  "the irreversible Host send must have a final authoritative terminal-state recheck");
+assert.match(coordinator, /sendFollowUp\(visibleContinuationTrigger\(state\.task,\s*deliveryToken\),\s*\(\) => \{[\s\S]{0,900}callTask\("status"\)[\s\S]{0,600}!terminal\(latest\.task\)/,
+  "the first irreversible send must rely on final authorization CAS; retries must recheck authoritative task ownership");
+assert.match(coordinator, /const verdict = beforeSend\(\);[\s\S]{0,800}if \(verdict === true\) \{[\s\S]{0,120}return;/,
+  "first authorized Host dispatch must not insert an asynchronous preflight that could strand DELIVERING after iframe teardown");
+assert.match(coordinator, /const preflight = ensureStillRunnable\(\);\s*if \(preflight\) await preflight;/,
+  "only retries with an unresolved preflight may await before invoking the Host message API");
 assert.match(coordinator, /function acceptTask\([\s\S]{0,1700}terminal\(state\.task\)[\s\S]{0,300}stopSupervisor\(\)[\s\S]{0,200}stopLifecycleRefresh\(\)/,
   "observing terminal state must synchronously cancel supervisor and lifecycle timers");
 assert.match(runtimeStateSource, /closeTerminalContinuationArtifacts\([\s\S]{0,5200}state='NO_WORK'[\s\S]{0,3400}delivery_token=null[\s\S]{0,2200}stall_armed_at=null/,

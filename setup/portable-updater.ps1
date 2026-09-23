@@ -1934,16 +1934,27 @@ function Get-ProcessImagePath([System.Diagnostics.Process]$Process) {
     }
 }
 
+function Test-PortableUiImagePath([string]$Actual) {
+    if ([string]::IsNullOrWhiteSpace($Actual)) { return $false }
+    $allowed = @(
+        [IO.Path]::GetFullPath((Join-Path $Root "DevSpace-Portable.exe")),
+        [IO.Path]::GetFullPath((Join-Path $Root "ui-next\runtime\electron.exe"))
+    )
+    foreach ($expected in $allowed) {
+        if ($Actual -ieq $expected) { return $true }
+    }
+    return $false
+}
+
 function Stop-ValidatedPortableUiProcess([int]$ProcessId) {
     if ($ProcessId -le 0) { return $false }
     $process = $null
     try { $process = Get-Process -Id $ProcessId -ErrorAction Stop }
     catch { return $false }
     try {
-        $expected = [IO.Path]::GetFullPath((Join-Path $Root "DevSpace-Portable.exe"))
         $actual = Get-ProcessImagePath $process
-        if ([string]::IsNullOrWhiteSpace($actual) -or -not ($actual -ieq $expected)) {
-            throw "Refusing to stop PID $ProcessId because it is not this Portable installation's DevSpace-Portable.exe."
+        if (-not (Test-PortableUiImagePath $actual)) {
+            throw "Refusing to stop PID $ProcessId because it is not this Portable installation's UI executable."
         }
         Write-UpdateLog "Closing validated Portable control center PID $ProcessId before applying program files."
         try { [void]$process.CloseMainWindow() } catch { }
@@ -1960,15 +1971,14 @@ function Stop-ValidatedPortableUiProcess([int]$ProcessId) {
 }
 
 function Stop-PortableUiBeforeApply([int]$RequestedUiPid) {
-    $expected = [IO.Path]::GetFullPath((Join-Path $Root "DevSpace-Portable.exe"))
     if ($RequestedUiPid -gt 0) {
         $process = $null
         try { $process = Get-Process -Id $RequestedUiPid -ErrorAction Stop }
         catch { return }
         try {
             $actual = Get-ProcessImagePath $process
-            if ([string]::IsNullOrWhiteSpace($actual) -or -not ($actual -ieq $expected)) {
-                throw "UiPid $RequestedUiPid is not this Portable installation's DevSpace-Portable.exe. No program files were changed."
+            if (-not (Test-PortableUiImagePath $actual)) {
+                throw "UiPid $RequestedUiPid does not belong to this Portable installation. No program files were changed."
             }
             Write-UpdateLog "Waiting for validated native UI PID $RequestedUiPid to exit before applying program files."
             if ($process.WaitForExit(90000)) { return }
@@ -1983,10 +1993,10 @@ function Stop-PortableUiBeforeApply([int]$RequestedUiPid) {
     # it invokes this backend with -UiPid 0. Direct/internal callers can reach
     # Apply without that handoff, though. Discover only the exact executable
     # path for this installation so we never terminate an unrelated process.
-    foreach ($process in @(Get-Process -Name "DevSpace-Portable" -ErrorAction SilentlyContinue)) {
+    foreach ($process in @(Get-Process -Name "DevSpace-Portable","electron" -ErrorAction SilentlyContinue)) {
         try {
             $actual = Get-ProcessImagePath $process
-            if (-not [string]::IsNullOrWhiteSpace($actual) -and ($actual -ieq $expected)) {
+            if (Test-PortableUiImagePath $actual) {
                 [void](Stop-ValidatedPortableUiProcess ([int]$process.Id))
             }
         } finally {

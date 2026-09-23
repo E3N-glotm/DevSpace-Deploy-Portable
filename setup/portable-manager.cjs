@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const childProcess = require("child_process");
+const {remoteSshAdminFactory} = require("./remote-ssh-admin.cjs");
 const http = require("http");
 const dns = require("dns").promises;
 const { pathToFileURL } = require("url");
@@ -21,6 +22,7 @@ const AUTH_FILE = path.join(CONFIG_DIR, "auth.json");
 const NGROK_CONFIG = path.join(CONFIG_DIR, "ngrok.yml");
 const CLOUDFLARE_TOKEN_FILE = path.join(CONFIG_DIR, "cloudflare.token");
 const DEPLOYMENT_FILE = path.join(CONFIG_DIR, "deployment.json");
+const SSH_PROFILES_FILE = path.join(DATA_DIR, "remote-agent-ssh-profiles.json");
 const STATE_DIR = process.env.DEVSPACE_PORTABLE_STATE_DIR
   ? path.resolve(process.env.DEVSPACE_PORTABLE_STATE_DIR)
   : path.join(DATA_DIR, "state");
@@ -46,6 +48,9 @@ const COMPUTER_USE_HELPER = path.join(ROOT, "app", "node_modules", "@waishnav", 
 const COMPUTER_USE_CAPTURE = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "helpers", "computer-use-capture.exe");
 const COMPUTER_USE_INPUT = path.join(ROOT, "app", "node_modules", "@waishnav", "devspace", "dist", "helpers", "computer-use-input.exe");
 const POWERSHELL_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+const SSH_ASKPASS_EXE = path.join(ROOT, "DevSpace-SshAskPass.exe");
+const BUNDLED_SSH_EXE = path.join(ROOT, "runtime", "git", "usr", "bin", "ssh.exe");
+const WINDOWS_SSH_EXE = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "OpenSSH", "ssh.exe");
 const REPORTS_DIR = path.join(ROOT, "reports");
 const CHECKSUM_FILE = path.join(ROOT, "SHA256SUMS.txt");
 const NODE_EXE = path.join(ROOT, "runtime", "node", "node.exe");
@@ -73,7 +78,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.62";
-const PORTABLE_DEV_ITERATION = "dev3";
+const PORTABLE_DEV_ITERATION = "dev4";
 const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
@@ -1947,6 +1952,12 @@ async function runRemoteAgentAdmin(action, payload = {}) {
     payload,
     publicBaseUrl: String(config.publicBaseUrl || ""),
   });
+}
+
+async function runRemoteSshAdmin(action, payload = {}) {
+  return remoteSshAdminFactory({
+    root: ROOT, readJson, writeJson, restrictAcl, remoteAdmin: runRemoteAgentAdmin,
+  }).handle(action, payload);
 }
 
 function installTasks() {
@@ -4482,6 +4493,9 @@ async function main() {
       stdoutJson(await runRemoteAgentAdmin("revoke", await readStdinJson()));
     } else if (command === "remote-agent-delete") {
       stdoutJson(await runRemoteAgentAdmin("delete", await readStdinJson()));
+    } else if (command.startsWith("remote-ssh-") &&
+      new Set(["list", "save", "test", "deploy", "recover", "delete"]).has(command.slice("remote-ssh-".length))) {
+      stdoutJson(await runRemoteSshAdmin(command.slice("remote-ssh-".length), await readStdinJson()));
     } else if (command === "log-paths") {
       const provider = selectedTunnelProvider();
       stdoutJson({

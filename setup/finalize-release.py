@@ -61,14 +61,17 @@ def validate_release_version(version: str, dev_iteration: str | None = None) -> 
             f"Portable version identity mismatch: package.json is {package_version}, requested release is {version}"
         )
 
-    _, dev_label = normalize_dev_iteration(dev_iteration)
+    iteration, dev_label = normalize_dev_iteration(dev_iteration)
     display_version = f"{version} {dev_label}" if dev_label else version
     expected_fragments = {
         ROOT / "scripts" / "start-devspace.sh": f'export DEVSPACE_PORTABLE_VERSION="{version}"',
         ROOT / "vendor" / "waishnav-devspace" / "dist" / "capabilities.js": f'DEVSPACE_SERVER_VERSION = "{version}"',
         ROOT / "vendor" / "waishnav-devspace" / "dist" / "ui" / "assets" / "runtime-enhancements.js": f"DevSpace Portable {display_version} · Protocol 1.6",
-        ROOT / "setup" / "native" / "DevSpacePortableApp.cs": f"DevSpace Portable {display_version} · Protocol 1.6",
     }
+    if not iteration or iteration < 4:
+        expected_fragments[ROOT / "setup" / "native" / "DevSpacePortableApp.cs"] = (
+            f"DevSpace Portable {display_version} · Protocol 1.6"
+        )
     mismatches: list[str] = []
     portable_manager_source = (ROOT / "setup" / "portable-manager.cjs").read_text(encoding="utf-8")
     if f'const PORTABLE_VERSION = "{version}";' not in portable_manager_source:
@@ -112,6 +115,10 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
     # from the distributable Next UI. Do not carry forward its obsolete key
     # after rebuilding a manifest from a previous dev3 preview.
     candidates.discard("ui-next/tests/security.test.cjs")
+    if iteration >= 4:
+        # The old control center remains in Git history for rollback research
+        # but is neither compiled nor shipped after dev4.
+        candidates.discard("setup/native/DevSpacePortableApp.cs")
     # Rebuild the mapping from normalized POSIX-style paths so a Windows
     # command-line --hotfix using backslashes cannot leave duplicate logical
     # keys such as docs/releases/x.md and docs\releases\x.md.
@@ -125,6 +132,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "app/node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json",
             "app/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/package.json",
             "setup/portable-manager.cjs",
+            "setup/remote-ssh-admin.cjs",
             "setup/logged-launcher.cjs",
             "DevSpace-Portable.exe",
             "DevSpace-Portable-Next.exe",
@@ -170,6 +178,8 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "setup/test-continuation-guard.mjs",
             "setup/test-continuation-supervisor-scheduler.mjs",
             "setup/test-remote-agent-ssh-rescue.mjs",
+            "setup/test-dev4-ssh-admin.mjs",
+            "setup/test-ui-next-navigation.mjs",
             "setup/test-portable-ui-workflows.mjs",
             "setup/test-oauth-client-compatibility.mjs",
             "setup/test-standalone-updater.mjs",
@@ -275,6 +285,8 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
     )
     if hotfix:
         candidates.add(hotfix.replace("\\", "/"))
+    if iteration and iteration >= 4:
+        candidates.discard("setup/native/DevSpacePortableApp.cs")
     for relative in sorted(candidates):
         path = ROOT / relative
         key_files.pop(relative, None)

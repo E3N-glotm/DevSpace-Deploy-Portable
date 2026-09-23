@@ -152,9 +152,37 @@ $Tests = @(
     "setup/test-computer-use-batch.mjs",
     "setup/test-computer-use-broker.mjs"
 )
+$DevelopmentIteration = 0
+try {
+    $manifest = Get-Content -LiteralPath (Join-Path $Root 'VERSION-MANIFEST.json') -Raw | ConvertFrom-Json
+    $DevelopmentIteration = [int]$manifest.development.iteration
+} catch {}
+$NextIsDefault = $DevelopmentIteration -ge 4
+if ($NextIsDefault) {
+    Write-Host '==> Electron replacement desktop UI: build and security tests'
+    Invoke-NativeChecked -FilePath $Npm -ArgumentList @('run', 'build', '--prefix', 'ui-next') -FailureMessage 'Next UI build failed.'
+    Invoke-NativeChecked -FilePath $Npm -ArgumentList @('run', 'test', '--prefix', 'ui-next') -FailureMessage 'Next UI security regression failed.'
+    Write-Host '==> setup/test-dev4-ssh-admin.mjs'
+    Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev4-ssh-admin.mjs') -FailureMessage 'Next UI SSH compatibility regression failed.'
+}
 foreach ($Test in $Tests) {
+    if ($NextIsDefault -and $Test -in @(
+        'setup/test-native-ui-resilience.mjs',
+        'setup/test-native-close-tray.mjs',
+        'setup/test-selected-file-diff.mjs',
+        'setup/test-portable-ui-heartbeat.mjs'
+    )) {
+        Write-Host "==> Historical WinForms-only test excluded from dev4+ installed-UI gate: $Test"
+        continue
+    }
     Write-Host "==> $Test"
     Invoke-NativeChecked -FilePath $Node -ArgumentList @($Test) -FailureMessage "Test failed: $Test"
+}
+if ($NextIsDefault) {
+    Write-Host '==> setup/test-ui-next-navigation.mjs'
+    Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-ui-next-navigation.mjs') -FailureMessage 'Next UI navigation acceptance failed.'
+    Write-Host '==> setup/test-dev4-feature-coverage.mjs'
+    Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev4-feature-coverage.mjs') -FailureMessage 'Next UI feature and contrast coverage failed.'
 }
 
 if (-not $SkipAudit) {

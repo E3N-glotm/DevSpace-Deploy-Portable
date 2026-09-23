@@ -1119,11 +1119,26 @@ export function installContinuationCoordinator(app, options = {}) {
         throw new Error("terminal-continuation-cancelled");
       }
     };
-    const ensureStillRunnable = async () => {
+    const ensureStillRunnable = () => {
       ensureSenderLifetime();
       if (typeof beforeSend !== "function") return;
-      if (!(await beforeSend())) throw new Error("terminal-continuation-cancelled");
-      ensureSenderLifetime();
+      const verdict = beforeSend();
+      // The first Host send is immediately after the final server-side
+      // authorize-delivery CAS. That first verdict is synchronous and already
+      // authorized; do not insert an extra Promise/microtask between the
+      // authorization response and the irreversible Host API invocation.
+      // A background ChatGPT iframe can be suspended/replaced in that gap,
+      // stranding the durable generation in DELIVERING with no delivery receipt.
+      if (verdict === true) {
+        ensureSenderLifetime();
+        return;
+      }
+      if (verdict === false) throw new Error("terminal-continuation-cancelled");
+      // Only retries/fallbacks perform a fresh asynchronous owner check.
+      return Promise.resolve(verdict).then((allowed) => {
+        if (!allowed) throw new Error("terminal-continuation-cancelled");
+        ensureSenderLifetime();
+      });
     };
     const standardUiMessage = typeof options.uiMessage === "function"
       ? options.uiMessage
@@ -1208,7 +1223,8 @@ export function installContinuationCoordinator(app, options = {}) {
     // path. Native remains a compatibility fallback only after ui/message
     // explicitly reports that the method itself is unsupported.
     if (typeof standardUiMessage === "function") {
-      await ensureStillRunnable();
+      const preflight = ensureStillRunnable();
+      if (preflight) await preflight;
       const standardPayload = { role: "user", content: [{ type: "text", text }] };
       const standard = await invokeWithSettlementBound(standardUiMessage, standardPayload);
       if (standard.status === "pending") {
@@ -1240,7 +1256,8 @@ export function installContinuationCoordinator(app, options = {}) {
     for (let attempt = 0; attempt < TRANSIENT_RETRY_DELAYS_MS.length; attempt += 1) {
       if (TRANSIENT_RETRY_DELAYS_MS[attempt] > 0) await sleep(TRANSIENT_RETRY_DELAYS_MS[attempt]);
       try {
-        await ensureStillRunnable();
+        const preflight = ensureStillRunnable();
+        if (preflight) await preflight;
         const primary = await invokeWithSettlementBound(nativeFollowUp, { prompt: text });
         if (primary.status === "pending") {
           return {
@@ -1315,7 +1332,7 @@ export function installContinuationCoordinator(app, options = {}) {
         if (!authorized?.accepted) return false;
 
         let hostSendAttempt = 0;
-        const delivery = await sendFollowUp(visibleContinuationTrigger(state.task, deliveryToken), async () => {
+        const delivery = await sendFollowUp(visibleContinuationTrigger(state.task, deliveryToken), () => {
           hostSendAttempt += 1;
           // authorize-delivery is already the final server-side CAS over the
           // exact manual/synthetic owner, card generation, sender lease and
@@ -1324,17 +1341,17 @@ export function installContinuationCoordinator(app, options = {}) {
           // replaced in that extra round-trip. Retries/fallback attempts still
           // re-read authoritative state so a later manual takeover always wins.
           if (hostSendAttempt === 1) return true;
-          const latest = await callTask("status").catch(() => undefined);
-          if (latest?.task) acceptTask(latest.task);
-          // Check fresh ownership on every transport attempt, including retries
-          // and fallback. A manual takeover keeps the task RUNNING but revokes
-          // this delivery; cached state or a failed status cannot authorize it.
-          return Boolean(latest?.task
-            && !terminal(latest.task)
-            && !automationSuppressed(latest.task)
-            && latest.task.deliveryToken === deliveryToken
-            && latest.task.deliveryOwner === "synthetic-pending"
-            && latest.task.continuationDeliveryAwaitingAck);
+          return callTask("status").then((latest) => {
+            if (latest?.task) acceptTask(latest.task);
+            // Check fresh ownership on every transport retry/fallback, including
+            // manual takeover. Never send from a cached or failed status.
+            return Boolean(latest?.task
+              && !terminal(latest.task)
+              && !automationSuppressed(latest.task)
+              && latest.task.deliveryToken === deliveryToken
+              && latest.task.deliveryOwner === "synthetic-pending"
+              && latest.task.continuationDeliveryAwaitingAck);
+          }).catch(() => false);
         });
         const recorded = await callSender("delivery-result", {
           deliveryToken,

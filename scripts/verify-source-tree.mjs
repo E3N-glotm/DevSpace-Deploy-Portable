@@ -224,7 +224,8 @@ const versionIdentitySources = [
   // The executable/service identity stays strict semver, while user-visible
   // surfaces intentionally include the current development iteration label (devN).
   ["vendor/waishnav-devspace/dist/ui/assets/runtime-enhancements.js", `DevSpace Portable ${displayVersion} · Protocol 1.6`],
-  ["setup/native/DevSpacePortableApp.cs", `DevSpace Portable ${displayVersion} · Protocol 1.6`],
+  ...(Number(manifest.development?.iteration || 0) >= 4 ? [] :
+    [["setup/native/DevSpacePortableApp.cs", `DevSpace Portable ${displayVersion} · Protocol 1.6`]]),
 ];
 for (const [file, expected] of versionIdentitySources) {
   const source = readFileSync(join(root, file), "utf8");

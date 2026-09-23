@@ -225,6 +225,8 @@ def validate_release_plugins(entries: list[tuple[Path, Path]]) -> None:
 
 def release_files() -> list[Path]:
     files: list[Path] = []
+    manifest = json.loads((ROOT / "VERSION-MANIFEST.json").read_text(encoding="utf-8"))
+    next_only = int(manifest.get("development", {}).get("iteration", 0)) >= 4
     for current_root, dir_names, file_names in os.walk(ROOT):
         current = Path(current_root)
         relative_dir = current.relative_to(ROOT)
@@ -251,6 +253,8 @@ def release_files() -> list[Path]:
         for file_name in sorted(file_names):
             file_path = current / file_name
             relative = file_path.relative_to(ROOT)
+            if next_only and relative == Path("setup/native/DevSpacePortableApp.cs"):
+                continue
             if relative.parent == Path(".") and file_name in EXCLUDED_TOP_LEVEL_FILES:
                 continue
             # Source/regression tests intentionally leave a handful of
@@ -424,7 +428,7 @@ def main() -> int:
     policy = json.loads((ROOT / "setup" / "legacy-release-policy.json").read_text(encoding="utf-8"))
     version = release_version()
     is_dev = bool(manifest.get("development"))
-    if str(manifest.get("development", {}).get("label", "")) == "dev3":
+    if int(manifest.get("development", {}).get("iteration", 0)) >= 3:
         required_next = (
             "DevSpace-Portable-Next.exe",
             "ui-next/electron/main.cjs",

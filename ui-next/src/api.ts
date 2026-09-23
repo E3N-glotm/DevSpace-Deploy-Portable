@@ -28,10 +28,13 @@ export type Backend = {
   save(settings: Settings): Promise<{ mcpUrl: string; generatedOwnerToken: boolean }>;
   deploy(provider: Provider): Promise<void>;
   copySecret(kind: 'owner' | 'ngrok' | 'cloudflare'): Promise<{copied: boolean}>;
+  copyValue(value:string): Promise<{copied:boolean}>;
+  pickPlugin(): Promise<string|null>;
+  pickExport(suggestedName:string): Promise<string|null>;
+  admin(action:string,payload:Record<string,unknown>,confirmed?:boolean):Promise<any>;
   copyUrl(kind: 'local' | 'public'): Promise<{copied: boolean}>;
   chooseFolder(): Promise<string | null>;
   runAction(action: 'diagnose' | 'restart-local' | 'restart-tunnel' | 'plugin-list' | 'continuation-list' | 'memory-list' | 'review-list' | 'oauth-client-list' | 'update-check'): Promise<unknown>;
-  openLegacy(): Promise<void>;
   onStatus(handler: (value: any) => void): () => void;
   onProgress(handler: (value: Progress) => void): () => void;
 };

@@ -7,8 +7,11 @@ import {
   PlugConnectedRegular, SearchRegular, ServerRegular, SettingsRegular, ShieldRegular,
 } from '@fluentui/react-icons';
 import type { Config, Permission, Progress, Provider, Settings } from './api';
+import { AgentsPage, PluginsPage, ContinuationsPage, SessionsPage,
+  MemoriesPage, OAuthPage, ServicePage, DiagnosticsPage } from './Operations';
 
-type Page = 'home' | 'workspaces' | 'agents' | 'extensions' | 'tasks' | 'diagnose' | 'settings';
+type Page = 'home' | 'workspaces' | 'agents' | 'extensions' | 'tasks' |
+  'sessions' | 'memories' | 'oauth' | 'services' | 'diagnose' | 'settings';
 type SecretKind = 'owner' | 'ngrok' | 'cloudflare';
 const permissionNames: {key: keyof Omit<Permission,'profile'>; label: string; desc: string}[] = [
   {key:'allowExternalPaths',label:'访问工作区以外的路径',desc:'允许读取或修改所选工作目录之外的文件。'},
@@ -194,18 +197,25 @@ export function App() {
   if(!draft||!config)return <div className="startup"><Spinner size="large"/><h2>正在连接 DevSpace…</h2><p>{error||'读取本地配置，不会修改现有部署。'}</p></div>;
   return <div className="desktop">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE NEXT · DEV3</small></span></div>
+      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV4</small></span></div>
       <div className="side-group">
-        {([['home',<HomeRegular/>,'主页'],['workspaces',<FolderOpenRegular/>,'工作区'],['agents',<ServerRegular/>,'远程服务器'],['extensions',<PlugConnectedRegular/>,'扩展'],['tasks',<AppsRegular/>,'任务与会话'],['diagnose',<SearchRegular/>,'诊断']] as const).map(([id,icon,title])=>
-          <button type="button" key={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
+        {([['home',<HomeRegular/>,'主页'],['workspaces',<FolderOpenRegular/>,'工作区'],
+          ['agents',<ServerRegular/>,'远程服务器'],['extensions',<PlugConnectedRegular/>,'插件与工具'],
+          ['tasks',<AppsRegular/>,'续轮任务'],['sessions',<SearchRegular/>,'会话与回退'],
+          ['memories',<KeyRegular/>,'Memories'],['oauth',<LockClosedRegular/>,'OAuth 客户端'],
+          ['services',<DesktopRegular/>,'服务与桌面控制'],
+          ['diagnose',<SearchRegular/>,'日志与诊断']] as const).map(([id,icon,title])=>
+          <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
-      <div className="sidebar-bottom"><button className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span className={'dot '+(status?.localHealthy?'online':'')}/>{status?.localHealthy?'本地 MCP 已连接':'本地 MCP 未连接'}<small>v1.1.62 dev3</small></div>
+      <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
+        <div className="sidebar-status"><span className={'dot '+(status?.localHealthy?'online':'')}/>{status?.localHealthy?'本地 MCP 已连接':'本地 MCP 未连接'}<small>v1.1.62 dev4</small></div>
       </div>
     </aside>
     <main className="main">
       <header className="topbar"><div><span className="eyebrow">DEVSPACE / {wizard?'首次设置':page.toUpperCase()}</span><h1>{wizard?'设置 DevSpace':{
-        home:'控制台',workspaces:'工作区',agents:'远程服务器',extensions:'扩展与插件',tasks:'任务与会话',diagnose:'诊断中心',settings:'设置与权限',
+        home:'控制台',workspaces:'工作区',agents:'远程服务器',extensions:'插件与工具',tasks:'续轮任务',
+        sessions:'会话与回退',memories:'Memories',oauth:'OAuth 客户端',services:'服务与桌面控制',
+        diagnose:'诊断中心',settings:'设置与权限',
       }[page]}</h1></div><div className="top-actions"><span className={'status-pill '+(status?.localHealthy?'ok':'')}>{status?.localHealthy?'● 服务正常':'○ 服务未连接'}</span>
         <Button appearance="subtle" icon={<ArrowClockwiseRegular/>} onClick={()=>window.devspace.getStatus().then(setStatus)}>刷新</Button></div></header>
       <div className="page-body">
@@ -215,7 +225,7 @@ export function App() {
           <div className="wizard-steps">{steps.map((label,i)=><div key={label} className={'wizard-step '+(i===step?'current':i<step?'past':'')}><span>{i<step?'✓':i+1}</span><small>{label}</small></div>)}</div>
           <section className="panel wizard-panel">
             {step===0&&<><div className="large-icon"><CodeRegular/></div><h2>欢迎使用 DevSpace</h2><p className="muted">通过几个清晰的步骤完成本地部署。已经保存的 Token 和 OAuth 数据不会因进入向导而重置。</p>
-              <div className="tip"><ShieldRegular/>可以随时回到现有控制中心；新界面与旧 WinForms 共用原有服务和配置。</div></>}
+              <div className="tip"><ShieldRegular/>此界面直接使用现有服务和配置；所有管理功能均可从左侧导航进入。</div></>}
             {step===1&&<><h2>你准备怎样使用 DevSpace？</h2><p className="muted">只显示与你选择的连接方式相关的设置。</p>
               <div className="choices"><Choice selected={draft.provider==='local'} icon={<DesktopRegular/>} title="仅本机" caption="无需公网 Token，不启动隧道。" onClick={()=>update({provider:'local'})}/>
                 <Choice selected={draft.provider==='cloudflare'} icon={<CloudRegular/>} title="Cloudflare Tunnel" caption="从 ChatGPT 公网连接你的电脑。" onClick={()=>update({provider:'cloudflare',publicBaseUrl:config.providerUrls?.cloudflare||''})}/>
@@ -254,14 +264,15 @@ export function App() {
           </div>
         </div>}
         {!wizard&&page==='home'&&<><div className="hero"><span className="eyebrow">SYSTEM OVERVIEW</span><h2>{status?.localHealthy?'DevSpace 正在运行':'DevSpace 尚未就绪'}</h2>
-          <p>服务状态与工作区一目了然。高级维护操作保留在设置中。</p>
-          <div className="hero-actions"><Button appearance="primary" onClick={()=>select('settings')}>配置服务</Button><Button appearance="outline" onClick={()=>window.devspace.openLegacy()}>打开旧版控制中心</Button></div></div>
+          <p>服务状态与工作区一目了然。插件、任务、会话与系统管理均可直接在新版窗口中操作。</p>
+          <div className="hero-actions"><Button appearance="primary" onClick={()=>select('settings')}>配置服务</Button>
+            <Button appearance="outline" onClick={()=>select('services')}>服务管理</Button></div></div>
           <div className="metric-grid"><div className="metric"><span className="metric-icon"><DesktopRegular/></span><small>本地 MCP</small><strong>{status?.localHealthy?'已连接':'未连接'}</strong><p>{status?.localUrl}</p></div>
             <div className="metric"><span className="metric-icon"><CloudRegular/></span><small>公网模式（连通性未核验）</small><strong>{status?.provider==='local'?'仅本机':status?.provider}</strong><p>{status?.publicUrl||'未配置公网入口'}</p></div>
             <div className="metric"><span className="metric-icon"><FolderOpenRegular/></span><small>允许的工作目录</small><strong>{config.allowedRoots.length} 个</strong><p>可在工作区页面查看与添加</p></div></div>
           <section className="panel"><div className="section-heading"><h3>快速开始</h3><span>常用操作</span></div><div className="quick-grid">
             <button onClick={()=>select('workspaces')}><FolderOpenRegular/><strong>工作目录</strong><small>查看已授权目录</small></button>
-            <button onClick={()=>select('agents')}><ServerRegular/><strong>远程服务</strong><small>使用现有 Agent 管理</small></button>
+            <button onClick={()=>select('agents')}><ServerRegular/><strong>远程服务</strong><small>登记、配对与维护 Agent</small></button>
             <button onClick={()=>select('diagnose')}><SearchRegular/><strong>检查连接</strong><small>诊断服务运行状态</small></button>
           </div></section></>}
         {!wizard&&page==='settings'&&<><section className="panel"><div className="section-heading"><div><h2>连接与凭据</h2><p>已保存的 Token 以掩码显示，不会发送到渲染器。</p></div></div>
@@ -286,27 +297,17 @@ export function App() {
         {!wizard&&page==='workspaces'&&<section className="panel"><div className="section-heading"><h2>允许的工作目录</h2><span>{draft.allowedRoots.length} 个</span></div>
           <Roots values={draft.allowedRoots} onChange={v=>update({allowedRoots:v,allowAllFixedDrives:false})} onChoose={addFolder}/>
           <div className="button-row"><Button appearance="primary" disabled={busy||!dirty} onClick={()=>save(false)}>保存目录更改</Button></div></section>}
-        {!wizard&&page==='agents'&&<section className="panel"><div className="section-heading"><h2>远程服务器</h2><span>保留现有 Remote Agent 管理能力</span></div>
-          <p className="muted">远程 Agent 配对、连接和权限管理仍由已有控制中心负责。当前 Next UI 不会另起一套 Agent 数据库。</p>
-          <Button appearance="primary" onClick={()=>window.devspace.openLegacy()}>打开远程服务器管理</Button></section>}
-        {!wizard&&page==='extensions'&&<section className="panel"><div className="section-heading"><h2>已安装扩展</h2></div>
-          <p className="muted">使用现有插件管理器读取安装信息，安装与授权操作在原版控制中心完成。</p>
-          <div className="button-row"><Button disabled={advancedBusy} onClick={()=>runAdvanced('plugin-list')}>查看插件清单</Button><Button onClick={()=>window.devspace.openLegacy()}>管理插件</Button></div>
-          {diagnostic&&<pre className="output">{diagnostic}</pre>}</section>}
-        {!wizard&&page==='tasks'&&<section className="panel"><div className="section-heading"><h2>任务与会话</h2></div>
-          <p className="muted">保留当前的任务自动续轮机制。查看任务不改变任务状态，也不会创建新的续轮。</p>
-          <div className="button-row"><Button disabled={advancedBusy} onClick={()=>runAdvanced('continuation-list')}>查看续轮任务</Button>
-            <Button disabled={advancedBusy} onClick={()=>runAdvanced('review-list')}>会话审阅</Button>
-            <Button disabled={advancedBusy} onClick={()=>runAdvanced('memory-list')}>Memories</Button>
-            <Button onClick={()=>window.devspace.openLegacy()}>任务高级管理</Button></div>
-          {diagnostic&&<pre className="output">{diagnostic}</pre>}</section>}
-        {!wizard&&page==='diagnose'&&<section className="panel"><div className="section-heading"><h2>连接与系统诊断</h2><span>{root}</span></div>
-          <div className="diagnostic-line"><span>本地 MCP</span><strong>{status?.localHealthy?'正常':'未连接'}</strong><code>{status?.localUrl}</code></div>
-          <div className="diagnostic-line"><span>公网连接</span><strong>{status?.provider}</strong><code>{status?.publicUrl||'仅本地'}</code></div>
-          <div className="button-row"><Button icon={<SearchRegular/>} disabled={advancedBusy} onClick={()=>runAdvanced('diagnose')}>运行完整诊断</Button>
-            <Button disabled={advancedBusy} onClick={()=>runAdvanced('update-check')}>检查更新</Button>
-            <Button onClick={()=>window.devspace.openLegacy()}>打开高级诊断</Button></div>
-          {diagnostic&&<pre className="output">{diagnostic}</pre>}</section>}
+        {!wizard&&page==='agents'&&<AgentsPage/>}
+        {!wizard&&page==='extensions'&&<PluginsPage/>}
+        {!wizard&&page==='tasks'&&<ContinuationsPage/>}
+        {!wizard&&page==='sessions'&&<SessionsPage/>}
+        {!wizard&&page==='memories'&&<MemoriesPage workspaceRoots={draft.allowedRoots}/>}
+        {!wizard&&page==='oauth'&&<OAuthPage/>}
+        {!wizard&&page==='services'&&<ServicePage config={config} onConfigChange={async()=>setConfig(await window.devspace.getConfig())}/>}
+        {!wizard&&page==='diagnose'&&<><section className="panel"><div className="diagnostic-line"><span>本地 MCP</span>
+          <strong>{status?.localHealthy?'正常':'未连接'}</strong><code>{status?.localUrl}</code></div>
+          <div className="diagnostic-line"><span>公网模式</span><strong>{status?.provider}</strong><code>{status?.publicUrl||'仅本地'}</code></div></section>
+          <DiagnosticsPage/></>}
       </div>
     </main>
   </div>;

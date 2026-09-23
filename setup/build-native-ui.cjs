@@ -5,6 +5,8 @@ const path = require("path");
 const childProcess = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
+const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "VERSION-MANIFEST.json"), "utf8"));
+const NEXT_IS_DEFAULT = Number(manifest.development?.iteration || 0) >= 4;
 const VSWHERE = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe";
 const REFERENCE_ROOT_CANDIDATES = [
   "C:\\Program Files (x86)\\Reference Assemblies\\Microsoft\\Framework\\.NETFramework\\v4.8",
@@ -13,10 +15,14 @@ const REFERENCE_ROOT_CANDIDATES = [
 ];
 const TARGETS = [
   {
-    source: path.join(ROOT, "setup", "native", "DevSpacePortableApp.cs"),
+    // dev4+ removes the former control center from the installed product.
+    // Retain the historical executable filename as a tiny compatibility
+    // launcher for shortcuts and old transactional updaters, not a WinForms UI.
+    source: path.join(ROOT, "setup", "native",
+      NEXT_IS_DEFAULT ? "DevSpacePortableNextLauncher.cs" : "DevSpacePortableApp.cs"),
     output: path.join(ROOT, "DevSpace-Portable.exe"),
     target: "winexe",
-    shared: true,
+    shared: !NEXT_IS_DEFAULT,
   },
   {
     source: path.join(ROOT, "setup", "native", "DevSpaceUpdaterApp.cs"),

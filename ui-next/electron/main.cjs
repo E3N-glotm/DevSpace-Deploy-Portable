@@ -18,6 +18,44 @@ const ACTIONS = new Set([
   'diagnose', 'restart-local', 'restart-tunnel', 'plugin-list',
   'continuation-list', 'memory-list', 'review-list', 'oauth-client-list', 'update-check',
 ]);
+// Explicitly enumerate existing manager commands. The renderer can neither
+// choose an arbitrary command nor access Node, shell, or a filesystem API.
+const ADMIN_READ = new Set([
+  'remote-agent-list','remote-ssh-list','plugin-list','continuation-list','review-list',
+  'review-details','memory-list','oauth-client-list',
+  'continuation-cutoff-estimate-get','log-paths','network-proxy-state',
+  'dashboard-status','update-check',
+]);
+const ADMIN_WRITE = new Set([
+  'remote-agent-create-enrollment','remote-agent-revoke','remote-agent-delete',
+  'remote-ssh-save','remote-ssh-test','remote-ssh-deploy','remote-ssh-recover','remote-ssh-delete',
+  'plugin-install','plugin-export','plugin-enable','plugin-disable',
+  'plugin-uninstall','plugin-slot-bind','plugin-slot-unbind','plugin-refresh',
+  'continuation-lock','continuation-unlock','continuation-pause',
+  'continuation-resume','continuation-stop','continuation-delete',
+  'continuation-cutoff-estimate-set',
+  'review-update','review-rollback','review-restore-safety',
+  'memory-upsert','memory-delete',
+  'oauth-client-create','oauth-client-rotate-secret','oauth-client-delete',
+  'set-auto-continuation','set-computer-use',
+  'repair-stale-proxy','restore-proxy-repair',
+  'start-local','stop-local','restart-local','start-tunnel','stop-tunnel',
+  'restart-tunnel','enable','disable','uninstall-tasks','install-tasks',
+  'update-stage','update-launch',
+]);
+const ADMIN_DESTRUCTIVE = new Set([
+  'remote-agent-revoke','remote-agent-delete','plugin-uninstall',
+  'remote-ssh-deploy','remote-ssh-recover','remote-ssh-delete',
+  'continuation-stop','continuation-delete','review-rollback',
+  'review-restore-safety','memory-delete','oauth-client-rotate-secret',
+  'oauth-client-delete','uninstall-tasks','disable','update-launch',
+  'repair-stale-proxy','restore-proxy-repair',
+]);
+const ADMIN_FOREIGN_SERVICE = new Set([
+  'start-local','stop-local','restart-local','start-tunnel','stop-tunnel',
+  'restart-tunnel','enable','disable','uninstall-tasks','install-tasks',
+  'update-launch',
+]);
 const SECRETS = Object.freeze({
   owner: 'auth.json', ngrok: 'ngrok.yml', cloudflare: 'cloudflare.token',
 });
@@ -27,7 +65,16 @@ let currentStatus = {};
 let watchers = [];
 let refreshHandle = null;
 let closing = false;
-const smokeMode = process.argv.includes('--devspace-ui-smoke');
+let computerUseLeaseId = '';
+let computerUseHeartbeat;
+let shutdownStarted = false;
+let selectedPluginSource = '';
+let selectedPluginExport = '';
+let remoteAutoRecoverTimer;
+let remoteAutoRecoverBusy = false;
+const remoteLastAttempt = new Map();
+const navigationSmokeMode = process.argv.includes('--devspace-ui-navigation-smoke');
+const smokeMode = process.argv.includes('--devspace-ui-smoke') || navigationSmokeMode;
 if (smokeMode) app.disableHardwareAcceleration();
 
 function ensureRoot() {
@@ -255,6 +302,87 @@ function installHandlers() {
     clipboard.writeText(value);
     return {copied: true};
   });
+  register('pickPlugin', async () => {
+    const result = await dialog.showOpenDialog(windowRef, {
+      title: '选择 DevSpace 插件包',properties:['openFile'],
+      filters:[{name:'插件 ZIP 或 manifest.json',extensions:['zip','json']}],
+    });
+    selectedPluginSource=result.canceled?'':String(result.filePaths[0]||'');
+    return selectedPluginSource||null;
+  });
+  register('pickExport', async suggestedName => {
+    const safe = String(suggestedName || 'devspace-plugin.zip')
+      .replace(/[^a-zA-Z0-9._-]/g,'_').slice(0,120);
+    const result = await dialog.showSaveDialog(windowRef, {
+      title:'导出插件包',defaultPath:safe,filters:[{name:'ZIP',extensions:['zip']}],
+    });
+    selectedPluginExport=result.canceled?'':String(result.filePath||'');
+    return selectedPluginExport||null;
+  });
+  register('copyValue', value => {
+    if (typeof value !== 'string' || value.length > 20_000) throw new Error('无效的复制内容。');
+    clipboard.writeText(value);
+    return {copied:true};
+  });
+  register('admin', async (action, payload, confirmed = false) => {
+    if (!ADMIN_READ.has(action) && !ADMIN_WRITE.has(action)) throw new Error('此管理操作不在授权列表内。');
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+      throw new Error('无效的管理操作参数。');
+    }
+    const serializedPayload = JSON.stringify(payload);
+    if (!serializedPayload || serializedPayload.length > 64 * 1024) throw new Error('管理操作参数过大。');
+    if (ADMIN_DESTRUCTIVE.has(action) && confirmed !== true) throw new Error('此操作需要明确确认。');
+    if (ADMIN_FOREIGN_SERVICE.has(action)) assertNoForeignServiceOwnership();
+    if (action === 'set-computer-use' && payload.enabled === true) {
+      const deployment = readJson(path.join(CONFIG, 'deployment.json'));
+      if (!deployment.permissions?.allowComputerUse) {
+        throw new Error('请先在权限页允许 Computer Use 并应用设置。');
+      }
+    }
+    if (action === 'plugin-install') {
+      if (!selectedPluginSource || payload.sourcePath !== selectedPluginSource
+        || !fs.existsSync(payload.sourcePath)
+        || !['.zip','.json'].includes(path.extname(payload.sourcePath).toLowerCase())) {
+        throw new Error('请选择有效的插件包。');
+      }
+      selectedPluginSource='';
+    }
+    if (action === 'plugin-export') {
+      if (!selectedPluginExport || payload.destinationPath !== selectedPluginExport ||
+        path.extname(payload.destinationPath).toLowerCase() !== '.zip') {
+        throw new Error('请选择有效的 ZIP 导出目标。');
+      }
+      selectedPluginExport='';
+    }
+    if (action === 'update-launch') {
+      if (typeof payload.stagingPath !== 'string') throw new Error('必须选择已校验的更新暂存目录。');
+      payload = {stagingPath: payload.stagingPath, uiPid: process.pid};
+    }
+    const exec = async () => {
+      const response = await runManager(action, payload,
+        action === 'update-stage' ? 4_200_000 : ADMIN_WRITE.has(action) ? 180_000 : 60_000);
+      if (action === 'oauth-client-create' || action === 'oauth-client-rotate-secret') {
+        // Newly issued secrets are visible only once; copy in Main and never
+        // serialize the plaintext into React state or renderer DevTools.
+        const secret = String(response?.clientSecret || '');
+        if (secret) clipboard.writeText(secret);
+        return {...response,clientSecret:undefined,secretCopied:Boolean(secret)};
+      }
+      if (action === 'set-computer-use') {
+        if (payload.enabled===true) await ensureComputerUseLease();
+        else computerUseLeaseId='';
+      }
+      if (action === 'update-launch' && response?.acknowledged === true) {
+        // The detached updater owns the transaction after its launch ACK.
+        // Give the renderer one second to display the handoff message, then
+        // release the UI executable so Windows can replace program files.
+        setTimeout(() => app.quit(), 1200);
+      }
+      return response;
+    };
+    if (ADMIN_WRITE.has(action)) return operation(exec);
+    return exec();
+  });
   register('chooseFolder', async () => {
     const result = await dialog.showOpenDialog(windowRef, {properties: ['openDirectory'], title: '选择允许 DevSpace 访问的工作目录'});
     return result.canceled ? null : result.filePaths[0] || null;
@@ -269,11 +397,55 @@ function installHandlers() {
       ? operation(() => runManager(action, undefined, 180_000))
       : runManager(action, undefined, 35_000);
   });
-  register('openLegacy', async () => {
-    const executable = path.join(ROOT, 'DevSpace-Portable.exe');
-    if (!fs.existsSync(executable)) throw new Error('原版控制中心不存在。');
-    spawn(executable, [], {cwd: ROOT, detached: true, windowsHide: false, stdio: 'ignore'}).unref();
-  });
+}
+async function ensureComputerUseLease() {
+  if (computerUseLeaseId) {
+    const lease = await runManager('ui-heartbeat',{leaseId:computerUseLeaseId},20_000);
+    computerUseLeaseId=String(lease.leaseId||computerUseLeaseId);
+    return lease;
+  }
+  const lease=await runManager('ui-open',undefined,20_000);
+  computerUseLeaseId=String(lease.leaseId||'');
+  if(!computerUseLeaseId)throw new Error('本地桌面控制服务未返回有效租约。');
+  return lease;
+}
+async function recoverOfflineAgents() {
+  // Former WinForms performed this while its window was running. The new UI
+  // preserves the opt-in per-profile policy, but only for this installation's
+  // healthy service; an E-drive preview cannot act on D-live Agents.
+  if (smokeMode || closing || remoteAutoRecoverBusy || activeOperation
+    || currentStatus.localHealthy !== true
+    || !fs.existsSync(path.join(ROOT,"data","remote-agent-ssh-profiles.json"))) return;
+  try { assertNoForeignServiceOwnership(); } catch { return; }
+  remoteAutoRecoverBusy = true;
+  try {
+    const stored = await runManager('remote-ssh-list', {}, 20_000);
+    const profiles = Array.isArray(stored.profiles) ? stored.profiles : [];
+    if (!profiles.some(p=>p.autoRecover)) return;
+    const status = await runManager('remote-agent-list', {}, 30_000);
+    for (const agent of status.agents || []) {
+      if (closing || activeOperation) break;
+      if (String(agent.status||'').toLowerCase() !== 'offline' || !agent.id) continue;
+      const profile=profiles.find(p=>p.autoRecover && (
+        p.key===agent.id || p.key===('name:'+String(agent.name||''))));
+      if (!profile) continue;
+      const now=Date.now(), last=remoteLastAttempt.get(agent.id)||0;
+      if (now-last < 120_000) continue;
+      remoteLastAttempt.set(agent.id,now);
+      // Recover an existing verified state only. Never auto-enroll a new
+      // identity or kill other users' Python/Agent processes in the background.
+      try {
+        await runManager('remote-ssh-recover',{
+          key:profile.key,agentId:agent.id,
+          installRoot:agent.installRoot||'',
+          writableRoots:agent.writableRoots||agent.allowedRoots||[],
+        },75_000);
+      } catch {
+        // Manual SSH management exposes the failed state; automatic recovery
+        // must neither silently reinstall nor leak SSH diagnostics to React.
+      }
+    }
+  } catch {} finally { remoteAutoRecoverBusy = false; }
 }
 function createWindow() {
   const main = new BrowserWindow({
@@ -305,7 +477,7 @@ app.whenReady().then(() => {
       const watchdog = setTimeout(() => {
         process.stdout.write(JSON.stringify({smoke: false, reason: 'renderer did not load in time'}) + '\n');
         app.exit(2);
-      }, 20_000);
+      }, navigationSmokeMode ? 75_000 : 20_000);
       activeWindow.webContents.once('did-finish-load', async () => {
         try {
           // Wait for the initial read-only configuration IPC to complete.
@@ -320,6 +492,32 @@ app.whenReady().then(() => {
           const view = await activeWindow.webContents.executeJavaScript(
             '({ title: document.title, bridge: !!window.devspace, hasRoot: !!document.querySelector(".desktop"), mainText: document.body.innerText.slice(0, 150) })',
           );
+          if (navigationSmokeMode && view.bridge && view.hasRoot) {
+            const coverage = [];
+            const pageIds = ['home','workspaces','agents','extensions','tasks',
+              'sessions','memories','oauth','services','diagnose','settings'];
+            for (const pageId of pageIds) {
+              const clicked = await activeWindow.webContents.executeJavaScript(`(() => {
+                const button = [...document.querySelectorAll('.sidebar .nav')]
+                  .find(item => item.getAttribute('data-page') === ${JSON.stringify(pageId)});
+                if (!button) return false;
+                button.click(); return true;
+              })()`);
+              await new Promise(resolve => setTimeout(resolve, 150));
+              const rendered = await activeWindow.webContents.executeJavaScript(
+                `({ heading: document.querySelector('.topbar h1')?.textContent || '',
+                    hasPanel: !!document.querySelector('.page-body .panel, .page-body .hero'),
+                    legacyLaunch: !![...document.querySelectorAll('button')].find(x => /打开旧版|旧版控制中心/.test(x.textContent)),
+                    error: document.querySelector('.alert.error')?.textContent || '' })`,
+              );
+              coverage.push({page:pageId, clicked, ...rendered});
+            }
+            const valid = coverage.every(x => x.clicked && x.hasPanel && !x.legacyLaunch);
+            clearTimeout(watchdog);
+            process.stdout.write(JSON.stringify({smoke:valid, navigation:coverage}) + '\n');
+            app.exit(valid ? 0 : 5);
+            return;
+          }
           clearTimeout(watchdog);
           process.stdout.write(JSON.stringify({smoke: true, ...view}) + '\n');
           app.exit(view.bridge && view.hasRoot ? 0 : 3);
@@ -341,15 +539,41 @@ app.whenReady().then(() => {
       try { watchers.push(fs.watch(directory, debounced)); } catch {}
     }
     refreshHandle = setInterval(() => publishStatus().catch(() => {}), 20_000);
+    // The existing lightweight Node fallback broker handles input/capture
+    // requests after explicitly enabled permissions. It does not launch the
+    // WinForms frontend; its lease expires if this window is terminated.
+    computerUseHeartbeat=setInterval(async()=>{
+      if(closing||!computerUseLeaseId)return;
+      try { await ensureComputerUseLease(); }
+      catch { computerUseLeaseId=''; }
+    },30_000);
+    remoteAutoRecoverTimer=setInterval(()=>recoverOfflineAgents().catch(()=>{}),120_000);
+    if(readJson(path.join(CONFIG,'deployment.json')).features?.computerUse){
+      ensureComputerUseLease().catch(()=>{ computerUseLeaseId=''; });
+    }
     publishStatus().catch(() => {});
   } catch (e) {
     dialog.showErrorBox('DevSpace Next 无法启动', e.message);
     app.quit();
   }
 });
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   closing = true;
   if (refreshHandle) clearInterval(refreshHandle);
+  if (computerUseHeartbeat) clearInterval(computerUseHeartbeat);
+  if (remoteAutoRecoverTimer) clearInterval(remoteAutoRecoverTimer);
   for (const watcher of watchers) watcher.close();
+  // The native file-queue broker must not retain input privileges after the
+  // owner closes the Electron window. Expire this exact UI lease before exit.
+  if (computerUseLeaseId) {
+    event.preventDefault();
+    const leaseId = computerUseLeaseId;
+    computerUseLeaseId = '';
+    runManager('ui-close', {leaseId}, 8_000)
+      .catch(() => {})
+      .finally(() => app.quit());
+  }
 });
 app.on('window-all-closed', () => app.quit());

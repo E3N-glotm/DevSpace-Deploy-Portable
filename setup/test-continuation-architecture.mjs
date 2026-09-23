@@ -254,7 +254,7 @@ try {
   assert.ok(runtimeSource.includes("server-turn-lease-expired-no-inflight-model-request")
     && !runtimeSource.includes("server-confirmed-host-cutoff-no-inflight-model-request"),
     "the resident supervisor must keep weak lease suspicion as telemetry and remove historical-cutoff authorization");
-  assert.match(coordinatorSource, /const modelContextUpdate = updateModelContextBestEffort[\s\S]{0,800}callSender\("claim"[\s\S]{0,900}await modelContextUpdate[\s\S]{0,1400}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\),\s*async \(\) =>/,
+  assert.match(coordinatorSource, /const modelContextUpdate = updateModelContextBestEffort[\s\S]{0,800}callSender\("claim"[\s\S]{0,900}await modelContextUpdate[\s\S]{0,1400}callSender\("authorize-delivery"[\s\S]{0,2200}sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\),\s*\(\) =>/,
     "automatic delivery may overlap advisory context hydration with claim but must re-authorize synthetic ownership immediately before the visible Host trigger");
   {
     const authorizeIndex = coordinatorSource.indexOf('callSender("authorize-delivery"');
@@ -274,15 +274,14 @@ try {
   // by the immediately preceding authorize-delivery CAS and must not insert a
   // second server round-trip. A retry/fallback is no longer adjacent to that
   // CAS and therefore must re-read authoritative manual/terminal state.
-  const sendBarrierBody = coordinatorSource.match(/sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\), async \(\) => \{([\s\S]*?)\n        \}\);/)[1];
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const sendBarrier = new AsyncFunction("callTask", "acceptTask", "terminal", "automationSuppressed", "deliveryToken", "hostSendAttempt", sendBarrierBody);
+  const sendBarrierBody = coordinatorSource.match(/sendFollowUp\(visibleContinuationTrigger\(state\.task, deliveryToken\), \(\) => \{([\s\S]*?)\n        \}\);/)[1];
+  const sendBarrier = new Function("callTask", "acceptTask", "terminal", "automationSuppressed", "deliveryToken", "hostSendAttempt", sendBarrierBody);
   const pendingDelivery = { state: "RUNNING", deliveryToken: "expected", deliveryOwner: "synthetic-pending", continuationDeliveryAwaitingAck: true };
   const barrierAllows = (task, hostSendAttempt = 1, fail = false) => sendBarrier(
     async () => { if (fail) throw new Error("offline"); return task ? { task } : undefined; },
     () => {}, (task) => task.state === "SUCCEEDED", (task) => task.state === "WAITING_EXTERNAL", "expected", hostSendAttempt);
-  assert.equal(await barrierAllows({ ...pendingDelivery, deliveryOwner: "manual" }, 0), true,
-    "the first invocation must trust the immediately preceding successful authorization CAS and avoid another iframe-host round-trip");
+  assert.equal(barrierAllows({ ...pendingDelivery, deliveryOwner: "manual" }, 0), true,
+    "the first invocation must synchronously trust the immediately preceding authorization CAS without another iframe-host round-trip or async boundary");
   assert.equal(await barrierAllows(pendingDelivery, 1), true);
   assert.equal(await barrierAllows({ ...pendingDelivery, deliveryOwner: "manual" }, 1), false,
     "a manual takeover before a retry/fallback must suppress the stale Host message");
