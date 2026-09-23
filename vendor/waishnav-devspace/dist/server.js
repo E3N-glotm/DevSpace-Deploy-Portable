@@ -1340,6 +1340,7 @@ function workspaceAppRevision(config) {
     const inlineStyles = [
         ...(entry.css ?? []),
         "assets/runtime-enhancements.css",
+        "assets/card-interactions.css",
         "assets/session-review.css",
         "assets/runtime-timeline.css",
     ].map((stylesheet) => readFileSync(new URL(`../dist/ui/${stylesheet}`, import.meta.url)));
@@ -1446,6 +1447,7 @@ function workspaceAppHtml(config, resourceUri = workspaceAppUri(config)) {
     const stylesheetFiles = [
         ...(entry.css ?? []),
         "assets/runtime-enhancements.css",
+        "assets/card-interactions.css",
         "assets/session-review.css",
         "assets/runtime-timeline.css",
     ];

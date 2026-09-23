@@ -57,6 +57,7 @@ function Invoke-NativeChecked {
 }
 
 Invoke-NativeChecked -FilePath $Node -ArgumentList @("scripts\verify-source-tree.mjs") -FailureMessage "Source-tree verification failed."
+Invoke-NativeChecked -FilePath $Node -ArgumentList @("setup\test-card-host-interactions.mjs") -FailureMessage "Card Host bridge regression failed."
 Invoke-NativeChecked -FilePath $Node -ArgumentList @("scripts\pack-devspace-core.mjs") -FailureMessage "Portable core packaging failed."
 
 if (-not $SkipInstall) {

@@ -35,24 +35,141 @@ let rendering = false;
 // Explicit user disclosure choices survive status updates and iframe rehydration.
 // Storage is scoped to the immutable card identity, never just the workspace.
 const disclosureChoices = new Map();
-function preserveDisclosure(panel, key, defaultOpen) {
-  const storageKey = `devspace:disclosure:${key}`;
-  if (!disclosureChoices.has(key)) {
-    try {
-      const saved = window.sessionStorage.getItem(storageKey);
-      if (saved === "open" || saved === "closed") disclosureChoices.set(key, saved === "open");
-    } catch { /* Storage may be unavailable in a sandboxed App. */ }
+// ChatGPT optionally persists widgetState between card re-renders. Store only
+// bounded, non-sensitive disclosure flags; never persist command text, tool
+// arguments, OAuth information or a sender/turn lease in host-owned state.
+const CARD_STATE_VERSION = 1;
+const CARD_STATE_LIMIT = 48;
+let pendingHostWidgetState;
+function disclosureKey(key) {
+  const raw = String(key);
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
   }
-  panel.open = disclosureChoices.has(key) ? disclosureChoices.get(key) : defaultOpen;
+  return `${raw.length.toString(36)}:${hash.toString(36)}`;
+}
+function disclosureScope() {
+  const surface = window.__DEVSPACE_CONTINUATION_SURFACE__;
+  return `${surface?.kind ?? "workspace"}:${surface?.anchorMountGeneration ?? 0}`;
+}
+function hostDisclosureSnapshot() {
+  const state = pendingHostWidgetState ?? window.openai?.widgetState;
+  if (!state || typeof state !== "object" || Array.isArray(state)) return undefined;
+  const cardState = state.devspaceCardV1;
+  return cardState?.version === CARD_STATE_VERSION && cardState?.scope === disclosureScope()
+    && cardState.disclosure && typeof cardState.disclosure === "object" && !Array.isArray(cardState.disclosure)
+    ? cardState.disclosure : undefined;
+}
+function readDisclosureChoice(key) {
+  const token = disclosureKey(key);
+  if (disclosureChoices.has(token)) return disclosureChoices.get(token);
+  const value = hostDisclosureSnapshot()?.[token];
+  if (value === "open" || value === "closed") {
+    disclosureChoices.set(token, value === "open");
+    return value === "open";
+  }
+  // Non-ChatGPT MCP Apps and legacy cards remain fully functional.
+  try {
+    const saved = window.sessionStorage.getItem(`devspace:disclosure:${token}`)
+      ?? window.sessionStorage.getItem(`devspace:disclosure:${key}`);
+    if (saved === "open" || saved === "closed") {
+      disclosureChoices.set(token, saved === "open");
+      return saved === "open";
+    }
+  } catch { /* Storage is optional in a sandboxed App. */ }
+  return undefined;
+}
+function writeDisclosureChoiceToken(token, open) {
+  if (!/^[0-9a-z]+:[0-9a-z]+$/.test(token)) return;
+  disclosureChoices.set(token, open);
+  try { window.sessionStorage.setItem(`devspace:disclosure:${token}`, open ? "open" : "closed"); } catch {}
+  const host = window.openai;
+  if (typeof host?.setWidgetState !== "function") return;
+  try {
+    const currentState = host.widgetState && typeof host.widgetState === "object" && !Array.isArray(host.widgetState)
+      ? host.widgetState : {};
+    const oldState = { ...currentState, ...(pendingHostWidgetState ?? {}) };
+    const oldDisclosure = hostDisclosureSnapshot() ?? {};
+    const entries = Object.entries(oldDisclosure)
+      .filter(([name, value]) => /^[0-9a-z]+:[0-9a-z]+$/.test(name) && (value === "open" || value === "closed"))
+      .slice(-(CARD_STATE_LIMIT - 1));
+    const flags = Object.fromEntries(entries);
+    flags[token] = open ? "open" : "closed";
+    const nextState = {
+      ...oldState,
+      devspaceCardV1: { version: CARD_STATE_VERSION, scope: disclosureScope(), disclosure: flags },
+    };
+    pendingHostWidgetState = nextState;
+    const write = host.setWidgetState(nextState);
+    // A Host bridge may reject asynchronously (for example while its iframe
+    // is being disposed). Avoid an unhandled rejection and allow the next
+    // explicit interaction to retry with the sessionStorage fallback.
+    if (write && typeof write.catch === "function") {
+      write.catch(() => {
+        if (pendingHostWidgetState === nextState) pendingHostWidgetState = undefined;
+      });
+    }
+  } catch {
+    pendingHostWidgetState = undefined;
+    /* Host bridge may be unavailable during iframe rehydration. */
+  }
+}
+function writeDisclosureChoice(key, open) {
+  writeDisclosureChoiceToken(disclosureKey(key), open);
+}
+function preserveDisclosure(panel, key, defaultOpen) {
+  // reconcileCardNode intentionally retains the <details> DOM node and its
+  // original listener across task/generation updates. Put the *current*
+  // identity into an attribute which reconciliation refreshes, otherwise a
+  // click on generation 4 would accidentally save generation 1's preference.
+  panel.setAttribute("data-devspace-disclosure-key", disclosureKey(key));
+  const saved = readDisclosureChoice(key);
+  panel.open = saved === undefined ? defaultOpen : saved;
   // Record the native summary action synchronously, before an arriving update
   // can replace the node; asynchronous toggle events alone can lose this race.
   panel.addEventListener("click", (event) => {
     const summary = event.target?.closest?.("summary");
     if (!summary || summary.parentElement !== panel || event.defaultPrevented) return;
     const nextOpen = !panel.open;
-    disclosureChoices.set(key, nextOpen);
-    try { window.sessionStorage.setItem(storageKey, nextOpen ? "open" : "closed"); } catch {}
+    writeDisclosureChoiceToken(panel.getAttribute("data-devspace-disclosure-key"), nextOpen);
   });
+}
+
+function addCardDisplayActions(body, panel) {
+  const actions = element("div", { className: "devspace-card-actions" });
+  const expand = element("button", {
+    className: "devspace-card-action",
+    text: ZH ? "全屏查看" : "View fullscreen",
+  });
+  expand.type = "button";
+  const status = element("span", { className: "devspace-card-action-status" });
+  status.setAttribute("role", "status");
+  expand.addEventListener("click", async () => {
+    const openInline = () => {
+      panel.open = true;
+      writeDisclosureChoiceToken(panel.getAttribute("data-devspace-disclosure-key"), true);
+    };
+    const host = window.openai;
+    if (typeof host?.requestDisplayMode !== "function") {
+      openInline();
+      status.textContent = ZH ? "当前宿主不支持全屏，已展开卡片。" : "Fullscreen unavailable; card expanded.";
+      return;
+    }
+    expand.disabled = true;
+    try {
+      await host.requestDisplayMode({ mode: "fullscreen" });
+      status.textContent = "";
+    } catch {
+      openInline();
+      status.textContent = ZH ? "全屏请求未被宿主接受，仍可在卡片内查看。" : "Fullscreen unavailable; use the inline card.";
+    } finally {
+      expand.disabled = false;
+    }
+  });
+  actions.append(expand, status);
+  body.prepend(actions);
 }
 
 function reconcileCardNode(current, next) {
@@ -314,6 +431,7 @@ function buildRuntimeCard() {
     outputSection.append(element("div", { className: "runtime-output-empty", text: runtime.running ? "Waiting for process output…" : "No output." }));
   }
   body.append(outputSection);
+  addCardDisplayActions(body, panel);
   panel.append(body);
   shell.append(panel);
   return shell;
@@ -350,6 +468,18 @@ function buildContinuationCard() {
   panel.append(header);
 
   const body = element("div", { className: "codex-runtime-body" });
+  if (required.length) {
+    const progress = element("div", { className: "devspace-milestone-progress" });
+    progress.setAttribute("role", "progressbar");
+    progress.setAttribute("aria-label", ZH ? "里程碑完成进度" : "Milestone progress");
+    progress.setAttribute("aria-valuemin", "0");
+    progress.setAttribute("aria-valuemax", String(required.length));
+    progress.setAttribute("aria-valuenow", String(required.filter((item) => completed.has(item)).length));
+    const fill = element("span", { className: "devspace-milestone-progress-fill" });
+    fill.style.width = `${100 * required.filter((item) => completed.has(item)).length / required.length}%`;
+    progress.append(fill);
+    body.append(progress);
+  }
   const summary = element("div", { className: "runtime-meta-grid" });
   [
     metadataRow(ZH ? "任务 ID" : "Task ID", task.id),
@@ -408,6 +538,7 @@ function buildContinuationCard() {
           ? (ZH ? "仅截断恢复要求已验证的真实宿主超时；历史时长、租约到期和页面关闭都不能单独触发续轮。" : "Timeout recovery requires a verified actual Host timeout; historical duration, lease expiry and page disposal cannot independently trigger continuation.")
         : (ZH ? "兼容任务不会自动创建下一轮；需要截断恢复时使用 timeout-recovery，需要常驻/监控时由用户明确选择 resident。" : "Compatibility tasks never auto-create a new turn; use timeout-recovery for truncation recovery and explicitly choose resident for user-authorized persistent monitoring.");
   body.append(element("div", { className: "runtime-output-empty", text: note }));
+  addCardDisplayActions(body, panel);
   panel.append(body);
   shell.append(panel);
   return shell;
@@ -708,7 +839,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-    text: "DevSpace Portable 1.1.61 · Protocol 1.6",
+    text: "DevSpace Portable 1.1.62 dev1 · Protocol 1.6",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);

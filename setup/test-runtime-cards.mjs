@@ -123,6 +123,7 @@ try {
     !html.includes("const RUNTIME_TOOLS = new Set([")
     || !html.includes(".codex-runtime-card{")
     || !html.includes(".devspace-session-review{")
+    || !html.includes(".devspace-card-actions{")
     || !html.includes(".devspace-operation-timeline {")
     || externalScriptSources.length !== 0
     || /<link[^>]+rel="stylesheet"/.test(html)
@@ -133,6 +134,7 @@ try {
   for (const relativePath of [
     "../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js",
     "../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.css",
+    "../app/node_modules/@waishnav/devspace/dist/ui/assets/card-interactions.css",
     "../app/node_modules/@waishnav/devspace/dist/ui/assets/session-review.css",
     "../app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-timeline.css",
   ]) {
