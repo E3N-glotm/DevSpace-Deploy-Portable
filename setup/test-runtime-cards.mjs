@@ -12,6 +12,8 @@ import {
   toolInvocationStatus,
   toolWidgetDescriptorMeta,
   workspaceAppHtml,
+  workspaceAppGenerationUri,
+  workspaceAppResourceResult,
 } from "../app/node_modules/@waishnav/devspace/dist/server.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-runtime-card-smoke-"));
@@ -115,6 +117,15 @@ try {
   }
 
   const html = workspaceAppHtml({ publicBaseUrl: "https://example.test" });
+  const config = { publicBaseUrl: "https://example.test" };
+  const inlineResource = workspaceAppResourceResult(config);
+  const anchorResource = workspaceAppResourceResult(config, workspaceAppGenerationUri(config, 3));
+  if (inlineResource.contents[0]._meta.ui.prefersBorder !== true
+    || inlineResource.contents[0]._meta["openai/widgetPrefersBorder"] !== true
+    || anchorResource.contents[0]._meta.ui.prefersBorder !== false
+    || anchorResource.contents[0]._meta["openai/widgetPrefersBorder"] !== false) {
+    throw new Error("dev2 Host-native continuation border metadata must not affect review resources");
+  }
   const externalScriptSources = Array.from(
     html.matchAll(/<script\b[^>]*\bsrc=(["'])(.*?)\1[^>]*>/g),
     (match) => match[2],

@@ -1,4 +1,4 @@
-/* DevSpace Portable 1.1.62 dev1. Reuse Host colors without requiring a
+/* DevSpace Portable 1.1.62 dev2. Reuse Host colors without requiring a
    ChatGPT-only component runtime or altering the continuation sender UI. */
 .devspace-card-actions{display:flex;align-items:center;flex-wrap:wrap;gap:9px;padding:8px 0 12px}
 .devspace-card-action{font:inherit;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--tool-card-border);border-radius:8px;padding:7px 12px;color:var(--color-text-primary,#f5f5f6);background:var(--tool-card-header-bg,var(--color-background-secondary,#242428))}
@@ -9,3 +9,23 @@
 .devspace-milestone-progress{height:5px;width:100%;margin:3px 0 12px;overflow:hidden;border-radius:999px;background:var(--color-background-tertiary,#343438)}
 .devspace-milestone-progress-fill{display:block;height:100%;border-radius:inherit;background:var(--color-text-success,#75d58b);transition:width .18s ease}
 @media (prefers-reduced-motion:reduce){.devspace-milestone-progress-fill{transition:none}}
+
+/* The Host supplies the outer card surface. Keep an inline continuation to
+   one native disclosure row; mount the heavy diagnostics only on demand. */
+.continuation-card.devspace-native-card{background:transparent;border:0;box-shadow:none;max-width:100%;min-width:0;margin:0}
+.devspace-native-card .compact-log-summary{position:relative;display:grid;grid-template-columns:18px auto minmax(0,1fr) auto auto;gap:8px;align-items:center;min-height:43px;padding:7px 8px 11px;border-radius:10px;line-height:1.25}
+.devspace-native-card .compact-log-summary:hover{background:var(--color-background-secondary,rgba(127,127,127,.06))}
+.devspace-native-card .compact-log-command{font:inherit;font-size:12px;color:var(--color-text-secondary,currentColor);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.devspace-native-card .compact-log-verb{font-size:12px;font-weight:600;color:var(--color-text-primary,currentColor);white-space:nowrap}
+.devspace-native-card .compact-log-icon{border:0;background:transparent;width:18px;height:18px}
+.devspace-native-card .runtime-status{font-size:10px;border:0;background:transparent;padding:3px 4px;white-space:nowrap}
+.devspace-native-card .devspace-native-count{font-variant-numeric:tabular-nums;font-size:11px;color:var(--color-text-tertiary,currentColor);white-space:nowrap}
+.devspace-native-card .devspace-inline-progress{grid-column:1/-1;position:absolute;bottom:2px;left:8px;right:8px;width:auto;height:2px;margin:0;border:0;background:var(--color-background-tertiary,rgba(127,127,127,.12))}
+.devspace-native-card .devspace-milestone-progress-fill{transition:none}
+.devspace-native-card[open]>.codex-runtime-body{border:1px solid var(--tool-card-border,rgba(127,127,127,.15));border-radius:12px;margin:5px 0 3px;padding:12px;background:var(--color-background-primary,transparent)}
+.devspace-native-card .runtime-meta-grid{grid-template-columns:repeat(auto-fit,minmax(145px,1fr));background:transparent;border:0;gap:3px}
+.devspace-native-card .runtime-meta-row{background:var(--color-background-secondary,rgba(127,127,127,.06));border-radius:7px;padding:7px 9px}
+.devspace-native-card .continuation-milestones{border-radius:8px;overflow:hidden}
+.devspace-native-card .operation-summary{padding:5px 8px}
+.devspace-native-card .runtime-output-empty{font-size:11px;line-height:1.45}
+@media(max-width:560px){.devspace-native-card .compact-log-summary{grid-template-columns:18px minmax(0,1fr) auto;gap:6px}.devspace-native-card .compact-log-verb{display:none}.devspace-native-card .compact-log-command{grid-column:2;grid-row:1}.devspace-native-card .devspace-native-count{grid-column:3;grid-row:1}.devspace-native-card .runtime-status{display:none}}

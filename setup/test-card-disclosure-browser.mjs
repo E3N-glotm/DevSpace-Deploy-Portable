@@ -42,10 +42,23 @@ const panel = () => page.locator(".continuation-card");
 try {
   await boot();
   await notify(task);
+  assert.equal(await panel().evaluate(node => node.open), false, "dev2 task summary must be compact by default");
+  assert.equal(await panel().locator(".continuation-milestones").count(), 0,
+    "collapsed card must avoid building large diagnostics");
+  assert.ok((await panel().evaluate(node => node.getBoundingClientRect().height)) < 75,
+    "the initial task summary must fit within one native-size row");
+  await panel().locator(":scope > summary").click();
   assert.equal(await panel().evaluate(node => node.open), true);
+  await panel().locator(".continuation-milestones").waitFor();
+  await panel().locator(".devspace-card-action").click();
+  assert.equal(await panel().evaluate(node => node.open), true,
+    "the fullscreen fallback must target the mounted card after DOM reconciliation");
   await panel().locator(":scope > summary").click();
   assert.equal(await panel().evaluate(node => node.open), false);
   const height = await panel().evaluate(node => node.getBoundingClientRect().height);
+  assert.ok(height < 75, "collapsed card must remain one line high");
+  assert.equal(await panel().locator(".runtime-meta-grid").count(), 0,
+    "closed card must not retain the full diagnostics tree");
   // Distinct progress updates must retain collapse and the visible height.
   for (let i = 0; i < 20; i++) {
     await update({ ...task, continuationCount: i, turnLeaseExpiresAt: String(i) });
@@ -80,6 +93,8 @@ try {
   // authority, but the historical card must remain visible instead of being
   // replaced by an empty Host shell. It freezes its own last snapshot and
   // ignores newer-generation task broadcasts.
+  await panel().locator(":scope > summary").click();
+  await panel().locator(".continuation-milestones").waitFor();
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("devspace:continuation-superseded", {
     detail: { surfaceGeneration: 1, authoritativeGeneration: 2 }
   })));
@@ -97,21 +112,23 @@ try {
   await boot();
   await notify(task);
   // Exercise the native click/update race before the deferred toggle event.
+  const openBeforeClickRace = await panel().evaluate(node => node.open);
   await panel().evaluate((node, task) => {
     node.querySelector("summary").click();
     window.dispatchEvent(new CustomEvent("devspace:continuation-task", { detail: { ...task, continuationCount: 30 } }));
   }, task);
-  assert.equal(await panel().evaluate(node => node.open), true);
-  await panel().locator(":scope > summary").click();
+  assert.equal(await panel().evaluate(node => node.open), !openBeforeClickRace);
+  if (await panel().evaluate(node => node.open)) await panel().locator(":scope > summary").click();
   await boot();
   await notify(task);
   assert.equal(await panel().evaluate(node => node.open), false, "same immutable card rehydrates collapsed");
   await update({ ...task, anchorMountGeneration: 2 });
-  assert.equal(await panel().evaluate(node => node.open), true, "new manual card has its own disclosure choice");
+  assert.equal(await panel().evaluate(node => node.open), false, "new manual card must start compact");
   await update({ ...task, anchorMountGeneration: 3, state: "SUCCEEDED", completedMilestones: ["first", "second"] });
   assert.equal(await panel().evaluate(node => node.open), false, "completed cards default to collapsed");
   // Repeat tool results, including deferred renders, must not reopen the card.
   await update({ ...task, anchorMountGeneration: 4 });
+  await panel().locator(":scope > summary").click();
   await panel().locator(":scope > summary").click();
   await notify({ ...task, anchorMountGeneration: 4 });
   await page.waitForTimeout(250);
@@ -170,6 +187,8 @@ try {
   await embeddedPanel.waitFor();
   await embeddedPanel.locator(":scope > summary").click();
   await page.waitForTimeout(300);
+  assert.equal(await embeddedPanel.evaluate(node => node.open), true,
+    "integrated Host card must reveal diagnostics only after explicit expansion");
   assert.ok(await page.evaluate(() => window.sizeHistory.length > 0),
     "the SDK must actually send size notifications before checking stability: " + JSON.stringify({
       methods: await page.evaluate(() => window.hostMethods),
@@ -181,6 +200,9 @@ try {
         options: window.__DEVSPACE_MCP_APP__?.options,
       }))
     }));
+  await embeddedPanel.locator(":scope > summary").click();
+  await page.waitForTimeout(100);
+  assert.equal(await embeddedPanel.evaluate(node => node.open), false);
   await page.evaluate(() => { window.sizeHistory = []; });
   for (let i = 0; i < 10; i++) {
     await hostNotify({ ...task, anchorMountGeneration: 5, continuationCount: i });

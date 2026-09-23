@@ -31,6 +31,7 @@ let reviewLoadTimer;
 
 let renderScheduled = false;
 let rendering = false;
+let lastCompactContinuationSignature;
 
 // Explicit user disclosure choices survive status updates and iframe rehydration.
 // Storage is scoped to the immutable card identity, never just the workspace.
@@ -134,7 +135,15 @@ function preserveDisclosure(panel, key, defaultOpen) {
     if (!summary || summary.parentElement !== panel || event.defaultPrevented) return;
     const nextOpen = !panel.open;
     writeDisclosureChoiceToken(panel.getAttribute("data-devspace-disclosure-key"), nextOpen);
+    // Keep the initial card cheap: materialize diagnostics only after a
+    // deliberate expansion. Never call a server tool from this UI action.
   });
+  if (panel.dataset.devspaceContinuation === "true") {
+    // Native <details> toggles *after* summary's click default action.
+    // A microtask queued in click may run while panel.open is still false
+    // and incorrectly skip expansion due to the compact-state cache.
+    panel.addEventListener("toggle", scheduleRender);
+  }
 }
 
 function addCardDisplayActions(body, panel) {
@@ -148,8 +157,12 @@ function addCardDisplayActions(body, panel) {
   status.setAttribute("role", "status");
   expand.addEventListener("click", async () => {
     const openInline = () => {
-      panel.open = true;
-      writeDisclosureChoiceToken(panel.getAttribute("data-devspace-disclosure-key"), true);
+      // The keyed DOM reconciler can move this action button from a newly
+      // constructed, detached card into the already mounted <details>.
+      // Always act on the *live* ancestor, not the builder's stale panel.
+      const livePanel = expand.closest?.("details") ?? panel;
+      livePanel.open = true;
+      writeDisclosureChoiceToken(livePanel.getAttribute("data-devspace-disclosure-key"), true);
     };
     const host = window.openai;
     if (typeof host?.requestDisplayMode !== "function") {
@@ -452,21 +465,48 @@ function buildContinuationCard() {
   const tone = superseded ? "waiting" : continuationStateTone(task);
   const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
   const completed = new Set(Array.isArray(task.completedMilestones) ? task.completedMilestones : []);
+  const doneCount = required.reduce((count, item) => count + (completed.has(item) ? 1 : 0), 0);
+  const identity = `continuation:${task.id ?? state.input?.taskId ?? "pending"}:${task.anchorMountGeneration ?? state.result?.structuredContent?.anchorMountGeneration ?? "pending"}`;
   const shell = element("main", { className: "shell" });
-  const panel = element("details", { className: `tool-card shell codex-runtime-card compact-log continuation-card ${tone}` });
+  const panel = element("details", { className: `tool-card shell codex-runtime-card compact-log continuation-card devspace-native-card ${tone}` });
   panel.dataset.devspaceContinuation = "true";
   if (superseded) panel.dataset.devspaceContinuationSuperseded = "true";
-  preserveDisclosure(panel, `continuation:${task.id ?? state.input?.taskId ?? "pending"}:${task.anchorMountGeneration ?? state.result?.structuredContent?.anchorMountGeneration ?? "pending"}`, tone !== "success");
+  // Conversation-native summary by default; large metadata belongs in an
+  // explicitly opened detail view rather than a permanent 800px-high App.
+  preserveDisclosure(panel, identity, false);
   const header = element("summary", { className: "compact-log-summary" });
   const lockLabel = task.ownerLocked ? (ZH ? " · 已锁定" : " · Locked") : "";
   header.append(
     element("span", { className: `compact-log-icon ${tone}`, text: superseded ? "→" : tone === "success" ? "✓" : tone === "failed" ? "×" : "↻" }),
-    element("span", { className: "compact-log-verb", text: superseded ? (ZH ? "历史里程碑" : "Previous milestone") : (ZH ? "自动续轮任务" : "Continuation task") }),
+    element("span", { className: "compact-log-verb", text: superseded ? (ZH ? "历史任务" : "Earlier task") : (ZH ? "DevSpace 任务" : "DevSpace task") }),
     element("code", { className: "compact-log-command", text: task.objective || state.input?.objective || (ZH ? "等待任务状态" : "Waiting for task state") }),
+    element("span", { className: "devspace-native-count", text: required.length ? `${doneCount}/${required.length}` : "" }),
     element("span", { className: `runtime-status ${tone}`, text: superseded ? (ZH ? "已由后续消息接替" : "Superseded") : `${task.state || "STARTING"}${lockLabel}` }),
   );
-  panel.append(header);
+  // A collapsed card has only its single-line semantic summary and a thin
+  // progress indicator. Skip building/serializing diagnostics on each Host
+  // heartbeat or tool-result refresh while the card remains collapsed.
+  if (!panel.open) {
+    if (required.length) {
+      const progress = element("div", { className: "devspace-milestone-progress devspace-inline-progress" });
+      progress.setAttribute("role", "progressbar");
+      progress.setAttribute("aria-label", ZH ? "里程碑完成进度" : "Milestone progress");
+      progress.setAttribute("aria-valuemin", "0");
+      progress.setAttribute("aria-valuemax", String(required.length));
+      progress.setAttribute("aria-valuenow", String(doneCount));
+      const fill = element("span", { className: "devspace-milestone-progress-fill" });
+      fill.style.width = `${doneCount * 100 / required.length}%`;
+      progress.append(fill);
+      // Closed <details> hides all siblings of <summary>. Put the compact
+      // progress bar inside the visible native summary, not in its body.
+      header.append(progress);
+    }
+    panel.append(header);
+    shell.append(panel);
+    return shell;
+  }
 
+  panel.append(header);
   const body = element("div", { className: "codex-runtime-body" });
   if (required.length) {
     const progress = element("div", { className: "devspace-milestone-progress" });
@@ -474,9 +514,9 @@ function buildContinuationCard() {
     progress.setAttribute("aria-label", ZH ? "里程碑完成进度" : "Milestone progress");
     progress.setAttribute("aria-valuemin", "0");
     progress.setAttribute("aria-valuemax", String(required.length));
-    progress.setAttribute("aria-valuenow", String(required.filter((item) => completed.has(item)).length));
+    progress.setAttribute("aria-valuenow", String(doneCount));
     const fill = element("span", { className: "devspace-milestone-progress-fill" });
-    fill.style.width = `${100 * required.filter((item) => completed.has(item)).length / required.length}%`;
+    fill.style.width = `${100 * doneCount / required.length}%`;
     progress.append(fill);
     body.append(progress);
   }
@@ -839,7 +879,7 @@ function ensureVersionFooter() {
   if (!root || root.querySelector("[data-devspace-version='true']")) return;
   const footer = element("div", {
     className: "devspace-version-footer",
-    text: "DevSpace Portable 1.1.62 dev1 · Protocol 1.6",
+    text: "DevSpace Portable 1.1.62 dev2 · Protocol 1.6",
   });
   footer.dataset.devspaceVersion = "true";
   root.append(footer);
@@ -869,10 +909,25 @@ function renderPatchPending() {
 
 function renderContinuation() {
   if (!root || rendering || !CONTINUATION_TOOLS.has(state.tool)) return;
+  const task = state.continuationTask ?? state.result?.structuredContent?.task ?? {};
+  const currentPanel = root.querySelector(".continuation-card");
+  // Ignore heartbeat-only and timeout-bookkeeping updates in the closed view.
+  // They belong to the coordinator, not the user's compact task summary.
+  // A native disclosure click invalidates this cache so details are built
+  // immediately when opened and discarded again when closed.
+  const compactSignature = JSON.stringify([
+    task.id, task.anchorMountGeneration, task.state, task.ownerLocked,
+    task.objective, task.requiredMilestones, task.completedMilestones,
+    state.input?.objective, state.continuationSuperseded,
+  ]);
+  if (currentPanel && !currentPanel.open
+      && lastCompactContinuationSignature === compactSignature) return;
   rendering = true;
   try {
     replaceCardIfChanged(buildContinuationCard());
     ensureVersionFooter();
+    lastCompactContinuationSignature = root.querySelector(".continuation-card")?.open
+      ? undefined : compactSignature;
   } finally {
     rendering = false;
   }

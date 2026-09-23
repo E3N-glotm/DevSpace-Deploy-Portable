@@ -1531,16 +1531,19 @@ function appOpenAiWidgetCsp(config) {
         connect_domains: [publicBaseUrl],
     };
 }
-function appResourceMeta(config) {
+function appResourceMeta(config, resourceUri = "") {
     const publicBaseUrl = config.publicBaseUrl.replace(/\/+$/, "");
+    const isContinuation = /-continuation-anchor(?:-g\d+)?\.html$/.test(String(resourceUri));
     return {
         ui: {
-            prefersBorder: true,
+            prefersBorder: !isContinuation,
             domain: publicBaseUrl,
             csp: appCsp(config),
         },
-        "openai/widgetDescription": "DevSpace workspace UI, operation timeline, file diffs, generated artifact previews, and durable task continuation.",
-        "openai/widgetPrefersBorder": true,
+        "openai/widgetDescription": isContinuation
+            ? "Compact DevSpace task summary. Expand for milestones and diagnostics; fullscreen is optional."
+            : "DevSpace workspace UI, operation timeline, file diffs and artifact previews.",
+        "openai/widgetPrefersBorder": !isContinuation,
         "openai/widgetCSP": appOpenAiWidgetCsp(config),
         "openai/widgetDomain": publicBaseUrl,
     };
@@ -1552,7 +1555,7 @@ function workspaceAppResourceResult(config, resourceUri = workspaceAppUri(config
                 uri: String(resourceUri),
                 mimeType: RESOURCE_MIME_TYPE,
                 text: workspaceAppHtml(config, resourceUri),
-                _meta: appResourceMeta(config),
+                _meta: appResourceMeta(config, resourceUri),
             },
         ],
     };

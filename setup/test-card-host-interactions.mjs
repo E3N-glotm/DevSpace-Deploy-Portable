@@ -152,12 +152,20 @@ function find(node, predicate) {
   }
   return undefined;
 }
-const progress = find(tree, (item) => item.className === "devspace-milestone-progress");
+const progress = find(tree, (item) => item.className?.includes("devspace-milestone-progress"));
 assert.ok(progress);
 assert.equal(progress.attributes["aria-valuemax"], "2");
 assert.equal(progress.attributes["aria-valuenow"], "1");
 assert.equal(progress.children[0].style.width, "50%");
 assert.equal(calls.length, beforeBuild, "rendering a milestone card must not issue Host actions");
+assert.equal(find(tree, (item) => item.className === "runtime-meta-grid"), undefined,
+  "collapsed card must not materialize heavyweight diagnostics");
+card.writeDisclosureChoice("continuation:task-smoke:pending", true);
+const expanded = card.buildContinuationCard();
+assert.ok(find(expanded, (item) => item.className === "runtime-meta-grid"),
+  "explicitly expanded card must preserve detailed diagnostics");
+assert.ok(find(expanded, (item) => item.className?.includes("continuation-milestones")),
+  "explicitly expanded card must preserve complete milestone list");
 
 console.log(JSON.stringify({
   hostWidgetState: true, rapidStateWritesPreserved: true, noSensitivePersistence: true,
