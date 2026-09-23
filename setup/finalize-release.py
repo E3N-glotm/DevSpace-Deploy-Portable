@@ -108,6 +108,10 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
         (key.removesuffix(".sha256") if key.endswith(".sha256") else key).replace("\\", "/")
         for key in key_files
     }
+    # This regression test is maintained in source but deliberately excluded
+    # from the distributable Next UI. Do not carry forward its obsolete key
+    # after rebuilding a manifest from a previous dev3 preview.
+    candidates.discard("ui-next/tests/security.test.cjs")
     # Rebuild the mapping from normalized POSIX-style paths so a Windows
     # command-line --hotfix using backslashes cannot leave duplicate logical
     # keys such as docs/releases/x.md and docs\releases\x.md.
@@ -123,6 +127,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "setup/portable-manager.cjs",
             "setup/logged-launcher.cjs",
             "DevSpace-Portable.exe",
+            "DevSpace-Portable-Next.exe",
             "Update.exe",
             "DevSpace-SshAskPass.exe",
             "DevSpace-Portable.cmd",
@@ -133,6 +138,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "setup/build-native-ui.cjs",
             "setup/native/DevSpaceBrandIcon.cs",
             "setup/native/DevSpacePortableApp.cs",
+            "setup/native/DevSpacePortableNextLauncher.cs",
             "setup/native/DevSpaceUpdaterApp.cs",
             "setup/native/DevSpaceSshAskPass.cs",
             "setup/tunnel-launcher.cjs",
@@ -242,6 +248,13 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-guard.js",
             "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-coordinator.js",
             "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-timeline.css",
+            "ui-next/electron/main.cjs",
+            "ui-next/electron/preload.cjs",
+            "ui-next/dist/index.html",
+            "ui-next/runtime/electron.exe",
+            "ui-next/package.json",
+            "setup/test-dev3-local-onboarding.mjs",
+            "setup/test-dev3-local-live.mjs",
             "app/node_modules/@waishnav/devspace/dist/ui/assets/session-review.css",
             "app/plugin-dispatcher.mjs",
             "app/plugin-admin.mjs",

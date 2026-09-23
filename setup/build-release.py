@@ -240,6 +240,12 @@ def release_files() -> list[Path]:
             )
         elif relative_dir == Path("packages"):
             dir_names[:] = sorted(name for name in dir_names if name not in {"__pycache__", "staging"})
+        elif relative_dir == Path("ui-next"):
+            # The runtime needs only the self-contained renderer, Electron
+            # binary and narrow bridge. Never package npm's dependency tree
+            # or development-only source/test/build caches.
+            dir_names[:] = sorted(name for name in dir_names
+                                  if name not in {"node_modules", "src", "tests", ".cache"})
         else:
             dir_names[:] = sorted(name for name in dir_names if name != "__pycache__")
         for file_name in sorted(file_names):
@@ -267,6 +273,10 @@ def release_files() -> list[Path]:
             if relative.suffix.lower() in {".pyc", ".pyo"}:
                 continue
             if relative.parent == Path(".") and TEMP_NATIVE_UI_PATTERN.fullmatch(file_name):
+                continue
+            if relative.parent == Path("ui-next") and file_name in {
+                "package-lock.json", "tsconfig.json", "vite.config.ts", "index.html",
+            }:
                 continue
             files.append(relative)
     return sorted(files, key=lambda item: item.as_posix())
@@ -414,6 +424,17 @@ def main() -> int:
     policy = json.loads((ROOT / "setup" / "legacy-release-policy.json").read_text(encoding="utf-8"))
     version = release_version()
     is_dev = bool(manifest.get("development"))
+    if str(manifest.get("development", {}).get("label", "")) == "dev3":
+        required_next = (
+            "DevSpace-Portable-Next.exe",
+            "ui-next/electron/main.cjs",
+            "ui-next/electron/preload.cjs",
+            "ui-next/dist/index.html",
+            "ui-next/runtime/electron.exe",
+        )
+        missing_next = [item for item in required_next if not (ROOT / item).is_file()]
+        if missing_next:
+            raise RuntimeError("Dev3 Next UI payload is incomplete: " + ", ".join(missing_next))
     if version in policy["developmentOnlyVersions"] and not is_dev:
         raise RuntimeError(f"{version} is development-only; finalize it with --dev N before building.")
     node = ROOT / "runtime" / "node" / "node.exe"

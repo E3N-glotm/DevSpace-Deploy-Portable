@@ -8,6 +8,9 @@
 # Installed dependencies. The maintained Portable fork lives under vendor/.
 app/node_modules/
 node_modules/
+ui-next/node_modules/
+ui-next/dist/
+ui-next/runtime/
 
 # Bundled third-party runtimes are restored from a Release or local cache.
 runtime/
@@ -31,6 +34,7 @@ release-assets/*
 
 # Native build output and temporary replacement executables.
 /DevSpace-Portable.exe
+/DevSpace-Portable-Next.exe
 /Update.exe
 /DevSpace-SshAskPass.exe
 /*_DevSpace-Portable.exe

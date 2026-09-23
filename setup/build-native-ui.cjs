@@ -30,6 +30,12 @@ const TARGETS = [
     target: "exe",
     shared: false,
   },
+  {
+    source: path.join(ROOT, "setup", "native", "DevSpacePortableNextLauncher.cs"),
+    output: path.join(ROOT, "DevSpace-Portable-Next.exe"),
+    target: "winexe",
+    shared: false,
+  },
 ];
 const SHARED_SOURCES = [
   path.join(ROOT, "setup", "native", "DevSpaceBrandIcon.cs"),

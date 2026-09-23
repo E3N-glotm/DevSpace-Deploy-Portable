@@ -1,0 +1,27 @@
+{
+  "name": "devspace-portable-ui-next",
+  "version": "1.1.62-dev3",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "test": "node --test tests/*.test.cjs",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@fluentui/react-components": "^9.70.0",
+    "@fluentui/react-icons": "^2.0.310",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "electron": "^38.2.0",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.0"
+  }
+}

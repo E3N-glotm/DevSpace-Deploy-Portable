@@ -73,7 +73,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.62";
-const PORTABLE_DEV_ITERATION = "dev2";
+const PORTABLE_DEV_ITERATION = "dev3";
 const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
@@ -506,13 +506,18 @@ async function readStdinJson() {
 
 async function configure(input) {
   const priorDeployment = readJson(DEPLOYMENT_FILE, {});
+  const localOnly = input.localOnly === true;
   const priorProvider = normalizeTunnelProvider(priorDeployment.tunnelProvider || "ngrok");
   const tunnelProvider = normalizeTunnelProvider(input.tunnelProvider || priorProvider);
   const priorToolMode = normalizeToolMode(priorDeployment.toolMode || "full");
   const toolMode = normalizeToolMode(input.toolMode || priorToolMode);
   const permissions = normalizePermissionSettings(input.permissions, priorDeployment.permissions);
   const features = normalizeFeatureSettings(input.features, priorDeployment.features);
-  const publicBaseUrl = normalizePublicBaseUrl(input.publicBaseUrl);
+  // MCP OAuth needs a syntactically valid issuer even when no public tunnel
+  // exists. Use the actual loopback origin for first-run local-only setups;
+  // an empty origin would make mcpAuthRouter(new URL(...)) fail at startup.
+  const requestedPort = Number(input.port || 7676);
+  const publicBaseUrl = localOnly ? `http://127.0.0.1:${requestedPort}` : normalizePublicBaseUrl(input.publicBaseUrl);
   const providerUrls = {
     ngrok: String(priorDeployment.providerUrls?.ngrok || "").trim(),
     cloudflare: String(priorDeployment.providerUrls?.cloudflare || "").trim(),
@@ -520,7 +525,7 @@ async function configure(input) {
   if (!providerUrls[priorProvider] && priorDeployment.publicBaseUrl) {
     providerUrls[priorProvider] = String(priorDeployment.publicBaseUrl).trim();
   }
-  providerUrls[tunnelProvider] = publicBaseUrl;
+  if (!localOnly) providerUrls[tunnelProvider] = publicBaseUrl;
   const port = Number(input.port || 7676);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
     throw new Error("Port must be an integer from 1024 to 65535.");
@@ -542,18 +547,18 @@ async function configure(input) {
   const ngrokProxyUrl = normalizeNgrokProxyUrl(input.ngrokProxyUrl);
   const ngrokConnectCasHost = Boolean(input.ngrokConnectCasHost);
   const tunnelNetworkCompatibility = input.tunnelNetworkCompatibility !== false;
-  if (tunnelProvider === "ngrok" && !ngrokToken) {
+  if (!localOnly && tunnelProvider === "ngrok" && !ngrokToken) {
     throw new Error("Enter an ngrok Authtoken for the first ngrok deployment.");
   }
 
   let cloudflareToken = validateCloudflareToken(input.cloudflareToken);
   if (!cloudflareToken) cloudflareToken = existingCloudflareToken();
-  if (tunnelProvider === "cloudflare" && !cloudflareToken) {
+  if (!localOnly && tunnelProvider === "cloudflare" && !cloudflareToken) {
     throw new Error("Enter a Cloudflare named Tunnel Token for the first Cloudflare deployment.");
   }
 
-  if (tunnelProvider === "cloudflare") await ensureCloudflaredRuntime();
-  ensureRuntime(tunnelProvider);
+  if (!localOnly && tunnelProvider === "cloudflare") await ensureCloudflaredRuntime();
+  if (localOnly) ensureLocalRuntime(); else ensureRuntime(tunnelProvider);
   const bundledPlugins = seedBundledPlugins();
 
   backupFiles([CONFIG_FILE, AUTH_FILE, NGROK_CONFIG, CLOUDFLARE_TOKEN_FILE, DEPLOYMENT_FILE]);
@@ -584,6 +589,7 @@ async function configure(input) {
   if (cloudflareToken) writeAtomic(CLOUDFLARE_TOKEN_FILE, `${cloudflareToken}\n`);
   writeJson(DEPLOYMENT_FILE, {
     formatVersion: 5,
+    localOnly,
     tunnelProvider,
     toolMode,
     permissions,
@@ -610,7 +616,7 @@ async function configure(input) {
     bundledPlugins,
     providerUrls,
     publicBaseUrl,
-    mcpUrl: `${publicBaseUrl}/mcp`,
+    mcpUrl: localOnly ? `http://127.0.0.1:${port}/mcp` : `${publicBaseUrl}/mcp`,
     port,
     allowedRoots,
     permissionMode,
@@ -3028,6 +3034,9 @@ async function startTunnelOnly() {
 }
 
 async function startServices() {
+  if (readJson(DEPLOYMENT_FILE, {}).localOnly === true) {
+    return startLocalOnly();
+  }
   const provider = selectedTunnelProvider();
   ensureLocalRuntime();
   seedBundledPlugins();
@@ -4247,6 +4256,7 @@ function showConfig() {
   return {
     autoContinuationEnabled: autoContinuationEnabled(),
     configured: fs.existsSync(CONFIG_FILE) && fs.existsSync(AUTH_FILE),
+    localOnly: deployment.localOnly === true,
     tunnelProvider,
     toolMode: normalizeToolMode(deployment.toolMode || "full"),
     permissions: normalizePermissionSettings(deployment.permissions || config.permissions || { profile: "workspace" }),
@@ -4256,7 +4266,7 @@ function showConfig() {
     protocolVersion: "1.5",
     uiLease: uiLeaseStatus(),
     providerUrls,
-    publicBaseUrl: config.publicBaseUrl || "",
+    publicBaseUrl: deployment.localOnly === true ? "" : config.publicBaseUrl || "",
     port: config.port || 7676,
     allowedRoots: config.allowedRoots || [],
     permissionMode: deployment.permissionMode || "selected-roots",
@@ -4272,7 +4282,7 @@ function showConfig() {
     authFile: AUTH_FILE,
     stateDir: config.stateDir || STATE_DIR,
     pluginRoot: path.join(DATA_DIR, "plugins", "installed"),
-    mcpUrl: config.publicBaseUrl ? `${config.publicBaseUrl}/mcp` : "",
+    mcpUrl: deployment.localOnly === true ? `http://127.0.0.1:${config.port || 7676}/mcp` : config.publicBaseUrl ? `${config.publicBaseUrl}/mcp` : "",
   };
 }
 

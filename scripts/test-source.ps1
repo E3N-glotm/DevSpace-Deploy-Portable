@@ -58,6 +58,9 @@ function Invoke-NativeChecked {
 
 Invoke-NativeChecked -FilePath $Node -ArgumentList @("scripts\verify-source-tree.mjs") -FailureMessage "Source-tree verification failed."
 Invoke-NativeChecked -FilePath $Node -ArgumentList @("setup\test-card-host-interactions.mjs") -FailureMessage "Card Host bridge regression failed."
+Invoke-NativeChecked -FilePath $Node -ArgumentList @("setup\test-dev3-local-onboarding.mjs") -FailureMessage "Dev3 local-only setup/secret retention regression failed."
+Invoke-NativeChecked -FilePath $Node -ArgumentList @("setup\test-dev3-local-live.mjs") -FailureMessage "Dev3 isolated local OAuth/MCP integration test failed."
+Invoke-NativeChecked -FilePath $Node -ArgumentList @("--test", "ui-next/tests/security.test.cjs") -FailureMessage "Electron IPC and secret-isolation regression failed."
 Invoke-NativeChecked -FilePath $Node -ArgumentList @("scripts\pack-devspace-core.mjs") -FailureMessage "Portable core packaging failed."
 
 if (-not $SkipInstall) {
