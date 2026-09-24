@@ -209,9 +209,13 @@ function validateSettings(input) {
   if (!['local', 'ngrok', 'cloudflare'].includes(input.provider)) throw new Error('Unknown connection mode');
   const port = Number(input.port);
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('端口必须介于 1024 和 65535。');
-  if (!Array.isArray(input.allowedRoots) || !input.allowedRoots.length || input.allowedRoots.length > 24
+  const fileScopeMode = input.fileScopeMode === undefined
+    ? (input.allowAllFixedDrives === true ? 'all' : 'selected') : input.fileScopeMode;
+  if (!['selected','all'].includes(fileScopeMode)) throw new Error('请选择有效的文件访问范围。');
+  if (!Array.isArray(input.allowedRoots) || (fileScopeMode === 'selected' && !input.allowedRoots.length)
+    || input.allowedRoots.length > 24
     || input.allowedRoots.some(p => typeof p !== 'string' || !path.isAbsolute(p) || p.length > 1024)) {
-    throw new Error('请选择至少一个有效的工作目录。');
+    throw new Error('仅限工作目录模式必须选择至少一个有效目录。');
   }
   if (!input.permissions || !['workspace','full-access','custom'].includes(input.permissions.profile)) {
     throw new Error('访问权限预设无效。');
@@ -222,13 +226,37 @@ function validateSettings(input) {
       throw new Error('公网地址必须是 HTTPS 域名的根地址（不要填写 /mcp）。');
     }
   }
+  const operationMode = ['standard','full','custom'].includes(input.operationMode)
+    ? input.operationMode : 'custom';
+  const operationKeys = [
+    'allowArbitraryCommands','allowShellMutation','allowNetworkAccess',
+    'allowCredentialAccess','allowComputerUse','allowInteractiveProcesses',
+    'allowPersistentProcesses',
+  ];
+  const standardized = {
+    allowArbitraryCommands:false,allowShellMutation:false,allowNetworkAccess:true,
+    allowCredentialAccess:false,allowComputerUse:false,
+    allowInteractiveProcesses:true,allowPersistentProcesses:true,
+  };
+  const operationFlags = Object.fromEntries(operationKeys.map(key=>[
+    key,operationMode==='standard'?standardized[key]:
+      operationMode==='full'?true:input.permissions[key]===true,
+  ]));
   return {
     localOnly: input.provider === 'local',
     tunnelProvider: input.provider === 'local' ? 'ngrok' : input.provider,
     publicBaseUrl: input.provider === 'local' ? '' : input.publicBaseUrl,
     allowedRoots: input.allowedRoots, port, toolMode: input.toolMode || 'full',
-    allowAllFixedDrives: input.allowAllFixedDrives === true,
-    permissions: input.permissions,
+    fileScopeMode,
+    operationMode,
+    allowAllFixedDrives: fileScopeMode === 'all',
+    // Save a *single* effective policy. Never allow the Manager's legacy
+    // full-access/workspace presets to silently change the file scope.
+    permissions: {
+      ...operationFlags,
+      profile:'custom',
+      allowExternalPaths:fileScopeMode === 'all',
+    },
     ...(['ownerToken','ngrokToken','cloudflareToken'].reduce((out, key) => {
       if (typeof input[key] === 'string' && input[key].trim()) out[key] = input[key].trim();
       return out;
@@ -512,9 +540,63 @@ app.whenReady().then(() => {
               );
               coverage.push({page:pageId, clicked, ...rendered});
             }
-            const valid = coverage.every(x => x.clicked && x.hasPanel && !x.legacyLaunch);
+            // Verify the reported dark-hero regression against the actual
+            // computed Chromium style, not only a CSS source-string search.
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(\x27.sidebar [data-page="home"]\x27)?.click()',
+            );
+            await new Promise(resolve => setTimeout(resolve, 130));
+            const heroService = await activeWindow.webContents.executeJavaScript(`(() => {
+              const button=document.querySelector('.hero-service-button');
+              if(!button)return {found:false,contrast:0};
+              const color=getComputedStyle(button).color;
+              const background=getComputedStyle(button).backgroundColor;
+              const linear=component=>component<=0.04045?component/12.92:
+                Math.pow((component+0.055)/1.055,2.4);
+              const luminance=text=>{
+                const rgb=text.match(/[0-9.]+/g)?.slice(0,3).map(v=>linear(Number(v)/255))||[0,0,0];
+                return .2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];
+              };
+              const a=luminance(color),b=luminance(background);
+              return {found:true,color,background,contrast:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
+            })()`);
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(\x27.sidebar [data-page="settings"]\x27)?.click()',
+            );
+            await new Promise(resolve => setTimeout(resolve, 150));
+            const selected = await activeWindow.webContents.executeJavaScript(`(() => {
+              const scopes=[...document.querySelectorAll('.access-choices .choice')];
+              const operations=[...document.querySelectorAll('.permission-choices .choice')];
+              const all=scopes.find(x=>x.textContent.includes('全部可访问目录'));
+              const full=operations.find(x=>x.textContent.includes('全部操作'));
+              if(!all||!full)return {found:false,independent:false};
+              all.click();full.click();
+              return {found:true};
+            })()`);
+            await new Promise(resolve => setTimeout(resolve, 130));
+            const independent = await activeWindow.webContents.executeJavaScript(`(() => {
+              const scopes=[...document.querySelectorAll('.access-choices .choice')];
+              const ops=[...document.querySelectorAll('.permission-choices .choice')];
+              const chosen=text=>[...scopes,...ops].find(x=>x.textContent.includes(text))?.classList.contains('chosen');
+              const selected=scopes.find(x=>x.textContent.includes('仅限所选目录'));
+              if(!selected)return {independent:false};
+              selected.click();
+              return {allChosen:chosen('全部可访问目录'),selectedChosen:true,
+                fullChosen:chosen('全部操作')};
+            })()`);
+            await new Promise(resolve => setTimeout(resolve, 120));
+            const current = await activeWindow.webContents.executeJavaScript(`(() => ({
+              selectedChosen:!![...document.querySelectorAll('.access-choices .choice.chosen')]
+                .find(x=>x.textContent.includes('仅限所选目录')),
+              fullChosen:!![...document.querySelectorAll('.permission-choices .choice.chosen')]
+                .find(x=>x.textContent.includes('全部操作')),
+            }))()`);
+            const valid = coverage.every(x => x.clicked && x.hasPanel && !x.legacyLaunch)
+              && heroService.found && heroService.contrast >= 4.5
+              && selected.found && independent.selectedChosen && current.selectedChosen && current.fullChosen;
             clearTimeout(watchdog);
-            process.stdout.write(JSON.stringify({smoke:valid, navigation:coverage}) + '\n');
+            process.stdout.write(JSON.stringify({smoke:valid, navigation:coverage,
+              heroService, scopeOperationsIndependent:current.selectedChosen&&current.fullChosen}) + '\n');
             app.exit(valid ? 0 : 5);
             return;
           }

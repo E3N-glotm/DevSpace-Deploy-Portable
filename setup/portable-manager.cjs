@@ -78,7 +78,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.62";
-const PORTABLE_DEV_ITERATION = "dev4";
+const PORTABLE_DEV_ITERATION = "dev5";
 const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
@@ -516,7 +516,27 @@ async function configure(input) {
   const tunnelProvider = normalizeTunnelProvider(input.tunnelProvider || priorProvider);
   const priorToolMode = normalizeToolMode(priorDeployment.toolMode || "full");
   const toolMode = normalizeToolMode(input.toolMode || priorToolMode);
-  const permissions = normalizePermissionSettings(input.permissions, priorDeployment.permissions);
+  const requestedScope = input.fileScopeMode;
+  if (requestedScope !== undefined && !["selected","all"].includes(requestedScope)) {
+    throw new Error("Invalid file access scope; choose selected directories or all accessible directories.");
+  }
+  const operationMode = input.operationMode;
+  if (requestedScope !== undefined && !["standard", "full", "custom"].includes(operationMode)) {
+    throw new Error("Invalid operation rights preset; choose standard, full or custom.");
+  }
+  const normalizedPermissions = requestedScope !== undefined && operationMode === "standard"
+    ? normalizePermissionSettings({ profile: "workspace" })
+    : requestedScope !== undefined && operationMode === "full"
+      ? normalizePermissionSettings({ profile: "full-access" })
+      : normalizePermissionSettings(input.permissions, priorDeployment.permissions);
+  // Dev5 UI separates file access scope from operation rights. Do not let
+  // workspace/full-access presets silently override the chosen directory
+  // boundary. Older clients without fileScopeMode keep their old behavior.
+  const permissions = requestedScope === undefined ? normalizedPermissions : {
+    ...normalizedPermissions,
+    profile: "custom",
+    allowExternalPaths: requestedScope === "all",
+  };
   const features = normalizeFeatureSettings(input.features, priorDeployment.features);
   // MCP OAuth needs a syntactically valid issuer even when no public tunnel
   // exists. Use the actual loopback origin for first-run local-only setups;
@@ -535,8 +555,28 @@ async function configure(input) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
     throw new Error("Port must be an integer from 1024 to 65535.");
   }
-  const permissionMode = input.allowAllFixedDrives ? "all-drive-roots" : "selected-roots";
-  const allowedRoots = normalizeRoots(permissionMode === "all-drive-roots" ? fixedDrives() : input.allowedRoots);
+  const allDirectories = requestedScope === undefined
+    ? input.allowAllFixedDrives === true : requestedScope === "all";
+  const permissionMode = allDirectories ? "all-drive-roots" : "selected-roots";
+  const previousSelectedRoots = Array.isArray(priorDeployment.selectedRoots)
+    ? priorDeployment.selectedRoots
+    : priorDeployment.permissionMode === "all-drive-roots" ? []
+    : readJson(CONFIG_FILE, {}).allowedRoots || [];
+  // Explicit selections are remembered even while all-directory mode is
+  // active, so switching back restores the actual projects, not C:\, D:\...
+  const selectedRoots = Array.isArray(input.allowedRoots)
+    ? input.allowedRoots : previousSelectedRoots;
+  if (!allDirectories && !selectedRoots.length) {
+    throw new Error("Select at least one existing working directory or choose all directories.");
+  }
+  // All-directory mode must not be blocked by an unplugged/offline project
+  // volume in the remembered list. Validate its existence only when the
+  // user explicitly switches back to selected-directory scope.
+  const verifiedSelectedRoots = allDirectories
+    ? [...new Set(selectedRoots.map((item) => String(item || "").trim())
+      .filter((item) => item && path.isAbsolute(item)).map((item) => path.resolve(item)))]
+    : normalizeRoots(selectedRoots);
+  const allowedRoots = normalizeRoots(permissionMode === "all-drive-roots" ? fixedDrives() : verifiedSelectedRoots);
   const priorAuth = readJson(AUTH_FILE, {});
   let ownerToken = String(input.ownerToken || "").trim();
   let generatedOwnerToken = false;
@@ -603,6 +643,8 @@ async function configure(input) {
     publicBaseUrl,
     port,
     permissionMode,
+    selectedRoots: verifiedSelectedRoots,
+    operationMode: requestedScope !== undefined ? operationMode : undefined,
     ngrokProxyConfigured: Boolean(ngrokProxyUrl),
     tunnelNetworkCompatibility,
     ngrokConnectCasHost,
@@ -625,6 +667,7 @@ async function configure(input) {
     port,
     allowedRoots,
     permissionMode,
+    selectedRoots: verifiedSelectedRoots,
     ngrokProxyUrl,
     tunnelNetworkCompatibility,
     ngrokConnectCasHost,
@@ -4280,6 +4323,11 @@ function showConfig() {
     publicBaseUrl: deployment.localOnly === true ? "" : config.publicBaseUrl || "",
     port: config.port || 7676,
     allowedRoots: config.allowedRoots || [],
+    selectedRoots: Array.isArray(deployment.selectedRoots)
+      ? deployment.selectedRoots
+      : deployment.permissionMode === "all-drive-roots" ? [] : config.allowedRoots || [],
+    operationMode: ["standard","full","custom"].includes(deployment.operationMode)
+      ? deployment.operationMode : undefined,
     permissionMode: deployment.permissionMode || "selected-roots",
     hasOwnerToken: Boolean(readJson(AUTH_FILE, {}).ownerToken),
     hasNgrokToken: Boolean(existingNgrokToken()),

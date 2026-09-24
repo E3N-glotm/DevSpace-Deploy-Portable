@@ -164,6 +164,10 @@ if ($NextIsDefault) {
     Invoke-NativeChecked -FilePath $Npm -ArgumentList @('run', 'test', '--prefix', 'ui-next') -FailureMessage 'Next UI security regression failed.'
     Write-Host '==> setup/test-dev4-ssh-admin.mjs'
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev4-ssh-admin.mjs') -FailureMessage 'Next UI SSH compatibility regression failed.'
+    if ($DevelopmentIteration -ge 5) {
+        Write-Host '==> setup/test-dev5-access-scope.mjs'
+        Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev5-access-scope.mjs') -FailureMessage 'Dev5 file access scope / operations isolation failed.'
+    }
 }
 foreach ($Test in $Tests) {
     if ($NextIsDefault -and $Test -in @(

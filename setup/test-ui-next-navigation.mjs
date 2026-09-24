@@ -26,4 +26,13 @@ const result=JSON.parse(resultLine);
 assert.equal(result.smoke,true);
 assert.equal(result.navigation.length,11);
 assert.ok(result.navigation.every(row=>row.clicked&&row.hasPanel&&!row.legacyLaunch&&!row.error));
-console.log(JSON.stringify({nextDefaultLauncher:true,legacyUIEntrypoints:0,nativePages:result.navigation.length,smoke:true}));
+if(Number(manifest.development?.iteration||0)>=5){
+  assert.equal(result.heroService?.found,true,'Dark hero must show service action');
+  assert.ok(result.heroService?.contrast>=4.5,
+    'Service-management action must meet WCAG AA normal-text contrast in actual Electron');
+  assert.equal(result.scopeOperationsIndependent,true,
+    'Choosing full operations must not change the selected file scope');
+}
+console.log(JSON.stringify({nextDefaultLauncher:true,legacyUIEntrypoints:0,
+  nativePages:result.navigation.length,heroServiceContrast:result.heroService?.contrast,
+  scopeOperationsIndependent:result.scopeOperationsIndependent,smoke:true}));

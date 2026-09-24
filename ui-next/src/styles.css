@@ -127,3 +127,37 @@ textarea:focus-visible{outline:3px solid #1467bd;outline-offset:2px}
 .operation-output,.output{color:#f4f7ff}
 .page-body{max-width:1480px}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+
+/* dev5: secondary action inside the dark service hero must never inherit
+   Fluent's dark-on-light outlined button tokens from the page theme. */
+.hero .hero-service-button,
+.hero .hero-service-button:hover,
+.hero .hero-service-button:focus-visible{
+  color:#ffffff!important;
+  border:1px solid #e0efff!important;
+  background:#183e67!important;
+  font-weight:700;
+  min-width:104px;
+}
+.hero .hero-service-button:hover{background:#27699e!important}
+.hero .hero-service-button:active{background:#10476f!important}
+.hero .hero-service-button:focus-visible{outline:3px solid #fff;outline-offset:3px}
+
+/* File scope and operations are independent sections, in setup and settings. */
+.access-section{margin:22px 0 28px;min-width:0}
+.access-section+.access-section{border-top:1px solid #cbd7e7;padding-top:23px}
+.access-heading{display:flex;gap:12px;align-items:center}
+.access-heading h3{margin:0 0 4px;font-size:16px;color:#14263e}
+.access-heading p{margin:0;font-size:12px;color:#415875;line-height:1.5}
+.access-number{flex:0 0 32px;height:32px;display:grid;place-items:center;border-radius:9px;background:#d8eafb;color:#174b81;font-weight:750}
+.access-section .choices{margin:16px 0 14px}
+.access-choices{grid-template-columns:repeat(2,minmax(0,1fr))}
+.access-choices .choice{min-height:132px}
+.access-summary{display:flex;flex-direction:column;gap:5px;border:1px solid #bdd3e9;background:#f0f7ff;border-radius:10px;padding:12px 15px;color:#183f68}
+.access-summary strong{font-size:12px;color:#183f68;overflow-wrap:anywhere}
+.access-summary span{font-size:11px;line-height:1.6;color:#385775}
+.access-final{margin-top:18px}
+.roots-retained{margin-top:10px}
+.permission-grid{margin-top:16px}
+.review strong{white-space:normal;text-align:right;overflow-wrap:anywhere}
+@media(max-width:1120px){.access-choices{grid-template-columns:1fr}.access-choices .choice{min-height:105px}}

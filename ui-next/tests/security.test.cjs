@@ -46,6 +46,33 @@ test('settings validation, secrets never substituted with asterisks',()=>{
   assert.throws(()=>h.validateSettings({...base,provider:'cloudflare',publicBaseUrl:'http://example.com'}));
   assert.throws(()=>h.validateSettings({...base,provider:'cloudflare',publicBaseUrl:'https://example.com/mcp'}));
 });
+test('dev5 file scope and operations remain independent in the privileged IPC validator',()=>{
+  const h=hooks();
+  const base={
+    provider:'local',port:7676,allowedRoots:[process.cwd()],
+    permissions:{profile:'full-access',allowExternalPaths:true,
+      allowArbitraryCommands:true,allowShellMutation:true,allowNetworkAccess:true,
+      allowCredentialAccess:true,allowComputerUse:true,
+      allowInteractiveProcesses:true,allowPersistentProcesses:true},
+    toolMode:'full',
+  };
+  const selected=h.validateSettings({...base,fileScopeMode:'selected',operationMode:'full'});
+  assert.equal(selected.fileScopeMode,'selected');
+  assert.equal(selected.allowAllFixedDrives,false);
+  assert.equal(selected.permissions.profile,'custom');
+  assert.equal(selected.permissions.allowExternalPaths,false);
+  assert.equal(selected.permissions.allowArbitraryCommands,true);
+  const allStandard=h.validateSettings({...base,fileScopeMode:'all',operationMode:'standard',
+    allowedRoots:[]});
+  assert.equal(allStandard.fileScopeMode,'all');
+  assert.equal(allStandard.allowAllFixedDrives,true);
+  assert.equal(allStandard.permissions.allowExternalPaths,true);
+  assert.equal(allStandard.permissions.allowArbitraryCommands,false);
+  assert.equal(allStandard.permissions.allowCredentialAccess,false);
+  assert.equal(allStandard.permissions.allowNetworkAccess,true);
+  assert.throws(()=>h.validateSettings({...base,fileScopeMode:'selected',allowedRoots:[]}),/工作目录/);
+  assert.throws(()=>h.validateSettings({...base,fileScopeMode:'bad'}),/文件访问范围/);
+});
 test('only allow-listed management operations and secret kinds',()=>{
   const h=hooks();
   assert.equal(h.getActions().includes('configure'),false);

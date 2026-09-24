@@ -9,7 +9,8 @@ export type Permission = {
 export type Config = {
   configured: boolean; localOnly: boolean; tunnelProvider: string; port: number;
   publicBaseUrl: string; providerUrls: {cloudflare?: string; ngrok?: string};
-  allowedRoots: string[]; permissionMode: string; permissions: Permission;
+  allowedRoots: string[]; selectedRoots?: string[]; permissionMode: string; permissions: Permission;
+  operationMode?: 'standard' | 'full' | 'custom';
   toolMode: string; hasOwnerToken: boolean; hasNgrokToken: boolean; hasCloudflareToken: boolean;
   ngrokProxyUrl: string; features: Record<string, boolean>; mcpUrl: string;
   portableDisplayVersion: string;
@@ -17,6 +18,7 @@ export type Config = {
 export type Settings = {
   provider: Provider; publicBaseUrl: string; port: number; allowedRoots: string[];
   permissions: Permission; toolMode: string; ngrokProxyUrl: string;
+  fileScopeMode: 'selected' | 'all'; operationMode: 'standard' | 'full' | 'custom';
   allowAllFixedDrives?: boolean;
   ngrokToken?: string; cloudflareToken?: string; ownerToken?: string;
 };

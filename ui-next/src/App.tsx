@@ -7,41 +7,30 @@ import {
   PlugConnectedRegular, SearchRegular, ServerRegular, SettingsRegular, ShieldRegular,
 } from '@fluentui/react-icons';
 import type { Config, Permission, Progress, Provider, Settings } from './api';
+import {operationNames, standardOperations, fullOperations, detectOperationMode,
+  initialFileScope, selectedDirectoryList, compileAccessSettings} from './access-policy';
 import { AgentsPage, PluginsPage, ContinuationsPage, SessionsPage,
   MemoriesPage, OAuthPage, ServicePage, DiagnosticsPage } from './Operations';
 
 type Page = 'home' | 'workspaces' | 'agents' | 'extensions' | 'tasks' |
   'sessions' | 'memories' | 'oauth' | 'services' | 'diagnose' | 'settings';
 type SecretKind = 'owner' | 'ngrok' | 'cloudflare';
-const permissionNames: {key: keyof Omit<Permission,'profile'>; label: string; desc: string}[] = [
-  {key:'allowExternalPaths',label:'访问工作区以外的路径',desc:'允许读取或修改所选工作目录之外的文件。'},
-  {key:'allowArbitraryCommands',label:'执行任意命令',desc:'允许运行未预先列入安全白名单的命令。'},
-  {key:'allowShellMutation',label:'通过 Shell 修改文件',desc:'允许运行可写入、删除或移动文件的 Shell 命令。'},
-  {key:'allowNetworkAccess',label:'网络访问与 SSH',desc:'允许访问网络和连接外部服务器。'},
-  {key:'allowCredentialAccess',label:'凭据接口',desc:'允许读取受保护的登录凭据，建议默认关闭。'},
-  {key:'allowComputerUse',label:'桌面控制',desc:'允许 AI 操作鼠标、键盘和屏幕，适合受信任的个人环境。'},
-  {key:'allowInteractiveProcesses',label:'交互进程',desc:'允许启动需要持续输入输出的终端进程。'},
-  {key:'allowPersistentProcesses',label:'持续进程',desc:'允许训练、服务和监控任务在当前操作结束后继续运行。'},
-];
 const workspace: Permission = {
-  profile:'workspace', allowExternalPaths:false, allowArbitraryCommands:false,
-  allowShellMutation:false, allowNetworkAccess:true, allowCredentialAccess:false,
-  allowComputerUse:false, allowInteractiveProcesses:true, allowPersistentProcesses:true,
+  profile:'custom', allowExternalPaths:false, ...standardOperations,
 };
-const fullAccess: Permission = Object.fromEntries([
-  ['profile','full-access'],...permissionNames.map(item => [item.key,true]),
-]) as unknown as Permission;
 function fromConfig(c: Config): Settings {
   return {
     provider: c.localOnly ? 'local' : c.tunnelProvider === 'cloudflare' ? 'cloudflare' : 'ngrok',
     publicBaseUrl: c.publicBaseUrl || '', port: c.port || 7676,
-    allowedRoots: Array.isArray(c.allowedRoots) ? c.allowedRoots : [],
-    allowAllFixedDrives: c.permissionMode === 'all-drive-roots',
+    allowedRoots: selectedDirectoryList(c),
+    fileScopeMode: initialFileScope(c),
+    operationMode: detectOperationMode(c),
+    allowAllFixedDrives: initialFileScope(c) === 'all',
     permissions: c.permissions || workspace, toolMode: c.toolMode || 'full',
     ngrokProxyUrl: c.ngrokProxyUrl || '',
   };
 }
-const steps = ['欢迎','使用方式','网络连接','工作目录','访问权限','检查配置','部署完成'];
+const steps = ['欢迎','使用方式','网络连接','文件范围','操作权限','检查配置','部署完成'];
 
 function SecretField({ kind, configured, value, onChange, onCopy }: {
   kind: SecretKind; configured: boolean; value: string; onChange: (value:string)=>void;
@@ -70,24 +59,56 @@ function Roots({values,onChange,onChoose}:{
   return <div className="roots">
     {values.map(root=><div className="root" key={root}><FolderOpenRegular/><span title={root}>{root}</span><Button appearance="subtle" size="small" onClick={()=>onChange(values.filter(v=>v!==root))}>移除</Button></div>)}
     <Button icon={<FolderOpenRegular/>} appearance="outline" onClick={onChoose}>添加工作目录</Button>
-    <p className="help">只能访问你选择的真实目录。首次使用需要添加至少一个现有文件夹。</p>
+    <p className="help">这里保存的是明确选择的项目目录；切换至「全部可访问目录」不会清除这些记录。</p>
   </div>;
 }
-function Permissions({value,onChange}: {value: Permission; onChange:(value:Permission)=>void}) {
-  const choose = (profile:Permission['profile']) =>
-    onChange(profile==='workspace'?{...workspace}:profile==='full-access'?{...fullAccess}:{...value,profile:'custom'});
-  return <div className="section">
-    <div className="choices permission-choices">
-      <Choice selected={value.profile==='workspace'} icon={<ShieldRegular/>} title="工作区访问" caption="只访问指定目录，适合新用户。" onClick={()=>choose('workspace')}/>
-      <Choice selected={value.profile==='full-access'} icon={<DesktopRegular/>} title="完全访问" caption="当前 Windows 用户拥有的全部权限。" onClick={()=>choose('full-access')}/>
-      <Choice selected={value.profile==='custom'} icon={<SettingsRegular/>} title="自定义" caption="逐项决定文件、命令及桌面权限。" onClick={()=>choose('custom')}/>
+function FileAccess({mode,onModeChange,roots,onRootsChange,onChoose}:{
+  mode:Settings['fileScopeMode'];onModeChange:(v:Settings['fileScopeMode'])=>void;
+  roots:string[];onRootsChange:(v:string[])=>void;onChoose:()=>Promise<void>;
+}) {
+  return <section className="access-section">
+    <div className="access-heading"><span className="access-number">01</span><div><h3>文件访问范围</h3>
+      <p>先决定可以访问哪里；下方的操作权限不会改变这里的选择。</p></div></div>
+    <div className="choices access-choices">
+      <Choice selected={mode==='selected'} icon={<FolderOpenRegular/>} title="仅限所选目录"
+        caption="只允许访问明确选择的工作目录及其子目录。" onClick={()=>onModeChange('selected')}/>
+      <Choice selected={mode==='all'} icon={<DesktopRegular/>} title="全部可访问目录"
+        caption="不受工作目录限制；访问当前 Windows 用户有权访问的路径。" onClick={()=>onModeChange('all')}/>
     </div>
-    {value.profile==='full-access' && <div className="warning"><ShieldRegular/>此预设将允许所有高级操作。请仅在可信的个人电脑上使用。</div>}
-    {value.profile==='custom' && <div className="permission-grid">{permissionNames.map(item=><div className="permission" key={item.key}>
+    {mode==='selected'?<><div className="access-summary">
+      <strong>当前有效范围：{roots.length?roots.length+' 个指定目录':'尚未选择目录'}</strong>
+              <span>内置文件工具限于以下目录。任意命令、外部程序及桌面控制等高级操作可能绕过目录过滤，请结合下方操作权限管理。</span>
+    </div><Roots values={roots} onChange={onRootsChange} onChoose={onChoose}/></>:
+      <><div className="warning" role="status"><ShieldRegular/>
+        全部目录模式不受下方已选目录限制，包括当前用户有权限访问的其他本地盘和网络路径；仍受 Windows 账户权限约束。</div>
+        <div className="access-summary"><strong>已保存 {roots.length} 个工作目录（当前不作为访问限制）</strong>
+          <span>切回「仅限所选目录」后，以下原有目录将重新成为访问边界。</span></div>
+        {roots.length>0&&<div className="roots roots-retained">{roots.map(root=>
+          <div className="root" key={root}><FolderOpenRegular/><span title={root}>{root}</span></div>)}</div>}</>}
+  </section>;
+}
+function Permissions({value,mode,onChange}:{
+  value:Permission;mode:Settings['operationMode'];onChange:(mode:Settings['operationMode'],value:Permission)=>void;
+}) {
+  const choose=(next:Settings['operationMode'])=>onChange(next,
+    next==='standard'?{...value,...standardOperations}:next==='full'?{...value,...fullOperations}:value);
+  return <section className="access-section">
+    <div className="access-heading"><span className="access-number">02</span><div><h3>操作权限</h3>
+      <p>决定可以执行哪些操作；「全部操作」不会自动开启全部目录访问。</p></div></div>
+    <div className="choices permission-choices">
+      <Choice selected={mode==='standard'} icon={<ShieldRegular/>} title="标准操作"
+        caption="网络和持续进程开启，任意命令、Shell 修改和敏感操作关闭。" onClick={()=>choose('standard')}/>
+      <Choice selected={mode==='full'} icon={<DesktopRegular/>} title="全部操作"
+        caption="启用以下所有操作能力，文件访问范围保持不变。" onClick={()=>choose('full')}/>
+      <Choice selected={mode==='custom'} icon={<SettingsRegular/>} title="自定义操作"
+        caption="逐项控制命令、网络、凭据及桌面操作。" onClick={()=>choose('custom')}/>
+    </div>
+    {mode==='full'&&<div className="warning"><ShieldRegular/>任意命令及桌面控制可能通过外部程序或界面操作影响工作目录外的文件；目录过滤不能约束所有外部操作，请仅在可信环境启用。</div>}
+    {mode==='custom'&&<div className="permission-grid">{operationNames.map(item=><div className="permission" key={item.key}>
       <div><strong>{item.label}</strong><p>{item.desc}</p></div>
-      <Switch checked={Boolean(value[item.key])} onChange={(_e,d)=>onChange({...value,[item.key]:d.checked})}/>
+      <Switch checked={Boolean(value[item.key])} onChange={(_e,d)=>onChange('custom',{...value,[item.key]:d.checked})}/>
     </div>)}</div>}
-  </div>;
+  </section>;
 }
 function DeployProgress({progress,busy}: {progress:Progress|null;busy:boolean}) {
   return <div className="deploy-progress">
@@ -140,7 +161,7 @@ export function App() {
     try {
       const folder=await window.devspace.chooseFolder();
       if(folder&&draft&&!draft.allowedRoots.some(v=>v.toLowerCase()===folder.toLowerCase()))
-        update({allowedRoots:[...draft.allowedRoots,folder],allowAllFixedDrives:false});
+        update({allowedRoots:[...draft.allowedRoots,folder],fileScopeMode:'selected',allowAllFixedDrives:false});
     }catch(e){setError(getError(e));}
   },[draft,update]);
   const copy=useCallback(async(kind:SecretKind)=>{
@@ -157,7 +178,7 @@ export function App() {
     setBusy(true);setError('');setNotice('');setProgress(null);
     try {
       const previous=await window.devspace.getConfig();
-      const result=await window.devspace.save(draft);
+      const result=await window.devspace.save(compileAccessSettings(draft));
       setApplyPending(true);
       const next=await window.devspace.getConfig();
       setConfig(next);setDraft(fromConfig(next));setDirty(false);setSecretRevision(v=>v+1);
@@ -191,13 +212,13 @@ export function App() {
       const present=selectedSecret==='ngrok'?config?.hasNgrokToken:config?.hasCloudflareToken;
       if(!present && !(selectedSecret==='ngrok'?draft.ngrokToken:draft.cloudflareToken))return false;
     }
-    if(step===3&&!draft.allowedRoots.length)return false;
+    if(step===3&&draft.fileScopeMode==='selected'&&!draft.allowedRoots.length)return false;
     return true;
   },[step,draft,isPublic,config,selectedSecret]);
   if(!draft||!config)return <div className="startup"><Spinner size="large"/><h2>正在连接 DevSpace…</h2><p>{error||'读取本地配置，不会修改现有部署。'}</p></div>;
   return <div className="desktop">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV4</small></span></div>
+      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV5</small></span></div>
       <div className="side-group">
         {([['home',<HomeRegular/>,'主页'],['workspaces',<FolderOpenRegular/>,'工作区'],
           ['agents',<ServerRegular/>,'远程服务器'],['extensions',<PlugConnectedRegular/>,'插件与工具'],
@@ -208,7 +229,7 @@ export function App() {
           <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
       <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span className={'dot '+(status?.localHealthy?'online':'')}/>{status?.localHealthy?'本地 MCP 已连接':'本地 MCP 未连接'}<small>v1.1.62 dev4</small></div>
+        <div className="sidebar-status"><span className={'dot '+(status?.localHealthy?'online':'')}/>{status?.localHealthy?'本地 MCP 已连接':'本地 MCP 未连接'}<small>v1.1.62 dev5</small></div>
       </div>
     </aside>
     <main className="main">
@@ -237,14 +258,18 @@ export function App() {
                   <SecretField key={selectedSecret+secretRevision} kind={selectedSecret} configured={selectedSecret==='cloudflare'?config.hasCloudflareToken:config.hasNgrokToken}
                     value={selectedSecret==='cloudflare'?draft.cloudflareToken||'':draft.ngrokToken||''} onChange={v=>update(selectedSecret==='cloudflare'?{cloudflareToken:v}:{ngrokToken:v})} onCopy={copy}/></Field>
               </>:<div className="tip"><LockClosedRegular/>此模式不会要求公网域名或隧道 Token，只会启动本地 MCP。</div>}</div></>}
-            {step===3&&<><h2>选择允许访问的工作目录</h2><p className="muted">无需手写路径；请只添加你希望让 DevSpace 访问的目录。</p>
-              <Roots values={draft.allowedRoots} onChange={v=>update({allowedRoots:v,allowAllFixedDrives:false})} onChoose={addFolder}/></>}
-            {step===4&&<><h2>选择访问权限</h2><p className="muted">默认使用工作区访问。完全访问意味着允许更广泛的操作。</p>
-              <Permissions value={draft.permissions} onChange={v=>update({permissions:v})}/></>}
+            {step===3&&<><h2>选择文件访问范围</h2><p className="muted">可以只授权指定目录，或者明确允许访问当前账户有权访问的所有目录。</p>
+              <FileAccess mode={draft.fileScopeMode} roots={draft.allowedRoots}
+                onModeChange={v=>update({fileScopeMode:v,allowAllFixedDrives:v==='all'})}
+                onRootsChange={v=>update({allowedRoots:v})} onChoose={addFolder}/></>}
+            {step===4&&<><h2>选择操作权限</h2><p className="muted">文件范围已单独选择；此处只决定命令、网络和桌面等操作能力。</p>
+              <Permissions value={draft.permissions} mode={draft.operationMode}
+                onChange={(mode,value)=>update({operationMode:mode,permissions:value})}/></>}
             {step===5&&<><h2>检查并部署</h2><p className="muted">确认以下配置。部署将注册计划任务并启动服务，不会删除旧数据。</p>
               <div className="review"><div>连接方式<strong>{draft.provider==='local'?'仅本机':draft.provider}</strong></div>
-                <div>本地端口<strong>{draft.port}</strong></div><div>工作目录<strong>{draft.allowedRoots.length} 个</strong></div>
-                <div>权限预设<strong>{draft.permissions.profile}</strong></div></div>
+                <div>本地端口<strong>{draft.port}</strong></div>
+                <div>有效文件范围<strong>{draft.fileScopeMode==='all'?'全部可访问目录':draft.allowedRoots.join('；')||'未选择'}</strong></div>
+                <div>操作权限<strong>{draft.operationMode==='standard'?'标准操作':draft.operationMode==='full'?'全部操作':'自定义操作'}</strong></div></div>
               <DeployProgress progress={progress} busy={busy}/></>}
             {step===6&&<><div className="large-icon green"><CheckmarkCircleRegular/></div><h2>DevSpace 已就绪</h2>
               <p className="muted">服务部署完成。下面的地址与密码可以通过按钮复制。</p>
@@ -266,10 +291,12 @@ export function App() {
         {!wizard&&page==='home'&&<><div className="hero"><span className="eyebrow">SYSTEM OVERVIEW</span><h2>{status?.localHealthy?'DevSpace 正在运行':'DevSpace 尚未就绪'}</h2>
           <p>服务状态与工作区一目了然。插件、任务、会话与系统管理均可直接在新版窗口中操作。</p>
           <div className="hero-actions"><Button appearance="primary" onClick={()=>select('settings')}>配置服务</Button>
-            <Button appearance="outline" onClick={()=>select('services')}>服务管理</Button></div></div>
+            <Button appearance="outline" className="hero-service-button" onClick={()=>select('services')}>服务管理</Button></div></div>
           <div className="metric-grid"><div className="metric"><span className="metric-icon"><DesktopRegular/></span><small>本地 MCP</small><strong>{status?.localHealthy?'已连接':'未连接'}</strong><p>{status?.localUrl}</p></div>
             <div className="metric"><span className="metric-icon"><CloudRegular/></span><small>公网模式（连通性未核验）</small><strong>{status?.provider==='local'?'仅本机':status?.provider}</strong><p>{status?.publicUrl||'未配置公网入口'}</p></div>
-            <div className="metric"><span className="metric-icon"><FolderOpenRegular/></span><small>允许的工作目录</small><strong>{config.allowedRoots.length} 个</strong><p>可在工作区页面查看与添加</p></div></div>
+            <div className="metric"><span className="metric-icon"><FolderOpenRegular/></span><small>有效文件访问范围</small>
+              <strong>{initialFileScope(config)==='all'?'全部可访问目录':selectedDirectoryList(config).length+' 个工作目录'}</strong>
+              <p>{initialFileScope(config)==='all'?'已选目录不构成访问限制':'在工作区页面查看或调整'}</p></div></div>
           <section className="panel"><div className="section-heading"><h3>快速开始</h3><span>常用操作</span></div><div className="quick-grid">
             <button onClick={()=>select('workspaces')}><FolderOpenRegular/><strong>工作目录</strong><small>查看已授权目录</small></button>
             <button onClick={()=>select('agents')}><ServerRegular/><strong>远程服务</strong><small>登记、配对与维护 Agent</small></button>
@@ -285,23 +312,36 @@ export function App() {
               <SecretField key={selectedSecret+secretRevision} kind={selectedSecret} configured={selectedSecret==='ngrok'?config.hasNgrokToken:config.hasCloudflareToken}
                 value={selectedSecret==='ngrok'?draft.ngrokToken||'':draft.cloudflareToken||''} onChange={v=>update(selectedSecret==='ngrok'?{ngrokToken:v}:{cloudflareToken:v})} onCopy={copy}/></Field>}
             <Field label="Owner Password"><SecretField key={'owner'+secretRevision} kind="owner" configured={config.hasOwnerToken} value={draft.ownerToken||''} onChange={v=>update({ownerToken:v})} onCopy={copy}/></Field></div></section>
-          <section className="panel"><div className="section-heading"><h2>工作目录与访问权限</h2></div>
-            <Roots values={draft.allowedRoots} onChange={v=>update({allowedRoots:v,allowAllFixedDrives:false})} onChoose={addFolder}/>
-            <Permissions value={draft.permissions} onChange={v=>update({permissions:v})}/></section>
+          <section className="panel"><div className="section-heading"><div><h2>文件与操作权限</h2>
+            <p>文件访问范围和操作能力相互独立。更改任一设置后保存并应用，服务才会采用新的权限。</p></div></div>
+            <FileAccess mode={draft.fileScopeMode} roots={draft.allowedRoots}
+              onModeChange={v=>update({fileScopeMode:v,allowAllFixedDrives:v==='all'})}
+              onRootsChange={v=>update({allowedRoots:v})} onChoose={addFolder}/>
+            <Permissions value={draft.permissions} mode={draft.operationMode}
+              onChange={(mode,value)=>update({operationMode:mode,permissions:value})}/>
+            <div className="access-summary access-final" role="status">
+              <strong>保存后将采用的范围：{draft.fileScopeMode==='all'?'全部可访问目录':draft.allowedRoots.join('；')||'请先选择目录'}</strong>
+              <span>操作能力：{draft.operationMode==='standard'?'标准操作':draft.operationMode==='full'?'全部操作':'自定义操作'}。{draft.fileScopeMode==='all'?'指定目录当前不限制访问。':'文件工具仍限制在所选目录；任意命令及桌面控制等外部操作不能保证遵守该限制。'}</span>
+            </div></section>
           <div className="save-bar"><span>{dirty?'● 有未保存的更改':applyPending?'● 已保存，待应用':'✓ 配置已应用'}</span>
             {dirty&&<Button onClick={()=>{setDraft(fromConfig(config));setDirty(false);}}>放弃更改</Button>}
-            <Button appearance={dirty||applyPending?'primary':'outline'} disabled={busy||(!dirty&&!applyPending)} onClick={()=>save(!dirty)}>{busy?'请稍候…':dirty?'保存更改':applyPending?'应用并重启':'配置已应用'}</Button>
+            <Button appearance={dirty||applyPending?'primary':'outline'} disabled={busy||(!dirty&&!applyPending)||(dirty&&draft.fileScopeMode==='selected'&&!draft.allowedRoots.length)} onClick={()=>save(!dirty)}>{busy?'请稍候…':dirty?'保存更改':applyPending?'应用并重启':'配置已应用'}</Button>
             <Button appearance="subtle" onClick={()=>{setWizard(true);setStep(0);}}>首次设置向导</Button></div>
           <section className="panel advanced"><div className="section-heading"><h3>高级服务管理</h3><span>仅在需要时使用</span></div>
             <div className="button-row"><Button disabled={advancedBusy} onClick={()=>runAdvanced('restart-local')}>重启本地 MCP</Button><Button disabled={advancedBusy} onClick={()=>runAdvanced('restart-tunnel')}>重启公网隧道</Button></div></section></>}
-        {!wizard&&page==='workspaces'&&<section className="panel"><div className="section-heading"><h2>允许的工作目录</h2><span>{draft.allowedRoots.length} 个</span></div>
-          <Roots values={draft.allowedRoots} onChange={v=>update({allowedRoots:v,allowAllFixedDrives:false})} onChoose={addFolder}/>
-          <div className="button-row"><Button appearance="primary" disabled={busy||!dirty} onClick={()=>save(false)}>保存目录更改</Button></div></section>}
+        {!wizard&&page==='workspaces'&&<section className="panel"><div className="section-heading"><div>
+          <h2>文件访问范围</h2><p>这里的设置与「设置 → 文件与操作权限」同步。允许全部目录时，单独列出的项目目录仅用于记录。</p></div></div>
+          <FileAccess mode={draft.fileScopeMode} roots={draft.allowedRoots}
+            onModeChange={v=>update({fileScopeMode:v,allowAllFixedDrives:v==='all'})}
+            onRootsChange={v=>update({allowedRoots:v})} onChoose={addFolder}/>
+          <div className="button-row"><Button appearance="primary" disabled={busy||!dirty||(draft.fileScopeMode==='selected'&&!draft.allowedRoots.length)}
+            onClick={()=>save(false)}>保存文件访问范围</Button>
+            {applyPending&&<Button onClick={()=>select('settings')}>前往设置并应用</Button>}</div></section>}
         {!wizard&&page==='agents'&&<AgentsPage/>}
         {!wizard&&page==='extensions'&&<PluginsPage/>}
         {!wizard&&page==='tasks'&&<ContinuationsPage/>}
         {!wizard&&page==='sessions'&&<SessionsPage/>}
-        {!wizard&&page==='memories'&&<MemoriesPage workspaceRoots={draft.allowedRoots}/>}
+        {!wizard&&page==='memories'&&<MemoriesPage workspaceRoots={draft.fileScopeMode==='all'?config.allowedRoots:draft.allowedRoots}/>}
         {!wizard&&page==='oauth'&&<OAuthPage/>}
         {!wizard&&page==='services'&&<ServicePage config={config} onConfigChange={async()=>setConfig(await window.devspace.getConfig())}/>}
         {!wizard&&page==='diagnose'&&<><section className="panel"><div className="diagnostic-line"><span>本地 MCP</span>
