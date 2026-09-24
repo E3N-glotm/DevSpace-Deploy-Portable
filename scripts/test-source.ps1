@@ -187,6 +187,10 @@ if ($NextIsDefault) {
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-ui-next-navigation.mjs') -FailureMessage 'Next UI navigation acceptance failed.'
     Write-Host '==> setup/test-dev4-feature-coverage.mjs'
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev4-feature-coverage.mjs') -FailureMessage 'Next UI feature and contrast coverage failed.'
+    if ($DevelopmentIteration -ge 6) {
+        Write-Host '==> setup/test-ui-next-close.mjs'
+        Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-ui-next-close.mjs') -FailureMessage 'Dev6 real Electron X / cancel / tray / legacy preference smoke failed.'
+    }
 }
 
 if (-not $SkipAudit) {

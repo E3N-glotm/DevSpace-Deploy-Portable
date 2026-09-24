@@ -33,6 +33,10 @@ if(Number(manifest.development?.iteration||0)>=5){
   assert.equal(result.scopeOperationsIndependent,true,
     'Choosing full operations must not change the selected file scope');
 }
+if(Number(manifest.development?.iteration||0)>=6){
+  assert.equal(result.updateInSettingsOnly,true,
+    'Update controls and close-choice reset must be available in Settings and not Diagnostics');
+}
 console.log(JSON.stringify({nextDefaultLauncher:true,legacyUIEntrypoints:0,
   nativePages:result.navigation.length,heroServiceContrast:result.heroService?.contrast,
   scopeOperationsIndependent:result.scopeOperationsIndependent,smoke:true}));

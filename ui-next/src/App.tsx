@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Field, Input, Spinner, Switch, Textarea } from '@fluentui/react-components';
+import { Button, Checkbox, Field, Input, Spinner, Switch, Textarea } from '@fluentui/react-components';
 import {
   AppsRegular, ArrowClockwiseRegular, ArrowLeftRegular, ArrowRightRegular,
   CheckmarkCircleRegular, ClipboardRegular, CloudRegular, CodeRegular,
@@ -10,7 +10,7 @@ import type { Config, Permission, Progress, Provider, Settings } from './api';
 import {operationNames, standardOperations, fullOperations, detectOperationMode,
   initialFileScope, selectedDirectoryList, compileAccessSettings} from './access-policy';
 import { AgentsPage, PluginsPage, ContinuationsPage, SessionsPage,
-  MemoriesPage, OAuthPage, ServicePage, DiagnosticsPage } from './Operations';
+  MemoriesPage, OAuthPage, ServicePage, DiagnosticsPage, UpdatesPage } from './Operations';
 
 type Page = 'home' | 'workspaces' | 'agents' | 'extensions' | 'tasks' |
   'sessions' | 'memories' | 'oauth' | 'services' | 'diagnose' | 'settings';
@@ -141,18 +141,36 @@ export function App() {
   const [applyPending,setApplyPending] = useState(false);
   const [diagnostic,setDiagnostic] = useState('');
   const [advancedBusy,setAdvancedBusy] = useState(false);
+  const [closeOpen,setCloseOpen] = useState(false);
+  const [rememberClose,setRememberClose] = useState(false);
+  const [closeBusy,setCloseBusy] = useState(false);
+  const [closePreference,setClosePreference] = useState<''|'minimize-tray'|'exit-ui'>('');
   useEffect(()=>{
     let active=true;
     const unStatus=window.devspace.onStatus(value=>{if(active)setStatus(value);});
     const unProgress=window.devspace.onProgress(value=>{if(active)setProgress(value);});
+    const unClose=window.devspace.onCloseRequest(()=>{
+      if(active){setCloseOpen(true);setRememberClose(false);setCloseBusy(false);}
+    });
+    window.devspace.getClosePreference().then(choice=>{if(active)setClosePreference(choice);}).catch(()=>{});
     window.devspace.initialize().then(data=>{
       if(!active)return;
       setConfig(data.config);setStatus(data.status);setRoot(data.root);setApplyPending(data.applyPending);
       setDraft(fromConfig(data.config));
       if(!data.config.configured){setWizard(true);setStep(0);}
     }).catch(e=>{if(active)setError(getError(e));});
-    return ()=>{active=false;unStatus();unProgress();};
+    return ()=>{active=false;unStatus();unProgress();unClose();};
   },[]);
+  const chooseClose=useCallback(async(choice:'cancel'|'minimize-tray'|'exit-ui')=>{
+    if(closeBusy)return;
+    setCloseBusy(true);
+    try {
+      await window.devspace.chooseClose(choice,choice!=='cancel'&&rememberClose);
+      if(choice!=='cancel'&&rememberClose)setClosePreference(choice);
+      setCloseOpen(false);
+    } catch(e) {setError(getError(e));}
+    finally {setCloseBusy(false);}
+  },[closeBusy,rememberClose]);
   const update = useCallback((change:Partial<Settings>)=>{
     setDraft(prev=>prev?{...prev,...change}:prev);
     setDirty(true);setError('');setNotice('');
@@ -218,7 +236,7 @@ export function App() {
   if(!draft||!config)return <div className="startup"><Spinner size="large"/><h2>正在连接 DevSpace…</h2><p>{error||'读取本地配置，不会修改现有部署。'}</p></div>;
   return <div className="desktop">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV5</small></span></div>
+      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV6</small></span></div>
       <div className="side-group">
         {([['home',<HomeRegular/>,'主页'],['workspaces',<FolderOpenRegular/>,'工作区'],
           ['agents',<ServerRegular/>,'远程服务器'],['extensions',<PlugConnectedRegular/>,'插件与工具'],
@@ -229,7 +247,7 @@ export function App() {
           <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
       <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span className={'dot '+(status?.localHealthy?'online':'')}/>{status?.localHealthy?'本地 MCP 已连接':'本地 MCP 未连接'}<small>v1.1.62 dev5</small></div>
+        <div className="sidebar-status"><span className={'dot '+(status?.localHealthy?'online':'')}/>{status?.localHealthy?'本地 MCP 已连接':'本地 MCP 未连接'}<small>v1.1.62 dev6</small></div>
       </div>
     </aside>
     <main className="main">
@@ -328,7 +346,16 @@ export function App() {
             <Button appearance={dirty||applyPending?'primary':'outline'} disabled={busy||(!dirty&&!applyPending)||(dirty&&draft.fileScopeMode==='selected'&&!draft.allowedRoots.length)} onClick={()=>save(!dirty)}>{busy?'请稍候…':dirty?'保存更改':applyPending?'应用并重启':'配置已应用'}</Button>
             <Button appearance="subtle" onClick={()=>{setWizard(true);setStep(0);}}>首次设置向导</Button></div>
           <section className="panel advanced"><div className="section-heading"><h3>高级服务管理</h3><span>仅在需要时使用</span></div>
-            <div className="button-row"><Button disabled={advancedBusy} onClick={()=>runAdvanced('restart-local')}>重启本地 MCP</Button><Button disabled={advancedBusy} onClick={()=>runAdvanced('restart-tunnel')}>重启公网隧道</Button></div></section></>}
+            <div className="button-row"><Button disabled={advancedBusy} onClick={()=>runAdvanced('restart-local')}>重启本地 MCP</Button><Button disabled={advancedBusy} onClick={()=>runAdvanced('restart-tunnel')}>重启公网隧道</Button></div></section>
+          <section className="panel"><div className="section-heading"><div><h3>关闭窗口行为</h3>
+            <p>关闭控制中心不会停止 DevSpace 或公网隧道；最小化到托盘时保留本地 UI 与 Computer Use 租约。</p></div></div>
+            <p className="help">当前选择：{closePreference==='minimize-tray'?'关闭时最小化到系统托盘':closePreference==='exit-ui'?'关闭时退出控制中心':'每次关闭时询问'}</p>
+            <Button appearance="outline" disabled={!closePreference} onClick={async()=>{
+              try{await window.devspace.resetClosePreference();setClosePreference('');setNotice('已恢复每次点击关闭按钮时询问。');}
+              catch(e){setError(getError(e));}
+            }}>恢复每次关闭时询问</Button>
+          </section>
+          <UpdatesPage/></>}
         {!wizard&&page==='workspaces'&&<section className="panel"><div className="section-heading"><div>
           <h2>文件访问范围</h2><p>这里的设置与「设置 → 文件与操作权限」同步。允许全部目录时，单独列出的项目目录仅用于记录。</p></div></div>
           <FileAccess mode={draft.fileScopeMode} roots={draft.allowedRoots}
@@ -350,5 +377,26 @@ export function App() {
           <DiagnosticsPage/></>}
       </div>
     </main>
+    {closeOpen&&<div className="close-overlay" role="presentation">
+      <section className="close-dialog" role="dialog" aria-modal="true" aria-labelledby="devspace-close-title"
+        aria-describedby="devspace-close-description">
+        <div className="close-dialog-header"><span className="close-dialog-mark">D</span>
+          <strong>关闭 DevSpace 控制中心</strong><button type="button" disabled={closeBusy} aria-label="取消关闭"
+            onClick={()=>chooseClose('cancel')}>×</button></div>
+        <div className="close-dialog-body"><h2 id="devspace-close-title">关闭控制中心后要做什么？</h2>
+          <p id="devspace-close-description">两种选择都不会停止 DevSpace 或公网隧道。最小化将保留本地 UI 与 Computer Use 租约；退出仅关闭控制中心。</p>
+          <div className="close-dialog-actions">
+            <button type="button" className="close-to-tray" disabled={closeBusy}
+              onClick={()=>chooseClose('minimize-tray')}>最小化到系统托盘</button>
+            <button type="button" className="close-exit" disabled={closeBusy}
+              onClick={()=>chooseClose('exit-ui')}>退出控制中心</button>
+          </div>
+          <Checkbox checked={rememberClose} onChange={(_e,data)=>setRememberClose(Boolean(data.checked))}
+            disabled={closeBusy} label="记住我的选择（可从系统托盘或设置中恢复每次询问）"/>
+          <div className="close-dialog-footer"><Button appearance="subtle" disabled={closeBusy}
+            onClick={()=>chooseClose('cancel')}>取消</Button></div>
+        </div>
+      </section>
+    </div>}
   </div>;
 }

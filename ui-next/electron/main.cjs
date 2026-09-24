@@ -2,10 +2,11 @@
 // DevSpace Portable Next: the renderer never receives Node, a shell, file IO,
 // OAuth credentials, or a generic command runner. Only the main process can
 // access the existing manager and the Windows clipboard.
-const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, Tray, Menu } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const {createClosePolicy} = require('./close-policy.cjs');
 
 const ROOT = path.resolve(process.env.DEVSPACE_PORTABLE_ROOT || path.join(__dirname, '../..'));
 const HERE = path.resolve(__dirname, '..');
@@ -13,6 +14,11 @@ const MANAGER = path.join(ROOT, 'setup', 'portable-manager.cjs');
 const NODE = path.join(ROOT, 'runtime', 'node', 'node.exe');
 const CONFIG = path.join(ROOT, 'data', 'config');
 const APPLY_PENDING = path.join(ROOT, 'data', 'run', 'ui-next-pending-apply.json');
+// Match WinForms' per-user preference location, including its documented
+// configuration-directory override; use only an E-drive isolated override in
+// UI smoke tests. The root configuration and background services stay intact.
+const closePolicy = createClosePolicy(process.env.DEVSPACE_PORTABLE_CONFIG_DIR
+  ? path.resolve(process.env.DEVSPACE_PORTABLE_CONFIG_DIR) : CONFIG);
 const HEALTH_TIMEOUT_MS = 2000;
 const ACTIONS = new Set([
   'diagnose', 'restart-local', 'restart-tunnel', 'plugin-list',
@@ -72,9 +78,15 @@ let selectedPluginSource = '';
 let selectedPluginExport = '';
 let remoteAutoRecoverTimer;
 let remoteAutoRecoverBusy = false;
+let trayIcon = null;
+let trayTransition = false;
+let closePromptOpen = false;
+let allowWindowClose = false;
+let trayNoticeShown = false;
 const remoteLastAttempt = new Map();
 const navigationSmokeMode = process.argv.includes('--devspace-ui-navigation-smoke');
-const smokeMode = process.argv.includes('--devspace-ui-smoke') || navigationSmokeMode;
+const closeSmokeMode = process.argv.includes('--devspace-ui-close-smoke');
+const smokeMode = process.argv.includes('--devspace-ui-smoke') || navigationSmokeMode || closeSmokeMode;
 if (smokeMode) app.disableHardwareAcceleration();
 
 function ensureRoot() {
@@ -279,6 +291,25 @@ function installHandlers() {
   }));
   register('getConfig', () => runManager('show-config'));
   register('getStatus', () => publishStatus());
+  register('getClosePreference', () => Promise.resolve(closePolicy.get()));
+  register('resetClosePreference', () => {
+    closePolicy.save('');
+    return {remembered:false};
+  });
+  register('chooseClose', async (choice, remember = false) => {
+    if (!closePromptOpen || !['minimize-tray','exit-ui','cancel'].includes(choice)) {
+      throw new Error('没有待确认的关闭窗口操作。');
+    }
+    closePromptOpen = false;
+    if (choice === 'cancel') return {action:'cancel'};
+    if (remember === true) closePolicy.save(choice);
+    if (choice === 'minimize-tray') {
+      await minimizeToTray();
+      return {action:'minimize-tray'};
+    }
+    requestUiExit();
+    return {action:'exit-ui'};
+  });
   register('save', input => operation(async () => {
     const checked = validateSettings(input);
     broadcastProgress('save', '正在检查并保存配置', 1, 4);
@@ -487,11 +518,78 @@ function createWindow() {
     },
   });
   windowRef = main;
+  main.on('close', event => {
+    if (allowWindowClose || closing || shutdownStarted || (smokeMode && !closeSmokeMode)) return;
+    event.preventDefault();
+    if (closePromptOpen || trayTransition) return;
+    const choice = closePolicy.get();
+    if (choice === 'minimize-tray') {
+      minimizeToTray().catch(error => dialog.showErrorBox('无法最小化到托盘', error.message));
+    } else if (choice === 'exit-ui') {
+      requestUiExit();
+    } else {
+      closePromptOpen = true;
+      main.webContents.send('ds:requestCloseChoice');
+    }
+  });
   if (!smokeMode) main.once('ready-to-show', () => main.show());
   main.webContents.setWindowOpenHandler(() => ({action: 'deny'}));
   main.webContents.on('will-navigate', e => e.preventDefault());
   main.loadFile(path.join(HERE, 'dist', 'index.html'));
   return main;
+}
+function requestUiExit() {
+  allowWindowClose = true;
+  app.quit(); // Existing before-quit handler releases only this UI lease.
+}
+function restoreFromTray() {
+  if (!windowRef || windowRef.isDestroyed() || closing) return;
+  windowRef.show();
+  if (windowRef.isMinimized()) windowRef.restore();
+  windowRef.focus();
+  if (trayIcon) trayIcon.setToolTip('DevSpace Portable');
+}
+async function minimizeToTray() {
+  if (trayTransition || closing || !windowRef || windowRef.isDestroyed()) return;
+  trayTransition = true;
+  try {
+    if (!trayIcon) {
+      // Use the actual installed executable's Windows icon; no additional
+      // icon download, background Node worker, or legacy WinForms process.
+      const executable = path.join(ROOT,'DevSpace-Portable.exe');
+      const icon = await app.getFileIcon(fs.existsSync(executable) ? executable : process.execPath,
+        {size:'small'});
+      if (icon.isEmpty()) throw new Error('无法加载托盘图标。');
+      trayIcon = new Tray(icon);
+      trayIcon.setToolTip('DevSpace Portable');
+      trayIcon.on('double-click', restoreFromTray);
+      trayIcon.on('click', restoreFromTray);
+      trayIcon.setContextMenu(Menu.buildFromTemplate([
+        {label:'打开控制中心',click:restoreFromTray},
+        {label:'下次关闭时询问',click:()=>{
+          try { closePolicy.save(''); }
+          catch(error) { dialog.showErrorBox('无法重置关闭偏好',error.message); }
+        }},
+        {type:'separator'},
+        {label:'退出控制中心',click:requestUiExit},
+      ]));
+    }
+    // Do not tear down the Electron main process or its UI/Computer Use lease
+    // when just hiding the window. MCP and public tunnel are unchanged.
+    windowRef.hide();
+    if (!trayNoticeShown) {
+      trayNoticeShown = true;
+      try {
+        trayIcon.displayBalloon?.({
+          iconType:'info',title:'DevSpace Portable',
+          content:'控制中心已最小化到系统托盘，后台服务和本地桌面租约保持运行。',
+          noSound:true,
+        });
+      } catch {} // Notification policies must not turn successful tray hiding into an error.
+    }
+  } finally {
+    trayTransition = false;
+  }
 }
 app.whenReady().then(() => {
   try {
@@ -520,6 +618,39 @@ app.whenReady().then(() => {
           const view = await activeWindow.webContents.executeJavaScript(
             '({ title: document.title, bridge: !!window.devspace, hasRoot: !!document.querySelector(".desktop"), mainText: document.body.innerText.slice(0, 150) })',
           );
+          if (closeSmokeMode && view.bridge && view.hasRoot) {
+            if (closePolicy.get() !== '') throw new Error('Close smoke requires an isolated unconfigured preference.');
+            activeWindow.close();
+            await new Promise(resolve => setTimeout(resolve, 170));
+            const closeDialog = await activeWindow.webContents.executeJavaScript(
+              '!!document.querySelector("[role=dialog].close-dialog")');
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(".close-dialog-footer button")?.click()');
+            await new Promise(resolve => setTimeout(resolve, 120));
+            const cancelKeptWindow = !activeWindow.isDestroyed()
+              && !await activeWindow.webContents.executeJavaScript('!!document.querySelector(".close-dialog")');
+            activeWindow.close();
+            await new Promise(resolve => setTimeout(resolve, 150));
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(".close-dialog input[type=checkbox]")?.click()');
+            await new Promise(resolve => setTimeout(resolve, 90));
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(".close-dialog .close-to-tray")?.click()');
+            for (let i=0; i<35 && (!trayIcon || trayTransition); i++) {
+              await new Promise(resolve => setTimeout(resolve, 180));
+            }
+            const result = {smoke:Boolean(closeDialog && cancelKeptWindow && trayIcon
+              && !activeWindow.isDestroyed() && !activeWindow.isVisible()
+              && closePolicy.get()==='minimize-tray'),
+              closeDialog,cancelKeptWindow,minimizedToTray:Boolean(trayIcon
+                && !activeWindow.isDestroyed() && !activeWindow.isVisible()),
+              remembered:closePolicy.get()==='minimize-tray'};
+            if (trayIcon) {trayIcon.destroy(); trayIcon=null;}
+            clearTimeout(watchdog);
+            process.stdout.write(JSON.stringify(result)+'\n');
+            app.exit(result.smoke ? 0 : 6);
+            return;
+          }
           if (navigationSmokeMode && view.bridge && view.hasRoot) {
             const coverage = [];
             const pageIds = ['home','workspaces','agents','extensions','tasks',
@@ -535,6 +666,10 @@ app.whenReady().then(() => {
               const rendered = await activeWindow.webContents.executeJavaScript(
                 `({ heading: document.querySelector('.topbar h1')?.textContent || '',
                     hasPanel: !!document.querySelector('.page-body .panel, .page-body .hero'),
+                    hasUpdateCheck: !![...document.querySelectorAll('.page-body button')]
+                      .find(x => x.textContent.trim() === '检查更新'),
+                    hasClosePreferenceReset: !![...document.querySelectorAll('.page-body button')]
+                      .find(x => x.textContent.trim() === '恢复每次关闭时询问'),
                     legacyLaunch: !![...document.querySelectorAll('button')].find(x => /打开旧版|旧版控制中心/.test(x.textContent)),
                     error: document.querySelector('.alert.error')?.textContent || '' })`,
               );
@@ -591,12 +726,17 @@ app.whenReady().then(() => {
               fullChosen:!![...document.querySelectorAll('.permission-choices .choice.chosen')]
                 .find(x=>x.textContent.includes('全部操作')),
             }))()`);
+            const updateInSettingsOnly=coverage.find(x=>x.page==='settings')?.hasUpdateCheck===true
+              && coverage.find(x=>x.page==='settings')?.hasClosePreferenceReset===true
+              && coverage.find(x=>x.page==='diagnose')?.hasUpdateCheck===false;
             const valid = coverage.every(x => x.clicked && x.hasPanel && !x.legacyLaunch)
               && heroService.found && heroService.contrast >= 4.5
-              && selected.found && independent.selectedChosen && current.selectedChosen && current.fullChosen;
+              && selected.found && independent.selectedChosen && current.selectedChosen && current.fullChosen
+              && updateInSettingsOnly;
             clearTimeout(watchdog);
             process.stdout.write(JSON.stringify({smoke:valid, navigation:coverage,
-              heroService, scopeOperationsIndependent:current.selectedChosen&&current.fullChosen}) + '\n');
+              heroService, scopeOperationsIndependent:current.selectedChosen&&current.fullChosen,
+              updateInSettingsOnly}) + '\n');
             app.exit(valid ? 0 : 5);
             return;
           }
@@ -643,10 +783,13 @@ app.on('before-quit', (event) => {
   if (shutdownStarted) return;
   shutdownStarted = true;
   closing = true;
+  closePromptOpen = false;
+  allowWindowClose = true;
   if (refreshHandle) clearInterval(refreshHandle);
   if (computerUseHeartbeat) clearInterval(computerUseHeartbeat);
   if (remoteAutoRecoverTimer) clearInterval(remoteAutoRecoverTimer);
   for (const watcher of watchers) watcher.close();
+  if (trayIcon) { trayIcon.destroy(); trayIcon = null; }
   // The native file-queue broker must not retain input privileges after the
   // owner closes the Electron window. Expire this exact UI lease before exit.
   if (computerUseLeaseId) {

@@ -15,8 +15,10 @@ function hooks({ownedTaskXml}={}){
     dialog:{showErrorBox(){}},shell:{},session:{},
   };
   const context={
-    require:n=>n==='electron'?electron:n==='node:child_process'&&ownedTaskXml!==undefined
-      ? {...require(n),spawnSync:()=>({status:0,stdout:ownedTaskXml})}:require(n),
+    require:n=>n==='electron'?electron:n==='./close-policy.cjs'
+      ? require('../electron/close-policy.cjs')
+      :n==='node:child_process'&&ownedTaskXml!==undefined
+        ? {...require(n),spawnSync:()=>({status:0,stdout:ownedTaskXml})}:require(n),
     __dirname:path.resolve(__dirname,'../electron'),process:{env:{...process.env,DEVSPACE_PORTABLE_ROOT:path.resolve(__dirname,'../..')},pid:125,argv:[]},
     setTimeout,clearTimeout,setInterval,clearInterval,console,URL,fetch,
   };

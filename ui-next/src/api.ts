@@ -23,6 +23,7 @@ export type Settings = {
   ngrokToken?: string; cloudflareToken?: string; ownerToken?: string;
 };
 export type Progress = { phase: string; message: string; step: number; total: number };
+export type CloseChoice = 'minimize-tray' | 'exit-ui' | 'cancel';
 export type Backend = {
   initialize(): Promise<{config: Config; status: any; root: string; applyPending:boolean}>;
   getConfig(): Promise<Config>;
@@ -39,5 +40,9 @@ export type Backend = {
   runAction(action: 'diagnose' | 'restart-local' | 'restart-tunnel' | 'plugin-list' | 'continuation-list' | 'memory-list' | 'review-list' | 'oauth-client-list' | 'update-check'): Promise<unknown>;
   onStatus(handler: (value: any) => void): () => void;
   onProgress(handler: (value: Progress) => void): () => void;
+  onCloseRequest(handler:()=>void):()=>void;
+  chooseClose(choice:CloseChoice,remember?:boolean):Promise<{action:CloseChoice}>;
+  getClosePreference():Promise<'' | 'minimize-tray' | 'exit-ui'>;
+  resetClosePreference():Promise<{remembered:boolean}>;
 };
 declare global { interface Window { devspace: Backend } }

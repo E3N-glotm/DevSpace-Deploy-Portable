@@ -550,7 +550,6 @@ export function DiagnosticsPage() {
   const [error,setError]=useState('');
   const [result,setResult]=useState<any>(null);
   const [logs,setLogs]=useState<any>(null);
-  const [stagedPath,setStagedPath]=useState('');
   const action=async(name:string,payload:Record<string,unknown>={},danger=false)=>{
     if(danger&&!window.confirm('此操作可能修改系统网络代理设置或替换当前程序。确认继续？'))return;
     setBusy(true);setError('');
@@ -559,7 +558,7 @@ export function DiagnosticsPage() {
     catch(e){setError(explain(e));}
     finally{setBusy(false);}
   };
-  return <Panel title="诊断、网络代理与更新" caption="维护操作集中在此处；不会因为打开页面就运行更新或修改系统网络配置。">
+  return <Panel title="日志、诊断与网络代理" caption="仅在你明确点击按钮时检查或修复服务及系统代理。软件更新请前往设置页面。">
     {error&&<div role="alert" className="op-message op-error">{error}</div>}
     <div className="op-subsection"><h3>日志与诊断</h3>
       <ActionRow><Button disabled={busy} onClick={()=>action('dashboard-status')}>服务状态</Button>
@@ -572,21 +571,40 @@ export function DiagnosticsPage() {
       <ActionRow><Button disabled={busy} onClick={()=>action('repair-stale-proxy',{},true)}>修复过期代理</Button>
         <Button disabled={busy} onClick={()=>action('restore-proxy-repair',{},true)}>恢复代理备份</Button></ActionRow>
     </div>
-    <div className="op-subsection"><h3>版本更新</h3>
-      <p className="help">检查更新与下载阶段不会自动替换运行中的服务；正式安装需完成额外核验和确认。</p>
-      <ActionRow><Button disabled={busy} onClick={()=>action('update-check')}>检查更新</Button>
-        <Button disabled={busy} onClick={async()=>{
-          setStagedPath('');
-          const staged=await action('update-stage');
-          if(typeof staged?.stagingPath==='string')setStagedPath(staged.stagingPath);
-        }}>下载并验证更新</Button>
-        <Button appearance="primary" disabled={busy||!stagedPath} onClick={async()=>{
-          const ack=await action('update-launch',{stagingPath:stagedPath},true);
-          if(ack?.acknowledged)setStagedPath('');
-        }}>安装已校验的更新</Button></ActionRow>
-      {stagedPath&&<div className="op-message op-success">更新已校验并暂存。点击安装后，Electron 将退出，由独立更新器替换程序并重新启动服务。</div>}
-      <p className="op-subtle">安装会中断当前 MCP 与正在进行的任务。先确认已备份配置/数据库，并安排无其他用户操作的维护窗口。</p>
-    </div>
+    {result&&simple(result)}
+  </Panel>;
+}
+
+export function UpdatesPage() {
+  const [busy,setBusy]=useState(false);
+  const [error,setError]=useState('');
+  const [result,setResult]=useState<any>(null);
+  const [stagedPath,setStagedPath]=useState('');
+  const action=async(name:'update-check'|'update-stage'|'update-launch',
+    payload:Record<string,unknown>={},danger=false)=>{
+    if(danger&&!window.confirm('安装更新会退出控制中心、中断当前 MCP 与正在运行的任务。请确认已备份配置/数据库并安排维护窗口。继续吗？'))return null;
+    setBusy(true);setError('');
+    try {
+      const data=await window.devspace.admin(name,payload,danger);
+      setResult(data);return data;
+    } catch(e) {setError(explain(e));return null;}
+    finally {setBusy(false);}
+  };
+  return <Panel title="软件更新" caption="在设置中检查、下载并安装更新；不会因为打开设置页面就自动更新或停止服务。">
+    {error&&<div role="alert" className="op-message op-error">{error}</div>}
+    <p className="help">检查和下载阶段不会替换当前服务。安装前须额外确认，并在有维护窗口时进行。</p>
+    <ActionRow><Button disabled={busy} onClick={()=>action('update-check')}>检查更新</Button>
+      <Button disabled={busy} onClick={async()=>{
+        setStagedPath('');
+        const staged=await action('update-stage');
+        if(typeof staged?.stagingPath==='string')setStagedPath(staged.stagingPath);
+      }}>下载并验证更新</Button>
+      <Button appearance="primary" disabled={busy||!stagedPath} onClick={async()=>{
+        const ack=await action('update-launch',{stagingPath:stagedPath},true);
+        if(ack?.acknowledged)setStagedPath('');
+      }}>安装已校验的更新</Button></ActionRow>
+    {stagedPath&&<div className="op-message op-success">更新已经校验并暂存；安装需要额外确认，届时控制中心将退出。</div>}
+    <p className="op-subtle">安装会中断当前 MCP 与正在进行的任务。先确认已备份配置/数据库，并安排无其他用户操作的维护窗口。</p>
     {result&&simple(result)}
   </Panel>;
 }

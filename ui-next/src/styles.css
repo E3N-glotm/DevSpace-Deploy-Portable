@@ -161,3 +161,31 @@ textarea:focus-visible{outline:3px solid #1467bd;outline-offset:2px}
 .permission-grid{margin-top:16px}
 .review strong{white-space:normal;text-align:right;overflow-wrap:anywhere}
 @media(max-width:1120px){.access-choices{grid-template-columns:1fr}.access-choices .choice{min-height:105px}}
+
+/* dev6: native Electron close choice; never launches the removed WinForms UI. */
+.close-overlay{position:fixed;inset:0;z-index:1000;background:#12233a75;
+  display:grid;place-items:center;padding:18px}
+.close-dialog{width:min(580px,100%);background:#fff;color:#17253b;border:1px solid #cdd9eb;
+  border-radius:15px;box-shadow:0 22px 70px #071b3760;overflow:hidden}
+.close-dialog-header{height:45px;background:#f6f9ff;border-bottom:1px solid #e4eaf3;
+  display:flex;align-items:center;gap:9px;padding:0 16px;font-size:12px;color:#203453}
+.close-dialog-mark{display:grid;place-items:center;width:19px;height:19px;border-radius:5px;
+  background:#4057ed;color:#fff;font-size:10px;font-weight:800}
+.close-dialog-header strong{flex:1;font-weight:650}
+.close-dialog-header button{border:0;background:transparent;font-size:22px;color:#344865;
+  padding:3px 8px;border-radius:5px}
+.close-dialog-header button:hover{background:#e4eefa;color:#122947}
+.close-dialog-body{padding:23px 26px 16px}
+.close-dialog-body h2{font-size:20px;letter-spacing:-.4px;color:#14233c;margin:0 0 9px}
+.close-dialog-body p{font-size:12px;color:#526984;line-height:1.7;margin:0 0 23px}
+.close-dialog-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-bottom:23px}
+.close-dialog-actions button{min-height:61px;border:1px solid #c6d5eb;border-radius:13px;
+  font-size:14px;font-weight:650;transition:background .12s ease,border-color .12s ease}
+.close-dialog-actions .close-to-tray{background:#4259ed;border-color:#4259ed;color:#fff}
+.close-dialog-actions .close-to-tray:hover{background:#2e46d7}
+.close-dialog-actions .close-exit{background:#f6f9ff;color:#18334f}
+.close-dialog-actions .close-exit:hover{background:#e9f1ff;border-color:#80a6da}
+.close-dialog-actions button:focus-visible,.close-dialog-header button:focus-visible{
+  outline:3px solid #2680e5;outline-offset:3px}
+.close-dialog-footer{display:flex;justify-content:flex-end;margin-top:12px}
+@media(max-width:530px){.close-dialog-body{padding:19px}.close-dialog-actions{grid-template-columns:1fr;gap:10px}}
