@@ -119,8 +119,13 @@ final class EndpointHealthMonitor implements AutoCloseable {
             remote = true;
         } else if (!local) {
             remote = false;
-        } else if ("cloudflare".equals(provider) && cloudflareEdge) {
-            remote = true;
+        } else if ("cloudflare".equals(provider)) {
+            // cloudflared already owns edge reconnection/backoff. Treat its
+            // registered edge set as the authoritative Cloudflare signal and
+            // never turn a phone->own-hostname hairpin failure into a process
+            // restart. Killing cloudflared while it is recovering creates a
+            // self-sustaining 530 -> SIGTERM -> STARTING loop.
+            remote = cloudflareEdge;
         } else {
             selfPublic = checkPublicMcp(config.publicBaseUrl() + "/mcp", error);
             remote = selfPublic;
@@ -143,6 +148,15 @@ final class EndpointHealthMonitor implements AutoCloseable {
                 worker.schedule(() -> {
                     if (active && epoch == networkEpoch) runProbe();
                 }, FAILURE_REPROBE_DELAY_MS, TimeUnit.MILLISECONDS);
+                return;
+            }
+            if ("cloudflare".equals(provider)) {
+                // Do not actively restart a live cloudflared process because
+                // its edge set is temporarily empty. Its own reconnect loop
+                // is more informed about QUIC/HTTP2 transport state and edge
+                // backoff. Surface CONNECTING/DEGRADED state only.
+                listener.onProbe(local, false, network,
+                        "Cloudflare edge 尚未注册；等待 cloudflared 自主重连");
                 return;
             }
             if (config.tunnelAutoReconnect()

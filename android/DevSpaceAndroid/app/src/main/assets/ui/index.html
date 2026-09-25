@@ -103,7 +103,7 @@
           <label class="field"><span>Named Tunnel Token</span><input id="cloudflareToken" type="password" placeholder="留空保持已保存 Token"></label>
           <div class="row"><button class="fill ghost" onclick="openExternal('cloudflare')">打开 Cloudflare</button><button class="small danger" onclick="clearCloudflare()">清除 Token</button></div>
         </div>
-        <div class="note bad">Cloudflare 健康以“本地 MCP + 已注册 edge 连接”为主判据；edge 已注册时不再发起手机自访问公网域名的 hairpin 探测，仅在 edge 尚未注册时作为兜底。网络切换另有约 12 秒稳定窗口和 3/7/13 秒快速复查。</div>
+        <div class="note bad">Cloudflare 健康以“本地 MCP + 已注册 edge 连接”为主判据；不再用手机自访问公网域名的 hairpin 结果触发重启，也不会因临时 HTTP 530 杀掉 cloudflared。edge 暂时掉线时由 cloudflared 自主重连；只有 Android 默认网络真正切换时才显式重建 Tunnel。</div>
       </div>
     </section>
 

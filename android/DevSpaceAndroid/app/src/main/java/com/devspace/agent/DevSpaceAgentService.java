@@ -127,6 +127,10 @@ public final class DevSpaceAgentService extends Service {
                         @Override public void onNetworkChanged(String reason) {
                             if (!running.get() || !config.tunnelAutoReconnect()) return;
                             CloudflareTunnelManager cloudflare = tunnelManager;
+                            // EndpointHealthMonitor no longer routes Cloudflare
+                            // probe failures here. This callback now represents
+                            // an actual Android default-network transition, for
+                            // which rebuilding bound sockets is appropriate.
                             if (cloudflare != null) cloudflare.requestReconnect(reason);
                             NgrokTunnelManager activeNgrok = ngrokTunnelManager;
                             if (activeNgrok != null) activeNgrok.requestReconnect(reason);
