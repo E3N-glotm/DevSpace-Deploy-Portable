@@ -3,7 +3,7 @@
 ### 1.1.44：锁屏与 Wi-Fi／移动数据切换诊断
 
 - 前台服务继续尊重用户的“保持 CPU WakeLock”开关；锁屏本身不表示公网连接一定存活。
-- 本地 MCP 使用 `/health` 检测。Cloudflare 模式以 cloudflared 的已注册 edge 连接作为公网主健康信号；手机访问自身公网域名的 hairpin 路径不再用于触发进程重启。edge discovery 显式使用 `1.1.1.1:53` 与 `1.0.0.1:53`，避免 Box4Root 启停后 Android DNS/SRV 状态影响 Tunnel 建链；edge 暂时掉线时由 cloudflared 自主重连。
+- 本地 MCP 使用 `/health` 检测。Cloudflare 模式以 cloudflared 的已注册 edge 连接作为公网主健康信号；手机访问自身公网域名的 hairpin 路径不再用于触发进程重启。Tunnel 启动时传入 Cloudflare 两个区域的静态 IPv4 edge 候选池，从而完全跳过 Android / Box4Root 的 SRV edge discovery；edge 暂时掉线时由 cloudflared 自主重连。
 - 默认网络切换时主动重连隧道；Wi-Fi 优先尝试 HTTP/2（TCP），连续公网探测失败后切换传输协议重试。保持用户手动停止和“不随开机启动”的既有行为。
 - 网络、最近一次探测、最近一次确认在线及最新隧道诊断显示在 UI 的 Runtime diagnostics；约每 20 秒检测一次，超过 60 秒没有成功运行探测时不显示绿灯。
 - 端到端检测不发送 OAuth 凭据，不在日志输出 Tunnel Token。Wi-Fi 和运营商／路由器策略不同，HTTP/2 不是所有网络的通用保证；遇到失败应以新诊断中的 HTTP 状态和最近隧道日志定位。

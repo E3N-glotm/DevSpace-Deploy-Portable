@@ -11,8 +11,8 @@ android {
         applicationId "com.devspace.mobile"
         minSdk 26
         targetSdk 36
-        versionCode 15
-        versionName "1.1.50-android.13-dns-resolver"
+        versionCode 16
+        versionName "1.1.51-android.14-static-edge"
     }
 
     buildTypes {
