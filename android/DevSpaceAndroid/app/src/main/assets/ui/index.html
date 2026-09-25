@@ -103,7 +103,7 @@
           <label class="field"><span>Named Tunnel Token</span><input id="cloudflareToken" type="password" placeholder="留空保持已保存 Token"></label>
           <div class="row"><button class="fill ghost" onclick="openExternal('cloudflare')">打开 Cloudflare</button><button class="small danger" onclick="clearCloudflare()">清除 Token</button></div>
         </div>
-        <div class="note bad">Cloudflare 健康以“本地 MCP + 已注册 edge 连接”为主判据；不再用手机自访问公网域名的 hairpin 结果触发重启，也不会因临时 HTTP 530 杀掉 cloudflared。edge 暂时掉线时由 cloudflared 自主重连；只有 Android 默认网络真正切换时才显式重建 Tunnel。</div>
+        <div class="note bad">Cloudflare edge 固定 IPv4，edge discovery 使用 cloudflared 独立 DNS（1.1.1.1:53 / 1.0.0.1:53），不再依赖 Box4Root 开关后的 Android 系统 DNS。临时 HTTP 530 不会杀掉 cloudflared；edge 暂时掉线时由 cloudflared 自主重连。</div>
       </div>
     </section>
 

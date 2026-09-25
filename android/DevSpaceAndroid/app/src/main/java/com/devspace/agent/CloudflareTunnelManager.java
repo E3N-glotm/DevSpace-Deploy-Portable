@@ -40,6 +40,8 @@ final class CloudflareTunnelManager implements AutoCloseable {
     private static final String TOKEN_FILE = ROOT_DIR + "/tunnel.token";
     private static final String PID_FILE = ROOT_DIR + "/cloudflared.pid";
     private static final String EDGE_IP_VERSION = "4";
+    private static final String DNS_RESOLVER_PRIMARY = "1.1.1.1:53";
+    private static final String DNS_RESOLVER_SECONDARY = "1.0.0.1:53";
 
     private final Context context;
     private final AgentConfig config;
@@ -80,7 +82,8 @@ final class CloudflareTunnelManager implements AutoCloseable {
         while (running.get()) {
             try {
                 listener.onTunnelState("Tunnel 连接中", "Cloudflare Tunnel " + CLOUDFLARED_VERSION
-                        + " · transport=auto · edge-ip=IPv" + EDGE_IP_VERSION);
+                        + " · transport=auto · edge-ip=IPv" + EDGE_IP_VERSION
+                        + " · dns=Cloudflare IPv4");
                 int hostPid = android.os.Process.myPid();
                 String hostProcess = context.getPackageName();
                 String command = "set -e; mkdir -p " + ShellEscaper.quote(ROOT_DIR)
@@ -95,7 +98,9 @@ final class CloudflareTunnelManager implements AutoCloseable {
                         + ") >/dev/null 2>&1 & "
                         + "exec " + ShellEscaper.quote(ROOT_BINARY)
                         + " tunnel --no-autoupdate --protocol auto --edge-ip-version " + EDGE_IP_VERSION
-                        + " run --token-file " + ShellEscaper.quote(TOKEN_FILE);
+                        + " run --dns-resolver-addrs " + DNS_RESOLVER_PRIMARY
+                        + " --dns-resolver-addrs " + DNS_RESOLVER_SECONDARY
+                        + " --token-file " + ShellEscaper.quote(TOKEN_FILE);
                 Process current = rootShell.startProcess(command);
                 process = current;
                 lastDiagnostic.set("");
@@ -180,7 +185,8 @@ final class CloudflareTunnelManager implements AutoCloseable {
         registeredConnections.clear();
         String detail = reason == null || reason.trim().isEmpty() ? "请求重连" : reason.trim();
         listener.onTunnelState("Tunnel 连接中",
-                detail + " · transport=auto · edge-ip=IPv" + EDGE_IP_VERSION);
+                detail + " · transport=auto · edge-ip=IPv" + EDGE_IP_VERSION
+                        + " · dns=Cloudflare IPv4");
         Process current = process;
         if (current != null) current.destroy();
         try {

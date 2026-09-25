@@ -11,8 +11,8 @@ android {
         applicationId "com.devspace.mobile"
         minSdk 26
         targetSdk 36
-        versionCode 14
-        versionName "1.1.49-android.12-cloudflare-supervision"
+        versionCode 15
+        versionName "1.1.50-android.13-dns-resolver"
     }
 
     buildTypes {
