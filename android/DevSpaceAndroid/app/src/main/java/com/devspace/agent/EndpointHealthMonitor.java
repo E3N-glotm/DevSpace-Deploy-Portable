@@ -92,7 +92,8 @@ final class EndpointHealthMonitor implements AutoCloseable {
                 && System.currentTimeMillis() - lastReconnectAt > 90_000L) {
             lastReconnectAt = System.currentTimeMillis();
             failedPublicProbes = 0;
-            listener.onNetworkChanged("连续三次公网端到端探测失败（" + network + "），尝试切换传输协议并重连");
+            listener.onNetworkChanged("连续三次公网端到端探测失败（" + network
+                    + "），重建 Cloudflare 自适应 IPv4 传输");
         }
     }
 

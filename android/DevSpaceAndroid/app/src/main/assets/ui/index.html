@@ -99,6 +99,7 @@
           <button class="danger small" onclick="clearNgrok()">清除 ngrok 凭据</button>
         </div>
         <div id="cloudflareBox" class="provider"><div class="providerHead"><div class="copy"><b>Cloudflare Tunnel</b><small id="cloudflareStatus">未配置</small></div><label class="switch"><input id="cloudflareEnabled" type="checkbox" onchange="exclusiveTunnel('cloudflare')"><span class="slider"></span></label></div>
+          <div class="note">Cloudflare edge 固定使用 IPv4；传输保持 auto，由 cloudflared 根据 UDP/QUIC 与 TCP/HTTP2 的实时可用性自动选择，不再按 Wi-Fi/蜂窝网络硬切协议。</div>
           <label class="field"><span>Named Tunnel Token</span><input id="cloudflareToken" type="password" placeholder="留空保持已保存 Token"></label>
           <div class="row"><button class="fill ghost" onclick="openExternal('cloudflare')">打开 Cloudflare</button><button class="small danger" onclick="clearCloudflare()">清除 Token</button></div>
         </div>

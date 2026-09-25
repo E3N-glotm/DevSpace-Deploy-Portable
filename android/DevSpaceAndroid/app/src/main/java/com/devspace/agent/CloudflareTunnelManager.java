@@ -39,6 +39,7 @@ final class CloudflareTunnelManager implements AutoCloseable {
     private static final String ROOT_BINARY = ROOT_DIR + "/cloudflared-" + CLOUDFLARED_VERSION + "-arm64";
     private static final String TOKEN_FILE = ROOT_DIR + "/tunnel.token";
     private static final String PID_FILE = ROOT_DIR + "/cloudflared.pid";
+    private static final String EDGE_IP_VERSION = "4";
 
     private final Context context;
     private final AgentConfig config;
@@ -49,7 +50,6 @@ final class CloudflareTunnelManager implements AutoCloseable {
     private final Set<String> registeredConnections = ConcurrentHashMap.newKeySet();
     private volatile Thread worker;
     private volatile Process process;
-    private volatile boolean preferHttp2;
 
     CloudflareTunnelManager(Context context, AgentConfig config, RootShell rootShell, Listener listener) {
         this.context = context.getApplicationContext();
@@ -80,7 +80,7 @@ final class CloudflareTunnelManager implements AutoCloseable {
         while (running.get()) {
             try {
                 listener.onTunnelState("Tunnel 连接中", "Cloudflare Tunnel " + CLOUDFLARED_VERSION
-                        + " · transport=" + (preferHttp2 ? "http2" : "auto"));
+                        + " · transport=auto · edge-ip=IPv" + EDGE_IP_VERSION);
                 int hostPid = android.os.Process.myPid();
                 String hostProcess = context.getPackageName();
                 String command = "set -e; mkdir -p " + ShellEscaper.quote(ROOT_DIR)
@@ -94,7 +94,7 @@ final class CloudflareTunnelManager implements AutoCloseable {
                         + "sleep 1; done; rm -f " + ShellEscaper.quote(PID_FILE)
                         + ") >/dev/null 2>&1 & "
                         + "exec " + ShellEscaper.quote(ROOT_BINARY)
-                        + " tunnel --no-autoupdate --protocol " + (preferHttp2 ? "http2" : "auto")
+                        + " tunnel --no-autoupdate --protocol auto --edge-ip-version " + EDGE_IP_VERSION
                         + " run --token-file " + ShellEscaper.quote(TOKEN_FILE);
                 Process current = rootShell.startProcess(command);
                 process = current;
@@ -153,7 +153,9 @@ final class CloudflareTunnelManager implements AutoCloseable {
                     String index = connectionIndex(diagnostic);
                     if (diagnostic.contains("Registered tunnel connection")) {
                         registeredConnections.add(index);
-                        listener.onTunnelState("Tunnel 连接中", "Cloudflare 已注册连接；等待公网端到端验证");
+                        String protocol = connectionProtocol(diagnostic);
+                        listener.onTunnelState("Tunnel 连接中", "Cloudflare 已注册 "
+                                + protocol + "/IPv" + EDGE_IP_VERSION + " 连接；等待公网端到端验证");
                     } else if (diagnostic.contains("Unregistered tunnel connection")) {
                         registeredConnections.remove(index);
                         if (registeredConnections.isEmpty()) {
@@ -175,18 +177,10 @@ final class CloudflareTunnelManager implements AutoCloseable {
 
     void requestReconnect(String reason) {
         if (!running.get()) return;
-        if (reason != null && reason.contains("Wi-Fi") && reason.contains("已切换")) {
-            // On Wi-Fi prefer TCP over QUIC/UDP. Some access points and VPN
-            // routes silently drop long-lived UDP tunnel sessions.
-            preferHttp2 = true;
-        } else if (reason != null && reason.contains("Mobile") && reason.contains("已切换")) {
-            preferHttp2 = false;
-        } else if (reason != null && reason.contains("连续三次")) {
-            // A network which blocks TCP 7844 should not get stuck in HTTP/2.
-            preferHttp2 = !preferHttp2;
-        }
         registeredConnections.clear();
-        listener.onTunnelState("Tunnel 连接中", reason);
+        String detail = reason == null || reason.trim().isEmpty() ? "请求重连" : reason.trim();
+        listener.onTunnelState("Tunnel 连接中",
+                detail + " · transport=auto · edge-ip=IPv" + EDGE_IP_VERSION);
         Process current = process;
         if (current != null) current.destroy();
         try {
@@ -204,6 +198,13 @@ final class CloudflareTunnelManager implements AutoCloseable {
     private static String connectionIndex(String line) {
         java.util.regex.Matcher match = java.util.regex.Pattern.compile("\\bconnIndex=(\\d+)").matcher(line);
         return match.find() ? match.group(1) : "default";
+    }
+
+    private static String connectionProtocol(String line) {
+        java.util.regex.Matcher match = java.util.regex.Pattern
+                .compile("\\bprotocol=(quic|http2)\\b", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(line);
+        return match.find() ? match.group(1).toLowerCase(Locale.ROOT) : "auto";
     }
 
     private void ensureSupportedAbi() {

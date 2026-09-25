@@ -11,8 +11,8 @@ android {
         applicationId "com.devspace.mobile"
         minSdk 26
         targetSdk 36
-        versionCode 9
-        versionName "1.1.44-android.7-network-health"
+        versionCode 10
+        versionName "1.1.45-android.8-adaptive-ipv4"
     }
 
     buildTypes {
