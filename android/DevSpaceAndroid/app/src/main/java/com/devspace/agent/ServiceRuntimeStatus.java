@@ -82,7 +82,7 @@ final class ServiceRuntimeStatus {
         if (localOk && (!publicEnabled || publicOk)) {
             lastHealthyAt = lastProbeAt;
             lastError = "";
-            detail = publicEnabled ? "本地 MCP 与公网 /health 均已验证" : "本地 MCP 已验证；公网未启用";
+            detail = publicEnabled ? "本地 MCP 与公网 Tunnel 健康已验证" : "本地 MCP 已验证；公网未启用";
         } else {
             lastError = lastProbeError.isEmpty() ? "端到端连接检测失败" : lastProbeError;
             detail = lastError;

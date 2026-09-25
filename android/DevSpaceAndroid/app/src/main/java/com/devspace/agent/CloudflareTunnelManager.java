@@ -154,8 +154,8 @@ final class CloudflareTunnelManager implements AutoCloseable {
                     if (diagnostic.contains("Registered tunnel connection")) {
                         registeredConnections.add(index);
                         String protocol = connectionProtocol(diagnostic);
-                        listener.onTunnelState("Tunnel 连接中", "Cloudflare 已注册 "
-                                + protocol + "/IPv" + EDGE_IP_VERSION + " 连接；等待公网端到端验证");
+                        listener.onTunnelState("Tunnel 已在线", "Cloudflare 已注册 "
+                                + protocol + "/IPv" + EDGE_IP_VERSION + " edge 连接");
                     } else if (diagnostic.contains("Unregistered tunnel connection")) {
                         registeredConnections.remove(index);
                         if (registeredConnections.isEmpty()) {

@@ -103,7 +103,7 @@
           <label class="field"><span>Named Tunnel Token</span><input id="cloudflareToken" type="password" placeholder="留空保持已保存 Token"></label>
           <div class="row"><button class="fill ghost" onclick="openExternal('cloudflare')">打开 Cloudflare</button><button class="small danger" onclick="clearCloudflare()">清除 Token</button></div>
         </div>
-        <div class="note bad">切换 Tunnel 提供商后先保存配置，再重启服务。运行中每约 20 秒检测本地 /health 与公网 /mcp；进程存活不代表公网在线。锁屏状态也会继续检测。</div>
+        <div class="note bad">Cloudflare 健康以“本地 MCP + 已注册 edge 连接”为主判据；edge 已注册时不再发起手机自访问公网域名的 hairpin 探测，仅在 edge 尚未注册时作为兜底。网络切换另有约 12 秒稳定窗口和 3/7/13 秒快速复查。</div>
       </div>
     </section>
 

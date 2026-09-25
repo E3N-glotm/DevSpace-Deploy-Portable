@@ -105,6 +105,10 @@ public final class DevSpaceAgentService extends Service {
             ngrokTunnelManager = ngrok;
             ngrok.start();
             EndpointHealthMonitor monitor = new EndpointHealthMonitor(this, config,
+                    () -> {
+                        CloudflareTunnelManager cloudflare = tunnelManager;
+                        return cloudflare != null && cloudflare.hasRegisteredConnection();
+                    },
                     new EndpointHealthMonitor.Listener() {
                         @Override public void onProbe(boolean localOk, boolean publicOk,
                                                       String network, String issue) {
@@ -189,17 +193,22 @@ public final class DevSpaceAgentService extends Service {
 
     private void onTunnelState(String provider, String state, String detail) {
         String normalized = state == null ? "" : state;
+        String message = detail == null ? "" : detail;
+        boolean cloudflareEdgeReady = "cloudflare".equals(provider)
+                && message.contains("Cloudflare 已注册")
+                && message.contains("edge");
         if (normalized.contains("失败") || normalized.contains("错误")
                 || normalized.contains("异常") || normalized.contains("退出")) {
-            ServiceRuntimeStatus.tunnelProblem((provider == null ? "Tunnel" : provider) + " · " + detail);
-        } else if (normalized.contains("已在线")) {
-            // A registered connection is only provisional: the HTTP health
-            // monitor must verify an actual public request before green.
-            ServiceRuntimeStatus.tunnelStarting("已建立边缘连接，等待公网 /health 检测");
+            ServiceRuntimeStatus.tunnelProblem((provider == null ? "Tunnel" : provider) + " · " + message);
+        } else if (cloudflareEdgeReady || normalized.contains("已在线")) {
+            ServiceRuntimeStatus.tunnelReady(message.isEmpty() ? "公网 Tunnel 已建立" : message);
         } else if (normalized.contains("正在") || normalized.contains("连接") || normalized.contains("已启动")) {
-            ServiceRuntimeStatus.tunnelStarting(detail);
+            ServiceRuntimeStatus.tunnelStarting(message);
         }
-        onState(state, detail, rootShell != null && rootShell.isRootAvailable());
+        // Persist and notify from the aggregate runtime state. Writing the raw
+        // provider callback here would overwrite RUNNING with "Tunnel 连接中"
+        // immediately after an edge-ready transition.
+        updateNotificationFromRuntime();
     }
 
     private void updateNotificationFromRuntime() {
