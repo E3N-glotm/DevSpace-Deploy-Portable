@@ -216,7 +216,7 @@
         document.getElementById("tunnelProvider").value = activeProvider;
         document.getElementById("publicBaseUrl").value = providerUrls[activeProvider] || config.publicBaseUrl || "";
         document.getElementById("port").value = config.port || 7676;
-        document.getElementById("toolMode").value = config.toolMode || "full";
+        document.getElementById("toolMode").value = config.toolMode || "codex";
         var permissions = config.permissions || { profile: "workspace" };
         document.getElementById("accessProfile").value = permissions.profile || "workspace";
         document.getElementById("allowExternalPaths").checked = !!permissions.allowExternalPaths;
@@ -649,11 +649,11 @@
       <div class="field">
         <label for="toolMode">DevSpace 工具模式</label>
         <select id="toolMode">
-          <option value="full">full（推荐：完整文件、搜索和目录工具）</option>
-          <option value="codex">codex（实验：多文件 apply_patch + 持久命令会话）</option>
+          <option value="codex">codex（默认：多文件 apply_patch + 持久命令会话）</option>
+          <option value="full">full（完整文件、搜索和目录工具）</option>
           <option value="minimal">minimal（精简：基础读写编辑与 bash）</option>
         </select>
-        <div class="hint">“保存并自动部署”会重启服务并应用新模式；“只保存设置”需稍后手动重启。codex 更适合跨文件补丁；full 兼容性最好；minimal 主要用于缩短工具列表。工具集合改变后，ChatGPT 网页端还需刷新工具；没有刷新入口时重新创建插件连接。</div>
+        <div class="hint">“保存并自动部署”会重启服务并应用新模式；“只保存设置”需稍后手动重启。默认使用 codex，更适合跨文件补丁和持久命令；full 保留完整搜索/目录工具；minimal 主要用于缩短工具列表。工具集合改变后，ChatGPT 网页端还需刷新工具；没有刷新入口时重新创建插件连接。</div>
       </div>
       <div id="ngrokFields" class="provider-fields">
         <div class="field">

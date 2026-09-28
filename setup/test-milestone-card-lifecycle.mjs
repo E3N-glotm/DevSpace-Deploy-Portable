@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -11,7 +10,18 @@ const TEST_SENDER_PROTOCOL_EPOCH = Number(serverSource.match(/const CONTINUATION
 const TEST_SENDER_ASSET_REVISION = "0123456789abcdef";
 const { StructuredRuntimeState } = await import(pathToFileURL(runtimePath).href);
 
-const stateDir = mkdtempSync(join(tmpdir(), "devspace-milestone-card-lifecycle-"));
+const cache = join(ROOT, ".test-cache");
+mkdirSync(cache, { recursive: true });
+const sandbox = mkdtempSync(join(cache, "milestone-card-lifecycle-"));
+const stateDir = join(sandbox, "state");
+const configDir = join(sandbox, "config");
+mkdirSync(stateDir);
+mkdirSync(configDir);
+writeFileSync(join(configDir, "auto-continuation.json"), JSON.stringify({
+  formatVersion: 1, enabled: true,
+}));
+const previousPortableConfigDir = process.env.DEVSPACE_PORTABLE_CONFIG_DIR;
+process.env.DEVSPACE_PORTABLE_CONFIG_DIR = configDir;
 const runtime = new StructuredRuntimeState(stateDir);
 runtime.configureContinuationSenderTransport({
   protocolEpoch: TEST_SENDER_PROTOCOL_EPOCH,
@@ -532,5 +542,7 @@ try {
   console.log("milestone card lifecycle tests passed");
 } finally {
   runtime.close();
-  rmSync(stateDir, { recursive: true, force: true });
+  if (previousPortableConfigDir === undefined) delete process.env.DEVSPACE_PORTABLE_CONFIG_DIR;
+  else process.env.DEVSPACE_PORTABLE_CONFIG_DIR = previousPortableConfigDir;
+  rmSync(sandbox, { recursive: true, force: true });
 }

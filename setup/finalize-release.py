@@ -52,6 +52,14 @@ def normalize_dev_iteration(dev_iteration: str | None) -> tuple[int | None, str 
     return iteration, f"dev{iteration}"
 
 
+def version_key(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in str(value).split("."))
+
+
+def next_ui_is_default(version: str, iteration: int | None) -> bool:
+    return bool(iteration is not None and iteration >= 4) or version_key(version) >= version_key("1.1.62")
+
+
 def validate_release_version(version: str, dev_iteration: str | None = None) -> None:
     if version == "1.1.59" and not normalize_dev_iteration(dev_iteration)[1]:
         raise SystemExit("1.1.59 is development-only; use --dev N. The next stable release is 1.1.61.")
@@ -68,7 +76,7 @@ def validate_release_version(version: str, dev_iteration: str | None = None) -> 
         ROOT / "vendor" / "waishnav-devspace" / "dist" / "capabilities.js": f'DEVSPACE_SERVER_VERSION = "{version}"',
         ROOT / "vendor" / "waishnav-devspace" / "dist" / "ui" / "assets" / "runtime-enhancements.js": f"DevSpace Portable {display_version} · Protocol 1.6",
     }
-    if not iteration or iteration < 4:
+    if not next_ui_is_default(version, iteration):
         expected_fragments[ROOT / "setup" / "native" / "DevSpacePortableApp.cs"] = (
             f"DevSpace Portable {display_version} · Protocol 1.6"
         )
@@ -115,7 +123,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
     # from the distributable Next UI. Do not carry forward its obsolete key
     # after rebuilding a manifest from a previous dev3 preview.
     candidates.discard("ui-next/tests/security.test.cjs")
-    if iteration >= 4:
+    if next_ui_is_default(version, iteration):
         # The old control center remains in Git history for rollback research
         # but is neither compiled nor shipped after dev4.
         candidates.discard("setup/native/DevSpacePortableApp.cs")
@@ -177,6 +185,8 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "setup/test-linux-agent-contract.mjs",
             "setup/test-continuation-guard.mjs",
             "setup/test-continuation-supervisor-scheduler.mjs",
+            "setup/test-auto-continuation-toggle.mjs",
+            "setup/test-dev9-defaults.mjs",
             "setup/test-remote-agent-ssh-rescue.mjs",
             "setup/test-dev4-ssh-admin.mjs",
             "setup/test-ui-next-navigation.mjs",
@@ -285,7 +295,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
     )
     if hotfix:
         candidates.add(hotfix.replace("\\", "/"))
-    if iteration and iteration >= 4:
+    if next_ui_is_default(version, iteration):
         candidates.discard("setup/native/DevSpacePortableApp.cs")
     for relative in sorted(candidates):
         path = ROOT / relative

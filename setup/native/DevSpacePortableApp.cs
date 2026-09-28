@@ -5228,7 +5228,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             shell.Controls.Add(content, 1, 1);
 
             Panel footer = new Panel { Dock = DockStyle.Fill, BackColor = Color.Transparent, Margin = new Padding(2, 7, 2, 0) };
-            _versionLabel.Text = "DevSpace Portable 1.1.62 dev3 · Protocol 1.6";
+            _versionLabel.Text = "DevSpace Portable 1.1.62 · Protocol 1.6";
             _versionLabel.ForeColor = UiPalette.TextMuted;
             _versionLabel.AutoSize = true;
             _versionLabel.Location = new Point(4, 5);
@@ -5377,7 +5377,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
             _provider.SelectedIndexChanged += ProviderChanged;
             _publicUrl = AddText(networkForm, "公网 HTTPS 根地址");
             _port = AddNumber(networkForm, "本地端口", 1, 65535, 7676);
-            _toolMode = AddCombo(networkForm, "工具模式", new[] { "full", "codex", "minimal" });
+            _toolMode = AddCombo(networkForm, "工具模式", new[] { "codex", "full", "minimal" });
             _ngrokToken = AddPassword(networkForm, "ngrok Authtoken（留空保留）");
             _ngrokProxy = AddText(networkForm, "ngrok 出站代理（可选）");
             _tunnelNetworkCompatibility = AddCheck(networkForm, "网络隔离监测（推荐）", "tunnelNetworkCompatibility");
@@ -6160,7 +6160,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 if (!GetBool(result, "ok") || GetBool(result, "enabled", !enabled) != enabled)
                     throw new InvalidOperationException("未能保存自动续轮开关。原设置保持不变。");
                 _currentConfig["autoContinuationEnabled"] = enabled;
-                SetOutput(enabled ? "自动续轮已开启，未完成任务可以在当前轮结束后继续。" : "自动续轮已关闭；手动 MCP 操作与里程碑卡片不受影响。");
+                SetOutput(enabled ? "自动续轮已开启；后续 DevSpace 工作轮会强制建立续轮锚点。" : "自动续轮已关闭；后续 DevSpace 工作轮不再自动建立续轮锚点。");
             }
             catch (Exception ex)
             {
@@ -6216,14 +6216,14 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 ? _providerUrls[_selectedProviderName]
                 : GetString(_currentConfig, "publicBaseUrl");
             _port.Value = Math.Max(_port.Minimum, Math.Min(_port.Maximum, GetInt(_currentConfig, "port", 7676)));
-            _toolMode.SelectedItem = GetString(_currentConfig, "toolMode", "full");
+            _toolMode.SelectedItem = GetString(_currentConfig, "toolMode", "codex");
             Dictionary<string, object> permissions = GetDictionary(_currentConfig, "permissions");
             _accessProfile.SelectedItem = GetString(permissions, "profile", "workspace");
             foreach (KeyValuePair<string, CheckBox> item in _permissionBoxes) item.Value.Checked = GetBool(permissions, item.Key);
             Dictionary<string, object> features = GetDictionary(_currentConfig, "features");
             foreach (KeyValuePair<string, CheckBox> item in _featureBoxes) item.Value.Checked = GetBool(features, item.Key, item.Key != "computerUse");
             _computerUseToggle.Checked = GetBool(features, "computerUse");
-            _autoContinuationToggle.Checked = GetBool(_currentConfig, "autoContinuationEnabled", true);
+            _autoContinuationToggle.Checked = GetBool(_currentConfig, "autoContinuationEnabled", false);
             _roots.Text = string.Join(Environment.NewLine, GetStringList(_currentConfig, "allowedRoots"));
             _allDrives.Checked = GetString(_currentConfig, "permissionMode") == "all-drive-roots";
             _ngrokProxy.Text = GetString(_currentConfig, "ngrokProxyUrl");
@@ -6256,7 +6256,7 @@ if [ -f ""$state/agent.log"" ]; then echo DEVSPACE_AGENT_LOG_BEGIN; tail -n 12 "
                 tunnelProvider = Convert.ToString(_provider.SelectedItem ?? "ngrok"),
                 publicBaseUrl = _publicUrl.Text.Trim(),
                 port = Decimal.ToInt32(_port.Value),
-                toolMode = Convert.ToString(_toolMode.SelectedItem ?? "full"),
+                toolMode = Convert.ToString(_toolMode.SelectedItem ?? "codex"),
                 permissions,
                 features,
                 allowedRoots = _roots.Lines.Select(line => line.Trim()).Where(line => line.Length > 0).ToArray(),

@@ -491,7 +491,6 @@ export function ServicePage({config,onConfigChange}:ServiceProps) {
   const [error,setError]=useState('');
   const [notice,setNotice]=useState('');
   const [output,setOutput]=useState<any>(null);
-  const [lease,setLease]=useState<any>(null);
   const [auto,setAuto]=useState(Boolean(config?.autoContinuationEnabled));
   const [computer,setComputer]=useState(Boolean(config?.features?.computerUse));
   useEffect(()=>{setAuto(Boolean(config?.autoContinuationEnabled));setComputer(Boolean(config?.features?.computerUse));},[config]);
@@ -513,10 +512,14 @@ export function ServicePage({config,onConfigChange}:ServiceProps) {
     ['enable','恢复并启动服务'],['disable','停止并禁用服务',true],
     ['install-tasks','注册或修复计划任务'],['uninstall-tasks','卸载计划任务',true],
   ];
+  const everyday=new Set(['start-local','restart-local','start-tunnel','restart-tunnel']);
+  const serviceButton=([name,title,danger]:[string,string,boolean?])=><Button key={name}
+    disabled={busy||(config?.localOnly&&name.includes('tunnel'))}
+    onClick={()=>act(name,{},Boolean(danger)||name.startsWith('restart-')||name.startsWith('stop-'))}>{title}</Button>;
   return <Panel title="服务与运行权限" caption="本地 MCP、隧道、计划任务、自动续轮和 Computer Use 的操作均在新版控制中心完成。">
     <Message error={error} notice={notice}/>
     <div className="op-form">
-      <div className="op-toggle"><div><strong>自动续轮</strong><small>只切换自动续轮开关，不改变已运行任务的身份和安全门控。</small></div>
+      <div className="op-toggle"><div><strong>自动续轮</strong><small>默认关闭。关闭时不自动建立续轮锚点；打开后，后续 DevSpace 工作轮会强制建立锚点并允许自动续接。</small></div>
         <Switch checked={auto} disabled={busy} onChange={async(_e,d)=>{
           const next=d.checked;const r=await act('set-auto-continuation',{enabled:next});
           if(r?.enabled===next)setAuto(next);
@@ -526,20 +529,16 @@ export function ServicePage({config,onConfigChange}:ServiceProps) {
         <Switch checked={computer} disabled={busy} onChange={async(_e,d)=>{
           const next=d.checked;
           const r=await act('set-computer-use',{enabled:next});
-          if(r?.enabled===next){setComputer(next);setLease(null);}
+          if(r?.enabled===next)setComputer(next);
         }}/></div>
-      <ActionRow><Button disabled={busy} onClick={async()=>{
-        setBusy(true);setError('');
-        try{setLease(await window.devspace.admin('dashboard-status',{}));}
-        catch(e){setError(explain(e));}finally{setBusy(false);}
-      }}>刷新运行状态</Button></ActionRow>
-      {lease&&simple(lease)}
     </div>
-    <div className="op-subsection"><h3>服务管理</h3>
-      <p className="help">停止或重新注册服务可能中断当前 ChatGPT/MCP 连接，操作前请确认正在运行的任务。</p>
-      <div className="op-task-actions">{actions.map(([name,title,danger])=>
-        <Button key={name} disabled={busy||(config?.localOnly&&name.includes('tunnel'))}
-          onClick={()=>act(name,{},Boolean(danger))}>{title}</Button>)}</div>
+    <div className="op-subsection"><h3>常用服务控制</h3>
+      <p className="help">启动与重启操作一步直达；重启可能短暂中断当前 MCP 连接。</p>
+      <div className="op-task-actions">{actions.filter(action=>everyday.has(action[0])).map(serviceButton)}</div>
+      <details className="op-advanced"><summary>高级服务维护与停用</summary>
+        <p className="help">停止、卸载或重新注册任务可能中断当前会话；相关危险操作继续要求确认。</p>
+        <div className="op-task-actions">{actions.filter(action=>!everyday.has(action[0])).map(serviceButton)}</div>
+      </details>
       {output&&simple(output)}
     </div>
   </Panel>;
@@ -566,16 +565,18 @@ export function DiagnosticsPage() {
         <Button disabled={busy} onClick={()=>action('network-proxy-state')}>系统代理状态</Button></ActionRow>
       {logs&&simple(logs)}
     </div>
-    <div className="op-subsection"><h3>代理连接修复</h3>
+    <details className="op-advanced"><summary>代理连接修复与恢复</summary>
       <p className="help">仅在诊断确认 Windows 代理残留时使用。修复与恢复均需要额外确认。</p>
       <ActionRow><Button disabled={busy} onClick={()=>action('repair-stale-proxy',{},true)}>修复过期代理</Button>
         <Button disabled={busy} onClick={()=>action('restore-proxy-repair',{},true)}>恢复代理备份</Button></ActionRow>
-    </div>
+    </details>
     {result&&simple(result)}
   </Panel>;
 }
 
-export function UpdatesPage() {
+export function UpdatesPage({quickCheck=false,onQuickCheckConsumed}: {
+  quickCheck?:boolean;onQuickCheckConsumed?:()=>void;
+}={}) {
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [result,setResult]=useState<any>(null);
@@ -590,6 +591,11 @@ export function UpdatesPage() {
     } catch(e) {setError(explain(e));return null;}
     finally {setBusy(false);}
   };
+  useEffect(()=>{
+    if(!quickCheck)return;
+    onQuickCheckConsumed?.();
+    void action('update-check');
+  },[quickCheck]);
   return <Panel title="软件更新" caption="在设置中检查、下载并安装更新；不会因为打开设置页面就自动更新或停止服务。">
     {error&&<div role="alert" className="op-message op-error">{error}</div>}
     <p className="help">检查和下载阶段不会替换当前服务。安装前须额外确认，并在有维护窗口时进行。</p>

@@ -32,6 +32,9 @@ writeFileSync(join(configDir, "config.json"), JSON.stringify({
 writeFileSync(join(configDir, "auth.json"), JSON.stringify({
   ownerToken: "isolated-continuation-wire-test-owner-token",
 }));
+writeFileSync(join(configDir, "auto-continuation.json"), JSON.stringify({
+  formatVersion: 1, enabled: true,
+}));
 process.env.DEVSPACE_PLUGIN_ROOT = join(temp, "plugins");
 const config = loadConfig({ ...process.env,
   DEVSPACE_CONFIG_DIR: configDir, DEVSPACE_STATE_DIR: stateDir,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { StructuredRuntimeState } from "../app/node_modules/@waishnav/devspace/dist/runtime-state.js";
@@ -13,6 +13,13 @@ for (const file of ["runtime-state.js", "server.js", "ui/assets/continuation-coo
 const cache = join(ROOT, ".test-cache");
 mkdirSync(cache, { recursive: true });
 const temp = mkdtempSync(join(cache, "resident-turns-"));
+const configDir = join(temp, "config");
+mkdirSync(configDir);
+writeFileSync(join(configDir, "auto-continuation.json"), JSON.stringify({
+  formatVersion: 1, enabled: true,
+}));
+const previousPortableConfigDir = process.env.DEVSPACE_PORTABLE_CONFIG_DIR;
+process.env.DEVSPACE_PORTABLE_CONFIG_DIR = configDir;
 const runtime = new StructuredRuntimeState(temp);
 const epoch = Number(readFileSync(join(ROOT, "vendor/waishnav-devspace/dist/server.js"), "utf8")
   .match(/const CONTINUATION_SENDER_PROTOCOL_EPOCH = (\d+);/)[1]);
@@ -430,6 +437,8 @@ try {
     liveHostAcceptance: false }, null, 2));
 } finally {
   runtime.close();
+  if (previousPortableConfigDir === undefined) delete process.env.DEVSPACE_PORTABLE_CONFIG_DIR;
+  else process.env.DEVSPACE_PORTABLE_CONFIG_DIR = previousPortableConfigDir;
   rmSync(temp, { recursive: true, force: true });
 }
 

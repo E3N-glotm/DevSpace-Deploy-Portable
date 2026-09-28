@@ -369,12 +369,12 @@ export class StructuredRuntimeState {
     }
     autoContinuationEnabled() {
         try {
-            return JSON.parse(readFileSync(this.autoContinuationPolicyFile, "utf8")).enabled !== false;
+            return JSON.parse(readFileSync(this.autoContinuationPolicyFile, "utf8")).enabled === true;
         }
-        catch (error) {
-            // Existing installations have no policy file and retain the old
-            // enabled default. A malformed/unreadable explicit file fails closed.
-            return error?.code === "ENOENT";
+        catch {
+            // 1.1.62 is opt-in: a missing, malformed, or unreadable policy file
+            // keeps automatic continuation disabled.
+            return false;
         }
     }
     configureContinuationSenderTransport(input = {}) {
@@ -737,7 +737,7 @@ export class StructuredRuntimeState {
         // the runtime boundary instead.  Issuance (mount_requested_at) is enough
         // to release ordinary work; iframe verification may arrive later and
         // must never force a duplicate card inside the same manual round.
-        if (anchorMountRecoveryRequired(task, Date.now())) {
+        if (this.autoContinuationEnabled() && anchorMountRecoveryRequired(task, Date.now())) {
             return {
                 accepted: false,
                 reason: "manual-round-card-required",
@@ -3390,6 +3390,13 @@ export class StructuredRuntimeState {
             conversationScopeId,
             internalAnchorPreparation: true,
         });
+        if (!this.autoContinuationEnabled()) {
+            return {
+                ...status,
+                accepted: false,
+                reason: "automatic-continuation-disabled",
+            };
+        }
         if (row.anchor_mount_verified_at && !anchorMountRecoveryRequired(row, Date.now(), hostTurnFingerprint)) {
             return { ...status, accepted: true, alreadyVerified: true };
         }
@@ -3512,10 +3519,13 @@ export class StructuredRuntimeState {
                 taskContract: true,
                 conversationLifetimeTaskContract: isCanonicalConversationScope(conversationScopeId),
                 conversationLifetimeSingleton: isCanonicalConversationScope(conversationScopeId),
-                manualRoundCardRequired: anchorMountRecoveryRequired(existing, now.getTime(), input.hostTurnFingerprint),
+                manualRoundCardRequired: this.autoContinuationEnabled()
+                    && anchorMountRecoveryRequired(existing, now.getTime(), input.hostTurnFingerprint),
                 newMilestoneRequired: TERMINAL_CONTINUATION_STATES.has(String(status.task?.state ?? "")),
-                initialAnchorRequired: anchorMountRecoveryRequired(existing, now.getTime(), input.hostTurnFingerprint),
-                anchorMountVerificationPending: !existing.anchor_mount_verified_at && Boolean(existing.anchor_mount_requested_at),
+                initialAnchorRequired: this.autoContinuationEnabled()
+                    && anchorMountRecoveryRequired(existing, now.getTime(), input.hostTurnFingerprint),
+                anchorMountVerificationPending: this.autoContinuationEnabled()
+                    && !existing.anchor_mount_verified_at && Boolean(existing.anchor_mount_requested_at),
             };
         }
         const required = Array.isArray(input.requiredMilestones)
@@ -3552,8 +3562,8 @@ export class StructuredRuntimeState {
             needsRefinement: required.length === 0,
             conversationLifetimeTaskContract: isCanonicalConversationScope(conversationScopeId),
             conversationLifetimeSingleton: isCanonicalConversationScope(conversationScopeId),
-            manualRoundCardRequired: true,
-            initialAnchorRequired: true,
+            manualRoundCardRequired: this.autoContinuationEnabled(),
+            initialAnchorRequired: this.autoContinuationEnabled(),
         };
     }
     continuationSupervisorDirective(input = {}) {
@@ -3590,9 +3600,9 @@ export class StructuredRuntimeState {
         const completed = new Set(parseJson(row.completed_milestones_json, []));
         const unfinished = required.length > 0 && required.some((milestone) => !completed.has(milestone));
         const watchedHandles = parseJson(row.watch_process_handles_json, []);
-        const activeTurnNeedsSupervisor = row.state === "RUNNING"
+        const activeTurnNeedsSupervisor = this.autoContinuationEnabled() && row.state === "RUNNING"
             && (unfinished || anchorMountRecoveryRequired(row, Date.now(), input.hostTurnFingerprint));
-        const residentWaitNeedsSupervisor = continuationMode === "resident"
+        const residentWaitNeedsSupervisor = this.autoContinuationEnabled() && continuationMode === "resident"
             && ["WAITING_EXTERNAL", "WAITING_SUPERVISOR"].includes(row.state)
             && watchedHandles.length > 0;
         if (!activeTurnNeedsSupervisor && !residentWaitNeedsSupervisor)
@@ -3617,6 +3627,7 @@ export class StructuredRuntimeState {
         const now = new Date();
         const nowIso = now.toISOString();
         const terminalStates = TERMINAL_CONTINUATION_STATES;
+        const anchorEnforcementEnabled = this.autoContinuationEnabled();
         const normalizedMode = (value, fallback = "compat") => {
             const mode = String(value ?? "").trim().toLowerCase();
             if (mode === "resident") return "resident";
@@ -3733,8 +3744,10 @@ export class StructuredRuntimeState {
             anchorMountRequestedAt: row.anchor_mount_requested_at ?? undefined,
             anchorMountCoordinatorId: row.anchor_mount_coordinator_id ?? undefined,
             anchorMountGeneration: Math.max(0, Number(row.anchor_mount_generation ?? 0)),
-            anchorMountRecoveryRequired: anchorMountRecoveryRequired(row, now.getTime(), input.hostTurnFingerprint),
-            anchorMountVerificationPending: !row.anchor_mount_verified_at && Boolean(row.anchor_mount_requested_at),
+            anchorMountRecoveryRequired: anchorEnforcementEnabled
+                && anchorMountRecoveryRequired(row, now.getTime(), input.hostTurnFingerprint),
+            anchorMountVerificationPending: anchorEnforcementEnabled
+                && !row.anchor_mount_verified_at && Boolean(row.anchor_mount_requested_at),
             anchorMountProvisionalUntil: anchorMountProvisionalUntil(row),
             unlimitedContinuations: Number(row.max_continuations || 0) <= 0,
             unlimitedWallClock: !row.deadline_at,
@@ -3777,6 +3790,7 @@ export class StructuredRuntimeState {
             };
         };
         const taskNeedsCurrentTurnSupervisor = (row, task = rowToTask(row)) => {
+            if (!anchorEnforcementEnabled) return false;
             if (!row || !task || task.state !== "RUNNING" || task.continuationMode === "compat") return false;
             const required = Array.isArray(task.requiredMilestones) ? task.requiredMilestones : [];
             if (required.length === 0) return false;
@@ -4065,16 +4079,20 @@ export class StructuredRuntimeState {
                     `).run(nowIso, nowIso, turnLeaseId, turnLeaseExpiresAt,
                         nowIso, nowIso, nowIso, nowIso, row.id);
                     row = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id);
-                    const rotated = this.rotateContinuationManualRoundCard(row.id, nowIso) || row;
+                    const rotated = anchorEnforcementEnabled
+                        ? this.rotateContinuationManualRoundCard(row.id, nowIso) || row
+                        : row;
                     const task = rowToTask(rotated);
                     return {
                         task,
                         accepted: true,
                         reason: "manual-round-started",
-                        manualRoundCardRequired: true,
-                        milestoneCardRequired: true,
-                        initialAnchorRequired: true,
-                        reanchorRequired: true,
+                        ...(anchorEnforcementEnabled ? {
+                            manualRoundCardRequired: true,
+                            milestoneCardRequired: true,
+                            initialAnchorRequired: true,
+                            reanchorRequired: true,
+                        } : {}),
                         conversationLifetimeSingleton: true,
                         ...continuationDirective(task),
                     };
@@ -4316,16 +4334,20 @@ export class StructuredRuntimeState {
                 })();
                 if (readyManualTakeover) {
                     const manualPlan = applyManualRoundPlan(readyManualTakeover);
-                    const rotated = this.rotateContinuationManualRoundCard(row.id, nowIso) || manualPlan.row;
+                    const rotated = anchorEnforcementEnabled
+                        ? this.rotateContinuationManualRoundCard(row.id, nowIso) || manualPlan.row
+                        : manualPlan.row;
                     const refreshedTask = rowToTask(rotated);
                     return {
                         task: refreshedTask,
                         accepted: true,
                         reason: "manual-turn-took-over-ready-generation",
-                        manualRoundCardRequired: true,
-                        milestoneCardRequired: true,
-                        initialAnchorRequired: true,
-                        reanchorRequired: true,
+                        ...(anchorEnforcementEnabled ? {
+                            manualRoundCardRequired: true,
+                            milestoneCardRequired: true,
+                            initialAnchorRequired: true,
+                            reanchorRequired: true,
+                        } : {}),
                         conversationLifetimeSingleton: isCanonicalConversationScope(refreshedTask.conversationScopeId),
                         ...(manualPlan.milestoneSetChanged ? { manualMilestoneSetChanged: true } : {}),
                         ...continuationDirective(refreshedTask),
@@ -4413,16 +4435,20 @@ export class StructuredRuntimeState {
                 const manualPlan = applyManualRoundPlan(
                     this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id),
                 );
-                const rotated = this.rotateContinuationManualRoundCard(row.id, nowIso) || manualPlan.row;
+                const rotated = anchorEnforcementEnabled
+                    ? this.rotateContinuationManualRoundCard(row.id, nowIso) || manualPlan.row
+                    : manualPlan.row;
                 const refreshedTask = rowToTask(rotated);
                 return {
                     task: refreshedTask,
                     accepted: true,
                     reason: "manual-turn-took-over",
-                    manualRoundCardRequired: true,
-                    milestoneCardRequired: true,
-                    initialAnchorRequired: true,
-                    reanchorRequired: true,
+                    ...(anchorEnforcementEnabled ? {
+                        manualRoundCardRequired: true,
+                        milestoneCardRequired: true,
+                        initialAnchorRequired: true,
+                        reanchorRequired: true,
+                    } : {}),
                     conversationLifetimeSingleton: isCanonicalConversationScope(refreshedTask.conversationScopeId),
                     ...(manualPlan.milestoneSetChanged ? { manualMilestoneSetChanged: true } : {}),
                     ...continuationDirective(refreshedTask),
@@ -4457,16 +4483,20 @@ export class StructuredRuntimeState {
                 const manualPlan = applyManualRoundPlan(
                     this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(row.id),
                 );
-                const rotated = this.rotateContinuationManualRoundCard(row.id, nowIso) || manualPlan.row;
+                const rotated = anchorEnforcementEnabled
+                    ? this.rotateContinuationManualRoundCard(row.id, nowIso) || manualPlan.row
+                    : manualPlan.row;
                 const refreshedTask = rowToTask(rotated);
                 return {
                     task: refreshedTask,
                     accepted: true,
                     reason: "manual-round-started",
-                    manualRoundCardRequired: true,
-                    milestoneCardRequired: true,
-                    initialAnchorRequired: true,
-                    reanchorRequired: true,
+                    ...(anchorEnforcementEnabled ? {
+                        manualRoundCardRequired: true,
+                        milestoneCardRequired: true,
+                        initialAnchorRequired: true,
+                        reanchorRequired: true,
+                    } : {}),
                     conversationLifetimeSingleton: isCanonicalConversationScope(refreshedTask.conversationScopeId),
                     ...(manualPlan.milestoneSetChanged ? { manualMilestoneSetChanged: true } : {}),
                     ...continuationDirective(refreshedTask),
@@ -4682,7 +4712,7 @@ export class StructuredRuntimeState {
                 // established this exact manual round, however, begin is only
                 // plan refinement/reactivation and MUST reuse that round's card
                 // even when the card has already mounted and verified.
-                beginManualCardRequired = !sameTerminalManualRound;
+                beginManualCardRequired = anchorEnforcementEnabled && !sameTerminalManualRound;
                 const cardBeforeBegin = this.database.sqlite.prepare(`
                   select * from continuation_conversation_cards where conversation_scope_id=?
                 `).get(existing.conversation_scope_id);
@@ -5687,7 +5717,7 @@ export class StructuredRuntimeState {
             if (input.waitingExternal) this.recordContinuationExternalWait(taskId, input);
             this.syncContinuationArchitectureForLegacyTask(taskId);
             let refreshed = this.database.sqlite.prepare("select * from continuation_tasks where id=?").get(taskId);
-            if (syntheticMilestoneRevision && !terminalStates.has(state)) {
+            if (anchorEnforcementEnabled && syntheticMilestoneRevision && !terminalStates.has(state)) {
                 const card = this.database.sqlite.prepare(`
                   select * from continuation_conversation_cards where conversation_scope_id=?
                 `).get(refreshed.conversation_scope_id);
@@ -5703,7 +5733,7 @@ export class StructuredRuntimeState {
                 task,
                 accepted: true,
                 ...(waitingForSupervisorAck ? { reason: "supervisor-ack-pending" } : {}),
-                ...(syntheticMilestoneRevision && !terminalStates.has(state) ? {
+                ...(anchorEnforcementEnabled && syntheticMilestoneRevision && !terminalStates.has(state) ? {
                     milestoneCardRequired: true,
                     initialAnchorRequired: true,
                     reanchorRequired: true,

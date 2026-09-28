@@ -34,14 +34,30 @@ const invoke = (command, input) => {
 const originalEnv = process.env.DEVSPACE_PORTABLE_CONFIG_DIR;
 let runtime;
 try {
-  // Old installations start enabled without creating a config file.
+  // dev9 is opt-in: a fresh installation starts disabled without creating a
+  // policy file and does not force a visible continuation anchor.
   process.env.DEVSPACE_PORTABLE_CONFIG_DIR = configDir;
   const { StructuredRuntimeState } = await import(pathToFileURL(join(root,
     "app", "node_modules", "@waishnav", "devspace", "dist", "runtime-state.js")).href);
   runtime = new StructuredRuntimeState(stateDir);
   assert.equal(existsSync(settingsFile), false);
-  assert.equal(runtime.autoContinuationEnabled(), true);
-  assert.equal(invoke("show-config").autoContinuationEnabled, true);
+  assert.equal(runtime.autoContinuationEnabled(), false);
+  assert.equal(invoke("show-config").autoContinuationEnabled, false);
+  const scope = "v1/test-auto-continuation-toggle";
+  const manualOff = runtime.continuationTask({
+    action: "status", manualTakeover: true, conversationScopeId: scope,
+  });
+  assert.equal(manualOff.accepted, true);
+  assert.equal(Boolean(manualOff.manualRoundCardRequired), false,
+    "OFF must keep manual DevSpace work headless");
+  assert.equal(Boolean(manualOff.initialAnchorRequired), false);
+  assert.equal(Boolean(manualOff.task.anchorMountRecoveryRequired), false);
+  assert.equal(runtime.continuationModelToolAuthorization({ conversationScopeId: scope }).accepted, true,
+    "OFF must not block ordinary DevSpace tools on a milestone card");
+  assert.equal(runtime.prepareContinuationAnchorMount({
+    taskId: manualOff.task.id, conversationScopeId: scope,
+  }).reason, "automatic-continuation-disabled",
+  "OFF must refuse automatic anchor preparation");
 
   // Standalone switch must not mutate deployment, authorization, or CU state.
   const configFile = join(configDir, "config.json");
@@ -60,16 +76,31 @@ try {
   assert.equal(runtime.claimReadyContinuationGeneration({}).reason, "automatic-continuation-disabled");
   assert.equal(runtime.authorizeContinuationGenerationDelivery({}).reason, "automatic-continuation-disabled");
   const manual = runtime.continuationTask({
-    action: "status", manualTakeover: true, conversationScopeId: "v1/test-auto-continuation-toggle",
+    action: "status", manualTakeover: true, conversationScopeId: scope,
   });
   assert.equal(manual.accepted, true, "OFF must not disable manual MCP task creation");
   assert.ok(manual.task.id);
+  assert.equal(Boolean(manual.manualRoundCardRequired), false);
   assert.equal(readFileSync(configFile, "utf8"), originalConfig);
   assert.equal(readFileSync(deploymentFile, "utf8"), originalDeployment);
 
   assert.equal(invoke("set-auto-continuation", { enabled: true }).enabled, true);
   assert.equal(runtime.autoContinuationEnabled(), true);
   assert.equal(invoke("show-config").autoContinuationEnabled, true);
+  const manualOn = runtime.continuationTask({
+    action: "status", manualTakeover: true, conversationScopeId: scope,
+  });
+  assert.equal(manualOn.manualRoundCardRequired, true,
+    "ON must force the manual round to establish its milestone anchor");
+  assert.equal(manualOn.initialAnchorRequired, true);
+  assert.equal(runtime.continuationModelToolAuthorization({ conversationScopeId: scope }).reason,
+    "manual-round-card-required");
+  const anchor = runtime.prepareContinuationAnchorMount({
+    taskId: manualOn.task.id, conversationScopeId: scope,
+  });
+  assert.equal(anchor.accepted, true);
+  assert.equal(runtime.continuationModelToolAuthorization({ conversationScopeId: scope }).accepted, true,
+    "issuing the requested anchor releases ordinary DevSpace work");
   assert.equal(runtime.claimReadyContinuationGeneration({}).reason, "sender-capability-required");
   assert.equal(runtime.authorizeContinuationGenerationDelivery({}).reason, "sender-capability-required");
   runtime.close(); runtime = undefined;
@@ -89,9 +120,10 @@ try {
   const native = readFileSync(join(root, "setup", "native", "DevSpacePortableApp.cs"), "utf8");
   assert.match(native, /headerActions\.Controls\.Add\(_computerUseToggle\);\s*headerActions\.Controls\.Add\(_autoContinuationToggle\);/);
   assert.match(native, /RunJsonAsync\("set-auto-continuation", new \{ enabled = enabled \}\)/);
-  assert.match(native, /GetBool\(_currentConfig, "autoContinuationEnabled", true\)/);
-  console.log(JSON.stringify({ defaultEnabled: true, disabledBlocksNewSynthetic: true,
-    manualMcpStillAllowed: true, cardsUnchanged: true, enablesWithoutRestart: true,
+  assert.match(native, /GetBool\(_currentConfig, "autoContinuationEnabled", false\)/);
+  console.log(JSON.stringify({ defaultEnabled: false, disabledBlocksNewSynthetic: true,
+    disabledKeepsManualHeadless: true, enabledForcesAnchor: true,
+    manualMcpStillAllowed: true, enablesWithoutRestart: true,
     persistent: true, failClosed: true, nativeHeaderToggle: true, isolatedFromComputerUse: true }));
 } finally {
   runtime?.close();

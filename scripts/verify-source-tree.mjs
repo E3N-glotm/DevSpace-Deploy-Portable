@@ -187,6 +187,14 @@ if (!displayVersion || (displayVersion !== packageVersion && !displayVersion.sta
 const displayDevSuffix = displayVersion === packageVersion
   ? ""
   : displayVersion.slice(packageVersion.length).trim();
+const portableVersionParts = String(manifest.runtime?.devspacePortable || "0.0.0")
+  .split(".").map((part) => Number(part) || 0);
+const stableNextDefault = (
+  (portableVersionParts[0] || 0) > 1 ||
+  ((portableVersionParts[0] || 0) === 1 && (portableVersionParts[1] || 0) > 1) ||
+  ((portableVersionParts[0] || 0) === 1 && (portableVersionParts[1] || 0) === 1
+    && (portableVersionParts[2] || 0) >= 62)
+);
 if (displayDevSuffix) {
   const match = /^dev([1-9]\d*)$/.exec(displayDevSuffix);
   if (!match) {
@@ -224,7 +232,7 @@ const versionIdentitySources = [
   // The executable/service identity stays strict semver, while user-visible
   // surfaces intentionally include the current development iteration label (devN).
   ["vendor/waishnav-devspace/dist/ui/assets/runtime-enhancements.js", `DevSpace Portable ${displayVersion} · Protocol 1.6`],
-  ...(Number(manifest.development?.iteration || 0) >= 4 ? [] :
+  ...((Number(manifest.development?.iteration || 0) >= 4 || stableNextDefault) ? [] :
     [["setup/native/DevSpacePortableApp.cs", `DevSpace Portable ${displayVersion} · Protocol 1.6`]]),
 ];
 for (const [file, expected] of versionIdentitySources) {

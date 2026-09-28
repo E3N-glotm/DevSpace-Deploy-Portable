@@ -26,5 +26,6 @@ contextBridge.exposeInMainWorld('devspace', Object.freeze({
   onCloseRequest: handler => listen('requestCloseChoice', handler),
   chooseClose: (choice, remember=false) => invoke('chooseClose', choice, remember),
   getClosePreference: () => invoke('getClosePreference'),
+  setClosePreference: choice => invoke('setClosePreference', choice),
   resetClosePreference: () => invoke('resetClosePreference'),
 }));

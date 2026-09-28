@@ -116,7 +116,7 @@ function parseToolMode(env) {
     if (env.DEVSPACE_MINIMAL_TOOLS !== undefined) {
         return parseBoolean(env.DEVSPACE_MINIMAL_TOOLS) ? "minimal" : "full";
     }
-    return "minimal";
+    return "codex";
 }
 function parseLogLevel(value) {
     if (!value || value === "info")

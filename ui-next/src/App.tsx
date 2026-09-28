@@ -12,8 +12,15 @@ import {operationNames, standardOperations, fullOperations, detectOperationMode,
 import { AgentsPage, PluginsPage, ContinuationsPage, SessionsPage,
   MemoriesPage, OAuthPage, ServicePage, DiagnosticsPage, UpdatesPage } from './Operations';
 
-type Page = 'home' | 'workspaces' | 'agents' | 'extensions' | 'tasks' |
+type Page = 'home' | 'agents' | 'extensions' | 'tasks' |
   'sessions' | 'memories' | 'oauth' | 'services' | 'diagnose' | 'settings';
+type SettingsSection = 'basic' | 'files' | 'operations' | 'updates';
+const settingsSections: {id:SettingsSection;label:string;description:string}[] = [
+  {id:'basic',label:'连接与凭据',description:'连接方式、端口、地址与关闭行为'},
+  {id:'files',label:'文件访问',description:'工作目录与文件访问范围'},
+  {id:'operations',label:'操作权限',description:'命令、网络、凭据与桌面控制'},
+  {id:'updates',label:'更新',description:'检查、下载与安装更新'},
+];
 type SecretKind = 'owner' | 'ngrok' | 'cloudflare';
 const workspace: Permission = {
   profile:'custom', allowExternalPaths:false, ...standardOperations,
@@ -26,7 +33,7 @@ function fromConfig(c: Config): Settings {
     fileScopeMode: initialFileScope(c),
     operationMode: detectOperationMode(c),
     allowAllFixedDrives: initialFileScope(c) === 'all',
-    permissions: c.permissions || workspace, toolMode: c.toolMode || 'full',
+    permissions: c.permissions || workspace, toolMode: c.toolMode || 'codex',
     ngrokProxyUrl: c.ngrokProxyUrl || '',
   };
 }
@@ -68,7 +75,7 @@ function FileAccess({mode,onModeChange,roots,onRootsChange,onChoose}:{
 }) {
   return <section className="access-section">
     <div className="access-heading"><span className="access-number">01</span><div><h3>文件访问范围</h3>
-      <p>先决定可以访问哪里；下方的操作权限不会改变这里的选择。</p></div></div>
+      <p>只决定可以访问哪里；操作权限在独立页面设置。</p></div></div>
     <div className="choices access-choices">
       <Choice selected={mode==='selected'} icon={<FolderOpenRegular/>} title="仅限所选目录"
         caption="只允许访问明确选择的工作目录及其子目录。" onClick={()=>onModeChange('selected')}/>
@@ -131,6 +138,7 @@ export function App() {
   const [status,setStatus] = useState<any>(null);
   const [root,setRoot] = useState('');
   const [page,setPage] = useState<Page>('home');
+  const [settingsSection,setSettingsSection] = useState<SettingsSection>('basic');
   const [wizard,setWizard] = useState(false);
   const [step,setStep] = useState(0);
   const [busy,setBusy] = useState(false);
@@ -139,8 +147,6 @@ export function App() {
   const [notice,setNotice] = useState('');
   const [dirty,setDirty] = useState(false);
   const [applyPending,setApplyPending] = useState(false);
-  const [diagnostic,setDiagnostic] = useState('');
-  const [advancedBusy,setAdvancedBusy] = useState(false);
   const [closeOpen,setCloseOpen] = useState(false);
   const [rememberClose,setRememberClose] = useState(false);
   const [closeBusy,setCloseBusy] = useState(false);
@@ -171,6 +177,14 @@ export function App() {
     } catch(e) {setError(getError(e));}
     finally {setCloseBusy(false);}
   },[closeBusy,rememberClose]);
+  const saveClosePreference=useCallback(async(choice:''|'minimize-tray'|'exit-ui')=>{
+    try {
+      const result=await window.devspace.setClosePreference(choice);
+      setClosePreference(result.choice);
+      setNotice(choice?'关闭窗口行为已保存，下次点击 × 时直接执行。':'已恢复每次关闭时询问。');
+      setError('');
+    } catch(e) {setError(getError(e));}
+  },[]);
   const update = useCallback((change:Partial<Settings>)=>{
     setDraft(prev=>prev?{...prev,...change}:prev);
     setDirty(true);setError('');setNotice('');
@@ -190,9 +204,14 @@ export function App() {
     try{await window.devspace.copyUrl(kind);setNotice('MCP 地址已复制到系统剪贴板。');}
     catch(e){setError(getError(e));}
   },[]);
-  const select=useCallback((name:Page)=>{setPage(name);setWizard(false);setError('');setNotice('');},[]);
+  const select=useCallback((name:Page, section?:SettingsSection)=>{
+    setPage(name);if(section)setSettingsSection(section);
+    setWizard(false);setError('');setNotice('');
+  },[]);
   const save=useCallback(async (deploy=false)=>{
     if(!draft)return;
+    if(deploy&&config?.configured&&
+      !window.confirm('应用配置会重启 DevSpace，可能短暂中断当前 MCP 连接及正在进行的任务。确定继续？'))return;
     setBusy(true);setError('');setNotice('');setProgress(null);
     try {
       const previous=await window.devspace.getConfig();
@@ -213,14 +232,6 @@ export function App() {
     }catch(e){setError(getError(e));}
     finally{setBusy(false);}
   },[draft]);
-  const runAdvanced=useCallback(async(action:Parameters<typeof window.devspace.runAction>[0])=>{
-    setAdvancedBusy(true);setError('');setNotice('');
-    try{
-      const result=await window.devspace.runAction(action);
-      setDiagnostic(typeof result==='string'?result:JSON.stringify(result,null,2));
-      if(action==='restart-local'||action==='restart-tunnel')setNotice('操作已提交，请等待服务状态更新。');
-    }catch(e){setError(getError(e));}finally{setAdvancedBusy(false);}
-  },[]);
   const isPublic=draft?.provider!=='local';
   const selectedSecret=draft?.provider==='ngrok'?'ngrok':'cloudflare';
   const validStep=useMemo(()=>{
@@ -236,10 +247,10 @@ export function App() {
   if(!draft||!config)return <div className="startup"><Spinner size="large"/><h2>正在连接 DevSpace…</h2><p>{error||'读取本地配置，不会修改现有部署。'}</p></div>;
   return <div className="desktop">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV6</small></span></div>
+      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV8</small></span></div>
       <div className="side-group">
-        {([['home',<HomeRegular/>,'主页'],['workspaces',<FolderOpenRegular/>,'工作区'],
-          ['agents',<ServerRegular/>,'远程服务器'],['extensions',<PlugConnectedRegular/>,'插件与工具'],
+        {([['home',<HomeRegular/>,'主页'],['agents',<ServerRegular/>,'远程服务器'],
+          ['extensions',<PlugConnectedRegular/>,'插件与工具'],
           ['tasks',<AppsRegular/>,'续轮任务'],['sessions',<SearchRegular/>,'会话与回退'],
           ['memories',<KeyRegular/>,'Memories'],['oauth',<LockClosedRegular/>,'OAuth 客户端'],
           ['services',<DesktopRegular/>,'服务与桌面控制'],
@@ -247,14 +258,14 @@ export function App() {
           <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
       <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span className={'dot '+(status?.localHealthy?'online':'')}/>{status?.localHealthy?'本地 MCP 已连接':'本地 MCP 未连接'}<small>v1.1.62 dev6</small></div>
+        <div className="sidebar-status"><span>v1.1.62</span></div>
       </div>
     </aside>
     <main className="main">
       <header className="topbar"><div><span className="eyebrow">DEVSPACE / {wizard?'首次设置':page.toUpperCase()}</span><h1>{wizard?'设置 DevSpace':{
-        home:'控制台',workspaces:'工作区',agents:'远程服务器',extensions:'插件与工具',tasks:'续轮任务',
+        home:'控制台',agents:'远程服务器',extensions:'插件与工具',tasks:'续轮任务',
         sessions:'会话与回退',memories:'Memories',oauth:'OAuth 客户端',services:'服务与桌面控制',
-        diagnose:'诊断中心',settings:'设置与权限',
+        diagnose:'诊断中心',settings:'设置',
       }[page]}</h1></div><div className="top-actions"><span className={'status-pill '+(status?.localHealthy?'ok':'')}>{status?.localHealthy?'● 服务正常':'○ 服务未连接'}</span>
         <Button appearance="subtle" icon={<ArrowClockwiseRegular/>} onClick={()=>window.devspace.getStatus().then(setStatus)}>刷新</Button></div></header>
       <div className="page-body">
@@ -307,20 +318,24 @@ export function App() {
           </div>
         </div>}
         {!wizard&&page==='home'&&<><div className="hero"><span className="eyebrow">SYSTEM OVERVIEW</span><h2>{status?.localHealthy?'DevSpace 正在运行':'DevSpace 尚未就绪'}</h2>
-          <p>服务状态与工作区一目了然。插件、任务、会话与系统管理均可直接在新版窗口中操作。</p>
-          <div className="hero-actions"><Button appearance="primary" onClick={()=>select('settings')}>配置服务</Button>
-            <Button appearance="outline" className="hero-service-button" onClick={()=>select('services')}>服务管理</Button></div></div>
+          <p>这里仅显示运行概览。配置、服务控制及诊断分别在左侧对应页面操作。</p></div>
+          {(dirty||applyPending)&&<div className="home-pending" role="status"><div><strong>{dirty?'有尚未保存的配置':'配置已保存，尚未应用'}</strong>
+            <p>{dirty?'请在设置中确认更改并保存。':'请在设置中应用更改，服务重启后生效。'}</p></div>
+            <Button appearance="primary" onClick={()=>select('settings','basic')}>处理配置</Button></div>}
           <div className="metric-grid"><div className="metric"><span className="metric-icon"><DesktopRegular/></span><small>本地 MCP</small><strong>{status?.localHealthy?'已连接':'未连接'}</strong><p>{status?.localUrl}</p></div>
             <div className="metric"><span className="metric-icon"><CloudRegular/></span><small>公网模式（连通性未核验）</small><strong>{status?.provider==='local'?'仅本机':status?.provider}</strong><p>{status?.publicUrl||'未配置公网入口'}</p></div>
             <div className="metric"><span className="metric-icon"><FolderOpenRegular/></span><small>有效文件访问范围</small>
               <strong>{initialFileScope(config)==='all'?'全部可访问目录':selectedDirectoryList(config).length+' 个工作目录'}</strong>
-              <p>{initialFileScope(config)==='all'?'已选目录不构成访问限制':'在工作区页面查看或调整'}</p></div></div>
-          <section className="panel"><div className="section-heading"><h3>快速开始</h3><span>常用操作</span></div><div className="quick-grid">
-            <button onClick={()=>select('workspaces')}><FolderOpenRegular/><strong>工作目录</strong><small>查看已授权目录</small></button>
-            <button onClick={()=>select('agents')}><ServerRegular/><strong>远程服务</strong><small>登记、配对与维护 Agent</small></button>
-            <button onClick={()=>select('diagnose')}><SearchRegular/><strong>检查连接</strong><small>诊断服务运行状态</small></button>
-          </div></section></>}
-        {!wizard&&page==='settings'&&<><section className="panel"><div className="section-heading"><div><h2>连接与凭据</h2><p>已保存的 Token 以掩码显示，不会发送到渲染器。</p></div></div>
+              <p>{initialFileScope(config)==='all'?'已选目录不构成访问限制':'仅允许访问所选目录'}</p></div></div></>}
+        {!wizard&&page==='settings'&&<>
+          <p className="settings-intro">配置在此编辑和应用。服务启停在「服务与桌面控制」，日志与代理修复在「日志与诊断」。</p>
+          <nav className="settings-nav" aria-label="设置分类">
+            {settingsSections.map(item=><button type="button" key={item.id} data-settings-section={item.id}
+              className={'settings-nav-item '+(settingsSection===item.id?'active':'')}
+              aria-current={settingsSection===item.id?'page':undefined}
+              onClick={()=>setSettingsSection(item.id)}><strong>{item.label}</strong><small>{item.description}</small></button>)}
+          </nav>
+          {settingsSection==='basic'&&<section className="panel"><div className="section-heading"><div><h2>连接与凭据</h2><p>端口、隧道与凭据。已保存的 Token 以掩码显示，不会发送到渲染器。</p></div></div>
           <div className="choices"><Choice selected={draft.provider==='local'} icon={<DesktopRegular/>} title="仅本机" caption="不使用公网隧道。" onClick={()=>update({provider:'local'})}/>
             <Choice selected={draft.provider==='cloudflare'} icon={<CloudRegular/>} title="Cloudflare" caption="通过已配置的域名连接。" onClick={()=>update({provider:'cloudflare',publicBaseUrl:config.providerUrls?.cloudflare||draft.publicBaseUrl})}/>
             <Choice selected={draft.provider==='ngrok'} icon={<PlugConnectedRegular/>} title="ngrok" caption="使用 ngrok 公网隧道。" onClick={()=>update({provider:'ngrok',publicBaseUrl:config.providerUrls?.ngrok||draft.publicBaseUrl})}/></div>
@@ -329,41 +344,33 @@ export function App() {
             {isPublic&&<Field label={selectedSecret==='ngrok'?'ngrok Authtoken':'Cloudflare Tunnel Token'}>
               <SecretField key={selectedSecret+secretRevision} kind={selectedSecret} configured={selectedSecret==='ngrok'?config.hasNgrokToken:config.hasCloudflareToken}
                 value={selectedSecret==='ngrok'?draft.ngrokToken||'':draft.cloudflareToken||''} onChange={v=>update(selectedSecret==='ngrok'?{ngrokToken:v}:{cloudflareToken:v})} onCopy={copy}/></Field>}
-            <Field label="Owner Password"><SecretField key={'owner'+secretRevision} kind="owner" configured={config.hasOwnerToken} value={draft.ownerToken||''} onChange={v=>update({ownerToken:v})} onCopy={copy}/></Field></div></section>
-          <section className="panel"><div className="section-heading"><div><h2>文件与操作权限</h2>
-            <p>文件访问范围和操作能力相互独立。更改任一设置后保存并应用，服务才会采用新的权限。</p></div></div>
+            <Field label="Owner Password"><SecretField key={'owner'+secretRevision} kind="owner" configured={config.hasOwnerToken} value={draft.ownerToken||''} onChange={v=>update({ownerToken:v})} onCopy={copy}/></Field></div>
+            <div className="address-actions"><span>当前 MCP 地址</span><Button icon={<ClipboardRegular/>} onClick={()=>copyUrl('local')}>复制本地地址</Button>
+              {status?.provider!=='local'&&<Button icon={<ClipboardRegular/>} onClick={()=>copyUrl('public')}>复制公网地址</Button>}</div></section>}
+          {settingsSection==='files'&&<section className="panel">
             <FileAccess mode={draft.fileScopeMode} roots={draft.allowedRoots}
               onModeChange={v=>update({fileScopeMode:v,allowAllFixedDrives:v==='all'})}
-              onRootsChange={v=>update({allowedRoots:v})} onChoose={addFolder}/>
+              onRootsChange={v=>update({allowedRoots:v})} onChoose={addFolder}/></section>}
+          {settingsSection==='operations'&&<section className="panel">
             <Permissions value={draft.permissions} mode={draft.operationMode}
-              onChange={(mode,value)=>update({operationMode:mode,permissions:value})}/>
-            <div className="access-summary access-final" role="status">
-              <strong>保存后将采用的范围：{draft.fileScopeMode==='all'?'全部可访问目录':draft.allowedRoots.join('；')||'请先选择目录'}</strong>
-              <span>操作能力：{draft.operationMode==='standard'?'标准操作':draft.operationMode==='full'?'全部操作':'自定义操作'}。{draft.fileScopeMode==='all'?'指定目录当前不限制访问。':'文件工具仍限制在所选目录；任意命令及桌面控制等外部操作不能保证遵守该限制。'}</span>
-            </div></section>
-          <div className="save-bar"><span>{dirty?'● 有未保存的更改':applyPending?'● 已保存，待应用':'✓ 配置已应用'}</span>
+              onChange={(mode,value)=>update({operationMode:mode,permissions:value})}/></section>}
+          {settingsSection==='basic'&&<section className="panel"><div className="section-heading"><div><h3>关闭窗口行为</h3>
+            <p>关闭控制中心不会停止 DevSpace 或公网隧道；最小化到托盘时保留本地 UI 与 Computer Use 租约。</p></div></div>
+            <div className="close-preferences" role="group" aria-label="关闭窗口行为">
+              <Choice selected={closePreference===''} icon={<SettingsRegular/>} title="每次关闭时询问"
+                caption="点击 × 后在应用内选择最小化或退出。" onClick={()=>saveClosePreference('')}/>
+              <Choice selected={closePreference==='minimize-tray'} icon={<DesktopRegular/>} title="最小化到系统托盘"
+                caption="关闭窗口时隐藏界面，保留托盘入口和 Computer Use 租约。" onClick={()=>saveClosePreference('minimize-tray')}/>
+              <Choice selected={closePreference==='exit-ui'} icon={<ArrowRightRegular/>} title="退出控制中心"
+                caption="只关闭桌面控制中心，MCP 和公网隧道继续运行。" onClick={()=>saveClosePreference('exit-ui')}/>
+            </div>
+            <p className="help">选择即保存；需要恢复每次询问时，直接选择第一项。</p>
+          </section>}
+          {(dirty||applyPending||settingsSection==='basic'||settingsSection==='files'||settingsSection==='operations')&&<div className="save-bar"><span>{dirty?'● 有未保存的更改':applyPending?'● 已保存，待应用':'✓ 配置已应用'}</span>
             {dirty&&<Button onClick={()=>{setDraft(fromConfig(config));setDirty(false);}}>放弃更改</Button>}
             <Button appearance={dirty||applyPending?'primary':'outline'} disabled={busy||(!dirty&&!applyPending)||(dirty&&draft.fileScopeMode==='selected'&&!draft.allowedRoots.length)} onClick={()=>save(!dirty)}>{busy?'请稍候…':dirty?'保存更改':applyPending?'应用并重启':'配置已应用'}</Button>
-            <Button appearance="subtle" onClick={()=>{setWizard(true);setStep(0);}}>首次设置向导</Button></div>
-          <section className="panel advanced"><div className="section-heading"><h3>高级服务管理</h3><span>仅在需要时使用</span></div>
-            <div className="button-row"><Button disabled={advancedBusy} onClick={()=>runAdvanced('restart-local')}>重启本地 MCP</Button><Button disabled={advancedBusy} onClick={()=>runAdvanced('restart-tunnel')}>重启公网隧道</Button></div></section>
-          <section className="panel"><div className="section-heading"><div><h3>关闭窗口行为</h3>
-            <p>关闭控制中心不会停止 DevSpace 或公网隧道；最小化到托盘时保留本地 UI 与 Computer Use 租约。</p></div></div>
-            <p className="help">当前选择：{closePreference==='minimize-tray'?'关闭时最小化到系统托盘':closePreference==='exit-ui'?'关闭时退出控制中心':'每次关闭时询问'}</p>
-            <Button appearance="outline" disabled={!closePreference} onClick={async()=>{
-              try{await window.devspace.resetClosePreference();setClosePreference('');setNotice('已恢复每次点击关闭按钮时询问。');}
-              catch(e){setError(getError(e));}
-            }}>恢复每次关闭时询问</Button>
-          </section>
-          <UpdatesPage/></>}
-        {!wizard&&page==='workspaces'&&<section className="panel"><div className="section-heading"><div>
-          <h2>文件访问范围</h2><p>这里的设置与「设置 → 文件与操作权限」同步。允许全部目录时，单独列出的项目目录仅用于记录。</p></div></div>
-          <FileAccess mode={draft.fileScopeMode} roots={draft.allowedRoots}
-            onModeChange={v=>update({fileScopeMode:v,allowAllFixedDrives:v==='all'})}
-            onRootsChange={v=>update({allowedRoots:v})} onChoose={addFolder}/>
-          <div className="button-row"><Button appearance="primary" disabled={busy||!dirty||(draft.fileScopeMode==='selected'&&!draft.allowedRoots.length)}
-            onClick={()=>save(false)}>保存文件访问范围</Button>
-            {applyPending&&<Button onClick={()=>select('settings')}>前往设置并应用</Button>}</div></section>}
+            </div>}
+          {settingsSection==='updates'&&<UpdatesPage/>}</>}
         {!wizard&&page==='agents'&&<AgentsPage/>}
         {!wizard&&page==='extensions'&&<PluginsPage/>}
         {!wizard&&page==='tasks'&&<ContinuationsPage/>}
@@ -371,25 +378,25 @@ export function App() {
         {!wizard&&page==='memories'&&<MemoriesPage workspaceRoots={draft.fileScopeMode==='all'?config.allowedRoots:draft.allowedRoots}/>}
         {!wizard&&page==='oauth'&&<OAuthPage/>}
         {!wizard&&page==='services'&&<ServicePage config={config} onConfigChange={async()=>setConfig(await window.devspace.getConfig())}/>}
-        {!wizard&&page==='diagnose'&&<><section className="panel"><div className="diagnostic-line"><span>本地 MCP</span>
-          <strong>{status?.localHealthy?'正常':'未连接'}</strong><code>{status?.localUrl}</code></div>
-          <div className="diagnostic-line"><span>公网模式</span><strong>{status?.provider}</strong><code>{status?.publicUrl||'仅本地'}</code></div></section>
-          <DiagnosticsPage/></>}
+        {!wizard&&page==='diagnose'&&<DiagnosticsPage/>}
       </div>
     </main>
     {closeOpen&&<div className="close-overlay" role="presentation">
       <section className="close-dialog" role="dialog" aria-modal="true" aria-labelledby="devspace-close-title"
         aria-describedby="devspace-close-description">
-        <div className="close-dialog-header"><span className="close-dialog-mark">D</span>
-          <strong>关闭 DevSpace 控制中心</strong><button type="button" disabled={closeBusy} aria-label="取消关闭"
-            onClick={()=>chooseClose('cancel')}>×</button></div>
-        <div className="close-dialog-body"><h2 id="devspace-close-title">关闭控制中心后要做什么？</h2>
-          <p id="devspace-close-description">两种选择都不会停止 DevSpace 或公网隧道。最小化将保留本地 UI 与 Computer Use 租约；退出仅关闭控制中心。</p>
+        <div className="close-dialog-body">
+          <div className="close-dialog-heading"><span className="close-dialog-icon"><DesktopRegular/></span>
+            <div><span className="eyebrow">控制中心 · 窗口行为</span><h2 id="devspace-close-title">关闭控制中心</h2></div>
+            <button type="button" className="close-dialog-dismiss" disabled={closeBusy} aria-label="取消关闭"
+              onClick={()=>chooseClose('cancel')}>×</button></div>
+          <p id="devspace-close-description">请选择关闭窗口后的行为。以下选项均不会停止本地 MCP 服务或公网隧道。</p>
           <div className="close-dialog-actions">
             <button type="button" className="close-to-tray" disabled={closeBusy}
-              onClick={()=>chooseClose('minimize-tray')}>最小化到系统托盘</button>
+              onClick={()=>chooseClose('minimize-tray')}><span className="close-option-title">最小化到系统托盘</span>
+              <small>保留控制中心进程与 Computer Use 租约，可从托盘恢复。</small></button>
             <button type="button" className="close-exit" disabled={closeBusy}
-              onClick={()=>chooseClose('exit-ui')}>退出控制中心</button>
+              onClick={()=>chooseClose('exit-ui')}><span className="close-option-title">退出控制中心</span>
+              <small>仅退出桌面界面，不关闭 MCP 服务或已启动的隧道。</small></button>
           </div>
           <Checkbox checked={rememberClose} onChange={(_e,data)=>setRememberClose(Boolean(data.checked))}
             disabled={closeBusy} label="记住我的选择（可从系统托盘或设置中恢复每次询问）"/>

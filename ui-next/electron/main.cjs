@@ -258,7 +258,7 @@ function validateSettings(input) {
     localOnly: input.provider === 'local',
     tunnelProvider: input.provider === 'local' ? 'ngrok' : input.provider,
     publicBaseUrl: input.provider === 'local' ? '' : input.publicBaseUrl,
-    allowedRoots: input.allowedRoots, port, toolMode: input.toolMode || 'full',
+    allowedRoots: input.allowedRoots, port, toolMode: input.toolMode || 'codex',
     fileScopeMode,
     operationMode,
     allowAllFixedDrives: fileScopeMode === 'all',
@@ -292,6 +292,12 @@ function installHandlers() {
   register('getConfig', () => runManager('show-config'));
   register('getStatus', () => publishStatus());
   register('getClosePreference', () => Promise.resolve(closePolicy.get()));
+  register('setClosePreference', value => {
+    if (!['','minimize-tray','exit-ui'].includes(value)) {
+      throw new Error('不支持的关闭窗口行为。');
+    }
+    return {choice:closePolicy.save(value)};
+  });
   register('resetClosePreference', () => {
     closePolicy.save('');
     return {remembered:false};
@@ -653,7 +659,7 @@ app.whenReady().then(() => {
           }
           if (navigationSmokeMode && view.bridge && view.hasRoot) {
             const coverage = [];
-            const pageIds = ['home','workspaces','agents','extensions','tasks',
+            const pageIds = ['home','agents','extensions','tasks',
               'sessions','memories','oauth','services','diagnose','settings'];
             for (const pageId of pageIds) {
               const clicked = await activeWindow.webContents.executeJavaScript(`(() => {
@@ -675,68 +681,94 @@ app.whenReady().then(() => {
               );
               coverage.push({page:pageId, clicked, ...rendered});
             }
-            // Verify the reported dark-hero regression against the actual
-            // computed Chromium style, not only a CSS source-string search.
+            // The overview is deliberately read-only: no second set of service
+            // or configuration actions should be rendered on the home page.
             await activeWindow.webContents.executeJavaScript(
               'document.querySelector(\x27.sidebar [data-page="home"]\x27)?.click()',
             );
             await new Promise(resolve => setTimeout(resolve, 130));
-            const heroService = await activeWindow.webContents.executeJavaScript(`(() => {
-              const button=document.querySelector('.hero-service-button');
-              if(!button)return {found:false,contrast:0};
-              const color=getComputedStyle(button).color;
-              const background=getComputedStyle(button).backgroundColor;
-              const linear=component=>component<=0.04045?component/12.92:
-                Math.pow((component+0.055)/1.055,2.4);
-              const luminance=text=>{
-                const rgb=text.match(/[0-9.]+/g)?.slice(0,3).map(v=>linear(Number(v)/255))||[0,0,0];
-                return .2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];
-              };
-              const a=luminance(color),b=luminance(background);
-              return {found:true,color,background,contrast:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
+            const homeHasNoDuplicateActions = await activeWindow.webContents.executeJavaScript(`(() => {
+              const names=[...document.querySelectorAll('.page-body button')]
+                .map(button=>button.textContent.trim());
+              return !names.some(name=>['保存配置','应用并重启','重启本地 MCP',
+                '重启公网隧道','检查更新','添加工作目录','服务管理'].includes(name))
+                && !document.querySelector('.quick-grid,.home-actions,.home-access');
             })()`);
             await activeWindow.webContents.executeJavaScript(
               'document.querySelector(\x27.sidebar [data-page="settings"]\x27)?.click()',
             );
             await new Promise(resolve => setTimeout(resolve, 150));
+            const subpages = {};
+            for (const section of ['basic','files','operations','updates']) {
+              subpages[section] = await activeWindow.webContents.executeJavaScript(`(() => {
+                const button=document.querySelector('[data-settings-section="${section}"]');
+                if(!button)return false;
+                button.click();return true;
+              })()`);
+              await new Promise(resolve => setTimeout(resolve, 130));
+              subpages[section] = subpages[section] && await activeWindow.webContents.executeJavaScript(`(() => {
+                const button=document.querySelector('[data-settings-section="${section}"]');
+                return button?.getAttribute('aria-current')==='page'
+                  && !!document.querySelector('.page-body .panel');
+              })()`);
+            }
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(\x27[data-settings-section="files"]\x27)?.click()');
+            await new Promise(resolve => setTimeout(resolve, 100));
             const selected = await activeWindow.webContents.executeJavaScript(`(() => {
               const scopes=[...document.querySelectorAll('.access-choices .choice')];
-              const operations=[...document.querySelectorAll('.permission-choices .choice')];
               const all=scopes.find(x=>x.textContent.includes('全部可访问目录'));
-              const full=operations.find(x=>x.textContent.includes('全部操作'));
-              if(!all||!full)return {found:false,independent:false};
-              all.click();full.click();
+              if(!all)return {found:false};
+              all.click();
               return {found:true};
             })()`);
             await new Promise(resolve => setTimeout(resolve, 130));
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(\x27[data-settings-section="operations"]\x27)?.click()');
+            await new Promise(resolve => setTimeout(resolve, 100));
             const independent = await activeWindow.webContents.executeJavaScript(`(() => {
-              const scopes=[...document.querySelectorAll('.access-choices .choice')];
               const ops=[...document.querySelectorAll('.permission-choices .choice')];
-              const chosen=text=>[...scopes,...ops].find(x=>x.textContent.includes(text))?.classList.contains('chosen');
-              const selected=scopes.find(x=>x.textContent.includes('仅限所选目录'));
-              if(!selected)return {independent:false};
-              selected.click();
-              return {allChosen:chosen('全部可访问目录'),selectedChosen:true,
-                fullChosen:chosen('全部操作')};
+              const full=ops.find(x=>x.textContent.includes('全部操作'));
+              if(!full)return {found:false};
+              full.click();return {found:true};
             })()`);
             await new Promise(resolve => setTimeout(resolve, 120));
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(\x27[data-settings-section="files"]\x27)?.click()');
+            await new Promise(resolve => setTimeout(resolve, 100));
             const current = await activeWindow.webContents.executeJavaScript(`(() => ({
-              selectedChosen:!![...document.querySelectorAll('.access-choices .choice.chosen')]
-                .find(x=>x.textContent.includes('仅限所选目录')),
-              fullChosen:!![...document.querySelectorAll('.permission-choices .choice.chosen')]
-                .find(x=>x.textContent.includes('全部操作')),
+              allChosen:!![...document.querySelectorAll('.access-choices .choice.chosen')]
+                .find(x=>x.textContent.includes('全部可访问目录')),
             }))()`);
-            const updateInSettingsOnly=coverage.find(x=>x.page==='settings')?.hasUpdateCheck===true
-              && coverage.find(x=>x.page==='settings')?.hasClosePreferenceReset===true
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(\x27[data-settings-section="operations"]\x27)?.click()');
+            await new Promise(resolve => setTimeout(resolve, 100));
+            current.fullChosen = await activeWindow.webContents.executeJavaScript(`!![...document.querySelectorAll('.permission-choices .choice.chosen')]
+              .find(x=>x.textContent.includes('全部操作'))`);
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(\x27[data-settings-section="updates"]\x27)?.click()');
+            await new Promise(resolve => setTimeout(resolve, 100));
+            const updateInSettingsOnly=await activeWindow.webContents.executeJavaScript(
+              '!![...document.querySelectorAll(".page-body button")].find(x => x.textContent.trim() === "检查更新")')
               && coverage.find(x=>x.page==='diagnose')?.hasUpdateCheck===false;
+            await activeWindow.webContents.executeJavaScript(
+              'document.querySelector(\x27[data-settings-section="basic"]\x27)?.click()');
+            await new Promise(resolve => setTimeout(resolve, 100));
+            const closePreferenceVisible=await activeWindow.webContents.executeJavaScript(`(() => {
+              const choices=[...document.querySelectorAll('.close-preferences .choice')];
+              return choices.length===3 && choices.some(x=>x.textContent.includes('每次关闭时询问'))
+                && ![...document.querySelectorAll('.page-body button')]
+                  .some(x=>x.textContent.trim()==='恢复每次关闭时询问');
+            })()`);
             const valid = coverage.every(x => x.clicked && x.hasPanel && !x.legacyLaunch)
-              && heroService.found && heroService.contrast >= 4.5
-              && selected.found && independent.selectedChosen && current.selectedChosen && current.fullChosen
-              && updateInSettingsOnly;
+              && homeHasNoDuplicateActions
+              && Object.values(subpages).every(Boolean)
+              && selected.found && independent.found && current.allChosen && current.fullChosen
+              && updateInSettingsOnly && closePreferenceVisible;
             clearTimeout(watchdog);
             process.stdout.write(JSON.stringify({smoke:valid, navigation:coverage,
-              heroService, scopeOperationsIndependent:current.selectedChosen&&current.fullChosen,
-              updateInSettingsOnly}) + '\n');
+              homeHasNoDuplicateActions, subpages, scopeOperationsIndependent:current.allChosen&&current.fullChosen,
+              updateInSettingsOnly, closePreferenceVisible}) + '\n');
             app.exit(valid ? 0 : 5);
             return;
           }

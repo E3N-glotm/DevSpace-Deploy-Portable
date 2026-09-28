@@ -128,7 +128,8 @@ DevSpace exposes these tool names:
 - `edit`
 - `bash`
 
-By default, DevSpace also runs in `DEVSPACE_TOOL_MODE=minimal`, so dedicated
+By default, DevSpace runs in `DEVSPACE_TOOL_MODE=codex`, so the compact
+Codex-oriented workspace/edit/process surface is available without opting in.
 `grep`, `glob`, and `ls` tools are hidden. Use `bash` with command-line tools
 such as `rg`, `find`, and `ls` for search and directory inspection.
 

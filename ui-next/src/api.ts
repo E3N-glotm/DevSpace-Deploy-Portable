@@ -43,6 +43,7 @@ export type Backend = {
   onCloseRequest(handler:()=>void):()=>void;
   chooseClose(choice:CloseChoice,remember?:boolean):Promise<{action:CloseChoice}>;
   getClosePreference():Promise<'' | 'minimize-tray' | 'exit-ui'>;
+  setClosePreference(choice:'' | 'minimize-tray' | 'exit-ui'):Promise<{choice:'' | 'minimize-tray' | 'exit-ui'}>;
   resetClosePreference():Promise<{remembered:boolean}>;
 };
 declare global { interface Window { devspace: Backend } }

@@ -78,8 +78,10 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.62";
-const PORTABLE_DEV_ITERATION = "dev6";
-const PORTABLE_DISPLAY_VERSION = `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`;
+const PORTABLE_DEV_ITERATION = "";
+const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
+  ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
+  : PORTABLE_VERSION;
 const UI_LEASE_TTL_MS = 90_000;
 const LOCAL_SERVICE_START_TIMEOUT_MS = 45_000;
 const TUNNEL_START_TIMEOUT_MS = 45_000;
@@ -141,7 +143,7 @@ function normalizeTunnelProvider(value) {
 }
 
 function normalizeToolMode(value) {
-  const mode = String(value || "full").trim().toLowerCase();
+  const mode = String(value || "codex").trim().toLowerCase();
   if (!new Set(["minimal", "full", "codex"]).has(mode)) {
     throw new Error(`Unsupported DevSpace tool mode: ${mode}`);
   }
@@ -216,7 +218,7 @@ function selectedTunnelProvider() {
 }
 
 function selectedToolMode() {
-  return normalizeToolMode(readJson(DEPLOYMENT_FILE, {}).toolMode || "full");
+  return normalizeToolMode(readJson(DEPLOYMENT_FILE, {}).toolMode || "codex");
 }
 
 function selectedPermissions() {
@@ -514,7 +516,7 @@ async function configure(input) {
   const localOnly = input.localOnly === true;
   const priorProvider = normalizeTunnelProvider(priorDeployment.tunnelProvider || "ngrok");
   const tunnelProvider = normalizeTunnelProvider(input.tunnelProvider || priorProvider);
-  const priorToolMode = normalizeToolMode(priorDeployment.toolMode || "full");
+  const priorToolMode = normalizeToolMode(priorDeployment.toolMode || "codex");
   const toolMode = normalizeToolMode(input.toolMode || priorToolMode);
   const requestedScope = input.fileScopeMode;
   if (requestedScope !== undefined && !["selected","all"].includes(requestedScope)) {
@@ -681,7 +683,7 @@ async function configure(input) {
 }
 
 function autoContinuationEnabled() {
-  try { return readJson(AUTO_CONTINUATION_FILE, { enabled: true }).enabled !== false; }
+  try { return readJson(AUTO_CONTINUATION_FILE, { enabled: false }).enabled === true; }
   catch { return false; }
 }
 
@@ -3828,7 +3830,7 @@ async function statusText() {
   const deployment = readJson(DEPLOYMENT_FILE, { port: 7676, tunnelProvider: "ngrok" });
   const config = readJson(CONFIG_FILE, {});
   const provider = normalizeTunnelProvider(deployment.tunnelProvider || "ngrok");
-  const toolMode = normalizeToolMode(deployment.toolMode || "full");
+  const toolMode = normalizeToolMode(deployment.toolMode || "codex");
   const permissions = normalizePermissionSettings(deployment.permissions || config.permissions || { profile: "workspace" });
   const spec = tunnelProcessSpec(provider);
   const port = Number(deployment.port || config.port || 7676);
@@ -4312,7 +4314,7 @@ function showConfig() {
     configured: fs.existsSync(CONFIG_FILE) && fs.existsSync(AUTH_FILE),
     localOnly: deployment.localOnly === true,
     tunnelProvider,
-    toolMode: normalizeToolMode(deployment.toolMode || "full"),
+    toolMode: normalizeToolMode(deployment.toolMode || "codex"),
     permissions: normalizePermissionSettings(deployment.permissions || config.permissions || { profile: "workspace" }),
     features: normalizeFeatureSettings(deployment.features || config.features || {}),
     portableVersion: PORTABLE_VERSION,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -793,11 +793,11 @@ assert.match(server, /Retry transient transport failures over bounded readiness 
   "server guidance must retain bounded transport-readiness retries");
 assert.match(server, /Before replaying uncertain side effects, inspect durable state/,
   "transport recovery must remain side-effect aware before replaying uncertain mutations");
-assert.match(server, /CONVERSATION_CARD_PRECONDITION[\s\S]{0,1300}Every manual user message that actually uses DevSpace owns exactly one fresh visible milestone card/,
-  "every ordinary DevSpace tool description must establish one visible milestone card per manual user message");
-assert.match(server, /manualTakeover=true exactly once[\s\S]{0,800}continuation_anchor exactly once before substantive DevSpace work/,
-  "manual turn ownership and card issuance must each happen exactly once");
-assert.match(server, /Synthetic\/App continuation turns MUST omit manualTakeover and reuse the current card while requiredMilestones is unchanged/,
+assert.match(server, /CONVERSATION_CARD_PRECONDITION[\s\S]{0,1800}Automatic continuation is opt-in[\s\S]{0,500}while it is disabled, status remains headless[\s\S]{0,700}When automatic continuation is enabled[\s\S]{0,500}continuation_anchor exactly once before substantive DevSpace work/,
+  "ordinary DevSpace tool descriptions must keep OFF headless and require exactly one anchor only when automatic continuation is enabled");
+assert.match(server, /manualTakeover=true exactly once[\s\S]{0,1200}When automatic continuation is enabled[\s\S]{0,700}continuation_anchor exactly once before substantive DevSpace work/,
+  "manual turn ownership must remain exactly once while card issuance is conditional on the enabled policy");
+assert.match(server, /Synthetic\/App continuation turns omit manualTakeover and reuse the current card while requiredMilestones is unchanged/,
   "synthetic continuations must reuse the current manual-round card while the milestone set is unchanged");
 assert.match(server, /sourceTool: "continuation_task", anchorMounted: false/,
   "headless continuation_task begin must never mark the visible continuation anchor as mounted");
@@ -868,11 +868,12 @@ assert.match(coordinator, /senderTransportAvailable\(\)[\s\S]{0,1600}callSender\
 assert.match(coordinator, /if \(!state\.anchorSurface \|\| state\.anchorSuperseded\) \{[\s\S]{0,700}never arm recovery from it/,
   "teardown of a transport-only or superseded historical App must not impersonate authoritative current-card lifecycle evidence");
 assert.ok(server.includes("Every real ChatGPT thread owns one lifetime DevSpace Task Contract/taskId")
-  && server.includes("Every manual user message that actually uses DevSpace owns exactly one fresh visible continuation_anchor milestone card")
+  && server.includes("Automatic continuation is disabled by default in Portable 1.1.62")
+  && server.includes("ordinary DevSpace work must not create a continuation_anchor")
   && server.includes("Synthetic resumed turns omit manualTakeover")
   && server.includes("reuse the current card while requiredMilestones is unchanged")
   && server.includes("If a synthetic checkpoint changes requiredMilestones, the runtime rotates one new generation"),
-  "server guidance must keep task identity thread-lifetime, rotate once per manual message, and rotate synthetic cards only on required-milestone-set revision");
+  "server guidance must keep task identity thread-lifetime, keep OFF headless, and preserve enabled synthetic card reuse/rotation rules");
 assert.match(runtimeStateSource, /function anchorMountRecoveryRequired[\s\S]{0,1000}return !row\.anchor_mount_verified_at && !row\.anchor_mount_requested_at/,
   "runtime gating must permit exactly one UI-bearing anchor issuance inside the current manual user round");
 assert.match(runtimeStateSource, /Exactly one UI-bearing continuation_anchor may be issued in the current[\s\S]{0,500}new manual round explicitly rotates\/reset these[\s\S]{0,500}synthetic continuations never do/,
@@ -886,12 +887,12 @@ const continuationModelToolAuthorizationBody = continuationModelToolAuthorizatio
   ? runtimeStateSource.slice(continuationModelToolAuthorizationStart, continuationModelToolAuthorizationEnd)
   : "";
 assert.ok(
-  continuationModelToolAuthorizationBody.includes("anchorMountRecoveryRequired(task, Date.now())")
+  continuationModelToolAuthorizationBody.includes("this.autoContinuationEnabled() && anchorMountRecoveryRequired(task, Date.now())")
   && continuationModelToolAuthorizationBody.includes('reason: "manual-round-card-required"'),
-  "ordinary manual-round DevSpace work must fail closed until that round's single visible milestone card has actually been issued",
+  "ordinary manual-round DevSpace work must fail closed on the anchor only when automatic continuation is enabled",
 );
-assert.match(runtimeStateSource, /initialAnchorRequired:\s*anchorMountRecoveryRequired\(existing, now\.getTime\(\), input\.hostTurnFingerprint\)/,
-  "initial hard gating must expose whether the current manual round still needs its single visible anchor");
+assert.match(runtimeStateSource, /initialAnchorRequired:\s*this\.autoContinuationEnabled\(\)[\s\S]{0,120}anchorMountRecoveryRequired\(existing, now\.getTime\(\), input\.hostTurnFingerprint\)/,
+  "initial hard gating must expose an anchor requirement only under the enabled automatic-continuation policy");
 assert.match(runtimeStateSource, /if \(!anchorMountRecoveryRequired\(row, Date\.now\(\), input\.hostTurnFingerprint\)\)\s*return undefined/,
   "supervisor gating must remain headless after the current manual round has already issued its visible card");
 assert.match(runtimeStateSource, /anchor-mount-verification-pending[\s\S]{0,500}alreadyRequested:\s*true[\s\S]{0,800}const generation = Math\.max\(1, previousGeneration \|\| 1\)/,
@@ -917,9 +918,10 @@ assert.ok(server.includes("Later new work reactivates that taskId with continuat
   || server.includes("Later user work reactivates the same taskId through continuation_task begin"),
   "server instructions must keep one thread-lifetime taskId across sequential user tasks");
 assert.ok(server.includes("Later new work reactivates that taskId with continuation_task action=begin")
-  && server.includes("Every manual user message that actually uses DevSpace owns exactly one fresh visible continuation_anchor milestone card")
+  && server.includes("Automatic continuation is disabled by default in Portable 1.1.62")
+  && server.includes("When the switch is enabled")
   && server.includes("All card generations reuse the same lifetime taskId"),
-  "a completed lifetime ledger must reactivate the same taskId while each later manual DevSpace message receives one fresh visible card generation");
+  "a completed lifetime ledger must reactivate the same taskId while anchor generations remain conditional on the enabled policy");
 assert.match(server, /continue\/resume reuses unfinished milestones/,
   "continue/resume must reuse unfinished milestones instead of manufacturing duplicate work items");
 assert.match(coordinator, /TRANSIENT_RETRY_DELAYS_MS = \[0, 500, 1_500, 3_000, 5_000\]/,
@@ -2866,7 +2868,18 @@ assert.equal(finishedTeardownApp.messages.length, 0,
 finishedTeardownController.dispose();
 
 const { StructuredRuntimeState } = await import(`${pathToFileURL(runtimeStatePath).href}?continuation=${Date.now()}`);
-const stateDir = mkdtempSync(join(tmpdir(), "devspace-continuation-test-"));
+const continuationCache = join(ROOT, ".test-cache");
+mkdirSync(continuationCache, { recursive: true });
+const continuationSandbox = mkdtempSync(join(continuationCache, "continuation-guard-"));
+const stateDir = join(continuationSandbox, "state");
+const continuationConfigDir = join(continuationSandbox, "config");
+mkdirSync(stateDir);
+mkdirSync(continuationConfigDir);
+writeFileSync(join(continuationConfigDir, "auto-continuation.json"), JSON.stringify({
+  formatVersion: 1, enabled: true,
+}));
+const previousPortableConfigDir = process.env.DEVSPACE_PORTABLE_CONFIG_DIR;
+process.env.DEVSPACE_PORTABLE_CONFIG_DIR = continuationConfigDir;
 const runtime = new StructuredRuntimeState(stateDir);
 configureTestSenderTransport(runtime);
 try {
@@ -2976,7 +2989,8 @@ try {
   // Sender authority is process-local even though the lifetime card itself is
   // durable. Reopening the same SQLite state must preserve the card generation
   // but invalidate the previous process's in-memory sender binding.
-  const senderRestartStateDir = mkdtempSync(join(tmpdir(), "devspace-continuation-sender-restart-"));
+  const senderRestartStateDir = join(continuationSandbox, "sender-restart-state");
+  mkdirSync(senderRestartStateDir);
   const senderRestartRuntimeA = new StructuredRuntimeState(senderRestartStateDir);
   configureTestSenderTransport(senderRestartRuntimeA);
   const senderRestartScope = "v1/test-sender-restart";
@@ -6024,5 +6038,7 @@ try {
   }));
 } finally {
   runtime.close();
-  rmSync(stateDir, { recursive: true, force: true });
+  if (previousPortableConfigDir === undefined) delete process.env.DEVSPACE_PORTABLE_CONFIG_DIR;
+  else process.env.DEVSPACE_PORTABLE_CONFIG_DIR = previousPortableConfigDir;
+  rmSync(continuationSandbox, { recursive: true, force: true });
 }

@@ -226,7 +226,12 @@ def validate_release_plugins(entries: list[tuple[Path, Path]]) -> None:
 def release_files() -> list[Path]:
     files: list[Path] = []
     manifest = json.loads((ROOT / "VERSION-MANIFEST.json").read_text(encoding="utf-8"))
-    next_only = int(manifest.get("development", {}).get("iteration", 0)) >= 4
+    release = str(manifest.get("runtime", {}).get("devspacePortable", "0.0.0"))
+    release_key = tuple(int(part) for part in release.split("."))
+    next_only = (
+        int(manifest.get("development", {}).get("iteration", 0)) >= 4
+        or release_key >= (1, 1, 62)
+    )
     for current_root, dir_names, file_names in os.walk(ROOT):
         current = Path(current_root)
         relative_dir = current.relative_to(ROOT)
@@ -428,7 +433,12 @@ def main() -> int:
     policy = json.loads((ROOT / "setup" / "legacy-release-policy.json").read_text(encoding="utf-8"))
     version = release_version()
     is_dev = bool(manifest.get("development"))
-    if int(manifest.get("development", {}).get("iteration", 0)) >= 3:
+    version_key = lambda value: tuple(int(part) for part in value.split("."))
+    next_ui_required = (
+        int(manifest.get("development", {}).get("iteration", 0)) >= 3
+        or version_key(version) >= version_key("1.1.62")
+    )
+    if next_ui_required:
         required_next = (
             "DevSpace-Portable-Next.exe",
             "ui-next/electron/main.cjs",
@@ -473,7 +483,6 @@ def main() -> int:
     # one shallow baseline-to-current bridge. Four pre-graph clients retain
     # direct assets: this is a bounded compatibility set, not a growing matrix.
     bootstrap = policy["bootstrapVersion"]
-    version_key = lambda value: tuple(int(part) for part in value.split("."))
     bridge_versions = (() if is_dev or version_key(version) < version_key(bootstrap)
                        else policy["legacyFromVersions"] if version == bootstrap
                        else [bootstrap, *policy["legacyDirectOnlyVersions"]])

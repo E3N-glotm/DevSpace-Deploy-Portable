@@ -6,7 +6,14 @@ const childProcess = require("child_process");
 
 const ROOT = path.resolve(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "VERSION-MANIFEST.json"), "utf8"));
-const NEXT_IS_DEFAULT = Number(manifest.development?.iteration || 0) >= 4;
+const portableVersion = String(manifest.runtime?.devspacePortable || "0.0.0")
+  .split(".").map((part) => Number(part) || 0);
+const STABLE_NEXT_IS_DEFAULT = (
+  (portableVersion[0] || 0) > 1 ||
+  ((portableVersion[0] || 0) === 1 && (portableVersion[1] || 0) > 1) ||
+  ((portableVersion[0] || 0) === 1 && (portableVersion[1] || 0) === 1 && (portableVersion[2] || 0) >= 62)
+);
+const NEXT_IS_DEFAULT = Number(manifest.development?.iteration || 0) >= 4 || STABLE_NEXT_IS_DEFAULT;
 const VSWHERE = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe";
 const REFERENCE_ROOT_CANDIDATES = [
   "C:\\Program Files (x86)\\Reference Assemblies\\Microsoft\\Framework\\.NETFramework\\v4.8",

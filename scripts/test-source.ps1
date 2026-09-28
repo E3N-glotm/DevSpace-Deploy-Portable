@@ -139,6 +139,7 @@ $Tests = @(
     "setup/test-continuation-guard.mjs",
     "setup/test-continuation-architecture.mjs",
     "setup/test-auto-continuation-toggle.mjs",
+    "setup/test-dev9-defaults.mjs",
     "setup/test-host-cutoff-estimate.mjs",
     "setup/test-continuation-wire-contract.mjs",
     "setup/test-continuation-supervisor-scheduler.mjs",
@@ -153,18 +154,22 @@ $Tests = @(
     "setup/test-computer-use-broker.mjs"
 )
 $DevelopmentIteration = 0
+$PortableVersion = "0.0.0"
 try {
     $manifest = Get-Content -LiteralPath (Join-Path $Root 'VERSION-MANIFEST.json') -Raw | ConvertFrom-Json
     $DevelopmentIteration = [int]$manifest.development.iteration
+    $PortableVersion = [string]$manifest.runtime.devspacePortable
 } catch {}
-$NextIsDefault = $DevelopmentIteration -ge 4
+$StableNextIsDefault = $PortableVersion -and ([version]$PortableVersion -ge [version]"1.1.62")
+$EffectiveNextIteration = if ($StableNextIsDefault) { 999 } else { $DevelopmentIteration }
+$NextIsDefault = $EffectiveNextIteration -ge 4
 if ($NextIsDefault) {
     Write-Host '==> Electron replacement desktop UI: build and security tests'
     Invoke-NativeChecked -FilePath $Npm -ArgumentList @('run', 'build', '--prefix', 'ui-next') -FailureMessage 'Next UI build failed.'
     Invoke-NativeChecked -FilePath $Npm -ArgumentList @('run', 'test', '--prefix', 'ui-next') -FailureMessage 'Next UI security regression failed.'
     Write-Host '==> setup/test-dev4-ssh-admin.mjs'
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev4-ssh-admin.mjs') -FailureMessage 'Next UI SSH compatibility regression failed.'
-    if ($DevelopmentIteration -ge 5) {
+    if ($EffectiveNextIteration -ge 5) {
         Write-Host '==> setup/test-dev5-access-scope.mjs'
         Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev5-access-scope.mjs') -FailureMessage 'Dev5 file access scope / operations isolation failed.'
     }
@@ -187,7 +192,7 @@ if ($NextIsDefault) {
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-ui-next-navigation.mjs') -FailureMessage 'Next UI navigation acceptance failed.'
     Write-Host '==> setup/test-dev4-feature-coverage.mjs'
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev4-feature-coverage.mjs') -FailureMessage 'Next UI feature and contrast coverage failed.'
-    if ($DevelopmentIteration -ge 6) {
+    if ($EffectiveNextIteration -ge 6) {
         Write-Host '==> setup/test-ui-next-close.mjs'
         Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-ui-next-close.mjs') -FailureMessage 'Dev6 real Electron X / cancel / tray / legacy preference smoke failed.'
     }
