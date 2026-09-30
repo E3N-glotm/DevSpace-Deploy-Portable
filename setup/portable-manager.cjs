@@ -77,7 +77,7 @@ const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
-const PORTABLE_VERSION = "1.1.62";
+const PORTABLE_VERSION = "1.1.63";
 const PORTABLE_DEV_ITERATION = "";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`

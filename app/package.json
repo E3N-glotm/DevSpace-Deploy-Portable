@@ -6,16 +6,17 @@
   "dependencies": {
     "@waishnav/devspace": "file:../packages/waishnav-devspace-1.0.7.tgz",
     "brace-expansion": "5.0.9",
-    "fast-uri": "^3.1.6",
+    "fast-uri": "3.1.7",
     "protobufjs": "7.6.5",
     "qs": "^6.16.0",
-    "undici": "8.10.0",
+    "undici": "8.10.2",
     "ws": "8.21.0"
   },
   "overrides": {
     "brace-expansion": "5.0.9",
     "protobufjs": "7.6.5",
     "hono": "4.13.5",
-    "undici": "8.10.0"
+    "ip-address": "10.7.2",
+    "undici": "8.10.2"
   }
 }

@@ -19,9 +19,18 @@ import { fileURLToPath } from "node:url";
 const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE_NODE = join(SOURCE_ROOT, "runtime", "node", "node.exe");
 const SOURCE_UPDATER = join(SOURCE_ROOT, "setup", "portable-updater.ps1");
+const UPDATER_SOURCE = readFileSync(SOURCE_UPDATER, "utf8");
 const POWERSHELL = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const NOOP_EXE = join(process.env.SystemRoot || "C:\\Windows", "System32", "where.exe");
 const LONG_RUNNING_EXE = join(process.env.SystemRoot || "C:\\Windows", "System32", "ping.exe");
+
+assert.match(UPDATER_SOURCE, /function Stop-ValidatedPortableUiProcessObject/);
+assert.match(UPDATER_SOURCE, /Stop-ValidatedPortableUiProcessObject \$process/);
+assert.doesNotMatch(
+  UPDATER_SOURCE,
+  /Stop-ValidatedPortableUiProcess \(\[int\]\$process\.Id\)/,
+  "direct UI discovery must not reopen a validated process by PID after another UI exits",
+);
 
 function writeJson(path, value) {
   writeFileSync(path, JSON.stringify(value, null, 2), "utf8");
@@ -324,6 +333,7 @@ try {
     lockedRuntimeNodeUsesDeferredCleanup: true,
     cleanupResultReflectsActualFilesystemState: true,
     directApplyClosesExactPortableControlCenter: true,
+    directApplyAvoidsPidReuseRace: true,
     unrelatedPortableRootExecutableFailsBeforeTransaction: true,
   }));
 } finally {

@@ -68,6 +68,10 @@ const SECRETS = Object.freeze({
 let windowRef;
 let activeOperation = false;
 let currentStatus = {};
+let publicVerification = {
+  fingerprint: '', checked: false, healthy: false, checkedAt: 0,
+  metadataStatus: 0, mcpStatus: 0, error: '',
+};
 let watchers = [];
 let refreshHandle = null;
 let closing = false;
@@ -178,7 +182,52 @@ async function operation(fn) {
   activeOperation = true;
   try { return await fn(); } finally { activeOperation = false; }
 }
-async function lightweightStatus() {
+async function publicConnectivity(publicUrl, provider, verifyPublic = false) {
+  if (provider === 'local' || !publicUrl) {
+    publicVerification = {
+      fingerprint: '', checked: provider !== 'local', healthy: false, checkedAt: Date.now(),
+      metadataStatus: 0, mcpStatus: 0, error: publicUrl ? '' : '公网入口未配置',
+    };
+    return publicVerification;
+  }
+  const normalized = String(publicUrl).replace(/\/$/, '');
+  const fingerprint = `${provider}|${normalized}`;
+  if (!verifyPublic && publicVerification.fingerprint === fingerprint) return publicVerification;
+  if (!verifyPublic) {
+    return {
+      fingerprint, checked: false, healthy: false, checkedAt: 0,
+      metadataStatus: 0, mcpStatus: 0, error: '',
+    };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+  let metadataStatus = 0;
+  let mcpStatus = 0;
+  let error = '';
+  try {
+    const [metadata, mcp] = await Promise.all([
+      fetch(`${normalized}/.well-known/oauth-protected-resource/mcp`, {
+        signal: controller.signal, cache: 'no-store',
+      }),
+      fetch(`${normalized}/mcp`, {
+        signal: controller.signal, cache: 'no-store',
+      }),
+    ]);
+    metadataStatus = metadata.status;
+    mcpStatus = mcp.status;
+  } catch (e) {
+    error = e?.name === 'AbortError' ? '公网核验超时' : '公网连接失败';
+  } finally {
+    clearTimeout(timer);
+  }
+  publicVerification = {
+    fingerprint, checked: true,
+    healthy: metadataStatus === 200 && mcpStatus === 401,
+    checkedAt: Date.now(), metadataStatus, mcpStatus, error,
+  };
+  return publicVerification;
+}
+async function lightweightStatus({verifyPublic = false} = {}) {
   const configuration = readJson(path.join(CONFIG, 'config.json'));
   const deployment = readJson(path.join(CONFIG, 'deployment.json'));
   const port = Number(configuration.port || 7676);
@@ -199,17 +248,25 @@ async function lightweightStatus() {
     });
     localHealthy = ownerPid > 0 && response.status === 200;
   } catch {} finally { clearTimeout(timer); }
+  const provider = deployment.localOnly ? 'local' : deployment.tunnelProvider || 'local';
+  const publicUrl = deployment.localOnly ? '' : configuration.publicBaseUrl || '';
+  const publicState = await publicConnectivity(publicUrl, provider, verifyPublic);
   return {
     localHealthy, port, localUrl: `http://127.0.0.1:${port}/mcp`,
-    provider: deployment.localOnly ? 'local' : deployment.tunnelProvider || 'local',
-    publicUrl: deployment.localOnly ? '' : configuration.publicBaseUrl || '',
+    provider, publicUrl,
+    publicChecked: publicState.checked,
+    publicHealthy: publicState.healthy,
+    publicCheckedAt: publicState.checkedAt,
+    publicMetadataStatus: publicState.metadataStatus,
+    publicMcpStatus: publicState.mcpStatus,
+    publicError: publicState.error,
     configured: fs.existsSync(path.join(CONFIG, 'auth.json')) && fs.existsSync(path.join(CONFIG, 'config.json')),
     checkedAt: Date.now(),
   };
 }
-async function publishStatus() {
+async function publishStatus(verifyPublic = false) {
   if (closing) return;
-  currentStatus = await lightweightStatus();
+  currentStatus = await lightweightStatus({verifyPublic});
   if (!windowRef?.isDestroyed()) windowRef.webContents.send('ds:status', currentStatus);
   return currentStatus;
 }
@@ -290,7 +347,9 @@ function installHandlers() {
     root: ROOT, applyPending: fs.existsSync(APPLY_PENDING),
   }));
   register('getConfig', () => runManager('show-config'));
-  register('getStatus', () => publishStatus());
+  // Explicit renderer refreshes are user-visible health checks and may verify
+  // the configured public MCP endpoint. Background status pushes stay local.
+  register('getStatus', () => publishStatus(true));
   register('getClosePreference', () => Promise.resolve(closePolicy.get()));
   register('setClosePreference', value => {
     if (!['','minimize-tray','exit-ui'].includes(value)) {

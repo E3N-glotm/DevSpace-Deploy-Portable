@@ -33,12 +33,18 @@ try {
   assert.equal(fresh.toolMode, "codex");
 
   const manifest = JSON.parse(readFileSync(join(root, "VERSION-MANIFEST.json"), "utf8"));
-  assert.equal(manifest.displayVersion, "1.1.62");
-  assert.equal(manifest.development, undefined);
+  const sourcePackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  assert.equal(manifest.runtime?.devspacePortable, sourcePackage.version);
+  const expectedDisplay = manifest.development?.label
+    ? `${sourcePackage.version} ${manifest.development.label}`
+    : sourcePackage.version;
+  assert.equal(manifest.displayVersion, expectedDisplay);
   assert.equal(manifest.toolModes?.default, "codex");
 
   const uiPackage = JSON.parse(readFileSync(join(root, "ui-next", "package.json"), "utf8"));
-  assert.equal(uiPackage.version, "1.1.62");
+  assert.equal(uiPackage.version, manifest.development?.label
+    ? `${sourcePackage.version}-${manifest.development.label}`
+    : sourcePackage.version);
   const app = readFileSync(join(root, "ui-next", "src", "App.tsx"), "utf8");
   const electron = readFileSync(join(root, "ui-next", "electron", "main.cjs"), "utf8");
   const native = readFileSync(join(root, "setup", "native", "DevSpacePortableApp.cs"), "utf8");

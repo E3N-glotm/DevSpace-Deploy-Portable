@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Checkbox, Field, Input, Switch, Textarea } from '@fluentui/react-components';
 
 type Item = Record<string,any>;
@@ -19,12 +19,17 @@ function useBackend(listAction:string,payload:Record<string,unknown>={}) {
   const [error,setError]=useState('');
   const [notice,setNotice]=useState('');
   const [result,setResult]=useState<any>(null);
-  const load=useCallback(async()=>{
-    setBusy(true);setError('');
-    try{setData(await window.devspace.admin(listAction,payload));}
-    catch(e){setError(explain(e));}
-    finally{setBusy(false);}
+  const inFlight=useRef(false);
+  const fetchData=useCallback(async(silent=false)=>{
+    if(inFlight.current)return;
+    inFlight.current=true;
+    if(!silent){setBusy(true);setError('');}
+    try{setData(await window.devspace.admin(listAction,payload));setError('');}
+    catch(e){if(!silent)setError(explain(e));}
+    finally{if(!silent)setBusy(false);inFlight.current=false;}
   },[listAction,JSON.stringify(payload)]);
+  const load=useCallback(()=>fetchData(false),[fetchData]);
+  const refresh=useCallback(()=>fetchData(true),[fetchData]);
   useEffect(()=>{void load();},[load]);
   const call:ApiAction=useCallback(async(action,p={},confirm=false)=>{
     setError('');setNotice('');
@@ -39,7 +44,7 @@ function useBackend(listAction:string,payload:Record<string,unknown>={}) {
     }catch(e){setError(explain(e));return null;}
     finally{setBusy(false);}
   },[listAction,load]);
-  return {data,busy,error,notice,result,load,call};
+  return {data,busy,error,notice,result,load,refresh,call};
 }
 function Message({error,notice}:{error:string;notice:string}) {
   return <>{error&&<div role="alert" className="op-message op-error">{error}</div>}
@@ -74,6 +79,12 @@ function ActionRow({children}:{children:React.ReactNode}) {
 export function AgentsPage() {
   const b=useBackend('remote-agent-list');
   const agents=asItems(b.data,'agents');
+  useEffect(()=>{
+    const refresh=()=>{if(document.visibilityState==='visible')void b.refresh();};
+    const timer=window.setInterval(refresh,5_000);
+    document.addEventListener('visibilitychange',refresh);
+    return ()=>{window.clearInterval(timer);document.removeEventListener('visibilitychange',refresh);};
+  },[b.refresh]);
   const [selected,setSelected]=useState('');
   const agent=agents.find(x=>String(x.id)===selected)||null;
   const [name,setName]=useState('');
@@ -97,15 +108,23 @@ export function AgentsPage() {
     });
     setCommand(String(response?.installCommand||''));
   }
-  return <Panel title="远程服务器" caption="登记、重新配对和管理 Linux Agent；生成的安装命令仅在明确操作后显示。">
+  const statusMeta=(status:unknown)=>{
+    const raw=String(status||'').toLowerCase();
+    if(raw==='online'||raw==='online-recent')return {tone:'healthy',label:'服务正常'};
+    if(raw==='revoked')return {tone:'revoked',label:'凭据已撤销'};
+    return {tone:'error',label:raw==='offline'?'服务离线':'服务异常'};
+  };
+  return <Panel title="远程服务器" caption="登记、重新配对和管理 Linux Agent；存活状态每 5 秒自动刷新，生成的安装命令仅在明确操作后显示。">
     <ActionRow><Button appearance="primary" onClick={()=>prepare('')} disabled={b.busy}>添加服务器</Button>
       <Button onClick={b.load} disabled={b.busy}>刷新状态</Button></ActionRow>
     <Message error={b.error} notice={b.notice}/>
     <div className="op-columns">
       <Selection items={agents} selected={selected} onSelect={prepare} getId={a=>String(a.id||'')}
-        describe={a=><><strong>{titleFor(a,'name','hostname','id')}</strong>
+        describe={a=>{const state=statusMeta(a.status);return <><span className="agent-title-row">
+          <span className={'agent-status-dot '+state.tone} title={state.label} aria-label={state.label}/>
+          <strong>{titleFor(a,'name','hostname','id')}</strong></span>
           <small>{a.status||'未知'} · {a.hostname||a.id} · {a.agentVersion||'版本未知'}</small>
-          <span className="op-subtle">{a.accessMode||'scoped'} · {a.installRoot||'尚未配置安装目录'}</span></>}/>
+          <span className="op-subtle">{a.accessMode||'scoped'} · {a.installRoot||'尚未配置安装目录'}</span></>}}/>
       <div className="op-editor">
         <h3>{selected?'更新或撤销服务器':'添加服务器'}</h3>
         <div className="op-form">

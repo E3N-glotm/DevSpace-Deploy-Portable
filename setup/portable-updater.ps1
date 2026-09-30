@@ -1946,25 +1946,36 @@ function Test-PortableUiImagePath([string]$Actual) {
     return $false
 }
 
+function Stop-ValidatedPortableUiProcessObject([System.Diagnostics.Process]$Process) {
+    if (-not $Process) { return $false }
+    try {
+        if ($Process.HasExited) { return $false }
+    } catch {
+        return $false
+    }
+    $actual = Get-ProcessImagePath $Process
+    if (-not (Test-PortableUiImagePath $actual)) {
+        throw "Refusing to stop PID $($Process.Id) because it is not this Portable installation's UI executable."
+    }
+    $processId = [int]$Process.Id
+    Write-UpdateLog "Closing validated Portable control center PID $processId before applying program files."
+    try { [void]$Process.CloseMainWindow() } catch { }
+    if ($Process.WaitForExit(3500)) { return $true }
+    try { $Process.Kill() }
+    catch { throw "Portable control center PID $processId could not be terminated before the update: $($_.Exception.Message)" }
+    if (-not $Process.WaitForExit(7000)) {
+        throw "Portable control center PID $processId did not exit before the update. No program files were changed."
+    }
+    return $true
+}
+
 function Stop-ValidatedPortableUiProcess([int]$ProcessId) {
     if ($ProcessId -le 0) { return $false }
     $process = $null
     try { $process = Get-Process -Id $ProcessId -ErrorAction Stop }
     catch { return $false }
     try {
-        $actual = Get-ProcessImagePath $process
-        if (-not (Test-PortableUiImagePath $actual)) {
-            throw "Refusing to stop PID $ProcessId because it is not this Portable installation's UI executable."
-        }
-        Write-UpdateLog "Closing validated Portable control center PID $ProcessId before applying program files."
-        try { [void]$process.CloseMainWindow() } catch { }
-        if ($process.WaitForExit(3500)) { return $true }
-        try { $process.Kill() }
-        catch { throw "Portable control center PID $ProcessId could not be terminated before the update: $($_.Exception.Message)" }
-        if (-not $process.WaitForExit(7000)) {
-            throw "Portable control center PID $ProcessId did not exit before the update. No program files were changed."
-        }
-        return $true
+        return Stop-ValidatedPortableUiProcessObject $process
     } finally {
         if ($process) { $process.Dispose() }
     }
@@ -1997,7 +2008,10 @@ function Stop-PortableUiBeforeApply([int]$RequestedUiPid) {
         try {
             $actual = Get-ProcessImagePath $process
             if (Test-PortableUiImagePath $actual) {
-                [void](Stop-ValidatedPortableUiProcess ([int]$process.Id))
+                # Keep operating on the already validated Process object.
+                # Re-opening by PID after another Electron process exits can
+                # hit Windows PID reuse and inspect an unrelated process.
+                [void](Stop-ValidatedPortableUiProcessObject $process)
             }
         } finally {
             try { $process.Dispose() } catch { }

@@ -43,10 +43,11 @@ def read_json(path: Path) -> dict:
 
 def install_node(target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.link(SOURCE_NODE, target)
-    except OSError:
-        shutil.copy2(SOURCE_NODE, target)
+    # Always copy the fixture runtime.  On Windows, a hardlink shares the same
+    # file object as the source runtime; when this test is launched through a
+    # live E-drive DevSpace process, deleting the fixture hardlink can then
+    # fail with WinError 5 even though no fixture process is running.
+    shutil.copy2(SOURCE_NODE, target)
 
 
 def remove_tree_retry(path: Path, attempts: int = 30, delay: float = 0.2) -> None:

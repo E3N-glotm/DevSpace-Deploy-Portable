@@ -167,6 +167,24 @@ export function App() {
     }).catch(e=>{if(active)setError(getError(e));});
     return ()=>{active=false;unStatus();unProgress();unClose();};
   },[]);
+  useEffect(()=>{
+    if(wizard||page!=='home')return;
+    let active=true;
+    let inFlight=false;
+    const refresh=async()=>{
+      if(!active||inFlight||document.visibilityState!=='visible')return;
+      inFlight=true;
+      try {
+        const next=await window.devspace.getStatus();
+        if(active)setStatus(next);
+      } catch {}
+      finally {inFlight=false;}
+    };
+    void refresh();
+    const timer=window.setInterval(refresh,5_000);
+    document.addEventListener('visibilitychange',refresh);
+    return ()=>{active=false;window.clearInterval(timer);document.removeEventListener('visibilitychange',refresh);};
+  },[wizard,page]);
   const chooseClose=useCallback(async(choice:'cancel'|'minimize-tray'|'exit-ui')=>{
     if(closeBusy)return;
     setCloseBusy(true);
@@ -247,7 +265,7 @@ export function App() {
   if(!draft||!config)return <div className="startup"><Spinner size="large"/><h2>正在连接 DevSpace…</h2><p>{error||'读取本地配置，不会修改现有部署。'}</p></div>;
   return <div className="desktop">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV8</small></span></div>
+      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE</small></span></div>
       <div className="side-group">
         {([['home',<HomeRegular/>,'主页'],['agents',<ServerRegular/>,'远程服务器'],
           ['extensions',<PlugConnectedRegular/>,'插件与工具'],
@@ -258,7 +276,7 @@ export function App() {
           <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
       <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span>v1.1.62</span></div>
+        <div className="sidebar-status"><span>v1.1.63</span></div>
       </div>
     </aside>
     <main className="main">
@@ -322,8 +340,15 @@ export function App() {
           {(dirty||applyPending)&&<div className="home-pending" role="status"><div><strong>{dirty?'有尚未保存的配置':'配置已保存，尚未应用'}</strong>
             <p>{dirty?'请在设置中确认更改并保存。':'请在设置中应用更改，服务重启后生效。'}</p></div>
             <Button appearance="primary" onClick={()=>select('settings','basic')}>处理配置</Button></div>}
-          <div className="metric-grid"><div className="metric"><span className="metric-icon"><DesktopRegular/></span><small>本地 MCP</small><strong>{status?.localHealthy?'已连接':'未连接'}</strong><p>{status?.localUrl}</p></div>
-            <div className="metric"><span className="metric-icon"><CloudRegular/></span><small>公网模式（连通性未核验）</small><strong>{status?.provider==='local'?'仅本机':status?.provider}</strong><p>{status?.publicUrl||'未配置公网入口'}</p></div>
+          <div className="metric-grid"><div className="metric"><span className="metric-icon"><DesktopRegular/></span>
+              <span className="metric-status-title"><span className={'metric-status-dot '+(status?.localHealthy?'healthy':'error')} aria-label={status?.localHealthy?'本地 MCP 正常':'本地 MCP 异常'}/><small>本地 MCP</small></span>
+              <strong>{status?.localHealthy?'已连接':'未连接'}</strong><p>{status?.localUrl}</p></div>
+            <div className="metric"><span className="metric-icon"><CloudRegular/></span>
+              <span className="metric-status-title"><span className={'metric-status-dot '+(status?.provider==='local'?'idle':!status?.publicChecked?'checking':status?.publicHealthy?'healthy':'error')}
+                aria-label={status?.provider==='local'?'仅本机':!status?.publicChecked?'正在核验公网连通性':status?.publicHealthy?'公网 MCP 正常':'公网 MCP 异常'}/><small>公网模式</small></span>
+              <strong>{status?.provider==='local'?'仅本机':status?.provider}</strong>
+              <p>{status?.provider==='local'?'未启用公网入口':!status?.publicChecked?'正在核验连通性…':status?.publicHealthy?'公网 MCP 已连通':status?.publicError||`连接异常（${status?.publicMetadataStatus||0}/${status?.publicMcpStatus||0}）`}</p>
+              {status?.provider!=='local'&&<p className="metric-url">{status?.publicUrl||'未配置公网入口'}</p>}</div>
             <div className="metric"><span className="metric-icon"><FolderOpenRegular/></span><small>有效文件访问范围</small>
               <strong>{initialFileScope(config)==='all'?'全部可访问目录':selectedDirectoryList(config).length+' 个工作目录'}</strong>
               <p>{initialFileScope(config)==='all'?'已选目录不构成访问限制':'仅允许访问所选目录'}</p></div></div></>}

@@ -191,6 +191,28 @@ jobs:
           npm ci --prefix app
           node setup/harden-nested-dependencies.mjs
 
+      - name: Prepare Next UI runtime
+        shell: pwsh
+        run: |
+          npm ci --prefix ui-next
+          $electronDist = Join-Path $PWD "ui-next\node_modules\electron\dist"
+          $electronExe = Join-Path $electronDist "electron.exe"
+          if (-not (Test-Path -LiteralPath $electronExe)) {
+            throw "Electron runtime was not installed by ui-next npm ci: $electronExe"
+          }
+          $uiRuntime = Join-Path $PWD "ui-next\runtime"
+          if (Test-Path -LiteralPath $uiRuntime) {
+            Remove-Item -LiteralPath $uiRuntime -Recurse -Force
+          }
+          Copy-Item -LiteralPath $electronDist -Destination $uiRuntime -Recurse -Force
+          npm run build --prefix ui-next
+          if (-not (Test-Path -LiteralPath (Join-Path $uiRuntime "electron.exe"))) {
+            throw "Next UI runtime hydration failed."
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $PWD "ui-next\dist\index.html"))) {
+            throw "Next UI production build is missing."
+          }
+
       - name: Test source and Portable runtime
         shell: pwsh
         run: ./scripts/test-source.ps1 -SkipInstall -SkipAudit

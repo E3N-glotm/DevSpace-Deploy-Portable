@@ -12,7 +12,7 @@ const ROOT_UNDICI_ROOT = join(APP, "node_modules", "undici");
 const ROOT_UNDICI_PACKAGE_PATH = join(ROOT_UNDICI_ROOT, "package.json");
 const NESTED_UNDICI_ROOT = join(AGENT_ROOT, "node_modules", "undici");
 const UNDICI_PACKAGE_PATH = join(AGENT_ROOT, "node_modules", "undici", "package.json");
-const EXPECTED_UNDICI = "8.10.0";
+const EXPECTED_UNDICI = "8.10.2";
 const ROOT_AGENT_KEY = "node_modules/@earendil-works/pi-coding-agent";
 const ROOT_DIRECT_UNDICI_KEY = "node_modules/undici";
 const ROOT_UNDICI_KEY = `${ROOT_AGENT_KEY}/node_modules/undici`;
@@ -35,7 +35,8 @@ const rootLock = readJson(ROOT_LOCK_PATH);
 // npm overrides install the hardened nested package, but npm intentionally
 // leaves the depended-on package's published package.json and shrinkwrap
 // metadata unchanged. A clean npm ci therefore starts with an 8.5.0 metadata
-// declaration even though node_modules/undici is correctly resolved to 8.10.0.
+// declaration even though node_modules/undici is correctly resolved to the
+// hardened version below.
 // Normalize those local runtime metadata files and replace the shrinkwrap-
 // pinned nested package with the separately locked root dependency. This
 // avoids a network operation in the hardening step and remains deterministic.
@@ -66,5 +67,5 @@ console.log(JSON.stringify({
   package: agentPackage.dependencies.undici,
   shrinkwrap: shrinkwrap.packages[""].dependencies.undici,
   installed: installedUndici.version,
-  rootLock: rootLock.packages[ROOT_UNDICI_KEY].version,
+  rootLock: rootLock.packages[ROOT_DIRECT_UNDICI_KEY].version,
 }));
