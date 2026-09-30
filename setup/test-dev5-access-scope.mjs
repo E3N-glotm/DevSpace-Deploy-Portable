@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {existsSync,mkdirSync,mkdtempSync,readFileSync,rmSync} from 'node:fs';
-import {resolve,join,dirname} from 'node:path';
+import {resolve,join,dirname,parse} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
@@ -43,8 +43,9 @@ assert.equal(policy.detectOperationMode({
   permissions:{...fullSelected.permissions,allowArbitraryCommands:false},
 }),'custom','An obsolete preset label must not conceal changed backend permission flags');
 
-// Actual manager save/show-config contract, isolated beneath the E-drive
-// source reports directory. Never reads/writes D-live credentials or services.
+// Actual manager save/show-config contract, isolated beneath this checkout's
+// source reports directory. Local development remains on E:, while GitHub's
+// Windows runner checks out on D:. Never reads/writes a separate live install.
 const report=join(root,'reports');
 mkdirSync(report,{recursive:true});
 const temp=mkdtempSync(join(report,'.tmp-dev5-scope-'));
@@ -98,9 +99,10 @@ try {
   assert.equal(cfg.permissions.allowArbitraryCommands,false);
   assert.deepEqual(cfg.selectedRoots,selected,
     'Switching to all directories must retain the explicit project selection');
-  assert.ok(cfg.allowedRoots.some(dir=>dir.toLowerCase()==='e:\\'),
-    'Actual backend all-directory discovery must include the E source drive');
-  assert.ok(persisted().allowedRoots.some(dir=>dir.toLowerCase()==='e:\\'));
+  const sourceDriveRoot=parse(root).root.toLowerCase();
+  assert.ok(cfg.allowedRoots.some(dir=>dir.toLowerCase()===sourceDriveRoot),
+    'Actual backend all-directory discovery must include the source checkout drive');
+  assert.ok(persisted().allowedRoots.some(dir=>dir.toLowerCase()===sourceDriveRoot));
 
   const temporarilyUnavailable=join(root,'reports','.offline-dev5-volume-example');
   save(policy.compileAccessSettings({...base,fileScopeMode:'all',
