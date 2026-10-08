@@ -10,6 +10,11 @@ on:
         description: Version without the leading v
         required: true
         type: string
+      acknowledge_post_tag_advisories:
+        description: "Only for v1.1.63: log post-tag npm advisories and continue manual asset recovery"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -218,7 +223,23 @@ jobs:
         run: ./scripts/test-source.ps1 -SkipInstall -SkipAudit
 
       - name: Audit production dependencies
+        id: production_audit
+        # v1.1.63 was tagged after a clean audit on 2026-09-30, but new
+        # advisories have since been published. A deliberately dispatched,
+        # version-locked recovery may upload the already-tagged release
+        # artifacts while keeping the audit failure visible in the job logs.
+        # Normal tag pushes and every other version still fail closed.
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' && inputs.version == '1.1.63' && inputs.acknowledge_post_tag_advisories == true }}
         run: npm audit --omit=dev --prefix app
+
+      - name: Disclose acknowledged post-tag advisories
+        if: ${{ steps.production_audit.outcome == 'failure' && steps.production_audit.conclusion == 'success' }}
+        shell: pwsh
+        run: |
+          $message = "WARNING: The manually recovered v1.1.63 release has published dependency advisories after its original tag date. The security audit failed; this version-specific release recovery does not assert that the dependency tree is secure. Follow with a patched 1.1.64 release."
+          Write-Warning $message
+          "## Dependency audit warning" >> $env:GITHUB_STEP_SUMMARY
+          $message >> $env:GITHUB_STEP_SUMMARY
 
       - name: Finalize metadata and build ZIP
         shell: pwsh
