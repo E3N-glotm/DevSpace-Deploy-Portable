@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const {createClosePolicy} = require('./close-policy.cjs');
+const {createPublicHealthMonitor} = require('./public-health.cjs');
 
 const ROOT = path.resolve(process.env.DEVSPACE_PORTABLE_ROOT || path.join(__dirname, '../..'));
 const HERE = path.resolve(__dirname, '..');
@@ -68,10 +69,7 @@ const SECRETS = Object.freeze({
 let windowRef;
 let activeOperation = false;
 let currentStatus = {};
-let publicVerification = {
-  fingerprint: '', checked: false, healthy: false, checkedAt: 0,
-  metadataStatus: 0, mcpStatus: 0, error: '',
-};
+const publicMonitor = createPublicHealthMonitor();
 let watchers = [];
 let refreshHandle = null;
 let closing = false;
@@ -183,49 +181,7 @@ async function operation(fn) {
   try { return await fn(); } finally { activeOperation = false; }
 }
 async function publicConnectivity(publicUrl, provider, verifyPublic = false) {
-  if (provider === 'local' || !publicUrl) {
-    publicVerification = {
-      fingerprint: '', checked: provider !== 'local', healthy: false, checkedAt: Date.now(),
-      metadataStatus: 0, mcpStatus: 0, error: publicUrl ? '' : '公网入口未配置',
-    };
-    return publicVerification;
-  }
-  const normalized = String(publicUrl).replace(/\/$/, '');
-  const fingerprint = `${provider}|${normalized}`;
-  if (!verifyPublic && publicVerification.fingerprint === fingerprint) return publicVerification;
-  if (!verifyPublic) {
-    return {
-      fingerprint, checked: false, healthy: false, checkedAt: 0,
-      metadataStatus: 0, mcpStatus: 0, error: '',
-    };
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
-  let metadataStatus = 0;
-  let mcpStatus = 0;
-  let error = '';
-  try {
-    const [metadata, mcp] = await Promise.all([
-      fetch(`${normalized}/.well-known/oauth-protected-resource/mcp`, {
-        signal: controller.signal, cache: 'no-store',
-      }),
-      fetch(`${normalized}/mcp`, {
-        signal: controller.signal, cache: 'no-store',
-      }),
-    ]);
-    metadataStatus = metadata.status;
-    mcpStatus = mcp.status;
-  } catch (e) {
-    error = e?.name === 'AbortError' ? '公网核验超时' : '公网连接失败';
-  } finally {
-    clearTimeout(timer);
-  }
-  publicVerification = {
-    fingerprint, checked: true,
-    healthy: metadataStatus === 200 && mcpStatus === 401,
-    checkedAt: Date.now(), metadataStatus, mcpStatus, error,
-  };
-  return publicVerification;
+  return publicMonitor.check(publicUrl, provider, verifyPublic);
 }
 async function lightweightStatus({verifyPublic = false} = {}) {
   const configuration = readJson(path.join(CONFIG, 'config.json'));
@@ -256,6 +212,8 @@ async function lightweightStatus({verifyPublic = false} = {}) {
     provider, publicUrl,
     publicChecked: publicState.checked,
     publicHealthy: publicState.healthy,
+    publicState: publicState.state,
+    publicLastSuccessAt: publicState.lastSuccessAt,
     publicCheckedAt: publicState.checkedAt,
     publicMetadataStatus: publicState.metadataStatus,
     publicMcpStatus: publicState.mcpStatus,

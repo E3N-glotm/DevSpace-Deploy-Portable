@@ -22,6 +22,13 @@
   mode.
 - Background main-process status refresh remains local/passive; public probes are
   limited to visible Home-page status refreshes.
+- Public endpoint probes now use an eight-second network window instead of the
+  two-second local MCP timeout. A single outbound DNS/TLS/proxy delay never
+  turns an actively used public MCP endpoint red: recent successful verification
+  is retained for up to two minutes, and transport-only failures show an
+  amber **unverified** state rather than claiming the tunnel is offline.
+- Repeated explicit OAuth/MCP HTTP-contract failures are distinguished from
+  timeout/transport uncertainty; endpoint changes reset previous evidence.
 
 ## Updater reliability
 
@@ -30,6 +37,11 @@
   re-opening the numeric PID after another UI process exits.
 - Existing rollback, strict ownership checks, service recovery and persistent
   configuration preservation remain in place.
+- For legacy shallow update bridges, the compact launcher detects the pending
+  `legacy-upgrade-bootstrap.json` marker and invokes the same-version full
+  repair **before** requiring Electron runtime files. Windows process detection
+  additionally attempts a compatible WMI fallback after CIM failure, while
+  retaining strict process ownership and fail-closed behavior.
 
 ## Defaults retained from 1.1.62
 

@@ -344,10 +344,10 @@ export function App() {
               <span className="metric-status-title"><span className={'metric-status-dot '+(status?.localHealthy?'healthy':'error')} aria-label={status?.localHealthy?'本地 MCP 正常':'本地 MCP 异常'}/><small>本地 MCP</small></span>
               <strong>{status?.localHealthy?'已连接':'未连接'}</strong><p>{status?.localUrl}</p></div>
             <div className="metric"><span className="metric-icon"><CloudRegular/></span>
-              <span className="metric-status-title"><span className={'metric-status-dot '+(status?.provider==='local'?'idle':!status?.publicChecked?'checking':status?.publicHealthy?'healthy':'error')}
-                aria-label={status?.provider==='local'?'仅本机':!status?.publicChecked?'正在核验公网连通性':status?.publicHealthy?'公网 MCP 正常':'公网 MCP 异常'}/><small>公网模式</small></span>
+              <span className="metric-status-title"><span className={'metric-status-dot '+(status?.provider==='local'?'idle':status?.publicState==='healthy'?'healthy':status?.publicState==='unhealthy'?'error':'checking')}
+                aria-label={status?.provider==='local'?'仅本机':status?.publicState==='healthy'?'公网 MCP 最近连通':status?.publicState==='unhealthy'?'公网 MCP 已确认异常':'公网连通性暂无法确认'}/><small>公网模式</small></span>
               <strong>{status?.provider==='local'?'仅本机':status?.provider}</strong>
-              <p>{status?.provider==='local'?'未启用公网入口':!status?.publicChecked?'正在核验连通性…':status?.publicHealthy?'公网 MCP 已连通':status?.publicError||`连接异常（${status?.publicMetadataStatus||0}/${status?.publicMcpStatus||0}）`}</p>
+              <p>{status?.provider==='local'?'未启用公网入口':!status?.publicChecked?'正在核验连通性…':status?.publicState==='healthy'?(status?.publicError?'最近核验成功，本次探测延迟':'公网 MCP 已连通'):status?.publicState==='unhealthy'?'公网端点持续异常':'公网状态暂无法核验（不代表插件断联）'}</p>
               {status?.provider!=='local'&&<p className="metric-url">{status?.publicUrl||'未配置公网入口'}</p>}</div>
             <div className="metric"><span className="metric-icon"><FolderOpenRegular/></span><small>有效文件访问范围</small>
               <strong>{initialFileScope(config)==='all'?'全部可访问目录':selectedDirectoryList(config).length+' 个工作目录'}</strong>

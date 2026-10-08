@@ -1011,9 +1011,9 @@ function processCreationTicks(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return 0;
   const script = [
     "$ErrorActionPreference='Stop'",
-    `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue`,
+    `$p=$null;try{$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop}catch{try{$p=Get-WmiObject Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop}catch{exit 4}}`,
     "if($null -eq $p){exit 3}",
-    "$ticks=try{$p.CreationDate.ToUniversalTime().Ticks}catch{0}",
+    "$ticks=try{if($p.CreationDate -is [datetime]){$p.CreationDate.ToUniversalTime().Ticks}else{[Management.ManagementDateTimeConverter]::ToDateTime([string]$p.CreationDate).ToUniversalTime().Ticks}}catch{0}",
     "[Console]::Out.Write([string]$ticks)",
   ].join(";");
   const result = childProcess.spawnSync(POWERSHELL_EXE, [
@@ -2126,9 +2126,9 @@ function provenPortableRuntimeListener(pid) {
   if (!installed.ino || !installed.dev) return null;
   const script = [
     "$ErrorActionPreference='Stop'",
-    `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue`,
+    `$p=$null;try{$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop}catch{try{$p=Get-WmiObject Win32_Process -Filter "ProcessId=${pid}" -ErrorAction Stop}catch{exit 4}}`,
     "if($null -eq $p){exit 3}",
-    "$p | Select-Object Name,ExecutablePath,@{n='CreationTicks';e={try{$_.CreationDate.ToUniversalTime().Ticks}catch{0}}} | ConvertTo-Json -Compress",
+    "$p | Select-Object Name,ExecutablePath,@{n='CreationTicks';e={try{if($_.CreationDate -is [datetime]){$_.CreationDate.ToUniversalTime().Ticks}else{[Management.ManagementDateTimeConverter]::ToDateTime([string]$_.CreationDate).ToUniversalTime().Ticks}}catch{0}}} | ConvertTo-Json -Compress",
   ].join(";");
   const observed = childProcess.spawnSync(POWERSHELL_EXE, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script,
@@ -2401,7 +2401,11 @@ function portableProcessSnapshot() {
     // Include normalized spellings as additional aliases, never as replacements.
     `$root=(${powershellLiteral(ROOT)}).TrimEnd('\\')`,
     `$canonicalRoot=(${powershellLiteral(canonicalRoot)}).TrimEnd('\\')`,
-    "$all=@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,@{n='CreationTicks';e={try{$_.CreationDate.ToUniversalTime().Ticks}catch{0}}})",
+    // Older Windows/Powershell installations may reject CIM enumeration even
+    // while classic WMI still works. Keep strict ownership predicates exactly
+    // the same on both transports; if both fail, abort before killing anything.
+    "$records=@();$cimError='';try{$records=@(Get-CimInstance Win32_Process -ErrorAction Stop)}catch{$cimError=$_.Exception.Message;try{$records=@(Get-WmiObject Win32_Process -ErrorAction Stop)}catch{throw ('CIM and WMI process enumeration both failed; no processes stopped. CIM: '+$cimError+'; WMI: '+$_.Exception.Message)}}",
+    "$all=@($records | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,@{n='CreationTicks';e={try{if($_.CreationDate -is [datetime]){$_.CreationDate.ToUniversalTime().Ticks}else{[Management.ManagementDateTimeConverter]::ToDateTime([string]$_.CreationDate).ToUniversalTime().Ticks}}catch{0}}})",
     "$wrappers=@('cmd.exe','wscript.exe','cscript.exe','powershell.exe','pwsh.exe','bash.exe','sh.exe')",
     // Exclude the snapshot PowerShell itself. Its -Command text necessarily
     // contains $root, so the wrapper heuristic would otherwise classify the

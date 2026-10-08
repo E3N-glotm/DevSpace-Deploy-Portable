@@ -139,6 +139,7 @@ $Tests = @(
     "setup/test-continuation-guard.mjs",
     "setup/test-continuation-architecture.mjs",
     "setup/test-auto-continuation-toggle.mjs",
+    "setup/test-legacy-next-bootstrap.mjs",
     "setup/test-dev9-defaults.mjs",
     "setup/test-host-cutoff-estimate.mjs",
     "setup/test-continuation-wire-contract.mjs",

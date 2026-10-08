@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.63",
-  "builtAt": "2026-09-30T11:16:17+08:00",
+  "builtAt": "2026-10-08T11:57:39+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -543,9 +543,9 @@
     "cloudflared-windows-amd64.exe.sha256": "8635da433b6df8194746e88ed9d2589566c20e38bfc2a80e431a348b7c765841"
   },
   "keyFiles": {
-    "DevSpace-Portable-Next.exe.sha256": "d648d44e27fbde855c977634562a90fd39cb266415d33ed575255412ed3cddab",
+    "DevSpace-Portable-Next.exe.sha256": "fc7d25ba8a26ac8410d70b460a41da27c8646a1013e7059b96de8e558707282d",
     "DevSpace-Portable.cmd.sha256": "cd10ca0aae1c499835cdf28ef1328f8b90f8dc790ff81eb63a4247bc8cdad3ea",
-    "DevSpace-Portable.exe.sha256": "359548f8a376337c3fc958c0c048c70cb51fc71bce5e92db41352ac80e7cb1f1",
+    "DevSpace-Portable.exe.sha256": "3174933ffb7b665aa439f2cbdc65a34a69b571cd1753319525854c53204d0257",
     "DevSpace-SshAskPass.exe.sha256": "ce6e7251e751da4faec1d75f5b32588e971e9eea474dc2cf5b26e282dad514e1",
     "Update.exe.sha256": "370bdcba2f8863d09b622bfee12502fe734860f51481b4b4633cbbc06dba38b4",
     "app/DevSpace-Plugin.cmd.sha256": "aa0fbe0e7f248476ac425ffc0d17752e2c14351b8079ab1d3d2cc56d0104c338",
@@ -676,7 +676,7 @@
     "docs/releases/HOTFIX-1.1.60.md.sha256": "b82ed5cb0864bef09ee85a4e4635bbaf7f4bcbc6f248f434e63c039da53ca966",
     "docs/releases/HOTFIX-1.1.61.md.sha256": "00ef863aaf9452d8dc63f45094784b180dacfb1b1d97e5c9641fdce5754ee354",
     "docs/releases/HOTFIX-1.1.62.md.sha256": "2d381cac2c27340f45325e6ab78cd8469c2e444593c115860a466c006342b79f",
-    "docs/releases/HOTFIX-1.1.63.md.sha256": "5a707a6cd7cd247eda67e4b27aee82666562dbbdc00cf279f444cbf5840a6059",
+    "docs/releases/HOTFIX-1.1.63.md.sha256": "eaf5c81af4fb54453f83b769eb85241e8f46998f307a384e93180ed461ec2e21",
     "docs/releases/HOTFIX-1.1.7.md.sha256": "ff933198773788193d73d87f861d7abaabd0b3299f6e87090c049b7d5589899e",
     "docs/releases/HOTFIX-1.1.8.md.sha256": "6cf9c3997017b030d57ff095c87aaf0b5299c24c141fe42f015a7ec00bd71f09",
     "docs/releases/HOTFIX-1.1.9.md.sha256": "0bb546acfafaa0ea69d83790eb95a6bea2f113b936cb5116ec7968ad58da218e",
@@ -690,7 +690,7 @@
     "scripts/start-devspace.sh.sha256": "c9c1bd97c45967c2a2b77292f59319f38239acd4617bb0ce63323e3db42a79c9",
     "scripts/start-tunnel.cmd.sha256": "7f46d9acf63e632fff252d6302a4aa28a7dd23d355f3b4d4ac14bf78199178c9",
     "scripts/start-tunnel.sh.sha256": "1065b667659a26560dd2c7c108b63cc68f511a08ee6305623abd51e6408c2b87",
-    "scripts/test-source.ps1.sha256": "05a6b73561ce17abfbb8406797e75ee18286ec9b1d44b1f85edda59f2580853e",
+    "scripts/test-source.ps1.sha256": "7956a8efcf188f3a064ceb2ec9e9b504ea1f9a5c1d65a9613ea2b942e7f47fd7",
     "scripts/verify-source-tree.mjs.sha256": "86e5a0d0239d6a11dd13bd4dc983ccf8d710fbca5e0c6d8e47cab6407ea2a034",
     "setup/Portable-Setup.hta.sha256": "5562632866a222ddd24bb7688a8dcb9b31679d793bac97e129ab6c762dfe5582",
     "setup/blockmap-updater.cjs.sha256": "9690d85ce1ac740216cc94895a6d39f4f10e0147c407d4581e9a0055a4b748a0",
@@ -714,7 +714,7 @@
     "setup/legacy/Portable-Setup-1.1.8.hta.sha256": "8e9c3734a102320f72ab6c2c5e91f72526fd76e0a436834f564786f24d2fc5ae",
     "setup/logged-launcher.cjs.sha256": "f5831f29ab3b5294fdf0304de1f681e0a1cd57148ebaa79df8a15c3e6ac2db5a",
     "setup/native/DevSpaceBrandIcon.cs.sha256": "b8094cc3c68f7ba4962a8ac1d2aef7107dd08d2cc7f6eed93c49bfb4c189e96c",
-    "setup/native/DevSpacePortableNextLauncher.cs.sha256": "ae577dac2d943667ff8da2db470f559d92bca5962cf23b684458960cedb6016e",
+    "setup/native/DevSpacePortableNextLauncher.cs.sha256": "2ad3ee01969e6085880fad44be7ed10c2458324146565b8f214348cc2ffe4b7b",
     "setup/native/DevSpaceSshAskPass.cs.sha256": "cc532a01d394b9815d1ff7c7ee24485c962b01c36d9739f6471de3cb12353753",
     "setup/native/DevSpaceUpdaterApp.cs.sha256": "6558569d8230d0d14b71c27c82c442cd3a4f31f71fbb9f93daf746a81ca3c6df",
     "setup/native/computer-use-capture.cpp.sha256": "2ffa35a5b6b941e2aa87173621f7ab5393c5d67871d18652a723afd8e2aef0a1",
@@ -722,7 +722,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "8389e3a7e8c8462385b66ba32165dce3fffe04bc2cc757a75902c24df5efbb1b",
+    "setup/portable-manager.cjs.sha256": "fe02f3802b25bc1a85a50e9ff9b8996385d0db1e4e43e34f8dc270121dd6340d",
     "setup/portable-updater.ps1.sha256": "1fc0e3c7951d860b7eca83bfbc4e2f7a5d4ff4ee7dc62fe2bc328651d84c8f24",
     "setup/remote-ssh-admin.cjs.sha256": "d44accb853526f03834d3bca95b29cf470fca2b5928c5b5457aec72f42117acb",
     "setup/test-auto-continuation-toggle.mjs.sha256": "97c57850cec6c1d7921524e06cfb79b5956d49e9bb7fc0bdf9defe8392fba3c6",
@@ -774,8 +774,8 @@
     "setup/test-updater-long-path.mjs.sha256": "608e6533cc4bc18b3116cef575f1105b872ea9025c4be7d36fc6d619482afc9b",
     "setup/test-upstream-workspace-reuse.mjs.sha256": "87a4d35a9eb1ddfb154cecf625adc410d2db414e9716e0e8426cb0b76d59ba12",
     "setup/tunnel-launcher.cjs.sha256": "e6c70fa208032d45481cf28dd0904b5fb20a5173e8a9f7029d64d3f71ca08e3e",
-    "ui-next/dist/index.html.sha256": "95e97b7cec404d71bb36f600c85fc9eea0e808af48fe45ce4c3abc96f2f26354",
-    "ui-next/electron/main.cjs.sha256": "99b9d43e3a7a4cd44ef7d187ba767b0dc816f1a4f2fb9b762c2984a845e95c16",
+    "ui-next/dist/index.html.sha256": "166af7c6326c98119667b08652cd8dcfc9281a45216d77db4a2cc73901522d96",
+    "ui-next/electron/main.cjs.sha256": "968eef4dfa8129be6ee0324bf8ae59f73011211331228a4483767196c9fa608c",
     "ui-next/electron/preload.cjs.sha256": "619023003f999425f70fbcce75b503ad666c5ff91fb6df58671bd83e4ed98967",
     "ui-next/package.json.sha256": "0710ab85f0aa68f5454701975b42c1db921a9d7e6c884146412f44b3b71fcbe9",
     "ui-next/runtime/electron.exe.sha256": "62c62d170a95aa4a3eb3df05f0d56a3654ab4344f7452e21dea1334afed7100f"
