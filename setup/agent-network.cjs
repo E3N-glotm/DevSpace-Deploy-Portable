@@ -2,6 +2,8 @@
 const net=require("node:net");
 const fs=require("node:fs");
 const path=require("node:path");
+const os=require("node:os");
+const dgram=require("node:dgram");
 
 function privateIpv4(host) {
   if(net.isIP(host)!==4)return false;
@@ -37,4 +39,48 @@ function readAgentNetwork(root) {
   try {return validateLanSettings(JSON.parse(fs.readFileSync(agentNetworkPath(root),"utf8")));}
   catch(error){if(error.code==="ENOENT")return validateLanSettings({});throw error;}
 }
-module.exports={privateIpv4,validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork};
+
+function lanControllerAddress(sshHost,interfaces=os.networkInterfaces(),preferred="") {
+  // Prefer the interface in the same subnet as the target SSH server, rather
+  // than arbitrarily picking the first adapter on a VPN/multi-NIC machine.
+  const options=Object.values(interfaces).flat().filter(i=>
+    i?.family==="IPv4"&&!i.internal&&privateIpv4(i.address));
+  const remote=net.isIP(sshHost)===4?sshHost.split(".").map(Number):null;
+  const toInt=ip=>ip.split(".").reduce((v,x)=>((v<<8)|Number(x))>>>0,0);
+  const match=remote&&options.filter(i=>net.isIP(i.netmask)===4
+    && (toInt(i.address)&toInt(i.netmask))===(toInt(sshHost)&toInt(i.netmask)));
+  if(match?.length===1)return match[0].address;
+  if(match?.length>1)throw new Error("目标服务器对应多个局域网网卡，请检查 Windows 网络配置。");
+  if(privateIpv4(preferred)&&options.some(i=>i.address===preferred))return preferred;
+  if(options.length===1)return options[0].address;
+  throw new Error("无法自动确定服务器可访问的 Windows 内网 IP；请检查网卡和 VPN 路由。");
+}
+function localRouteAddress(host,port) {
+  return new Promise((resolve,reject)=>{
+    // UDP connect only queries the OS routing table; no packet or secret is
+    // sent to the remote host. Works with both SSH-over-LAN and VPN routes.
+    const socket=dgram.createSocket("udp4");
+    let closed=false;
+    const done=(error,address)=>{
+      if(closed)return;
+      closed=true;clearTimeout(timer);socket.removeAllListeners("error");socket.close();
+      error?reject(error):resolve(address);
+    };
+    const timer=setTimeout(()=>done(new Error("Route probe timed out.")),3000);
+    socket.once("error",error=>done(error));
+    socket.connect(port,host,()=>{
+      try{done(null,socket.address().address);}
+      catch(error){done(error);}
+    });
+  });
+}
+async function resolveLanControllerAddress(host,port=22,interfaces=os.networkInterfaces(),preferred="",probe=localRouteAddress) {
+  const choices=Object.values(interfaces).flat().filter(i=>
+    i?.family==="IPv4"&&!i.internal&&privateIpv4(i.address)).map(i=>i.address);
+  try{
+    const address=await probe(host,port);
+    if(choices.includes(address))return address;
+  }catch{}
+  return lanControllerAddress(host,interfaces,preferred);
+}
+module.exports={privateIpv4,validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork,lanControllerAddress,resolveLanControllerAddress};

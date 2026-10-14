@@ -5,7 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 const childProcess = require("child_process");
 const {remoteSshAdminFactory} = require("./remote-ssh-admin.cjs");
-const {validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork} = require("./agent-network.cjs");
+const {validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork,resolveLanControllerAddress} = require("./agent-network.cjs");
 const os = require("os");
 const http = require("http");
 const dns = require("dns").promises;
@@ -2061,6 +2061,33 @@ function agentNetworkSet(payload){
   restrictAcl(agentNetworkPath(ROOT));
   return {ok:true,settings,restartRequired:true,
     notice:"Restart the local MCP service to apply the dedicated LAN Agent listener. The public MCP listener stays on 127.0.0.1."};
+}
+async function agentNetworkPrepare(payload){
+  const sshHost=String(payload.host||"").trim();
+  if(!sshHost||!/^[A-Za-z0-9.:-]+$/.test(sshHost))
+    throw new Error("请先填写有效的服务器 SSH IP 或主机名。");
+  const previous=readAgentNetwork(ROOT);
+  const preferred=previous.bindHost==="0.0.0.0"?"":previous.bindHost;
+  const portNumber=Number(payload.port||22);
+  if(!Number.isInteger(portNumber)||portNumber<1||portNumber>65535)
+    throw new Error("SSH 端口无效。");
+  const address=await resolveLanControllerAddress(sshHost,portNumber,os.networkInterfaces(),preferred);
+  const port=previous.port;
+  const serverUrl=validateAgentUrl(`http://${address}:${port}`,"lan");
+  const requested=validateLanSettings({...previous,enabled:true,
+    bindHost:previous.enabled?previous.bindHost:address});
+  // Never silently rebind an existing listener that serves other LAN Agents.
+  if(requested.bindHost!=="0.0.0.0"&&requested.bindHost!==address)
+    throw new Error("已有局域网 Agent 入口绑定其他网卡；请先在高级设置中调整监听地址。");
+  if(requested.port===Number(readJson(CONFIG_FILE,{}).port||7676))
+    throw new Error("局域网 Agent 端口不能与 MCP 端口相同。");
+  const restartRequired=!previous.enabled||previous.bindHost!==requested.bindHost;
+  if(restartRequired){
+    fs.mkdirSync(CONFIG_DIR,{recursive:true});
+    writeJson(agentNetworkPath(ROOT),requested);
+    restrictAcl(agentNetworkPath(ROOT));
+  }
+  return {ok:true,serverUrl,restartRequired,port,bindHost:requested.bindHost};
 }
 
 function installTasks() {
@@ -4603,6 +4630,8 @@ async function main() {
       stdoutJson(agentNetworkGet());
     } else if (command === "agent-network-set") {
       stdoutJson(agentNetworkSet(await readStdinJson()));
+    } else if (command === "agent-network-prepare") {
+      stdoutJson(await agentNetworkPrepare(await readStdinJson()));
     } else if (command === "remote-agent-create-enrollment") {
       stdoutJson(await runRemoteAgentAdmin("create-enrollment", await readStdinJson()));
     } else if (command === "remote-agent-revoke") {

@@ -8,7 +8,7 @@ import {createRequire} from "node:module";
 
 const root=resolve(dirname(fileURLToPath(import.meta.url)),"..");
 const require=createRequire(import.meta.url);
-const {validateAgentUrl,validateLanSettings}=require("../setup/agent-network.cjs");
+const {validateAgentUrl,validateLanSettings,lanControllerAddress,resolveLanControllerAddress}=require("../setup/agent-network.cjs");
 const core=join(root,"app","node_modules","@waishnav","devspace","dist");
 const {startAgentLanGateway}=await import(pathToFileURL(join(core,"agent-lan-gateway.js")));
 const {RemoteAgentManager}=await import(pathToFileURL(join(core,"remote-agent-manager.js")));
@@ -22,6 +22,18 @@ for(const bad of ["http://8.8.8.8:7677","http://127.0.0.1:7677","https://192.168
   assert.throws(()=>validateAgentUrl(bad,"lan"));
 assert.throws(()=>validateAgentUrl("http://public.example.com","internet"));
 assert.throws(()=>validateLanSettings({enabled:true,port:22}));
+const multiNic={
+  lan:[{family:"IPv4",internal:false,address:"192.168.10.5",netmask:"255.255.255.0"}],
+  vpn:[{family:"IPv4",internal:false,address:"10.12.0.2",netmask:"255.255.0.0"}],
+};
+assert.equal(lanControllerAddress("10.12.33.10",multiNic),"10.12.0.2");
+assert.equal(lanControllerAddress("192.168.10.50",multiNic),"192.168.10.5");
+assert.equal(lanControllerAddress("172.20.1.9",multiNic,"192.168.10.5"),"192.168.10.5");
+assert.throws(()=>lanControllerAddress("172.20.1.9",multiNic),/无法自动确定/);
+assert.equal(lanControllerAddress("172.20.1.9",{lan:multiNic.lan}),"192.168.10.5");
+assert.equal(await resolveLanControllerAddress("172.39.60.12",55301,multiNic,"",async()=>"10.12.0.2"),"10.12.0.2");
+assert.equal(await resolveLanControllerAddress("192.168.10.50",22,multiNic,"",async()=>{throw Error("offline");}),"192.168.10.5");
+await assert.rejects(resolveLanControllerAddress("172.39.60.12",55301,multiNic,"",async()=>"8.8.8.8"),/无法自动确定/);
 
 mkdirSync(join(root,"reports"),{recursive:true});
 const temp=mkdtempSync(join(root,"reports",".tmp-lan-gateway-"));

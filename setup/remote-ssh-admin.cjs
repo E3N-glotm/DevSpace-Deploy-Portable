@@ -33,6 +33,7 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
     port:Number(pick(p,"Port","port",22)),userName:String(pick(p,"UserName","userName")),
     autoRecover:Boolean(pick(p,"AutoRecover","autoRecover",true)),
     hasPassword:Boolean(pick(p,"ProtectedPassword","protectedPassword")),
+    privateKeyPath:String(pick(p,"PrivateKeyPath","privateKeyPath")),
   });
   function store() {
     const raw=readJson(profilesPath,{Profiles:[]});
@@ -78,12 +79,16 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
   function execute(profile, script, timeout=30000) {
     if(!ssh)throw new Error("Bundled Git SSH and Windows OpenSSH are missing.");
     const p=publicProfile(profile),password=protect("decrypt",pick(profile,"ProtectedPassword","protectedPassword"));
+    const identity=String(p.privateKeyPath||"").trim();
+    if(identity&&(!path.isAbsolute(identity)||!fs.existsSync(identity)||!fs.statSync(identity).isFile()))
+      throw new Error("SSH 私钥文件不存在或不是有效文件。");
     if(password&&!fs.existsSync(askpass))throw new Error("DevSpace SSH password helper is missing.");
     const host=p.host.includes(":")&&!p.host.startsWith("[")?"["+p.host+"]":p.host;
     const args=["-o","ConnectTimeout=10","-o","ConnectionAttempts=2",
       "-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR",
       "-o","BatchMode="+(password?"no":"yes"),
       ...(password?["-o","NumberOfPasswordPrompts=2"]:[]),
+      ...(identity?["-i",identity,"-o","IdentitiesOnly=yes"]:[]),
       "-p",String(p.port),p.userName+"@"+host,"bash","-s"];
     const env={...process.env};
     if(password){env.SSH_ASKPASS=askpass;env.SSH_ASKPASS_REQUIRE="force";
@@ -351,6 +356,13 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       let target=s.Profiles.find(v=>String(pick(v,"Key","key")).toLowerCase()===key.toLowerCase());
       if(!target){target={Key:key};s.Profiles.push(target);}
       Object.assign(target,{Key:key,Host:p.host,Port:p.port,UserName:p.userName,AutoRecover:payload.autoRecover!==false});
+      if(typeof payload.privateKeyPath==="string"){
+        const identity=payload.privateKeyPath.trim();
+        if(identity&&(!path.isAbsolute(identity)||!fs.existsSync(identity)||!fs.statSync(identity).isFile()))
+          throw new Error("SSH 私钥路径无效，请选择 Windows 上已有的私钥文件。");
+        target.PrivateKeyPath=identity;
+        if(identity)target.ProtectedPassword="";
+      }
       if(payload.clearPassword===true)target.ProtectedPassword="";
       else if(typeof payload.password==="string"&&payload.password.length){
         if(payload.password.length>4096)throw new Error("SSH password too long.");

@@ -71,7 +71,7 @@ try {
   const fakeSsh=join(scratch,"runtime","git","usr","bin","ssh.exe");
   mkdirSync(join(scratch,"runtime","git","usr","bin"),{recursive:true});
   writeFileSync(fakeSsh,"mock SSH binary - never executed");
-  let failProbe=false, stopped=0, enrolled=0,installed=0;
+  let failProbe=false, stopped=0, enrolled=0,installed=0,identityUsed=false;
   const scripts=[];
   const state="/home/ubuntu/workspace/.devspace-agent/verified-id";
   const mockRemote=remoteSshAdminFactory({
@@ -100,6 +100,8 @@ try {
     childProcess.spawnSync=(file,args,options)=>{
       if(String(file)!==fakeSsh)return originalSpawn(file,args,options);
       const script=String(options.input||"");
+      if(args.includes("-i")&&args.includes(join(scratch,"id_ed25519")))
+        identityUsed=true;
       const bash=realSpawnSync(join(root,"runtime","git","bin","bash.exe"),["-n"],
         {input:script,encoding:"utf8",timeout:10000,windowsHide:true});
       assert.equal(bash.status,0,"Generated SSH script is not valid Bash: "+String(bash.stderr||"").slice(0,350));
@@ -124,6 +126,14 @@ try {
     // Remove password from the sandbox so only mocked SSH is involved.
     const s=readJson(profileFile);s.Profiles[0].ProtectedPassword="";
     writeJson(profileFile,s);
+    const privateKey=join(scratch,"id_ed25519");
+    writeFileSync(privateKey,"test-only-mocked-private-key-file");
+    await mockRemote.handle("save",{key:"agent-existing",host:"gpu2.example.test",
+      port:2022,userName:"ubuntu",privateKeyPath:privateKey});
+    assert.equal((await mockRemote.handle("list")).profiles[0].privateKeyPath,privateKey);
+    await assert.rejects(mockRemote.handle("save",{key:"agent-existing",
+      host:"gpu2.example.test",port:2022,userName:"ubuntu",
+      privateKeyPath:join(scratch,"does-not-exist")}),/私钥/);
     const updated=await mockRemote.handle("deploy",{
       key:"agent-existing",agentId:"agent-existing",name:"test-agent",
       installRoot:"/home/ubuntu/workspace",accessMode:"scoped",
@@ -131,6 +141,7 @@ try {
     });
     assert.equal(updated.ok,true);
     assert.equal(stopped,1);assert.equal(installed,1);assert.equal(enrolled,1);
+    assert.equal(identityUsed,true,"the selected SSH private key must reach ssh.exe through -i");
     assert.ok(scripts.find(s=>s.includes("DEVSPACE_AGENT_STATE_STOPPED=")).includes("/proc"),
       "Verified-state termination must inspect exact Linux process command lines");
     failProbe=true;
@@ -149,6 +160,7 @@ try {
   assert.deepEqual((await factory.handle("list")).profiles,[]);
   console.log(JSON.stringify({
     legacyProfileShape:true,winCurrentUserDpapiCipherPreserved:true,
+    sshPrivateKeyPathSupported:true,
     privateSshPasswordNeverReturned:true,offlineAssetHashes:true,
     safeSshEndpointValidation:true,isolatedEDrive:true,
     existingAgentUpgradeGuard:true,bashSyntaxChecked:true,

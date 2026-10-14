@@ -21,5 +21,5 @@ test('remote agent heartbeat status refreshes automatically without button flick
   assert.match(operations,/document\.visibilityState==='visible'/);
   assert.match(operations,/const refresh=useCallback\(\(\)=>fetchData\(true\)/);
   assert.match(operations,/if\(!silent\)\{setBusy\(true\);setError\(''\);\}/);
-  assert.match(operations,/存活状态每 5 秒自动刷新/);
+  assert.match(operations,/状态每 5 秒自动刷新/);
 });

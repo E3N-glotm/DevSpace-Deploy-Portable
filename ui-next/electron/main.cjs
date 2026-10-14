@@ -36,7 +36,7 @@ const ADMIN_READ = new Set([
 ]);
 const ADMIN_WRITE = new Set([
   'remote-agent-create-enrollment','remote-agent-revoke','remote-agent-delete',
-  'remote-ssh-save','remote-ssh-test','remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','agent-network-set',
+  'remote-ssh-save','remote-ssh-test','remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','agent-network-set','agent-network-prepare',
   'plugin-install','plugin-export','plugin-enable','plugin-disable',
   'plugin-uninstall','plugin-slot-bind','plugin-slot-unbind','plugin-refresh',
   'continuation-lock','continuation-unlock','continuation-pause',
@@ -53,7 +53,7 @@ const ADMIN_WRITE = new Set([
 ]);
 const ADMIN_DESTRUCTIVE = new Set([
   'remote-agent-revoke','remote-agent-delete','plugin-uninstall',
-  'remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','agent-network-set',
+  'remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','agent-network-set','agent-network-prepare',
   'continuation-stop','continuation-delete','review-rollback',
   'review-restore-safety','memory-delete','oauth-client-rotate-secret',
   'oauth-client-delete','uninstall-tasks','disable','update-launch',

@@ -32,11 +32,22 @@ assert.match(switchCode,/probeAgentEndpoint\(profile,state,serverUrl\)/);
 assert.match(switchCode,/configureAgentUrl\(profile,state,agentId,serverUrl,mode\)/);
 assert.match(switchCode,/waitForAgentHeartbeat\(agentId,restartedAfter\)/);
 assert.match(switchCode,/configureAgentUrl\(profile,state,agentId,serverUrl,mode,true\)/);
-assert.match(ui,/const key=String\(profile\?\.key\|\|requestedKey\)/);
+assert.match(ui,/const key=String\(activeProfile\?\.key \|\| \(selected \|\| 'name:'\+name\.trim\(\)\)\)/,
+  "the unified editor must reuse old name-keyed SSH profiles");
 assert.match(ui,/remote-ssh-switch-network/);
 assert.match(manager,/agent-network-set/);
+assert.match(manager,/agent-network-prepare/);
 assert.match(manager,/readAgentNetwork\(ROOT\)/);
-assert.match(ui,/\['remote-ssh-deploy','remote-ssh-probe'\]\.includes\(action\)\?\{connectionMode,serverUrl:serverUrl\.trim\(\)\}/);
+assert.match(ui,/remote-ssh-deploy/);
+assert.match(ui,/remote-ssh-save/);
+assert.match(ui,/agent-network-prepare/);
+assert.match(ui,/await window\.devspace\.runAction\('restart-local'\)/);
+assert.match(ui,/添加并连接/);
+assert.match(ui,/保存并更新/);
+assert.match(ui,/SSH 恢复离线 Agent/);
+assert.match(ui,/密码 \/ SSH 私钥路径/);
+assert.doesNotMatch(ui,/function RemoteSshPanel|公网 Agent URL|Windows 局域网 Agent URL/,
+  "adding a server must use one SSH form and an internet/LAN toggle, not three configuration sections");
 assert.match(admin,/connectionMode,\.\.\.\(serverUrl\?\{serverUrl\}:\{\}\)/);
 console.log(JSON.stringify({offlineLiveProcessRestarts:true,endpointPreflight:true,
   newHeartbeatRequired:true,networkSwitchRollback:true,legacySshProfilePreserved:true,
