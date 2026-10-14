@@ -38,7 +38,7 @@ import urllib.request
 from pathlib import Path
 
 
-AGENT_VERSION = "1.1.46"
+AGENT_VERSION = "1.1.48"
 PROTOCOL_VERSION = 1
 DEFAULT_CONFIG = "/etc/devspace-agent/config.json"
 DEFAULT_STATE_DIR = "/var/lib/devspace-agent"
@@ -394,47 +394,58 @@ class WebSocketClient:
         base_path = parsed.path.rstrip("/")
         self.path = (base_path if base_path and base_path != "/" else "") + "/agent/v1/connect"
         self.socket: socket.socket | ssl.SSLSocket | None = None
+        # HTTP 101 headers and the first WebSocket frame may arrive in the
+        # same TCP/TLS read. Preserve that frame for recv_json(); a TCP read
+        # is not an HTTP or WebSocket message boundary.
+        self._received_after_headers = bytearray()
         self.send_lock = threading.Lock()
 
     def connect(self, timeout: float = 15.0) -> None:
         raw = socket.create_connection((self.host, self.port), timeout=timeout)
-        raw.settimeout(None)
-        if self.secure:
-            context = ssl.create_default_context()
-            sock = context.wrap_socket(raw, server_hostname=self.host)
-        else:
-            sock = raw
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        host_header = self.host if self.port in (80, 443) else f"{self.host}:{self.port}"
-        request = (
-            f"GET {self.path} HTTP/1.1\r\n"
-            f"Host: {host_header}\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "User-Agent: DevSpace-Linux-Agent/1\r\n"
-            "\r\n"
-        ).encode("ascii")
-        sock.sendall(request)
-        response = self._read_http_headers(sock)
-        status = response.split(b"\r\n", 1)[0]
-        if b" 101 " not in status:
+        sock = raw
+        self._received_after_headers.clear()
+        try:
+            # Keep TLS negotiation and HTTP 101 handshakes bounded. The old
+            # unbounded recv could strand reconnection indefinitely.
+            raw.settimeout(timeout)
+            if self.secure:
+                context = ssl.create_default_context()
+                sock = context.wrap_socket(raw, server_hostname=self.host)
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            host_header = self.host if self.port in (80, 443) else f"{self.host}:{self.port}"
+            request = (
+                f"GET {self.path} HTTP/1.1\r\n"
+                f"Host: {host_header}\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                "User-Agent: DevSpace-Linux-Agent/1\r\n"
+                "\r\n"
+            ).encode("ascii")
+            sock.sendall(request)
+            response = self._read_http_headers(sock)
+            status = response.split(b"\r\n", 1)[0]
+            if b" 101 " not in status:
+                raise ConnectionError(f"WebSocket upgrade failed: {status.decode('latin1', 'replace')}")
+            headers = {}
+            for line in response.split(b"\r\n")[1:]:
+                if b":" in line:
+                    key_name, value = line.split(b":", 1)
+                    headers[key_name.strip().lower()] = value.strip()
+            expected = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest())
+            if headers.get(b"sec-websocket-accept") != expected:
+                raise ConnectionError("WebSocket server returned an invalid Sec-WebSocket-Accept value.")
+            # Server pings every 15 seconds. A bounded idle receive timeout
+            # lets the Agent reconnect after silent TCP/NAT blackholes.
+            sock.settimeout(75.0)
+            self.socket = sock
+        except Exception:
             sock.close()
-            raise ConnectionError(f"WebSocket upgrade failed: {status.decode('latin1', 'replace')}")
-        headers = {}
-        for line in response.split(b"\r\n")[1:]:
-            if b":" in line:
-                key_name, value = line.split(b":", 1)
-                headers[key_name.strip().lower()] = value.strip()
-        expected = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest())
-        if headers.get(b"sec-websocket-accept") != expected:
-            sock.close()
-            raise ConnectionError("WebSocket server returned an invalid Sec-WebSocket-Accept value.")
-        self.socket = sock
+            self._received_after_headers.clear()
+            raise
 
-    @staticmethod
-    def _read_http_headers(sock: socket.socket) -> bytes:
+    def _read_http_headers(self, sock: socket.socket) -> bytes:
         data = bytearray()
         while b"\r\n\r\n" not in data:
             chunk = sock.recv(4096)
@@ -445,9 +456,7 @@ class WebSocketClient:
                 raise ConnectionError("WebSocket handshake headers are too large.")
         header, _separator, remainder = bytes(data).partition(b"\r\n\r\n")
         if remainder:
-            # The DevSpace server does not send application frames before hello,
-            # so receiving bytes here indicates an invalid handshake boundary.
-            raise ConnectionError("Unexpected WebSocket payload during handshake.")
+            self._received_after_headers.extend(remainder)
         return header + b"\r\n\r\n"
 
     def close(self) -> None:
@@ -486,9 +495,12 @@ class WebSocketClient:
             masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
             sock.sendall(header + mask + masked)
 
-    @staticmethod
-    def _read_exact(sock: socket.socket, length: int) -> bytes:
+    def _read_exact(self, sock: socket.socket, length: int) -> bytes:
         data = bytearray()
+        if self._received_after_headers:
+            buffered = min(length, len(self._received_after_headers))
+            data.extend(self._received_after_headers[:buffered])
+            del self._received_after_headers[:buffered]
         while len(data) < length:
             chunk = sock.recv(length - len(data))
             if not chunk:
@@ -1180,7 +1192,10 @@ class AgentRuntime:
                 "autoUpdate": True,
                 "persistentProcesses": True,
             },
-            "metadata": {"python": sys.version.split()[0], "uid": os.getuid(), "user": os.environ.get("USER")},
+            "metadata": {"python": sys.version.split()[0], "uid": os.getuid(), "user": os.environ.get("USER"),
+                         "connectionMode": self.config.get("connectionMode") or "internet",
+                         "serverUrl": self.config.get("server")},
+            "connectionMode": self.config.get("connectionMode") or "internet",
         }
         if enrollment_token:
             value["enrollmentToken"] = enrollment_token
@@ -1614,6 +1629,19 @@ class AgentRuntime:
         return {"hostname": socket.gethostname(), "loadAverage": list(os.getloadavg()), "cpuCount": os.cpu_count(), "memory": memory, "gpus": gpus, "agentVersion": AGENT_VERSION}
 
     def agent_self_update(self, params: dict) -> dict:
+        # A previously installed Windows controller may still advertise an
+        # older Agent. Never let its background version-mismatch RPC undo a
+        # newer, deliberately deployed remote Agent (or trigger a restart
+        # loop). Refuse malformed versions too, before fetching remote code.
+        import re
+        current_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", AGENT_VERSION)
+        requested_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(params.get("version", "")))
+        if not current_match or not requested_match:
+            raise ValueError("Agent update version is missing or invalid.")
+        current = tuple(map(int, current_match.groups()))
+        requested = tuple(map(int, requested_match.groups()))
+        if requested <= current:
+            return {"updated": False, "version": AGENT_VERSION, "reason": "not-newer"}
         url = str(params["url"])
         expected = str(params["sha256"])
         with urllib.request.urlopen(url, timeout=60) as response:
@@ -1647,6 +1675,7 @@ def enrollment_config(args) -> tuple[Path, dict]:
     config = {
         "server": args.server.rstrip("/"),
         "servers": [args.server.rstrip("/")],
+        "connectionMode": args.connection_mode,
         "name": args.name,
         "accessMode": access_mode,
         "writableRoots": roots,
@@ -1732,6 +1761,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     enroll_parser = subparsers.add_parser("enroll", help="Enroll this Linux host with a Windows DevSpace control plane")
     enroll_parser.add_argument("--server", required=True)
+    enroll_parser.add_argument("--connection-mode", choices=("internet", "lan"), default="internet")
     enroll_parser.add_argument("--token", required=True)
     enroll_parser.add_argument("--name", required=True)
     enroll_parser.add_argument("--writable-root", "--allowed-root", dest="writable_root", action="append")

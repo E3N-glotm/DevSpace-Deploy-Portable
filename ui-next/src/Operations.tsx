@@ -78,6 +78,7 @@ function ActionRow({children}:{children:React.ReactNode}) {
 
 export function AgentsPage() {
   const b=useBackend('remote-agent-list');
+  const net=useBackend('agent-network-get');
   const agents=asItems(b.data,'agents');
   useEffect(()=>{
     const refresh=()=>{if(document.visibilityState==='visible')void b.refresh();};
@@ -92,11 +93,29 @@ export function AgentsPage() {
   const [roots,setRoots]=useState('');
   const [full,setFull]=useState(false);
   const [command,setCommand]=useState('');
+  const [lanEnabled,setLanEnabled]=useState(false);
+  const [lanPort,setLanPort]=useState('7677');
+  const [lanBind,setLanBind]=useState('0.0.0.0');
+  const [connectionMode,setConnectionMode]=useState<'internet'|'lan'>('internet');
+  const [serverUrl,setServerUrl]=useState('');
+  useEffect(()=>{
+    if(connectionMode==='internet'&&!serverUrl&&net.data?.internetDefaultUrl)
+      setServerUrl(String(net.data.internetDefaultUrl));
+  },[net.data?.internetDefaultUrl,connectionMode]);
+  useEffect(()=>{
+    if(!net.data?.settings)return;
+    setLanEnabled(net.data.settings.enabled===true);
+    setLanPort(String(net.data.settings.port||7677));
+    setLanBind(String(net.data.settings.bindHost||'0.0.0.0'));
+  },[net.data?.settings?.enabled,net.data?.settings?.port,net.data?.settings?.bindHost]);
   const prepare=(id:string)=>{
     const item=agents.find(x=>String(x.id)===id);
     setSelected(id);setName(value(item||null,'name'));setInstallRoot(value(item||null,'installRoot'));
     setRoots(Array.isArray(item?.writableRoots)?item.writableRoots.join('\n'):'');
     setFull(item?.accessMode==='full-access');setCommand('');
+    const pref=net.data?.connections?.[id] || item?.metadata || {};
+    setConnectionMode(pref.connectionMode==='lan'?'lan':'internet');
+    setServerUrl(String(pref.serverUrl||(pref.connectionMode==='lan'?'':net.data?.internetDefaultUrl||'')));
   };
   async function enroll(){
     if(!name.trim()||!installRoot.trim()||(!full&&!roots.trim()))return;
@@ -105,6 +124,7 @@ export function AgentsPage() {
       accessMode:full?'full-access':'scoped',
       writableRoots:full?[]:roots.split(/\r?\n/).map(s=>s.trim()).filter(Boolean),
       ttlMinutes:15,
+      connectionMode, ...(connectionMode==='lan'||serverUrl.trim()?{serverUrl:serverUrl.trim()}:{}),
     });
     setCommand(String(response?.installCommand||''));
   }
@@ -118,6 +138,21 @@ export function AgentsPage() {
     <ActionRow><Button appearance="primary" onClick={()=>prepare('')} disabled={b.busy}>添加服务器</Button>
       <Button onClick={b.load} disabled={b.busy}>刷新状态</Button></ActionRow>
     <Message error={b.error} notice={b.notice}/>
+    <div className="op-subsection">
+      <h3>局域网 Agent 入口（Windows 控制端）</h3>
+      <p className="op-subtle">独立监听，仅开放 Agent WebSocket / 安装资源，不对局域网开放 MCP/OAuth。LAN Agent 无需互联网出口。注意：局域网模式使用明文 HTTP/WS 并传输 Agent 凭据，只能在可信、隔离的局域网使用；优先绑定指定内网 IP。保存后须重启本地 MCP，并按需放行 Windows 防火墙入站端口。</p>
+      <div className="op-toggle"><div><strong>启用局域网 Agent 入口</strong><small>默认关闭；公网 Agent 不受此开关影响。</small></div>
+        <Switch checked={lanEnabled} onChange={(_e,d)=>setLanEnabled(d.checked)}/></div>
+      <div className="form-grid">
+        <TextControl label="局域网监听 IP（0.0.0.0 = 所有接口）" value={lanBind} onChange={setLanBind}/>
+        <TextControl label="Agent 专用端口" value={lanPort} onChange={setLanPort}/>
+      </div>
+      <p className="op-subtle">可用 Windows 内网 IP：{(net.data?.addresses||[]).join('、')||'请检查当前网络适配器'}。Agent 连接 URL 示例：http://192.168.1.10:{lanPort}</p>
+      <ActionRow><Button disabled={net.busy} onClick={async()=>{await net.call('agent-network-set',{enabled:lanEnabled,port:Number(lanPort),bindHost:lanBind},true);}}>保存局域网入口</Button>
+        <Button disabled={net.busy} onClick={()=>net.call('restart-local',{},true)}>重启本地 MCP 应用配置</Button>
+        <Button disabled={net.busy} onClick={net.load}>读取当前配置</Button></ActionRow>
+      <Message error={net.error} notice={net.notice}/>
+    </div>
     <div className="op-columns">
       <Selection items={agents} selected={selected} onSelect={prepare} getId={a=>String(a.id||'')}
         describe={a=>{const state=statusMeta(a.status);return <><span className="agent-title-row">
@@ -130,10 +165,15 @@ export function AgentsPage() {
         <div className="op-form">
           <TextControl label="服务器显示名称" value={name} onChange={setName} required/>
           <TextControl label="Linux Agent 安装目录" value={installRoot} onChange={setInstallRoot} placeholder="/home/user/devspace-agent" required/>
+          <div className="op-toggle"><div><strong>通过局域网连接（关闭＝公网）</strong>
+            <small>每台 Agent 独立设置，创建时可选、创建后可修改。局域网服务器无需具备互联网出口。</small></div>
+            <Switch checked={connectionMode==='lan'} onChange={(_e,d)=>{setConnectionMode(d.checked?'lan':'internet');setServerUrl(d.checked?'':String(net.data?.internetDefaultUrl||''));setCommand('');}}/></div>
+          <TextControl label={connectionMode==='lan'?'Windows 局域网 Agent URL':'公网 Agent URL（留空使用现有公网配置）'}
+            value={serverUrl} onChange={setServerUrl} placeholder={connectionMode==='lan'?'http://192.168.1.10:'+lanPort:'https://agent.example.com'}/>
           <div className="op-toggle"><div><strong>完全访问</strong><small>关闭时只开放下方明确填写的 Linux 可写目录。</small></div>
             <Switch checked={full} onChange={(_e,d)=>setFull(d.checked)}/></div>
           {!full&&<Field label="允许写入的 Linux 目录（每行一个）"><Textarea rows={3} value={roots} onChange={(_e,d)=>setRoots(d.value)}/></Field>}
-          <ActionRow><Button appearance="primary" disabled={b.busy||!name.trim()||!installRoot.trim()||(!full&&!roots.trim())} onClick={enroll}>{selected?'重新生成配对命令':'生成一次性安装命令'}</Button>
+          <ActionRow><Button appearance="primary" disabled={b.busy||!name.trim()||!installRoot.trim()||(!full&&!roots.trim())||(connectionMode==='lan'&&!serverUrl.trim())} onClick={enroll}>{selected?'重新生成配对命令':'生成一次性安装命令'}</Button>
             {selected&&<Button disabled={b.busy} onClick={()=>b.call('remote-agent-revoke',{agentId:selected},true)}>撤销 Agent 凭据</Button>}
             {selected&&<Button disabled={b.busy} onClick={async()=>{if(await b.call('remote-agent-delete',{agentId:selected},true))prepare('');}}>删除记录</Button>}</ActionRow>
           {command&&<div className="op-command"><strong>15 分钟内有效的安装命令</strong><code>{command}</code>
@@ -142,19 +182,23 @@ export function AgentsPage() {
       </div>
     </div>
     <RemoteSshPanel agentId={selected} agentName={name} installRoot={installRoot}
-      roots={roots.split(/\r?\n/).map(s=>s.trim()).filter(Boolean)} full={full} onUpdate={b.load}/>
+      roots={roots.split(/\r?\n/).map(s=>s.trim()).filter(Boolean)} full={full} onUpdate={async()=>{await b.load();await net.load();}}
+      connectionMode={connectionMode} serverUrl={serverUrl}/>
   </Panel>;
 }
 
-function RemoteSshPanel({agentId,agentName,installRoot,roots,full,onUpdate}:{
+function RemoteSshPanel({agentId,agentName,installRoot,roots,full,connectionMode,serverUrl,onUpdate}:{
   agentId:string;agentName:string;installRoot:string;roots:string[];
-  full:boolean;onUpdate:()=>Promise<void>;
+  full:boolean;connectionMode:'lan'|'internet';serverUrl:string;onUpdate:()=>Promise<void>;
 }) {
   const b=useBackend('remote-ssh-list');
   const profiles=asItems(b.data,'profiles');
-  const key=agentId||('name:'+agentName.trim());
-  const profile=profiles.find(p=>String(p.key||'').toLowerCase()===key.toLowerCase())||
+  const requestedKey=agentId||('name:'+agentName.trim());
+  const profile=profiles.find(p=>String(p.key||'').toLowerCase()===requestedKey.toLowerCase())||
     profiles.find(p=>String(p.key||'').toLowerCase()===('name:'+agentName.trim()).toLowerCase())||null;
+  // Preserve old WinForms name-keyed DPAPI credentials; do not accidentally
+  // create a new empty ID-keyed profile when the user clicks SSH rescue.
+  const key=String(profile?.key||requestedKey);
   const [host,setHost]=useState('');
   const [port,setPort]=useState('22');
   const [userName,setUserName]=useState('ubuntu');
@@ -177,15 +221,24 @@ function RemoteSshPanel({agentId,agentName,installRoot,roots,full,onUpdate}:{
     if(result){setPassword('');return true;}
     return false;
   };
-  const manage=async(action:'remote-ssh-test'|'remote-ssh-deploy'|'remote-ssh-recover')=>{
+  const manage=async(action:'remote-ssh-test'|'remote-ssh-probe'|'remote-ssh-deploy'|'remote-ssh-recover')=>{
     const saved=await save();
     if(!saved)return;
     const response=await b.call(action,{
       key,agentId, name:agentName.trim(),installRoot:installRoot.trim(),
       accessMode:full?'full-access':'scoped',writableRoots:full?[]:roots,
-    },action!=='remote-ssh-test');
+      ...(['remote-ssh-deploy','remote-ssh-probe'].includes(action)?{connectionMode,serverUrl:serverUrl.trim()}:{}),
+    },action==='remote-ssh-deploy'||action==='remote-ssh-recover');
     if(response){setOutput(String(response.output||response.agent?.status||'操作完成'));
       if(action!=='remote-ssh-test')await onUpdate();}
+  };
+  const changeNetwork=async()=>{
+    if(!agentId||!serverUrl.trim())return;
+    if(!await save())return;
+    const response=await b.call('remote-ssh-switch-network',{
+      key,agentId,installRoot,connectionMode,serverUrl:serverUrl.trim(),
+    },true);
+    if(response){setOutput('已切换至'+(connectionMode==='lan'?'局域网':'公网')+'，Agent 心跳已恢复。');await onUpdate();}
   };
   return <div className="op-subsection">
     <Panel title="SSH 一键部署与救援" caption="与旧界面兼容的 SSH 配置保存在相同的数据文件中；现有密码使用当前 Windows 用户 DPAPI 加密，不向前端回显。">
@@ -204,10 +257,13 @@ function RemoteSshPanel({agentId,agentName,installRoot,roots,full,onUpdate}:{
         <Switch checked={autoRecover} onChange={(_e,d)=>setAutoRecover(d.checked)}/></div>
       <ActionRow><Button appearance="primary" disabled={b.busy||!key||!host.trim()} onClick={save}>保存 SSH 配置</Button>
         <Button disabled={b.busy||!key||!host.trim()} onClick={()=>manage('remote-ssh-test')}>测试 SSH</Button>
-        <Button disabled={b.busy||!key||!host.trim()||!agentName.trim()||!installRoot.trim()||(!full&&!roots.length)}
+        {agentId&&<Button disabled={b.busy||!host.trim()} onClick={()=>manage('remote-ssh-probe')}>测试 Agent 入口</Button>}
+        <Button disabled={b.busy||!key||!host.trim()||!agentName.trim()||!installRoot.trim()||(!full&&!roots.length)||(connectionMode==='lan'&&!serverUrl.trim())}
           onClick={()=>manage('remote-ssh-deploy')}>{agentId?'通过 SSH 更新 Agent':'通过 SSH 安装 Agent'}</Button>
         {agentId&&<Button disabled={b.busy||!profile} onClick={()=>manage('remote-ssh-recover')}>
           SSH 一键恢复离线 Agent</Button>}
+        {agentId&&<Button disabled={b.busy||!host.trim()||!serverUrl.trim()} onClick={changeNetwork}>
+          应用连接方式并重连 Agent</Button>}
         {profile&&<Button disabled={b.busy} onClick={async()=>{
           if(await b.call('remote-ssh-delete',{key:profile.key},true))setOutput('已删除 SSH 配置');
         }}>删除 SSH 凭据</Button>}</ActionRow>

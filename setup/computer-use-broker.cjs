@@ -10,6 +10,8 @@ const leaseId = String(process.argv[2] || process.env.DEVSPACE_COMPUTER_USE_LEAS
 // this loop remains for non-native/compatibility hosts and therefore does not
 // need a 25 Hz idle wakeup cadence.
 const pollIntervalMs = 500;
+const warmIndicatorHoldMs = 65_000;
+const completedIndicatorHoldMs = 90_000;
 let stopping = false;
 let lastStateWriteAt = 0;
 let announcedRunning = false;
@@ -31,6 +33,7 @@ function updateState(extra = {}, force = false) {
     lastLoopAt: new Date().toISOString(),
     pollIntervalMs,
     transport: "local-file-queue",
+    activityUntilAt: prior.leaseId === leaseId ? (prior.activityUntilAt || null) : null,
     ...extra,
   });
 }
@@ -55,7 +58,14 @@ async function main() {
       && manager.computerUseRuntimeEnabled()
       && Date.parse(String(lease.expiresAt || "")) > Date.now();
     if (!active) break;
-    const result = manager.processComputerUseRequests(lease);
+    const result = manager.processComputerUseRequests(lease, {
+      onActivity(phase) {
+        const hold = phase === "completed" ? completedIndicatorHoldMs : warmIndicatorHoldMs;
+        const previous = manager.readJson(manager.COMPUTER_USE_BROKER_FILE, {});
+        const until = Math.max(Date.now() + hold, Date.parse(String(previous.activityUntilAt || "")) || 0);
+        updateState({ activityUntilAt: new Date(until).toISOString() }, true);
+      },
+    });
     updateState({
       status: "running",
       processed: result.processed,

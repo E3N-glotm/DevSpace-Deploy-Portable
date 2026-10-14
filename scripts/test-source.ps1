@@ -102,6 +102,18 @@ Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-legacy-boots
 Write-Host "==> setup/test-legacy-bootstrap-policy.py"
 Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-legacy-bootstrap-policy.py") -FailureMessage "Test failed: setup/test-legacy-bootstrap-policy.py"
 
+Write-Host "==> setup/test-agent-websocket-coalesced.py"
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-agent-websocket-coalesced.py") -FailureMessage "Test failed: setup/test-agent-websocket-coalesced.py"
+
+Write-Host "==> setup/test-agent-downgrade-guard.py"
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-agent-downgrade-guard.py") -FailureMessage "Test failed: setup/test-agent-downgrade-guard.py"
+
+Write-Host "==> setup/test-agent-network-lan.mjs"
+Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-agent-network-lan.mjs") -FailureMessage "Test failed: setup/test-agent-network-lan.mjs"
+
+Write-Host "==> setup/test-agent-ssh-recovery-contract.mjs"
+Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-agent-ssh-recovery-contract.mjs") -FailureMessage "Test failed: setup/test-agent-ssh-recovery-contract.mjs"
+
 Write-Host "==> setup/test-update-manifest-graph.py"
 Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-update-manifest-graph.py") -FailureMessage "Test failed: setup/test-update-manifest-graph.py"
 

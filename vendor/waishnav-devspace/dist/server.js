@@ -43,6 +43,7 @@ import { openAiConversationScopeId } from "./request-meta.js";
 import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
 import { formatLocalAgentProviderAvailabilitySummary, getLocalAgentProviderAvailabilitySnapshot, } from "./local-agent-availability.js";
 import { linuxAgentAsset, RemoteAgentManager } from "./remote-agent-manager.js";
+import { startAgentLanGateway } from "./agent-lan-gateway.js";
 import { createContinuationSupervisorScheduler } from "./continuation-supervisor.js";
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
@@ -2485,6 +2486,20 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
                 // would ask the Host to create another milestone card.
                 return { content: [textBlock(result)], structuredContent: { result, ...payload } };
             }
+            // When the owner disables automatic continuation, a cached model
+            // may still call the UI-bearing anchor tool. Reject it *before*
+            // creating/refining a task, and most importantly never return
+            // workspaceAppResultMeta: even a rejected anchor used to attach
+            // a visible iframe shell in ChatGPT in this branch.
+            if (!runtimeState.autoContinuationEnabled()) {
+                const payload = {
+                    accepted: false,
+                    reason: "automatic-continuation-disabled",
+                    continuationAnchor: true,
+                };
+                const result = JSON.stringify(payload, null, 2);
+                return { isError: true, content: [textBlock(result)], structuredContent: { result, ...payload } };
+            }
             if (!conversationScopeId) {
                 const payload = {
                     accepted: false,
@@ -4781,11 +4796,15 @@ if (await isMainModule()) {
         }
     });
     attachAgentHttpServer(httpServer);
+    let agentLanServer;
+    try { agentLanServer=await startAgentLanGateway(config,remoteAgents); }
+    catch(error) { await shutdownHttpServer(httpServer,close); throw error; }
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown)
             return;
         shuttingDown = true;
+        if(agentLanServer)await new Promise(resolve=>agentLanServer.close(()=>resolve()));
         await shutdownHttpServer(httpServer, close);
         process.exit(0);
     };

@@ -13,6 +13,7 @@ PID_FILE=""
 LOG_FILE=""
 WRITABLE_ROOTS=()
 ACCESS_MODE="scoped"
+CONNECTION_MODE="internet"
 INSTALL_ROOT=""
 AGENT_SHA256=""
 AGENT_FILE=""
@@ -27,6 +28,7 @@ while (($#)); do
     --allow-root-service) ALLOW_ROOT_SERVICE=1; shift ;;
     --writable-root|--allowed-root) WRITABLE_ROOTS+=("$2"); shift 2 ;;
     --access-mode) ACCESS_MODE="$2"; shift 2 ;;
+    --connection-mode) CONNECTION_MODE="$2"; shift 2 ;;
     --install-root) INSTALL_ROOT="$2"; shift 2 ;;
     --agent-sha256) AGENT_SHA256="$2"; shift 2 ;;
     --agent-file) AGENT_FILE="$2"; shift 2 ;;
@@ -39,6 +41,7 @@ done
 [[ -n "$TOKEN" ]] || { echo "--token is required" >&2; exit 2; }
 [[ -n "$NAME" ]] || { echo "--name is required" >&2; exit 2; }
 [[ "$ACCESS_MODE" == "scoped" || "$ACCESS_MODE" == "full-access" ]] || { echo "--access-mode must be scoped or full-access" >&2; exit 2; }
+[[ "$CONNECTION_MODE" == "internet" || "$CONNECTION_MODE" == "lan" ]] || { echo "--connection-mode must be internet or lan" >&2; exit 2; }
 if [[ "$ACCESS_MODE" == "scoped" ]]; then
   ((${#WRITABLE_ROOTS[@]} > 0)) || { echo "Scoped mode requires at least one --writable-root" >&2; exit 2; }
 fi
@@ -206,7 +209,7 @@ start_background_agent() {
   }
 }
 
-ARGS=("$INSTALL_DIR/devspace-agent.py" enroll --config "$CONFIG" --server "$SERVER" --token "$TOKEN" --name "$NAME" --access-mode "$ACCESS_MODE" --install-root "$INSTALL_ROOT" --state-dir "$STATE_DIR")
+ARGS=("$INSTALL_DIR/devspace-agent.py" enroll --config "$CONFIG" --server "$SERVER" --token "$TOKEN" --name "$NAME" --access-mode "$ACCESS_MODE" --install-root "$INSTALL_ROOT" --state-dir "$STATE_DIR" --connection-mode "$CONNECTION_MODE")
 for root in "${WRITABLE_ROOTS[@]}"; do ARGS+=(--writable-root "$root"); done
 WAS_ACTIVE=0
 SERVICE_MODE="background"

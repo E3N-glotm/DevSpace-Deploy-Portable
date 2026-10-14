@@ -35,7 +35,7 @@ assert.equal(readFileSync(PACKAGED_AGENT, "utf8"), agent, "installed Portable Ag
 assert.equal(readFileSync(PACKAGED_INSTALLER, "utf8"), installer, "installed Portable installer must match maintained source");
 
 for (const contract of [
-  /AGENT_VERSION = "1\.1\.46"/,
+  /AGENT_VERSION = "1\.1\.48"/,
   /MAX_MESSAGE_BYTES = 8 \* 1024 \* 1024/,
   /TRANSFER_CHUNK_BYTES = 512 \* 1024/,
   /MAX_WATCHES = 64/,
@@ -121,7 +121,7 @@ assert.match(installer, /elif id ubuntu >\/dev\/null 2>&1; then[\s\S]{0,120}RUN_
   "ordinary root invocation must retain the historical ubuntu fallback when explicit root-service opt-in is absent");
 assert.doesNotMatch(installer, /curl is required/);
 assert.doesNotMatch(installer, /sha256sum is required/);
-assert.match(remoteAgentManager, /DEVSPACE_LINUX_AGENT_VERSION = "1\.1\.46"/);
+assert.match(remoteAgentManager, /DEVSPACE_LINUX_AGENT_VERSION = "1\.1\.48"/);
 assert.match(remoteAgentManager, /message\.agentVersion !== DEVSPACE_LINUX_AGENT_VERSION.*?agent\.selfUpdate/s);
 
 const python = spawnSync("python", ["-c", [

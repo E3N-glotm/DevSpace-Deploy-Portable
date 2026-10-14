@@ -522,7 +522,28 @@ try {
     await wire("continuation_task", { taskId: scenarioTask.id, action: "cancel" });
   }
   }
+  // A cached ChatGPT client may still request an anchor after the owner
+  // turned off automatic continuation. A rejected tool MUST NOT create a
+  // fresh task, emit card metadata or leave a visible milestone iframe.
+  writeFileSync(join(configDir, "auto-continuation.json"), JSON.stringify({
+    formatVersion: 1, enabled: false,
+  }));
+  const taskCountBeforeDisabledAnchor = runtime.database.sqlite.prepare(
+    "select count(*) as n from continuation_tasks").get().n;
+  const disabledAnchor = await client.callTool({
+    name: "continuation_anchor",
+    arguments: { taskId: started.task.id, requiredMilestones: ["must-not-create-card"] },
+  });
+  assert.equal(disabledAnchor.isError, true);
+  assert.equal(disabledAnchor.structuredContent.accepted, false);
+  assert.equal(disabledAnchor.structuredContent.reason, "automatic-continuation-disabled");
+  assert.equal(disabledAnchor.structuredContent.continuationAnchor, true);
+  assert.equal(disabledAnchor._meta?.['openai/outputTemplate'], undefined);
+  assert.equal(runtime.database.sqlite.prepare(
+    "select count(*) as n from continuation_tasks").get().n, taskCountBeforeDisabledAnchor);
+  assert.equal(runtime.continuationModelToolAuthorization({conversationScopeId: scope}).accepted, true);
   console.log("PASS: epoch 12/13 wire compatibility, epoch 11/future rejection, normalized leases and cached sender manual fencing");
+  console.log("PASS: disabled anchor wire call has no side effects or visible card metadata");
   console.log("PASS: strict schema, cached bridge, timeout, manual fencing, rejection, retry and synthetic work floor");
   console.log("PASS: selective task discovery and bounded execution ACK with retained server-side history");
   console.log("PASS: real MCP anchor/status/bind/heartbeat/READY/claim/authorize/receipt/ACK/completion contracts");

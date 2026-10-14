@@ -5,6 +5,8 @@ const path = require("path");
 const crypto = require("crypto");
 const childProcess = require("child_process");
 const {remoteSshAdminFactory} = require("./remote-ssh-admin.cjs");
+const {validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork} = require("./agent-network.cjs");
+const os = require("os");
 const http = require("http");
 const dns = require("dns").promises;
 const { pathToFileURL } = require("url");
@@ -77,8 +79,8 @@ const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
-const PORTABLE_VERSION = "1.1.63";
-const PORTABLE_DEV_ITERATION = "";
+const PORTABLE_VERSION = "1.1.64";
+const PORTABLE_DEV_ITERATION = "dev4";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -913,7 +915,7 @@ function captureComputerScreen(imageFile) {
   };
 }
 
-function processComputerUseRequests(lease) {
+function processComputerUseRequests(lease, { onActivity } = {}) {
   cleanupComputerUseBroker();
   if (!lease?.computerUseEnabled || !computerUseRuntimeEnabled()) {
     return { processed: 0, failed: 0, disabled: true, error: "computer-use-disabled" };
@@ -936,6 +938,7 @@ function processComputerUseRequests(lease) {
     } catch {
       continue;
     }
+    let authorizedActivity = false;
     try {
       const request = readJson(working, {});
       if (request.requestId !== requestId || request.leaseId !== lease.leaseId) {
@@ -943,6 +946,10 @@ function processComputerUseRequests(lease) {
         failed += 1;
         continue;
       }
+      // Only a live, lease-authorized request may pulse the visible desktop
+      // control indicator. The broker owns the signal, not arbitrary callers.
+      authorizedActivity = true;
+      try { onActivity?.("started"); } catch {}
       const imageFile = path.join(COMPUTER_USE_RESPONSES, `${requestId}.png`);
       const actionInputFile = path.join(COMPUTER_USE_REQUESTS, `${requestId}.action-${process.pid}.json`);
       const action = String(request.payload?.action || "");
@@ -975,6 +982,9 @@ function processComputerUseRequests(lease) {
       writeComputerUseResponse(requestId, { success: false, error: brokerErrorText(error?.message || error) });
       failed += 1;
     } finally {
+      if (authorizedActivity) {
+        try { onActivity?.("completed"); } catch {}
+      }
       fs.rmSync(working, { force: true });
     }
   }
@@ -1991,6 +2001,15 @@ async function runRemoteAgentAdmin(action, payload = {}) {
   const moduleUrl = `${pathToFileURL(REMOTE_AGENT_STORE_FILE).href}?mtime=${fs.statSync(REMOTE_AGENT_STORE_FILE).mtimeMs}`;
   const remoteModule = await import(moduleUrl);
   const config = readJson(CONFIG_FILE, {});
+  if(action==="create-enrollment"){
+    const mode=payload.connectionMode==="lan"?"lan":"internet";
+    const setting=readAgentNetwork(ROOT);
+    const url=mode==="lan" ? validateAgentUrl(payload.serverUrl,"lan")
+      : validateAgentUrl(payload.serverUrl||config.publicBaseUrl,"internet");
+    if(mode==="lan" && (!setting.enabled || Number(new URL(url).port)!==setting.port))
+      throw new Error("Enable the matching LAN Agent gateway port and restart the local MCP service before enrolling a LAN Agent.");
+    payload={...payload,connectionMode:mode,serverUrl:url};
+  }
   return remoteModule.remoteAgentAdmin({
     stateDir: STATE_DIR,
     action,
@@ -2000,9 +2019,48 @@ async function runRemoteAgentAdmin(action, payload = {}) {
 }
 
 async function runRemoteSshAdmin(action, payload = {}) {
-  return remoteSshAdminFactory({
+  const service=remoteSshAdminFactory({
     root: ROOT, readJson, writeJson, restrictAcl, remoteAdmin: runRemoteAgentAdmin,
-  }).handle(action, payload);
+  });
+  if(action==="switch-network"){
+    const mode=payload.connectionMode;
+    const cfg=readJson(CONFIG_FILE,{});
+    const desired=mode==="internet"?validateAgentUrl(payload.serverUrl||cfg.publicBaseUrl,"internet")
+      :validateAgentUrl(payload.serverUrl,"lan");
+    if(mode==="lan"){
+      const lan=readAgentNetwork(ROOT);
+      if(!lan.enabled || Number(new URL(desired).port)!==lan.port)
+        throw new Error("LAN Agent listener is disabled or its port does not match the requested URL.");
+    }
+    const result=await service.handle(action,{...payload,serverUrl:desired});
+    if(result?.ok){
+      const store=readJson(path.join(CONFIG_DIR,"agent-connections.json"),{});
+      store[String(payload.agentId)]={connectionMode:mode,serverUrl:desired};
+      writeJson(path.join(CONFIG_DIR,"agent-connections.json"),store);
+      restrictAcl(path.join(CONFIG_DIR,"agent-connections.json"));
+    }
+    return result;
+  }
+  return service.handle(action,payload);
+}
+function agentNetworkGet(){
+  const settings=readAgentNetwork(ROOT);
+  const addresses=Object.values(os.networkInterfaces()).flat().filter(x=>
+    x&&x.family==="IPv4"&&!x.internal&&/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(x.address))
+    .map(x=>x.address);
+  return {settings,addresses:[...new Set(addresses)],
+    internetDefaultUrl:String(readJson(CONFIG_FILE,{}).publicBaseUrl||""),
+    connections:readJson(path.join(CONFIG_DIR,"agent-connections.json"),{})};
+}
+function agentNetworkSet(payload){
+  const settings=validateLanSettings(payload);
+  if(settings.enabled && settings.port===Number(readJson(CONFIG_FILE,{}).port||7676))
+    throw new Error("Agent LAN port must differ from the local MCP listener port.");
+  fs.mkdirSync(CONFIG_DIR,{recursive:true});
+  writeJson(agentNetworkPath(ROOT),settings);
+  restrictAcl(agentNetworkPath(ROOT));
+  return {ok:true,settings,restartRequired:true,
+    notice:"Restart the local MCP service to apply the dedicated LAN Agent listener. The public MCP listener stays on 127.0.0.1."};
 }
 
 function installTasks() {
@@ -4541,6 +4599,10 @@ async function main() {
       stdoutJson(await runOAuthClientAdmin("delete", await readStdinJson()));
     } else if (command === "remote-agent-list") {
       stdoutJson(await runRemoteAgentAdmin("list", await readStdinJson()));
+    } else if (command === "agent-network-get") {
+      stdoutJson(agentNetworkGet());
+    } else if (command === "agent-network-set") {
+      stdoutJson(agentNetworkSet(await readStdinJson()));
     } else if (command === "remote-agent-create-enrollment") {
       stdoutJson(await runRemoteAgentAdmin("create-enrollment", await readStdinJson()));
     } else if (command === "remote-agent-revoke") {
@@ -4548,7 +4610,7 @@ async function main() {
     } else if (command === "remote-agent-delete") {
       stdoutJson(await runRemoteAgentAdmin("delete", await readStdinJson()));
     } else if (command.startsWith("remote-ssh-") &&
-      new Set(["list", "save", "test", "deploy", "recover", "delete"]).has(command.slice("remote-ssh-".length))) {
+      new Set(["list", "save", "test", "probe", "deploy", "recover", "switch-network", "delete"]).has(command.slice("remote-ssh-".length))) {
       stdoutJson(await runRemoteSshAdmin(command.slice("remote-ssh-".length), await readStdinJson()));
     } else if (command === "log-paths") {
       const provider = selectedTunnelProvider();

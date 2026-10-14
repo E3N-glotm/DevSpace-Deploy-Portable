@@ -6,7 +6,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createRemoteAgentStore } from "./remote-agent-store.js";
 
 export const DEVSPACE_REMOTE_AGENT_PROTOCOL = 1;
-export const DEVSPACE_LINUX_AGENT_VERSION = "1.1.46";
+export const DEVSPACE_LINUX_AGENT_VERSION = "1.1.48";
 const AGENT_PATH = "/agent/v1/connect";
 const MAX_RPC_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const DEFAULT_RPC_TIMEOUT_MS = 30_000;
@@ -82,8 +82,7 @@ export class RemoteAgentManager {
     connections = new Map();
     connectionWaiters = new Map();
     wss;
-    httpServer;
-    upgradeHandler;
+    httpServers = new Map();
     heartbeatTimer;
     constructor(config, runtimeState) {
         this.config = config;
@@ -93,14 +92,13 @@ export class RemoteAgentManager {
         this.heartbeatTimer = setInterval(() => this.heartbeat(), 15_000);
         this.heartbeatTimer.unref?.();
     }
-    attachHttpServer(httpServer) {
-        if (this.httpServer === httpServer)
+    attachHttpServer(httpServer, options = {}) {
+        if (this.httpServers.has(httpServer))
             return;
-        if (this.httpServer)
-            throw new Error("Remote Agent Manager is already attached to an HTTP server.");
-        this.httpServer = httpServer;
-        this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_RPC_PAYLOAD_BYTES });
-        this.upgradeHandler = (request, socket, head) => {
+        if (!this.wss)
+            this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_RPC_PAYLOAD_BYTES });
+        const lanOnly = options.lan === true;
+        const upgradeHandler = (request, socket, head) => {
             let pathname;
             try {
                 pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
@@ -111,13 +109,14 @@ export class RemoteAgentManager {
             }
             if (pathname !== AGENT_PATH)
                 return;
-            if (!this.agentHostAllowed(request)) {
+            if (!lanOnly && !this.agentHostAllowed(request)) {
                 socket.destroy();
                 return;
             }
-            this.wss.handleUpgrade(request, socket, head, (ws) => this.acceptSocket(ws, request));
+            this.wss.handleUpgrade(request, socket, head, (ws) => this.acceptSocket(ws, request, lanOnly));
         };
-        httpServer.on("upgrade", this.upgradeHandler);
+        this.httpServers.set(httpServer, upgradeHandler);
+        httpServer.on("upgrade", upgradeHandler);
     }
     agentHostAllowed(request) {
         if (this.config.allowedHosts?.includes("*"))
@@ -137,7 +136,7 @@ export class RemoteAgentManager {
         }
         return allowed.has(host);
     }
-    acceptSocket(ws, request) {
+    acceptSocket(ws, request, lanOnly = false) {
         const state = {
             ws,
             agentId: undefined,
@@ -145,6 +144,7 @@ export class RemoteAgentManager {
             pending: new Map(),
             lastSeenAt: Date.now(),
             remoteAddress: request.socket.remoteAddress,
+            agentOrigin: lanOnly ? this.lanAgentOrigin(request) : undefined,
         };
         const helloTimer = setTimeout(() => {
             if (!state.authenticated)
@@ -208,6 +208,16 @@ export class RemoteAgentManager {
         ws.on("close", () => this.dropConnection(state));
         ws.on("error", () => this.dropConnection(state));
     }
+    lanAgentOrigin(request) {
+        const host=String(request.headers.host || "").trim();
+        const parsed=/^((?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{2,5})$/.exec(host);
+        if (!parsed) return undefined;
+        const octets=parsed[1].split(".").map(Number);
+        if (octets.some(x=>x>255)||!(octets[0]===10||
+          (octets[0]===172&&octets[1]>=16&&octets[1]<=31)||
+          (octets[0]===192&&octets[1]===168))) return undefined;
+        return "http://"+host;
+    }
     handleHello(state, message) {
         if (message?.type !== "hello" || Number(message.protocol) !== DEVSPACE_REMOTE_AGENT_PROTOCOL)
             throw new Error(`Remote agent protocol mismatch. Expected ${DEVSPACE_REMOTE_AGENT_PROTOCOL}.`);
@@ -254,7 +264,7 @@ export class RemoteAgentManager {
             serverTime: new Date().toISOString(),
             agentVersion: DEVSPACE_LINUX_AGENT_VERSION,
             agentScriptSha256: agentScript.sha256,
-            agentScriptUrl: `${this.config.publicBaseUrl.replace(/\/+$/, "")}/agent/v1/devspace-agent.py`,
+            agentScriptUrl: `${state.agentOrigin || this.config.publicBaseUrl.replace(/\/+$/, "")}/agent/v1/devspace-agent.py`,
             enrollmentRecovered: Boolean(identity.recovered),
         };
         state.ws.send(JSON.stringify(ack));
@@ -468,8 +478,9 @@ export class RemoteAgentManager {
     }
     async close() {
         clearInterval(this.heartbeatTimer);
-        if (this.httpServer && this.upgradeHandler)
-            this.httpServer.off?.("upgrade", this.upgradeHandler);
+        for(const [server,handler] of this.httpServers)
+            server.off?.("upgrade",handler);
+        this.httpServers.clear();
         for (const state of this.connections.values())
             state.ws.close(1001, "server shutdown");
         this.connections.clear();

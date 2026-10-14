@@ -19,6 +19,7 @@ import { createLocalAgentStore } from "./local-agent-store.js";
 import { ensureDevspaceDefaultSkills, generateOwnerToken, loadDevspaceFiles, resolveSubagentsFlag, writeDevspaceAuth, writeDevspaceConfig, } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+import { startAgentLanGateway } from "./agent-lan-gateway.js";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 async function main(argv) {
@@ -171,7 +172,7 @@ async function serve() {
     }
     const { createServer } = await import("./server.js");
     const config = loadConfig();
-    const { app, close, localAgentProviders, attachAgentHttpServer } = createServer(config);
+    const { app, close, localAgentProviders, attachAgentHttpServer, remoteAgents } = createServer(config);
     const httpServer = app.listen(config.port, config.host, () => {
         console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
         console.log(`public base url: ${config.publicBaseUrl}`);
@@ -187,11 +188,15 @@ async function serve() {
         }
     });
     attachAgentHttpServer(httpServer);
+    let agentLanServer;
+    try { agentLanServer=await startAgentLanGateway(config,remoteAgents); }
+    catch(error) { await shutdownHttpServer(httpServer,close); throw error; }
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown)
             return;
         shuttingDown = true;
+        if(agentLanServer)await new Promise(resolve=>agentLanServer.close(()=>resolve()));
         await shutdownHttpServer(httpServer, close);
         process.exit(0);
     };

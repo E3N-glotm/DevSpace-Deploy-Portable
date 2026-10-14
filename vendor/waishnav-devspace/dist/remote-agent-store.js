@@ -267,7 +267,8 @@ export function remoteAgentAdmin({ stateDir, action, payload = {}, publicBaseUrl
             return { agents: store.list() };
         if (action === "create-enrollment") {
             const enrollment = store.createEnrollment(payload);
-            const base = String(publicBaseUrl ?? payload.publicBaseUrl ?? "").replace(/\/+$/, "");
+            const base = String(payload.serverUrl || publicBaseUrl || "").replace(/\/+$/, "");
+            const connectionMode=payload.connectionMode==="lan"?"lan":"internet";
             const rootArgs = enrollment.writableRoots.map((root) => `--writable-root '${root.replace(/'/g, `'"'"'`)}'`).join(" ");
             const stateKey = enrollment.agentId || `enroll-${sha256(enrollment.token).slice(0, 12)}`;
             const stateDir = `${enrollment.installRoot.replace(/\/+$/, "")}/.devspace-agent/${stateKey}`;
@@ -276,7 +277,8 @@ export function remoteAgentAdmin({ stateDir, action, payload = {}, publicBaseUrl
             const installCommand = base
                 ? `( tmp=$(mktemp); curl -fsSL '${base}/agent/v1/install.sh' -o "$tmp" && echo '${installer.sha256}  '"$tmp" | sha256sum -c - && bash "$tmp" --server '${base}' --token '${enrollment.token}' --name '${enrollment.name.replace(/'/g, `'"'"'`)}' --agent-sha256 '${agent.sha256}' --access-mode '${enrollment.accessMode}' --install-root '${enrollment.installRoot.replace(/'/g, `'"'"'`)}' --state-dir '${stateDir.replace(/'/g, `'"'"'`)}' ${rootArgs}; rc=$?; rm -f "$tmp"; exit $rc )`
                 : undefined;
-            return { enrollment, installCommand, serverUrl: base || undefined, stateDir, stateKey, installRoot: enrollment.installRoot, accessMode: enrollment.accessMode, writableRoots: enrollment.writableRoots, installerSha256: installer.sha256, agentSha256: agent.sha256 };
+            const selectedCommand=installCommand?.replace(" --token ", " --connection-mode '"+connectionMode+"' --token ");
+            return { enrollment, installCommand:selectedCommand, connectionMode, serverUrl: base || undefined, stateDir, stateKey, installRoot: enrollment.installRoot, accessMode: enrollment.accessMode, writableRoots: enrollment.writableRoots, installerSha256: installer.sha256, agentSha256: agent.sha256 };
         }
         if (action === "revoke")
             return { agent: store.revoke(String(payload.agentId ?? "")) };

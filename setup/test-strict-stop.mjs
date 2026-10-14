@@ -258,6 +258,10 @@ try {
   await mkdir(runDir, { recursive: true });
   await copyFile(sourceManager, manager);
   await copyFile(join(setupDir, "remote-ssh-admin.cjs"), join(sandboxSetupDir, "remote-ssh-admin.cjs"));
+  // 1.1.64 dev4 moved Agent network validation into a separate dependency.
+  // The isolated stop fixture must include it or the manager fails before
+  // process ownership is ever checked (MODULE_NOT_FOUND exit 1).
+  await copyFile(join(setupDir, "agent-network.cjs"), join(sandboxSetupDir, "agent-network.cjs"));
   await copyFile(process.execPath, sandboxNode);
   await writeFile(join(configDir, "deployment.json"), JSON.stringify({ port: 17689, tunnelProvider: "ngrok" }), "utf8");
   const launched = spawnSync(sandboxNode, ["-e", launcherCode], {

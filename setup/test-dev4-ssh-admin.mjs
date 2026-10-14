@@ -84,7 +84,14 @@ try {
           serverUrl:"https://example.test",stateDir:state,
           installerSha256:hashes[0],agentSha256:hashes[1]};
       }
-      if(action==="list")return {agents:[{id:"agent-existing",name:"test-agent",status:"online-recent"}]};
+      if(action==="list"){
+        // The desktop manager reads the database in a separate process, so
+        // its healthy status is online-recent, not an in-memory socket flag.
+        // A fresh SSH install must nevertheless have a *new* connect/heartbeat.
+        const seen=new Date().toISOString();
+        return {agents:[{id:"agent-existing",name:"test-agent",status:"online-recent",
+          connectedAt:seen,lastSeenAt:seen}]};
+      }
       throw new Error("Unexpected admin action: "+action);
     },
   });

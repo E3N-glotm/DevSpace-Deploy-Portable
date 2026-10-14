@@ -78,6 +78,8 @@ try {
   assert.equal(status.active, true);
   assert.equal(status.broker?.ready, true);
   assert.equal(status.broker?.pid, brokerPid);
+  assert.ok(Date.parse(status.broker?.activityUntilAt) > Date.now(),
+    "an authorized Computer Use request must pulse the visual desktop indicator");
 
   const disabled = manager("set-computer-use", { enabled: false });
   assert.equal(disabled.computerUseEnabled, false);

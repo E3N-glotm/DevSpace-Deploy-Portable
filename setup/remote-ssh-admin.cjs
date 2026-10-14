@@ -5,6 +5,18 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const cp = require("node:child_process");
+const {validateAgentUrl} = require("./agent-network.cjs");
+
+// The desktop manager reads SQLite in a separate process, not the live
+// RemoteAgentManager's in-memory socket set. Consequently an actually
+// connected Agent is reported as "online-recent" by this CLI. Require a
+// post-action connect AND heartbeat, plus stability across two polls; do not
+// mistake the pre-restart grace period for a successful recovery.
+function freshOnlineAgent(agent,startedAfter) {
+  return Boolean(agent && ["online","online-recent"].includes(String(agent.status||"").toLowerCase())
+    && Date.parse(agent.connectedAt||"")>=startedAfter
+    && Date.parse(agent.lastSeenAt||"")>=startedAfter);
+}
 
 function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAdmin}) {
   const profilesPath = path.join(root, "data", "remote-agent-ssh-profiles.json");
@@ -217,6 +229,84 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       throw new Error("Verified remote Agent restart failed: "+(result.error||result.output).slice(-300));
     return result.output.includes("DEVSPACE_AGENT_ALREADY_RUNNING")?"already-running":"started";
   }
+  function probeAgentEndpoint(profile,state,desiredUrl="") {
+    // An SSH restart is not a connectivity repair if the remote Linux machine
+    // cannot reach its configured controller. Probe the *actual* Agent
+    // WebSocket route before stopping an identity-verified running process.
+    const script=[
+      "set -eu","state="+quote(state),"override="+quote(desiredUrl),
+      "python3 - \"$state\" \"$override\" <<'PY'",
+      "import base64,json,os,pathlib,socket,ssl,sys,urllib.parse",
+      "config=json.loads((pathlib.Path(sys.argv[1])/'config.json').read_text())",
+      "base=sys.argv[2] or str((config.get('servers') or [config.get('server')])[0])",
+      "u=urllib.parse.urlparse(base)",
+      "if u.scheme not in ('http','https') or not u.hostname:raise SystemExit('DEVSPACE_AGENT_URL_INVALID')",
+      "port=u.port or (443 if u.scheme=='https' else 80)",
+      "sock=socket.create_connection((u.hostname,port),timeout=8)",
+      "try:",
+      " if u.scheme=='https':sock=ssl.create_default_context().wrap_socket(sock,server_hostname=u.hostname)",
+      " sock.settimeout(8)",
+      " key=base64.b64encode(os.urandom(16)).decode()",
+      " host=u.hostname+(':'+str(port) if port not in (80,443) else '')",
+      " request='GET /agent/v1/connect HTTP/1.1\\r\\nHost: '+host+'\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Version: 13\\r\\nSec-WebSocket-Key: '+key+'\\r\\n\\r\\n'",
+      " sock.sendall(request.encode('ascii'))",
+      " line=b''",
+      " while b'\\r\\n' not in line and len(line)<1024:line+=sock.recv(128)",
+      " status=line.split(b'\\r\\n',1)[0].decode('ascii','replace')",
+      " print('DEVSPACE_AGENT_WS_STATUS='+status)",
+      " if ' 101 ' not in status:raise SystemExit('DEVSPACE_AGENT_WS_NOT_UPGRADED')",
+      "finally:sock.close()",
+      "PY",
+    ];
+    const result=execute(profile,script.join("\n"),25000);
+    if(result.exitCode!==0||!result.output.includes("DEVSPACE_AGENT_WS_STATUS=HTTP/1.1 101"))
+      throw new Error("远程 Linux 无法连接 Agent 服务入口；不重启 Agent。检查 Windows 局域网 IP、监听端口、防火墙或公网隧道。"+
+        " "+(result.output||result.error).slice(-450));
+    return true;
+  }
+  async function waitForAgentHeartbeat(agentId,startedAfter=0,timeoutMs=24_000) {
+    const deadline=Date.now()+timeoutMs;
+    let consecutiveHealthy=0;
+    do{
+      const agents=(await remoteAdmin("list",{})).agents||[];
+      const found=agents.find(x=>x.id===agentId);
+      consecutiveHealthy=freshOnlineAgent(found,startedAfter)?consecutiveHealthy+1:0;
+      if(consecutiveHealthy>=2)
+        return found;
+      await new Promise(done=>setTimeout(done,1500));
+    }while(Date.now()<deadline);
+    throw new Error("Agent SSH process restarted, but no new controller heartbeat was observed.");
+  }
+  function configureAgentUrl(profile,state,agentId,serverUrl,mode,restore=false) {
+    const script=[
+      "set -eu","state="+quote(state),"agent_id="+quote(agentId),
+      "server="+quote(serverUrl),"mode="+quote(mode),"restore="+(restore?"1":"0"),
+      "python3 - \"$state\" \"$agent_id\" \"$server\" \"$mode\" \"$restore\" <<'PY'",
+      "import json,os,pathlib,sys,tempfile",
+      "state=pathlib.Path(sys.argv[1]); aid,url,mode,restore=sys.argv[2:]",
+      "config=state/'config.json'; backup=state/'.agent-network.previous.json'",
+      "data=json.loads(config.read_text())",
+      "assert data.get('agentId')==aid",
+      "if restore=='1':",
+      " assert backup.is_file()",
+      " content=backup.read_bytes()",
+      "else:",
+      " backup.write_bytes(config.read_bytes());os.chmod(backup,0o600)",
+      " data['server']=url;data['servers']=[url];data['connectionMode']=mode",
+      " content=(json.dumps(data,ensure_ascii=False,indent=2)+'\\n').encode()",
+      "fd,tmp=tempfile.mkstemp(dir=state,prefix='.agent-network-write-')",
+      "try:",
+      " with os.fdopen(fd,'wb') as f:f.write(content);f.flush();os.fsync(f.fileno())",
+      " os.chmod(tmp,0o600);os.replace(tmp,config)",
+      "finally:",
+      " if os.path.exists(tmp):os.unlink(tmp)",
+      "print('DEVSPACE_AGENT_CONFIG_WRITTEN')",
+      "PY",
+    ];
+    const result=execute(profile,script.join("\n"),16000);
+    if(result.exitCode!==0||!result.output.includes("DEVSPACE_AGENT_CONFIG_WRITTEN"))
+      throw new Error("Failed to save Agent connection settings: "+(result.error||result.output).slice(-400));
+  }
   function offlineInstall(enrollment,name,roots,sshUser,stateDirOverride="") {
     const data=enrollment.enrollment||{};
     const files=["install.sh","devspace-agent.py"].map(file=>{
@@ -246,6 +336,7 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       "--agent-sha256",hash(files[1]),"--access-mode",accessMode,
       "--install-root",data.installRoot||enrollment.installRoot,
       "--state-dir",stateDirOverride||enrollment.stateDir,"--agent-file",'"$tmp_dir/devspace-agent.py"'];
+    args.push("--connection-mode",enrollment.connectionMode==="lan"?"lan":"internet");
     if(!args[1]||!args[3]||!args[13])throw new Error("Enrollment missing required server, token, or state directory.");
     if(sshUser==="root")args.push("--user","root","--allow-root-service");
     if(accessMode!=="full-access")for(const writableRoot of roots)args.push("--writable-root",writableRoot);
@@ -280,16 +371,168 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       if(result.exitCode!==0||!result.output.includes("DEVSPACE_SSH_OK"))throw new Error("SSH test failed: "+result.error);
       return {ok:true,host:publicProfile(profile).host,output:result.output.slice(0,1500)};
     }
+    if(action==="inspect-agent-147"||action==="upgrade-agent-147"){
+      // Explicit maintenance on an already enrolled identity. Never create
+      // enrollment tokens, touch Agent configuration, or stop other workloads.
+      const agentId=String(payload.agentId||"").trim();
+      const installRoot=String(payload.installRoot||"").trim();
+      if(!/^agent_[a-z0-9]{6,32}$/i.test(agentId)||!installRoot.startsWith("/")||installRoot==="/")
+        throw new Error("Exact enrolled Agent ID and installation root are required.");
+      const state=findExistingState(profile,agentId,[],installRoot);
+      const inspectScript=[
+        "set -eu","state="+quote(state),"agent_id="+quote(agentId),
+        "python3 - \"$state\" \"$agent_id\" <<'PY'",
+        "import ast,hashlib,json,pathlib,sys",
+        "p=pathlib.Path(sys.argv[1]); aid=sys.argv[2]",
+        "config=(p/'config.json').read_bytes()",
+        "assert json.loads(config).get('agentId')==aid",
+        "data=(p/'bin/devspace-agent.py').read_bytes()",
+        "tree=ast.parse(data)",
+        "v=next(n.value.value for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='AGENT_VERSION' for t in n.targets))",
+        "processes=[]",
+        "for proc in pathlib.Path('/proc').iterdir():",
+        " if not proc.name.isdigit():continue",
+        " try:",
+        "  argv=[a.decode('utf8','replace') for a in (proc/'cmdline').read_bytes().split(b'\\0') if a]",
+        "  if str(p/'bin/devspace-agent.py') in argv and str(p/'config.json') in argv:processes.append(int(proc.name))",
+        " except (OSError,PermissionError): pass",
+        "print('DEVSPACE_AGENT_INSPECT='+json.dumps({'agentId':aid,'state':str(p),'version':v,'binarySha256':hashlib.sha256(data).hexdigest(),'configSha256':hashlib.sha256(config).hexdigest(),'processes':processes}))",
+        "PY",
+      ];
+      const inspect=()=>{
+        const result=execute(profile,inspectScript.join("\n"),22000);
+        if(result.exitCode!==0)throw new Error("Agent identity inspection failed: "+(result.error||result.output).slice(-350));
+        const line=result.output.match(/^DEVSPACE_AGENT_INSPECT=(.+)$/m)?.[1];
+        if(!line)throw new Error("Agent inspection returned no identity proof.");
+        const found=JSON.parse(line);
+        if(found.agentId!==agentId||found.state!==state)throw new Error("Inspected Agent identity does not match requested state.");
+        return found;
+      };
+      const previous=inspect();
+      if(action==="inspect-agent-147")return {ok:true,...previous};
+      if(String(payload.expectedAgentVersion)!=="1.1.47")
+        throw new Error("Explicit upgrade approval for Agent 1.1.47 is required.");
+      const original=fs.readFileSync(path.join(assetRoot,"devspace-agent.py"));
+      const source=original.toString("utf8");
+      if(!/^AGENT_VERSION = "1\.1\.47"$/m.test(source)
+        ||!source.includes("self._received_after_headers.extend(remainder)")
+        ||!source.includes('"reason": "not-newer"'))
+        throw new Error("Local Agent source lacks the tested 1.1.47 handshake/downgrade guards.");
+      const expected=hash(original);
+      const stageScript=[
+        "set -eu","state="+quote(state),"agent_id="+quote(agentId),
+        "python3 - \"$state\" \"$agent_id\" <<'PY'",
+        "import ast,base64,hashlib,json,os,pathlib,sys",
+        "state=pathlib.Path(sys.argv[1]); aid=sys.argv[2]",
+        "assert json.loads((state/'config.json').read_text()).get('agentId')==aid",
+        "payload=base64.b64decode("+JSON.stringify(original.toString("base64"))+")",
+        "assert hashlib.sha256(payload).hexdigest()=="+JSON.stringify(expected),
+        "ast.parse(payload.decode('utf8'))",
+        "target=state/'bin/.devspace-agent.1.1.47.staged'",
+        "target.write_bytes(payload); os.chmod(target,0o755)",
+        "print('STAGED_SHA256='+hashlib.sha256(target.read_bytes()).hexdigest())",
+        "PY",
+        'python3 "$state/bin/.devspace-agent.1.1.47.staged" self-test',
+      ];
+      const stage=execute(profile,stageScript.join("\n"),60000);
+      if(stage.exitCode!==0||!stage.output.includes("STAGED_SHA256="+expected)
+        ||!stage.output.includes('"passed": true'))
+        throw new Error("Agent staging/self-test failed; running Agent untouched: "+(stage.error||stage.output).slice(-400));
+      const backupScript=[
+        "set -eu","state="+quote(state),
+        'old="$state/bin/devspace-agent.py"; backup="$state/bin/.devspace-agent.1.1.46.backup"',
+        '[ -f "$backup" ] || cp -p "$old" "$backup"',
+        'test -s "$backup" && echo DEVSPACE_AGENT_BACKUP_READY',
+      ];
+      const backup=execute(profile,backupScript.join("\n"),18000);
+      if(backup.exitCode!==0||!backup.output.includes("DEVSPACE_AGENT_BACKUP_READY"))
+        throw new Error("Could not back up Agent; running Agent untouched.");
+      const restoreScript=[
+        "set -eu","state="+quote(state),
+        'cp -p "$state/bin/.devspace-agent.1.1.46.backup" "$state/bin/devspace-agent.py"',
+      ];
+      try{
+        stopVerifiedState(profile,state);
+        const replaceScript=[
+          "set -eu","state="+quote(state),"expected="+quote(expected),
+          "python3 - \"$state\" \"$expected\" <<'PY'",
+          "import hashlib,os,pathlib,sys",
+          "p=pathlib.Path(sys.argv[1]); staged=p/'bin/.devspace-agent.1.1.47.staged'",
+          "assert hashlib.sha256(staged.read_bytes()).hexdigest()==sys.argv[2]",
+          "os.replace(staged,p/'bin/devspace-agent.py')",
+          "print('AGENT_REPLACED='+sys.argv[2])",
+          "PY",
+        ];
+        const replaced=execute(profile,replaceScript.join("\n"),18000);
+        if(replaced.exitCode!==0||!replaced.output.includes("AGENT_REPLACED="+expected))
+          throw new Error("Verified Agent replacement failed.");
+        const restart=restartVerifiedState(profile,state);
+        const result=inspect();
+        if(result.version!=="1.1.47"||result.binarySha256!==expected
+          ||result.configSha256!==previous.configSha256||result.processes.length===0)
+          throw new Error("New Agent failed post-restart identity/version/config verification.");
+        return {ok:true,agentId,state,fromVersion:previous.version,version:result.version,
+          binarySha256:result.binarySha256,configPreserved:true,processes:result.processes,restart};
+      }catch(error){
+        const restore=execute(profile,restoreScript.join("\n"),18000);
+        if(restore.exitCode!==0)throw new Error("Agent update failed and binary rollback FAILED: "+error.message);
+        const restart=restartVerifiedState(profile,state);
+        throw new Error("Agent update failed; old binary restored and "+restart+": "+error.message);
+      }
+    }
+    if(action==="probe"){
+      const agentId=String(payload.agentId||"").trim();
+      if(!agentId)throw new Error("Agent ID required for an identity-fenced endpoint probe.");
+      const state=findExistingState(profile,agentId,[],String(payload.installRoot||""));
+      const mode=payload.connectionMode==="lan"?"lan":"internet";
+      const url=payload.serverUrl?validateAgentUrl(payload.serverUrl,mode):"";
+      probeAgentEndpoint(profile,state,url);
+      return {ok:true,agentId,endpointReachable:true,mode,checkedVia:"read-only SSH WebSocket HTTP 101 probe"};
+    }
     if(action==="recover"){
       const agentId=String(payload.agentId||"").trim();
       if(!agentId)throw new Error("Agent ID required to safely recover a remote instance.");
       const roots=Array.isArray(payload.writableRoots)?payload.writableRoots.map(String):[];
       const state=findExistingState(profile,agentId,roots,String(payload.installRoot||""));
+      probeAgentEndpoint(profile,state);
+      const restartedAfter=Date.now();
+      // A live but wedged Agent is the common failure case: the previous
+      // restartVerifiedState returned "already-running" and did nothing.
+      // Only the exact enrolled state is stopped, never all Python processes.
+      stopVerifiedState(profile,state);
       const restart=restartVerifiedState(profile,state);
-      return {ok:true,restart,stateVerified:true,agentId};
+      const agent=await waitForAgentHeartbeat(agentId,restartedAfter);
+      return {ok:true,restart,stateVerified:true,agentId,agent};
+    }
+    if(action==="switch-network"){
+      const agentId=String(payload.agentId||"").trim();
+      const mode=String(payload.connectionMode||"");
+      const serverUrl=validateAgentUrl(payload.serverUrl,mode);
+      const state=findExistingState(profile,agentId,[],String(payload.installRoot||""));
+      probeAgentEndpoint(profile,state,serverUrl);
+      // Back up the exact config before touching the process. Roll back on
+      // any failure, including an unreachable new address / lost heartbeat.
+      configureAgentUrl(profile,state,agentId,serverUrl,mode);
+      try{
+        const restartedAfter=Date.now();
+        stopVerifiedState(profile,state);
+        restartVerifiedState(profile,state);
+        const agent=await waitForAgentHeartbeat(agentId,restartedAfter);
+        return {ok:true,agentId,connectionMode:mode,serverUrl,agent};
+      }catch(error){
+        configureAgentUrl(profile,state,agentId,serverUrl,mode,true);
+        stopVerifiedState(profile,state);
+        restartVerifiedState(profile,state);
+        throw new Error("切换连接方式失败，已恢复旧配置并重启原 Agent："+error.message);
+      }
     }
     if(action==="deploy"){
       const agentId=String(payload.agentId||""),name=String(payload.name||"").trim();
+      const connectionMode=payload.connectionMode==="lan"?"lan":"internet";
+      const serverUrl=payload.serverUrl
+        ? validateAgentUrl(payload.serverUrl,connectionMode) : "";
+      if(connectionMode==="lan"&&!serverUrl)
+        throw new Error("LAN Agent SSH deployment requires the Windows LAN Agent URL.");
       const accessMode=payload.accessMode==="full-access"?"full-access":"scoped";
       const roots=accessMode==="full-access"?[]:Array.isArray(payload.writableRoots)?
         payload.writableRoots.map(String).map(x=>x.trim()).filter(Boolean):[];
@@ -301,18 +544,24 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       // the exact Agent ID; the old WinForms UI stopped old state before update.
       const existingState=agentId?findExistingState(profile,agentId,roots,installRoot):"";
       const enroll=await remoteAdmin("create-enrollment",
-        {agentId,name,installRoot,accessMode,writableRoots:roots,ttlMinutes:15});
+        {agentId,name,installRoot,accessMode,writableRoots:roots,ttlMinutes:15,
+          connectionMode,...(serverUrl?{serverUrl}:{})});
       const sameRoot=existingState && (existingState===installRoot||
         existingState.startsWith(installRoot.replace(/\/+$/,"")+"/"));
       const script=offlineInstall(enroll,name,roots,publicProfile(profile).userName,
         sameRoot?existingState:"");
       if(existingState)stopVerifiedState(profile,existingState);
+      // Accept only a *new* live connection, never a stale heartbeat from
+      // the pre-deployment instance that still falls in the grace window.
+      const startedAfter=Date.now();
       const result=execute(profile,script,150000);
       if(result.exitCode!==0)throw new Error("Agent SSH installer failed: "+(result.error||result.output).slice(-1500));
+      let consecutiveHealthy=0;
       for(let attempt=0;attempt<8;attempt++){
         const agents=(await remoteAdmin("list",{})).agents||[];
         const found=agents.find(a=>agentId?a.id===agentId:a.name===name);
-        if(found&&["online","online-recent"].includes(String(found.status||"").toLowerCase()))
+        consecutiveHealthy=freshOnlineAgent(found,startedAfter)?consecutiveHealthy+1:0;
+        if(consecutiveHealthy>=2)
           return {ok:true,agent:found};
         await new Promise(resolve=>setTimeout(resolve,1400));
       }
@@ -322,4 +571,4 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
   }
   return {handle,offlineInstall,publicProfile};
 }
-module.exports={remoteSshAdminFactory};
+module.exports={remoteSshAdminFactory,freshOnlineAgent};

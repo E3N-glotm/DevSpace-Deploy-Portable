@@ -2,12 +2,13 @@
 // DevSpace Portable Next: the renderer never receives Node, a shell, file IO,
 // OAuth credentials, or a generic command runner. Only the main process can
 // access the existing manager and the Windows clipboard.
-const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, Tray, Menu, screen } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const {createClosePolicy} = require('./close-policy.cjs');
 const {createPublicHealthMonitor} = require('./public-health.cjs');
+const {createComputerUseIndicator} = require('./computer-use-indicator.cjs');
 
 const ROOT = path.resolve(process.env.DEVSPACE_PORTABLE_ROOT || path.join(__dirname, '../..'));
 const HERE = path.resolve(__dirname, '..');
@@ -28,14 +29,14 @@ const ACTIONS = new Set([
 // Explicitly enumerate existing manager commands. The renderer can neither
 // choose an arbitrary command nor access Node, shell, or a filesystem API.
 const ADMIN_READ = new Set([
-  'remote-agent-list','remote-ssh-list','plugin-list','continuation-list','review-list',
+  'remote-agent-list','remote-ssh-list','remote-ssh-probe','agent-network-get','plugin-list','continuation-list','review-list',
   'review-details','memory-list','oauth-client-list',
   'continuation-cutoff-estimate-get','log-paths','network-proxy-state',
   'dashboard-status','update-check',
 ]);
 const ADMIN_WRITE = new Set([
   'remote-agent-create-enrollment','remote-agent-revoke','remote-agent-delete',
-  'remote-ssh-save','remote-ssh-test','remote-ssh-deploy','remote-ssh-recover','remote-ssh-delete',
+  'remote-ssh-save','remote-ssh-test','remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','agent-network-set',
   'plugin-install','plugin-export','plugin-enable','plugin-disable',
   'plugin-uninstall','plugin-slot-bind','plugin-slot-unbind','plugin-refresh',
   'continuation-lock','continuation-unlock','continuation-pause',
@@ -52,7 +53,7 @@ const ADMIN_WRITE = new Set([
 ]);
 const ADMIN_DESTRUCTIVE = new Set([
   'remote-agent-revoke','remote-agent-delete','plugin-uninstall',
-  'remote-ssh-deploy','remote-ssh-recover','remote-ssh-delete',
+  'remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','agent-network-set',
   'continuation-stop','continuation-delete','review-rollback',
   'review-restore-safety','memory-delete','oauth-client-rotate-secret',
   'oauth-client-delete','uninstall-tasks','disable','update-launch',
@@ -75,6 +76,8 @@ let refreshHandle = null;
 let closing = false;
 let computerUseLeaseId = '';
 let computerUseHeartbeat;
+let computerUseIndicatorTimer;
+let computerUseIndicator;
 let shutdownStarted = false;
 let selectedPluginSource = '';
 let selectedPluginExport = '';
@@ -452,7 +455,7 @@ function installHandlers() {
       }
       if (action === 'set-computer-use') {
         if (payload.enabled===true) await ensureComputerUseLease();
-        else computerUseLeaseId='';
+        else { computerUseLeaseId=''; computerUseIndicator?.hide(); }
       }
       if (action === 'update-launch' && response?.acknowledged === true) {
         // The detached updater owns the transaction after its launch ACK.
@@ -814,10 +817,36 @@ app.whenReady().then(() => {
     // requests after explicitly enabled permissions. It does not launch the
     // WinForms frontend; its lease expires if this window is terminated.
     computerUseHeartbeat=setInterval(async()=>{
-      if(closing||!computerUseLeaseId)return;
+      if(closing)return;
+      const deployment=readJson(path.join(CONFIG,'deployment.json'));
+      if(deployment.features?.computerUse!==true || deployment.permissions?.allowComputerUse!==true){
+        computerUseLeaseId='';
+        computerUseIndicator?.hide();
+        return;
+      }
+      // A one-off broker/lease heartbeat failure must not permanently stop
+      // computer control until the owner manually toggles it again. As long
+      // as the explicit owner policy still permits CU, retry the lease at the
+      // next tick, even when the previous lease ID has been discarded.
       try { await ensureComputerUseLease(); }
-      catch { computerUseLeaseId=''; }
+      catch { computerUseLeaseId=''; computerUseIndicator?.hide(); }
     },30_000);
+    // Separate short-lived, capture-excluded gold border for actual desktop
+    // activity. Broker pulse is lease-scoped and never depends on Host turn
+    // timing, automatic continuation, or the control-center window being shown.
+    if (!smokeMode) {
+      computerUseIndicator=createComputerUseIndicator({BrowserWindow,screen});
+      computerUseIndicatorTimer=setInterval(()=>{
+        const lease = readJson(path.join(ROOT,'data','run','ui-session.json'),null);
+        const broker = readJson(path.join(ROOT,'data','run','computer-use','broker.json'),null);
+        computerUseIndicator.update({
+          leaseId:computerUseLeaseId,
+          enabled:Boolean(computerUseLeaseId && lease?.leaseId===computerUseLeaseId
+            && lease.computerUseEnabled===true && Date.parse(lease.expiresAt)>Date.now()),
+          broker,
+        });
+      },500);
+    }
     remoteAutoRecoverTimer=setInterval(()=>recoverOfflineAgents().catch(()=>{}),120_000);
     if(readJson(path.join(CONFIG,'deployment.json')).features?.computerUse){
       ensureComputerUseLease().catch(()=>{ computerUseLeaseId=''; });
@@ -836,6 +865,8 @@ app.on('before-quit', (event) => {
   allowWindowClose = true;
   if (refreshHandle) clearInterval(refreshHandle);
   if (computerUseHeartbeat) clearInterval(computerUseHeartbeat);
+  if (computerUseIndicatorTimer) clearInterval(computerUseIndicatorTimer);
+  computerUseIndicator?.dispose();
   if (remoteAutoRecoverTimer) clearInterval(remoteAutoRecoverTimer);
   for (const watcher of watchers) watcher.close();
   if (trayIcon) { trayIcon.destroy(); trayIcon = null; }
