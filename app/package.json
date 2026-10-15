@@ -9,7 +9,7 @@
     "fast-uri": "3.1.7",
     "protobufjs": "7.6.5",
     "qs": "^6.16.0",
-    "undici": "8.10.2",
+    "undici": "8.11.2",
     "ws": "8.21.0"
   },
   "overrides": {
@@ -17,6 +17,6 @@
     "protobufjs": "7.6.5",
     "hono": "4.13.5",
     "ip-address": "10.7.2",
-    "undici": "8.10.2"
+    "undici": "8.11.2"
   }
 }
