@@ -639,40 +639,141 @@ export function DiagnosticsPage() {
 export function UpdatesPage({quickCheck=false,onQuickCheckConsumed}: {
   quickCheck?:boolean;onQuickCheckConsumed?:()=>void;
 }={}) {
-  const [busy,setBusy]=useState(false);
+  const [running,setRunning]=useState<''|'check'|'stage'|'install'>('');
   const [error,setError]=useState('');
-  const [result,setResult]=useState<any>(null);
+  const [checkResult,setCheckResult]=useState<any>(null);
+  const [progress,setProgress]=useState<import('./api').UpdateProgress|null>(null);
+  const [lastInstall,setLastInstall]=useState<import('./api').UpdateState['lastInstall']>(null);
+  const [elapsed,setElapsed]=useState(0);
   const [stagedPath,setStagedPath]=useState('');
-  const action=async(name:'update-check'|'update-stage'|'update-launch',
-    payload:Record<string,unknown>={},danger=false)=>{
-    if(danger&&!window.confirm('安装更新会退出控制中心、中断当前 MCP 与正在运行的任务。请确认已备份配置/数据库并安排维护窗口。继续吗？'))return null;
-    setBusy(true);setError('');
-    try {
-      const data=await window.devspace.admin(name,payload,danger);
-      setResult(data);return data;
-    } catch(e) {setError(explain(e));return null;}
-    finally {setBusy(false);}
+  const startedAt=useRef(0);
+  const busy=Boolean(running);
+  const check=async()=>{
+    if(busy)return;
+    setRunning('check');setError('');setCheckResult(null);setStagedPath('');setProgress(null);
+    startedAt.current=Date.now();setElapsed(0);
+    try{setCheckResult(await window.devspace.runAction('update-check'));}
+    catch{setError('检查更新失败。请检查互联网或系统代理连接，稍后重试。当前程序不会受到影响。');}
+    finally{setRunning('');}
+  };
+  const stage=async()=>{
+    if(busy||!checkResult?.updateAvailable)return;
+    setRunning('stage');setError('');setProgress(null);setStagedPath('');
+    startedAt.current=Date.now();setElapsed(0);
+    try{
+      const prepared=await window.devspace.admin('update-stage',{});
+      if(typeof prepared?.stagingPath==='string'&&prepared.stagingPath){
+        setStagedPath(prepared.stagingPath);
+        setProgress({phase:'staged',title:'更新已准备就绪',description:'已完成下载和完整性校验',
+          bytesReceived:0,bytesTotal:0,percent:null,speedBytesPerSecond:0,etaSeconds:null,updatedAt:Date.now()});
+      }else if(prepared?.updateAvailable===false){
+        setError('当前没有需要下载的新版本，请重新检查更新。');
+      }else{setError('未能完成更新准备。请重试，现有程序尚未更改。');}
+    }catch{
+      setError('下载或校验未完成。请检查网络或磁盘空间，再尝试下载；当前版本不受影响。');
+    }finally{setRunning('');}
+  };
+  const install=async()=>{
+    if(busy||!stagedPath)return;
+    if(!window.confirm('安装将关闭控制中心并暂时中断 MCP 连接和正在运行的任务。请确认已保存工作并安排维护时间。现在安装吗？'))return;
+    setRunning('install');setError('');startedAt.current=Date.now();setElapsed(0);
+    try{
+      const ack=await window.devspace.startUpdateInstaller(stagedPath);
+      if(ack?.started){setStagedPath('');
+        setProgress({phase:'apply-started',title:'正在启动安装程序',
+          description:'将打开独立安装窗口，继续显示安装进度和恢复状态',
+          bytesReceived:0,bytesTotal:0,percent:null,speedBytesPerSecond:0,etaSeconds:null,updatedAt:Date.now()});
+      }else{setError('未收到安装程序的启动确认，文件尚未开始替换，请重试。');}
+    }catch{setError('安装程序未能启动。可稍后重试，已下载的更新文件不会主动删除。');}
+    finally{setRunning('');}
   };
   useEffect(()=>{
     if(!quickCheck)return;
     onQuickCheckConsumed?.();
-    void action('update-check');
+    void check();
   },[quickCheck]);
-  return <Panel title="软件更新" caption="在设置中检查、下载并安装更新；不会因为打开设置页面就自动更新或停止服务。">
+  useEffect(()=>{
+    let live=true,waiting=false;
+    const refresh=async()=>{
+      if(waiting)return;
+      waiting=true;
+      try{
+        const state=await window.devspace.getUpdateState(running==='stage'?startedAt.current-1000:0);
+        if(live){setLastInstall(state.lastInstall);
+          if(running==='stage'&&state.progress)setProgress(state.progress);}
+      }catch{}finally{waiting=false;}
+    };
+    void refresh();
+    const timer=window.setInterval(refresh,running==='stage'?700:10_000);
+    return ()=>{live=false;window.clearInterval(timer);};
+  },[running]);
+  useEffect(()=>{
+    if(!running)return;
+    const timer=window.setInterval(()=>setElapsed(Math.floor((Date.now()-startedAt.current)/1000)),1000);
+    return ()=>window.clearInterval(timer);
+  },[running]);
+  const percent=progress?.percent;
+  const formatBytes=(bytes:number)=>bytes>=1024*1024*1024?(bytes/(1024**3)).toFixed(2)+' GB'
+    :bytes>=1024*1024?(bytes/(1024**2)).toFixed(1)+' MB'
+      :bytes>=1024?(bytes/1024).toFixed(0)+' KB':bytes+' B';
+  const duration=(seconds:number)=>seconds>=60?Math.floor(seconds/60)+' 分 '+seconds%60+' 秒':seconds+' 秒';
+  const modeName=(mode:string)=>mode==='blockmap'?'智能差分（只下载缺少的部分）'
+    :mode==='incremental'||mode==='incremental-chain'?'增量更新（节省流量）':'完整更新';
+  const versionParts=(v:string)=>/^\d+\.\d+\.\d+$/.test(v)?v.split('.').map(Number):[0,0,0];
+  const installedAhead=Boolean(checkResult&&versionParts(String(checkResult.currentVersion||''))
+    .some((n,i,all)=>n!==versionParts(String(checkResult.latestVersion||''))[i]
+      && all.slice(0,i).every((p,j)=>p===versionParts(String(checkResult.latestVersion||''))[j])
+      && n>versionParts(String(checkResult.latestVersion||''))[i]));
+  return <Panel title="软件更新" caption="简单三步：检查新版、下载并校验、确认安装。">
     {error&&<div role="alert" className="op-message op-error">{error}</div>}
-    <p className="help">检查和下载阶段不会替换当前服务。安装前须额外确认，并在有维护窗口时进行。</p>
-    <ActionRow><Button disabled={busy} onClick={()=>action('update-check')}>检查更新</Button>
-      <Button disabled={busy} onClick={async()=>{
-        setStagedPath('');
-        const staged=await action('update-stage');
-        if(typeof staged?.stagingPath==='string')setStagedPath(staged.stagingPath);
-      }}>下载并验证更新</Button>
-      <Button appearance="primary" disabled={busy||!stagedPath} onClick={async()=>{
-        const ack=await action('update-launch',{stagingPath:stagedPath},true);
-        if(ack?.acknowledged)setStagedPath('');
-      }}>安装已校验的更新</Button></ActionRow>
-    {stagedPath&&<div className="op-message op-success">更新已经校验并暂存；安装需要额外确认，届时控制中心将退出。</div>}
-    <p className="op-subtle">安装会中断当前 MCP 与正在进行的任务。先确认已备份配置/数据库，并安排无其他用户操作的维护窗口。</p>
-    {result&&simple(result)}
+    <div className="update-steps" aria-label="更新步骤">
+      <span className={running==='check'||checkResult?'current':''}>1 检查版本</span>
+      <span className={running==='stage'||stagedPath?'current':''}>2 下载校验</span>
+      <span className={running==='install'?'current':''}>3 安装重启</span>
+    </div>
+    <div className="update-overview" role="status" aria-live="polite">
+      <strong>{running==='check'?'正在检查是否有新版本…'
+        :running==='stage'?progress?.title||'正在连接下载服务…'
+        :running==='install'?progress?.title||'正在启动安装程序…'
+        :stagedPath?'更新已准备就绪，等待你确认安装'
+        :checkResult?.updateAvailable?'发现新版本 '+checkResult.latestVersion
+        :checkResult?.sourceCheckout?'源码目录无法在线覆盖更新'
+        :installedAhead?'当前版本比最新正式版更新'
+        :checkResult?'当前已是最新正式版':'点击“检查更新”开始'}</strong>
+      {running==='check'?<p>正在连接官方发布服务，请稍候（已等待 {duration(elapsed)}）。</p>
+        :running==='stage'?<p>{progress?.description||'正在获取更新文件，期间仍可正常使用软件'} · 已用时 {duration(elapsed)}</p>
+        :checkResult?<p>当前版本 {checkResult.currentVersion||'未知'} · 最新正式版 {checkResult.latestVersion||'未知'}
+          {checkResult.sourceCheckout?' · 请使用发布的安装包更新'
+            :checkResult.updateAvailable?' · '+modeName(String(checkResult.preferredMode||'')):' · 无需下载更新'}</p>
+          :<p>检查和下载不会替换现有文件，也不会停止服务。</p>}
+      {running==='stage'&&progress&&<>
+        {progress.bytesTotal>0&&<div className="update-progress">
+          <div className="update-progress-label"><span>{progress.phase==='downloading'?'下载进度':'当前文件进度'}</span><strong>{percent===null?'计算中…':percent+'%'}</strong></div>
+          <progress max={100} value={percent??0} aria-label="更新文件传输进度"/>
+          <div className="update-progress-meta"><span>{formatBytes(progress.bytesReceived)} / {formatBytes(progress.bytesTotal)}</span>
+            {progress.phase==='downloading'&&progress.speedBytesPerSecond>0&&
+              <span>{formatBytes(progress.speedBytesPerSecond)}/秒
+                {progress.etaSeconds!==null?' · 约剩 '+duration(progress.etaSeconds):''}</span>}</div>
+        </div>}
+        <small className="op-subtle">状态每秒左右刷新；下载到 100% 后还会继续校验与准备文件。</small>
+      </>}
+    </div>
+    <ActionRow><Button disabled={busy} onClick={check}>{running==='check'?'检查中…':'检查更新'}</Button>
+      <Button disabled={busy||!checkResult?.updateAvailable||checkResult?.sourceCheckout} onClick={stage}>{running==='stage'?'正在下载…':'下载并校验'}</Button>
+      <Button appearance="primary" disabled={busy||!stagedPath} onClick={install}>安装更新</Button></ActionRow>
+    {stagedPath&&<div className="op-message op-success">更新文件已经完整校验。点击“安装更新”后会先向你确认，不会自动重启。</div>}
+    {lastInstall&&<div className={'op-message '+(lastInstall.success?'op-success':'op-error')}>
+      {lastInstall.success
+        ?'最近一次更新已安装 '+lastInstall.version+(lastInstall.servicesRecovered?'，服务已恢复。':'，但服务需要检查，请到“服务与桌面控制”查看。')
+        :'上次安装没有完成。如系统已回退，可在维护窗口重试。'}
+    </div>}
+    <p className="op-subtle">安装阶段会暂时中断 MCP 连接和正在执行的任务，请在合适的时间操作。</p>
+    {checkResult&&<details className="op-advanced"><summary>版本与下载详情（高级）</summary>
+      <div className="review"><div>当前版本<strong>{checkResult.currentVersion}</strong></div>
+        <div>最新版本<strong>{checkResult.latestVersion}</strong></div>
+        <div>预计更新方式<strong>{modeName(String(checkResult.preferredMode||''))}</strong></div>
+        {Number(checkResult.incrementalAssetSize)>0&&<div>增量包大小<strong>{formatBytes(Number(checkResult.incrementalAssetSize))}</strong></div>}
+        <div>完整包大小<strong>{formatBytes(Number(checkResult.fullAssetSize||checkResult.assetSize||0))}</strong></div>
+      </div></details>}
   </Panel>;
 }

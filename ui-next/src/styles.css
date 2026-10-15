@@ -113,6 +113,24 @@
 .op-diff-hunk{background:#e2ecfb;color:#264f83}
 .op-diff code{font:inherit}
 
+/* Update UI is a status surface, not a PowerShell/JSON console. */
+.update-steps{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 16px}
+.update-steps span{padding:9px 13px;border:1px solid #c8d4e4;background:#f5f7fa;color:#45617e;
+  border-radius:8px;font-size:12px;font-weight:600}
+.update-steps span.current{color:#185a94;background:#eaf4ff;border-color:#80b2e4}
+.update-overview{background:#f6f9fd;border:1px solid #cbd8e8;border-radius:12px;padding:18px 20px;
+  margin:12px 0 14px;min-height:116px}
+.update-overview>strong{display:block;color:#172d49;font-size:17px}
+.update-overview>p{font-size:12px;color:#405771;margin:7px 0 0}
+.update-progress{margin-top:17px}
+.update-progress-label,.update-progress-meta{display:flex;justify-content:space-between;gap:10px;
+  flex-wrap:wrap;font-size:12px;color:#355573}
+.update-progress-label strong{font-variant-numeric:tabular-nums;color:#195f9b}
+.update-progress progress{display:block;width:100%;height:13px;margin:9px 0;
+  accent-color:#367ab9;border-radius:10px}
+.update-progress-meta{font-variant-numeric:tabular-nums;font-size:11px}
+.update-overview small{display:block;margin-top:12px}
+
 /* Full replacement UI: legible secondary text on both light and dark surfaces.
    Do not rely on Host/Windows accent colors for minimum contrast. */
 :root{color-scheme:light;--ds-text:#14263e;--ds-secondary:#415875;--ds-muted:#536781;--ds-border:#bdcce0}

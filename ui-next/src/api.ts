@@ -23,11 +23,20 @@ export type Settings = {
   ngrokToken?: string; cloudflareToken?: string; ownerToken?: string;
 };
 export type Progress = { phase: string; message: string; step: number; total: number };
+export type UpdateProgress = {
+  phase:string;title:string;description:string;bytesReceived:number;bytesTotal:number;
+  percent:number|null;speedBytesPerSecond:number;etaSeconds:number|null;updatedAt:number;
+};
+export type UpdateState = {progress:UpdateProgress|null;lastInstall:{
+  success:boolean;version:string;servicesRecovered:boolean;occurredAt:number;
+}|null};
 export type CloseChoice = 'minimize-tray' | 'exit-ui' | 'cancel';
 export type Backend = {
   initialize(): Promise<{config: Config; status: any; root: string; applyPending:boolean}>;
   getConfig(): Promise<Config>;
   getStatus(): Promise<any>;
+  getUpdateState(since?:number):Promise<UpdateState>;
+  startUpdateInstaller(stagingPath:string):Promise<{started:boolean}>;
   save(settings: Settings): Promise<{ mcpUrl: string; generatedOwnerToken: boolean }>;
   deploy(provider: Provider): Promise<void>;
   copySecret(kind: 'owner' | 'ngrok' | 'cloudflare'): Promise<{copied: boolean}>;

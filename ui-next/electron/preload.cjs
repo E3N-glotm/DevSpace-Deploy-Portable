@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld('devspace', Object.freeze({
   initialize: () => invoke('initialize'),
   getConfig: () => invoke('getConfig'),
   getStatus: () => invoke('getStatus'),
+  getUpdateState: since => invoke('getUpdateState', since),
+  startUpdateInstaller: staging => invoke('startUpdateInstaller', staging),
   save: settings => invoke('save', settings),
   deploy: provider => invoke('deploy', provider),
   copySecret: kind => invoke('copySecret', kind),

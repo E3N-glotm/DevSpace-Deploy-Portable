@@ -22,6 +22,8 @@ function hooks({ownedTaskXml}={}){
         ? require('../electron/public-health.cjs')
       :n==='./computer-use-indicator.cjs'
         ? require('../electron/computer-use-indicator.cjs')
+      :n==='./update-status.cjs'
+        ? require('../electron/update-status.cjs')
       :n==='node:child_process'&&ownedTaskXml!==undefined
         ? {...require(n),spawnSync:()=>({status:0,stdout:ownedTaskXml})}:require(n),
     __dirname:path.resolve(__dirname,'../electron'),process:{env:{...process.env,DEVSPACE_PORTABLE_ROOT:path.resolve(__dirname,'../..')},pid:125,argv:[]},

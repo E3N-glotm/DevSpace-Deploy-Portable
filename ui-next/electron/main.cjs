@@ -8,6 +8,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const {createClosePolicy} = require('./close-policy.cjs');
 const {createPublicHealthMonitor} = require('./public-health.cjs');
+const {readUpdateState} = require('./update-status.cjs');
 const {createComputerUseIndicator} = require('./computer-use-indicator.cjs');
 
 const ROOT = path.resolve(process.env.DEVSPACE_PORTABLE_ROOT || path.join(__dirname, '../..'));
@@ -317,6 +318,30 @@ function installHandlers() {
   // Explicit renderer refreshes are user-visible health checks and may verify
   // the configured public MCP endpoint. Background status pushes stay local.
   register('getStatus', () => publishStatus(true));
+  // Pollable while runManager('update-stage') is busy. The updater already
+  // persists progress; do not start any extra background downloads.
+  register('getUpdateState', since => readUpdateState(ROOT, since));
+  register('startUpdateInstaller', stagingPath => operation(async () => {
+    assertNoForeignServiceOwnership();
+    if (typeof stagingPath !== 'string' || !stagingPath) throw new Error('没有已校验的更新文件。');
+    const stage = path.resolve(stagingPath);
+    const prefix = path.resolve(ROOT, '.update-staging') + path.sep;
+    if (!stage.toLowerCase().startsWith(prefix.toLowerCase()) ||
+      !fs.existsSync(path.join(stage,'stage-info.json')) ||
+      !fs.existsSync(path.join(stage,'portable-updater.ps1')))
+      throw new Error('更新文件不存在或校验记录已失效，请重新下载。');
+    const exe = path.join(ROOT,'Update.exe');
+    if (!fs.existsSync(exe)) throw new Error('独立更新程序缺失，请重新安装完整发行版。');
+    await new Promise((resolve,reject) => {
+      const child = spawn(exe,['--resume-staged',stage,'--parent-ui',String(process.pid)],{
+        cwd:ROOT,windowsHide:false,detached:true,stdio:'ignore',
+      });
+      child.once('error',reject);
+      child.once('spawn',()=>{child.unref();resolve();});
+    });
+    setTimeout(()=>app.quit(),1600);
+    return {started:true};
+  }));
   register('getClosePreference', () => Promise.resolve(closePolicy.get()));
   register('setClosePreference', value => {
     if (!['','minimize-tray','exit-ui'].includes(value)) {

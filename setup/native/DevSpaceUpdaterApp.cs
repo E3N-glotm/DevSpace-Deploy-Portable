@@ -167,8 +167,37 @@ namespace DevSpacePortableUpdater
             Shown += async delegate
             {
                 if (_applyHelper) await ApplyFromTemporaryControllerAsync();
+                else if (_options.ContainsKey("resume-staged")) ResumeVerifiedStaging();
                 else await CheckAsync();
             };
+        }
+
+        // The Electron control center may already have downloaded and verified
+        // the update. Reuse that exact staging directory instead of downloading
+        // it again, and hand it to the visible detached Update.exe controller.
+        private void ResumeVerifiedStaging()
+        {
+            try
+            {
+                string staging = GetOption(_options, "resume-staged", "");
+                ValidateStagingPath(staging);
+                string metadata = Path.Combine(staging, "stage-info.json");
+                var info = _json.DeserializeObject(File.ReadAllText(metadata, Encoding.UTF8))
+                    as Dictionary<string, object>;
+                string target = GetString(info, "targetVersion", "");
+                if (!System.Text.RegularExpressions.Regex.IsMatch(target, @"^\d+\.\d+\.\d+$"))
+                    throw new InvalidOperationException("暂存的更新版本信息无效。");
+                if (!File.Exists(Path.Combine(staging, "portable-updater.ps1")))
+                    throw new InvalidOperationException("更新文件不完整，请重新下载并校验。");
+                _stagingPath = staging;
+                _targetVersion = target;
+                _summary.Text = "更新包已校验，准备安装 " + target;
+                _detail.Text = "独立安装窗口即将接管并显示实时安装状态。";
+                LaunchTemporaryApplyController();
+                _handoffToApply = true;
+                Close();
+            }
+            catch (Exception ex) { ShowFailure("无法继续安装", ex); }
         }
 
         private void BuildUi()

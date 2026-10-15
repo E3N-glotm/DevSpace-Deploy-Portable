@@ -270,6 +270,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-timeline.css",
             "ui-next/electron/main.cjs",
             "ui-next/electron/preload.cjs",
+            "ui-next/electron/update-status.cjs",
             "ui-next/dist/index.html",
             "ui-next/runtime/electron.exe",
             "ui-next/package.json",
