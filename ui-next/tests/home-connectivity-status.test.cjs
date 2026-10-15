@@ -25,7 +25,11 @@ test('home visibility drives a five-second public MCP verification',()=>{
   assert.match(app,/document\.visibilityState!=='visible'/);
   assert.match(app,/window\.setInterval\(refresh,5_000\)/);
   assert.match(main,/register\('getStatus', \(\) => publishStatus\(true\)\)/);
-  assert.match(main,/createPublicHealthMonitor\(\)/);
+  assert.match(main,/createPublicHealthMonitor\(\{/);
+  assert.match(main,/request: \(url, options\) => net\.fetch\(url, options\)/,
+    'public health checks must use Electron network stack and Windows proxy');
+  assert.doesNotMatch(main,/const publicMonitor = createPublicHealthMonitor\(\);/,
+    'Node global fetch bypasses system/PAC proxy and gives false disconnect indications');
   assert.match(probe,/oauth-protected-resource\/mcp/);
   assert.match(probe,/metadataStatus === 200 && mcpStatus === 401/);
   assert.match(probe,/recentSuccessMs = 120_000/);

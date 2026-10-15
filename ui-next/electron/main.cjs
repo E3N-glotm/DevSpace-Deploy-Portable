@@ -2,7 +2,7 @@
 // DevSpace Portable Next: the renderer never receives Node, a shell, file IO,
 // OAuth credentials, or a generic command runner. Only the main process can
 // access the existing manager and the Windows clipboard.
-const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, Tray, Menu, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, net, Tray, Menu, screen } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
@@ -70,7 +70,13 @@ const SECRETS = Object.freeze({
 let windowRef;
 let activeOperation = false;
 let currentStatus = {};
-const publicMonitor = createPublicHealthMonitor();
+// Node's global fetch bypasses the Windows system proxy / PAC that Chromium
+// and PowerShell use. On proxy-routed hosts this produced 8-second false
+// "public connection uncertain" states despite healthy live MCP sessions.
+// Electron net.fetch uses the active Chromium session's proxy resolver.
+const publicMonitor = createPublicHealthMonitor({
+  request: (url, options) => net.fetch(url, options),
+});
 let watchers = [];
 let refreshHandle = null;
 let closing = false;
