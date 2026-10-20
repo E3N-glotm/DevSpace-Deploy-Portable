@@ -1,10 +1,11 @@
-# Release pause — 2026-09-18
+# Release policy
 
-The 1.1.60 candidate has been withdrawn. Current implementation continues as
-1.1.59 dev102 without reverting source history. Release and incremental-backfill
-workflows are disabled, and DEVSPACE_RELEASE_APPROVED is false. Do not publish
-or recreate 1.1.60 tags/assets while real continuation acceptance is pending.
-The existing development-manifest check also blocks the manual publisher.
+The withdrawn 1.1.60 release remains prohibited. Subsequent stable releases
+resume at 1.1.61 and later. The release workflow is gated by the repository
+variable `DEVSPACE_RELEASE_APPROVED`; the stable tag must have no `development`
+field in `VERSION-MANIFEST.json`, must include a matching
+`docs/releases/HOTFIX-<version>.md`, and must pass CI before its assets count
+as published. Never infer successful publication merely from pushing a tag.
 
 # Release process
 
