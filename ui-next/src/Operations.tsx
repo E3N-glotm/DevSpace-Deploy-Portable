@@ -76,6 +76,15 @@ function ActionRow({children}:{children:React.ReactNode}) {
   return <div className="op-actions">{children}</div>;
 }
 
+function parseLinuxRoots(text:string):string[] {
+  return [...new Set(text.split(/[\r\n]+/).map(s=>s.trim()).filter(Boolean))];
+}
+function validLinuxRoots(roots:string[]):boolean {
+  return roots.length>0 && roots.length<=32 && roots.every(root=>
+    root.startsWith('/') && root.length<=1024 && !/[\x00-\x1f]/.test(root) &&
+    !root.split('/').some(part=>part==='.'||part==='..'));
+}
+
 export function AgentsPage() {
   const b=useBackend('remote-agent-list');
   const ssh=useBackend('remote-ssh-list');
@@ -99,6 +108,7 @@ export function AgentsPage() {
   const [sshUser,setSshUser]=useState('ubuntu');
   const [credential,setCredential]=useState('');
   const [originalRoots,setOriginalRoots]=useState<string[]>([]);
+  const [rootText,setRootText]=useState('');
   const [formBusy,setFormBusy]=useState(false);
   const [formError,setFormError]=useState('');
   const [formNotice,setFormNotice]=useState('');
@@ -110,12 +120,20 @@ export function AgentsPage() {
   const existingMode=net.data?.connections?.[selected]?.connectionMode||agent?.metadata?.connectionMode||'internet';
   const existingUrl=String(net.data?.connections?.[selected]?.serverUrl||agent?.metadata?.serverUrl||'');
   const validPort=Number.isInteger(Number(sshPort))&&Number(sshPort)>=1&&Number(sshPort)<=65535;
-  const ready=Boolean(name.trim()&&installRoot.trim()&&sshHost.trim()&&sshUser.trim()&&validPort);
+  const scopedRoots=parseLinuxRoots(rootText);
+  const rootsValid=full||validLinuxRoots(scopedRoots);
+  const ready=Boolean(name.trim()&&installRoot.trim()&&sshHost.trim()&&sshUser.trim()&&validPort&&rootsValid);
+  const updateInstallRoot=(next:string)=>{
+    if(!full&&(!rootText.trim()||rootText.trim()===installRoot.trim()))setRootText(next);
+    setInstallRoot(next);
+  };
   const prepare=(id:string)=>{
     const item=agents.find(x=>String(x.id)===id);
     const saved=findProfile(id,item||null);
     setSelected(id);setName(value(item||null,'name'));setInstallRoot(value(item||null,'installRoot'));
     setOriginalRoots(Array.isArray(item?.writableRoots)?item.writableRoots.map(String):[]);
+    setRootText(Array.isArray(item?.writableRoots)&&item.writableRoots.length
+      ?item.writableRoots.map(String).join('\n'):value(item||null,'installRoot'));
     setFull(item?.accessMode==='full-access');setCommand('');setFormError('');setFormNotice('');
     const pref=net.data?.connections?.[id] || item?.metadata || {};
     setConnectionMode(pref.connectionMode==='lan'?'lan':'internet');
@@ -149,12 +167,10 @@ export function AgentsPage() {
         if(network.restartRequired)await window.devspace.runAction('restart-local');
       }
       await saveSsh();
-      const roots=full?[]:originalRoots.length&&selected
-        ?originalRoots.length===1&&originalRoots[0]===agent?.installRoot
-          ?[installRoot.trim()]:originalRoots
-        :[installRoot.trim()];
+      const roots=full?[]:scopedRoots;
       const changed=Boolean(!selected||name.trim()!==agent?.name||installRoot.trim()!==agent?.installRoot
-        ||full!==(agent?.accessMode==='full-access'));
+        ||full!==(agent?.accessMode==='full-access') ||
+        (!full&&JSON.stringify([...roots].sort())!==JSON.stringify([...originalRoots].sort())));
       const networkChanged=mode!==existingMode || Boolean(existingUrl&&serverUrl&&existingUrl!==serverUrl);
       if(selected&&!changed&&!networkChanged){
         setFormNotice('SSH 连接信息已保存。');
@@ -199,10 +215,7 @@ export function AgentsPage() {
       const response=await window.devspace.admin('remote-agent-create-enrollment',{
         agentId:selected,name:name.trim(),installRoot:installRoot.trim(),
         accessMode:full?'full-access':'scoped',
-        writableRoots:full?[]:originalRoots.length&&selected
-          ?originalRoots.length===1&&originalRoots[0]===agent?.installRoot
-            ?[installRoot.trim()]:originalRoots
-          :[installRoot.trim()],
+        writableRoots:full?[]:scopedRoots,
         connectionMode,...(connectionMode==='lan'?{serverUrl:network.serverUrl}:{}),
       });
       setCommand(String(response?.installCommand||''));
@@ -231,7 +244,14 @@ export function AgentsPage() {
           <Field label="权限"><select className="op-select" value={full?'full':'scoped'} onChange={e=>setFull(e.target.value==='full')}>
             <option value="scoped">受限权限</option><option value="full">完全访问</option>
           </select></Field>
-          <TextControl label="安装目录" value={installRoot} onChange={setInstallRoot} placeholder="/home/ubuntu/workspace" required/>
+          <TextControl label="安装目录" value={installRoot} onChange={updateInstallRoot} placeholder="/home/ubuntu/workspace" required/>
+          {!full&&<Field label="允许访问的 Linux 目录" required>
+            <Textarea rows={3} className="op-path-textarea" value={rootText}
+              placeholder={'/home/ubuntu/workspace\n/home/ubuntu/datasets'}
+              onChange={(_e,d)=>setRootText(d.value)}/>
+          </Field>}
+          {!full&&<p className="op-path-help">每行一个绝对路径，支持多个目录；安装目录和可访问目录可以不同。修改已有服务器的授权路径后需重新部署 Agent。</p>}
+          {!full&&rootText.trim()&&!rootsValid&&<div className="op-message op-error">至少填写一个合法的 Linux 绝对路径（不能包含 . 或 .. 路径段）。</div>}
           <div className="form-grid">
             <TextControl label="服务器 IP" value={sshHost} onChange={setSshHost} placeholder="192.168.1.20" required/>
             <TextControl label="SSH 端口" value={sshPort} onChange={setSshPort} placeholder="22" required/>
@@ -488,8 +508,22 @@ export function MemoriesPage({workspaceRoots}:{workspaceRoots:string[]}) {
         <div className="op-form"><TextControl label="标题" value={title} onChange={setTitle} required/>
           <Field label="作用域"><select className="op-select" value={scope} onChange={e=>setScope(e.target.value as 'global'|'workspace')}>
             <option value="workspace">工作区</option><option value="global">全局</option></select></Field>
-          {scope==='workspace'&&<Field label="绑定工作目录"><select className="op-select" value={root} onChange={e=>setRoot(e.target.value)}>
-            {workspaceRoots.map(p=><option key={p} value={p}>{p}</option>)}</select></Field>}
+          {scope==='workspace'&&<>
+            <Field label="选择授权根目录"><select className="op-select"
+              value={workspaceRoots.some(p=>p.toLowerCase()===root.toLowerCase())?root:''}
+              onChange={e=>{if(e.target.value)setRoot(e.target.value);}}>
+              <option value="">选择根目录或直接输入子目录</option>
+              {workspaceRoots.map(p=><option key={p} value={p}>{p}</option>)}</select></Field>
+            <Field label="绑定工作目录" required><div className="op-path-row">
+              <Input value={root} placeholder="例如 E:\\program\\Python\\my-project"
+                onChange={(_e,d)=>setRoot(d.value)}/>
+              <Button onClick={async()=>{
+                try{const directory=await window.devspace.chooseFolder();if(directory)setRoot(directory);}
+                catch(e){window.alert(explain(e));}
+              }}>浏览文件夹</Button>
+            </div></Field>
+            <p className="op-path-help">可选择已授权根目录下的具体子目录；此操作不会扩大 DevSpace 的文件访问权限。</p>
+          </>}
           <TextControl label="标签（用逗号分隔）" value={tags} onChange={setTags}/>
           <Field label="正文" required><Textarea rows={11} value={content} onChange={(_e,d)=>setContent(d.value)}/></Field>
           <ActionRow><Button appearance="primary" disabled={b.busy||!title.trim()||!content.trim()||(scope==='workspace'&&!root)}

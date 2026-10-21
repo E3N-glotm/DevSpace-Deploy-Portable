@@ -55,10 +55,12 @@ try {
     enrollment:{token:"test-one-time-token",accessMode:"scoped",installRoot:"/home/ubuntu/workspace"},
     serverUrl:"https://example.test",stateDir:"/home/ubuntu/workspace/.devspace-agent/isolated",
     installerSha256:hashes[0],agentSha256:hashes[1],
-  },"test-agent",["/home/ubuntu/workspace"],"ubuntu");
+  },"test-agent",["/home/ubuntu/datasets","/mnt/archive"],"ubuntu");
   assert.ok(installer.includes("DEVSPACE_ASSET_0"));
   assert.ok(installer.includes("DEVSPACE_ASSET_1"));
   assert.ok(installer.includes("--writable-root"));
+  assert.ok(installer.includes("/home/ubuntu/datasets"));
+  assert.ok(installer.includes("/mnt/archive"));
   assert.ok(installer.includes("--state-dir"));
   assert.ok(!installer.includes("curl -"));
   assert.ok(installer.includes("test-one-time-token"));

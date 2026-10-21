@@ -160,7 +160,13 @@ function runManager(action, payload, timeoutMs = 90_000) {
     let stdout = '', stderr = '';
     const limit = 5 * 1024 * 1024;
     let settled = false;
-    const timer = setTimeout(() => child.kill(), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // Report a timeout distinctly from a child process' own non-zero exit.
+      // During first-run initialization a scheduled task may still be starting.
+      child.kill();
+    }, timeoutMs);
     child.stdout.on('data', b => {
       if (stdout.length + b.length > limit) { child.kill(); return; }
       stdout += b.toString('utf8');
@@ -174,6 +180,10 @@ function runManager(action, payload, timeoutMs = 90_000) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`管理操作 ${action} 等待超过 ${Math.ceil(timeoutMs / 1000)} 秒。可能仍有计划任务正在启动，请到“服务与桌面控制”和“日志与诊断”检查状态，再决定是否重试；不会自动覆盖现有实例。`));
+        return;
+      }
       if (code !== 0) {
         // Never pass potentially credential-bearing stdout/stderr to the renderer.
         reject(new Error(`管理操作 ${action} 失败（退出码 ${code}），请到诊断页查看安全日志。`));
@@ -370,7 +380,7 @@ function installHandlers() {
   register('save', input => operation(async () => {
     const checked = validateSettings(input);
     broadcastProgress('save', '正在检查并保存配置', 1, 4);
-    const outcome = await runManager('configure', checked, 160_000);
+    const outcome = await runManager('configure', checked, 300_000);
     // Keep the save-versus-apply state across window restarts. Only the
     // existing manager can apply configuration to the running service.
     fs.mkdirSync(path.dirname(APPLY_PENDING), {recursive:true});
@@ -384,16 +394,16 @@ function installHandlers() {
     if (!['local', 'ngrok', 'cloudflare'].includes(provider)) throw new Error('Invalid provider');
     assertNoForeignServiceOwnership();
     broadcastProgress('tasks', '注册本地 MCP 服务', 2, 4);
-    await runManager('install-tasks', undefined, 130_000);
+    await runManager('install-tasks', undefined, 240_000);
     if (provider === 'local') {
       broadcastProgress('local', '仅启动本地 MCP，不启动公网隧道', 3, 4);
       await runManager('stop-tunnel', undefined, 90_000);
       // A mere start-local would leave a healthy *old* process running with
       // stale permissions or OAuth settings after configuration changes.
-      await runManager('restart-local', undefined, 150_000);
+      await runManager('restart-local', undefined, 300_000);
     } else {
       broadcastProgress('start', '启动 MCP 与公网隧道', 3, 4);
-      await runManager('restart-local', undefined, 150_000);
+      await runManager('restart-local', undefined, 300_000);
       await runManager('restart-tunnel', undefined, 180_000);
     }
     const result = await publishStatus();

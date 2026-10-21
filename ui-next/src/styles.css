@@ -1,4 +1,9 @@
 :root{font-family:"Segoe UI Variable","Segoe UI",Arial,sans-serif;font-synthesis:none;color:#182238;background:#f6f8fc}
+.op-path-row{display:flex;align-items:center;gap:8px;width:100%;min-width:0}
+.op-path-row>span,.op-path-row [class*="fui-Input"]{flex:1;min-width:0}
+.op-path-row button{flex-shrink:0}
+.op-path-textarea{width:100%}
+.op-path-help{margin:0;color:#67768a;font-size:12px;line-height:1.5}
 *{box-sizing:border-box}body{margin:0;min-width:830px}button,input,textarea{font:inherit}button{cursor:pointer}
 .desktop{display:flex;height:100vh;min-height:630px}.sidebar{width:244px;flex-shrink:0;padding:22px 13px 17px;background:#101f38;color:#e8efff;display:flex;flex-direction:column}
 .brand{display:flex;align-items:center;gap:12px;font-size:21px;font-weight:750;letter-spacing:-.8px;padding:8px 10px 31px}

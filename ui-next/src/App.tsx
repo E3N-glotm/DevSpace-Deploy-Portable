@@ -233,15 +233,26 @@ export function App() {
     setBusy(true);setError('');setNotice('');setProgress(null);
     try {
       const previous=await window.devspace.getConfig();
-      const result=await window.devspace.save(compileAccessSettings(draft));
-      setApplyPending(true);
-      const next=await window.devspace.getConfig();
-      setConfig(next);setDraft(fromConfig(next));setDirty(false);setSecretRevision(v=>v+1);
+      // First-run retry after a successful save must not reconfigure secrets
+      // or reinstall runtime assets while an earlier deploy is still pending.
+      const needsSave=dirty||!previous.configured||!applyPending||!deploy;
+      const result=needsSave
+        ?await window.devspace.save(compileAccessSettings(draft))
+        :{generatedOwnerToken:false};
+      if(needsSave){
+        setApplyPending(true);
+        const next=await window.devspace.getConfig();
+        setConfig(next);setDraft(fromConfig(next));setDirty(false);setSecretRevision(v=>v+1);
+      }
       if(deploy) {
         await window.devspace.deploy(draft.provider);
         setApplyPending(false);
-        setStatus(await window.devspace.getStatus());
-        setStep(6);setNotice('部署已完成。请保存 MCP 地址和 Owner Password。');
+        const refreshed=await window.devspace.getStatus();
+        setStatus(refreshed);
+        setStep(6);
+        setNotice(draft.provider!=='local'&&refreshed.publicHealthy!==true
+          ?'本地 MCP 已部署。公网入口仍在连接或等待隧道路由同步，可在服务状态页继续检查。'
+          :'部署已完成。请保存 MCP 地址和 Owner Password。');
       } else {
         setNotice(previous.configured ? '设置已保存。网络或权限变更需点击「应用并重启」才会在服务中生效。'
           : '首次设置已保存，可以部署 DevSpace。');
@@ -276,7 +287,7 @@ export function App() {
           <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
       <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span>v1.1.65</span></div>
+        <div className="sidebar-status"><span>v1.1.66 dev1</span></div>
       </div>
     </aside>
     <main className="main">

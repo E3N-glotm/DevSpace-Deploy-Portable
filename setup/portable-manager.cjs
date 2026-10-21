@@ -79,8 +79,8 @@ const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
-const PORTABLE_VERSION = "1.1.65";
-const PORTABLE_DEV_ITERATION = "";
+const PORTABLE_VERSION = "1.1.66";
+const PORTABLE_DEV_ITERATION = "dev1";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -1494,6 +1494,7 @@ async function runReviewAdmin(action, payload = {}) {
 }
 
 async function runMemoryAdmin(action, payload = {}) {
+  const {validateMemoryWorkspaceRoot} = require("./memory-workspace-path.cjs");
   if (!fs.existsSync(DATABASE_CLIENT_FILE) || !fs.existsSync(MEMORY_STORE_FILE)) {
     throw new Error("Memory runtime is missing from the bundled DevSpace package.");
   }
@@ -1516,12 +1517,8 @@ async function runMemoryAdmin(action, payload = {}) {
       const scope = payload.scope === "global" ? "global" : "workspace";
       let workspaceRoot;
       if (scope === "workspace") {
-        workspaceRoot = path.resolve(String(payload.workspaceRoot || ""));
         const config = readJson(CONFIG_FILE, {});
-        const allowed = (config.allowedRoots || []).map((root) => path.resolve(String(root)).toLowerCase());
-        if (!allowed.includes(workspaceRoot.toLowerCase())) {
-          throw new Error("Workspace-scoped Memories created from the Portable UI must use one configured allowed root.");
-        }
+        workspaceRoot = validateMemoryWorkspaceRoot(payload.workspaceRoot, config.allowedRoots);
       }
       return {
         memory: store.upsert({

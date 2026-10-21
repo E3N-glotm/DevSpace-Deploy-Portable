@@ -547,7 +547,12 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
         throw new Error("LAN Agent SSH deployment requires the Windows LAN Agent URL.");
       const accessMode=payload.accessMode==="full-access"?"full-access":"scoped";
       const roots=accessMode==="full-access"?[]:Array.isArray(payload.writableRoots)?
-        payload.writableRoots.map(String).map(x=>x.trim()).filter(Boolean):[];
+        [...new Set(payload.writableRoots.map(String).map(x=>x.trim()).filter(Boolean))]:[];
+      if(accessMode==="scoped" && (roots.length>32 || roots.some(root=>
+        !root.startsWith("/") || root.length>1024 || /[\x00-\x1f]/.test(root) ||
+        root.split("/").some(segment=>segment==="."||segment==="..")))) {
+        throw new Error("Scoped Agent roots must be valid absolute Linux directories.");
+      }
       const requestedRoot=String(payload.installRoot||"").trim();
       if(!name||!requestedRoot||accessMode==="scoped"&&!roots.length)
         throw new Error("Agent name, install root and scoped roots are required.");

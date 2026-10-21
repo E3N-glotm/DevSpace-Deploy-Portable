@@ -125,6 +125,7 @@ Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-release-plug
 
 $Tests = @(
     "setup/test-runtime-cards.mjs",
+    "setup/test-memory-workspace-path.mjs",
     "setup/test-runtime-log-ui.mjs",
     "setup/test-portable-ui-workflows.mjs",
     "setup/test-oauth-client-compatibility.mjs",

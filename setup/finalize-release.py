@@ -138,9 +138,10 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "app/package.json",
             "app/node_modules/@earendil-works/pi-coding-agent/package.json",
             "app/node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json",
-            "app/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/package.json",
             "setup/portable-manager.cjs",
             "setup/remote-ssh-admin.cjs",
+            "setup/memory-workspace-path.cjs",
+            "setup/test-memory-workspace-path.mjs",
             "setup/logged-launcher.cjs",
             "DevSpace-Portable.exe",
             "DevSpace-Portable-Next.exe",
@@ -289,6 +290,13 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "docs/CODEX-GAP-1.1.6.md",
         }
     )
+    # npm ci may safely hoist undici rather than retaining the package-local
+    # copy. Track the actual installed package, not a stale lockfile layout.
+    undici_nested = "app/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/package.json"
+    undici_hoisted = "app/node_modules/undici/package.json"
+    candidates.discard(undici_nested)
+    candidates.discard(undici_hoisted)
+    candidates.add(undici_nested if (ROOT / undici_nested).is_file() else undici_hoisted)
     candidates.update(
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / "docs" / "releases").glob("HOTFIX-*.md")
