@@ -1,12 +1,12 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.66",
-  "builtAt": "2026-10-21T10:32:27+08:00",
+  "builtAt": "2026-10-27T14:33:29+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
   },
-  "displayVersion": "1.1.66 dev1",
+  "displayVersion": "1.1.66 dev2",
   "runtime": {
     "node": "24.18.1",
     "gitForWindows": "2.51.2.windows.1",
@@ -588,13 +588,13 @@
     "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-coordinator.js.sha256": "7fc5888e1db98312194f7a8f31a4fd74b2438d689f042baab10482b052ef6a49",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-guard.js.sha256": "bbda61fe239f34fb3037c55588f10b2bccc0554f16371be2dcb583ffec27814a",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.css.sha256": "a036708e820b58f75cdb6211066a875ae1382e8d8a7cbfb127283965d88b91cf",
-    "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js.sha256": "5d93d75c693535994660792e91aacc24d402b13403e140165009c9b78feda6f8",
+    "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js.sha256": "d8ef7d92ca92fb6c6470c9ab8666a8f07ede4ab466f9492e501292e6a11b9fe3",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-timeline.css.sha256": "619ba8244f3f4fb8e7635224781b1a0afc625a6fea8bd6a3140919a1fb46a80f",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/session-review.css.sha256": "43bcb84871dc9bb00cd51b65b3ac18cb43743c40b7e2a3893bf5041923a3acd4",
     "app/node_modules/@waishnav/devspace/dist/ui/workspace-app.html.sha256": "2427125c28866f2d143441b071725f424b3eae456f8135729e5fb125bd440c6a",
     "app/node_modules/@waishnav/devspace/dist/workspace-store.js.sha256": "0c465194a343c63dcf66976295890e21a95955960f7dd821ba3620d25b44afe0",
     "app/node_modules/@waishnav/devspace/dist/workspaces.js.sha256": "8ed1f40b419c8fc96214cd1d40424bd2afea8bf8fc4bc1d358635ddb22e7e963",
-    "app/package-lock.json.sha256": "603e5bdca1f25d1fc3ea68b05ef0286a0d745a7af628aea87205423fb1548cc5",
+    "app/package-lock.json.sha256": "ab368a606ad00a7c688ddc94d91498b17a6e052e8e08d3cf8e810eeb991dfa1e",
     "app/package.json.sha256": "fd4a77aa1a1feed1aa0d175136fdeb35ac4c1348498e880acb2b1ef6357b033f",
     "app/plugin-admin.mjs.sha256": "33941a87c72221008b67cb2229cfbd9225bf5035ef52e75897f06953f8b50136",
     "app/plugin-dispatcher.mjs.sha256": "e2389bb5b07947b0f0a8699b5784d3bbf4ec24d4a8d91a8286634e30ff14a87c",
@@ -684,14 +684,14 @@
     "docs/releases/HOTFIX-1.1.7.md.sha256": "ff933198773788193d73d87f861d7abaabd0b3299f6e87090c049b7d5589899e",
     "docs/releases/HOTFIX-1.1.8.md.sha256": "6cf9c3997017b030d57ff095c87aaf0b5299c24c141fe42f015a7ec00bd71f09",
     "docs/releases/HOTFIX-1.1.9.md.sha256": "0bb546acfafaa0ea69d83790eb95a6bea2f113b936cb5116ec7968ad58da218e",
-    "packages/waishnav-devspace-1.0.7.tgz.sha256": "e4f05d1063bc25b351785da353a75ec0e3e4c3c606404402152e788aef4e46be",
+    "packages/waishnav-devspace-1.0.7.tgz.sha256": "0a9eac3ebd8a2b3b9e0e9b5ca19867ed6a82aa3434a41fa4acdb29acff68244c",
     "runtime/node/node.exe.sha256": "ac51903c4c111815d52280b1fdcc8da067cbb37e2fe1a765097b85c3292c8582",
     "scripts/bootstrap-dev.ps1.sha256": "cdb31440e4f389e67d7e2ab51efcdd0fb8110980b24e4489dc488198ae3decd5",
     "scripts/hydrate-runtime-from-release.ps1.sha256": "84052dc514b0e25d2915851fd8aeb5132e449867fc4753bdfd9cb006c10d0fd0",
     "scripts/pack-devspace-core.mjs.sha256": "f10359ddc0dd7162c01ffd6fdc0f14dbadfb7f19dd9593a16c0c52e0af7c48ba",
     "scripts/pack-devspace-core.py.sha256": "be1cdacc75ea78fef74827bda58dbe63b4a9a39fa13ac92faedb17bf5c53ede5",
     "scripts/publish-github-release.ps1.sha256": "e23bb2b21c5c0c2b5597f346850e62484589c2fc52a2214424da31e5c70592a1",
-    "scripts/start-devspace.sh.sha256": "9fe34965bde024807dc87db1c924fa1fb86ac1c95417b00ebb8cb11cca577ec8",
+    "scripts/start-devspace.sh.sha256": "b25cfda1956919216f9aa48c7be7b232efddb8fa062aa450b84d31dd179a6fa3",
     "scripts/start-tunnel.cmd.sha256": "7f46d9acf63e632fff252d6302a4aa28a7dd23d355f3b4d4ac14bf78199178c9",
     "scripts/start-tunnel.sh.sha256": "1065b667659a26560dd2c7c108b63cc68f511a08ee6305623abd51e6408c2b87",
     "scripts/test-source.ps1.sha256": "efe5739eddc615a3b4129f185369cd7c6d975c3982cabc5f71191692ac0e1a69",
@@ -727,7 +727,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "94d3c96ba4520326ab0b4f61f6fb3d89ecf0c61448760dbf439f3bf062117e67",
+    "setup/portable-manager.cjs.sha256": "a6d56437a526e2ee5315a115500786a66a0a49d6e0546ebdd0b9711612375c90",
     "setup/portable-updater.ps1.sha256": "1fc0e3c7951d860b7eca83bfbc4e2f7a5d4ff4ee7dc62fe2bc328651d84c8f24",
     "setup/remote-ssh-admin.cjs.sha256": "4521925cbacd824b6f81b722d917ba7aacd89ba6443b3fb5a81a408bd5d0ff4e",
     "setup/test-auto-continuation-toggle.mjs.sha256": "97c57850cec6c1d7921524e06cfb79b5956d49e9bb7fc0bdf9defe8392fba3c6",
@@ -780,11 +780,11 @@
     "setup/test-updater-long-path.mjs.sha256": "608e6533cc4bc18b3116cef575f1105b872ea9025c4be7d36fc6d619482afc9b",
     "setup/test-upstream-workspace-reuse.mjs.sha256": "87a4d35a9eb1ddfb154cecf625adc410d2db414e9716e0e8426cb0b76d59ba12",
     "setup/tunnel-launcher.cjs.sha256": "e6c70fa208032d45481cf28dd0904b5fb20a5173e8a9f7029d64d3f71ca08e3e",
-    "ui-next/dist/index.html.sha256": "9ab379ee976ff56ce1044a18d4887eb348478b6d82b800002601a0ba6dff6879",
-    "ui-next/electron/main.cjs.sha256": "c75566b4d0268f5ea609d9a67a77fd4a2278c6d4a7d1f255c0cc973382501de7",
+    "ui-next/dist/index.html.sha256": "7044a2a15f4e5ed0afb31a064a2cc283da1e04c15456abdd0948c14bbdb9383f",
+    "ui-next/electron/main.cjs.sha256": "9575544fad3da8200f9bbb6e8bb055f369916d3f6b40c8db2091d6c47564855a",
     "ui-next/electron/preload.cjs.sha256": "368cdb5660bc83d02e138b5268e87683254217d155b7f046461c305f14032bb9",
     "ui-next/electron/update-status.cjs.sha256": "a3deb18c8d98905721ae1035ba1d39ff05cd9c8421dda91ae830f2a81a64c2e6",
-    "ui-next/package.json.sha256": "4247ceebf2a1edfd617424d9fde3c3c11cdd001b650c2c072daae58678a3bb1b",
+    "ui-next/package.json.sha256": "99fb8c626bbceb3b8cb54d72074bcf7683c56a74846840defc98572dda50f0b1",
     "ui-next/runtime/electron.exe.sha256": "62c62d170a95aa4a3eb3df05f0d56a3654ab4344f7452e21dea1334afed7100f"
   },
   "policy": {
@@ -802,7 +802,7 @@
   },
   "development": {
     "channel": "dev",
-    "iteration": 1,
-    "label": "dev1"
+    "iteration": 2,
+    "label": "dev2"
   }
 }

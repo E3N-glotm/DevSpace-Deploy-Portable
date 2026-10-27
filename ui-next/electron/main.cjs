@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const {createClosePolicy} = require('./close-policy.cjs');
-const {createPublicHealthMonitor} = require('./public-health.cjs');
+const {createPublicHealthMonitor, publicStatusFields} = require('./public-health.cjs');
 const {readUpdateState} = require('./update-status.cjs');
 const {createComputerUseIndicator} = require('./computer-use-indicator.cjs');
 
@@ -80,6 +80,7 @@ const publicMonitor = createPublicHealthMonitor({
 });
 let watchers = [];
 let refreshHandle = null;
+let publicRefreshHandle = null;
 let closing = false;
 let computerUseLeaseId = '';
 let computerUseHeartbeat;
@@ -230,21 +231,28 @@ async function lightweightStatus({verifyPublic = false} = {}) {
   return {
     localHealthy, port, localUrl: `http://127.0.0.1:${port}/mcp`,
     provider, publicUrl,
-    publicChecked: publicState.checked,
-    publicHealthy: publicState.healthy,
-    publicState: publicState.state,
-    publicLastSuccessAt: publicState.lastSuccessAt,
-    publicCheckedAt: publicState.checkedAt,
-    publicMetadataStatus: publicState.metadataStatus,
-    publicMcpStatus: publicState.mcpStatus,
-    publicError: publicState.error,
+    ...publicStatusFields(publicState),
     configured: fs.existsSync(path.join(CONFIG, 'auth.json')) && fs.existsSync(path.join(CONFIG, 'config.json')),
     checkedAt: Date.now(),
   };
 }
 async function publishStatus(verifyPublic = false) {
   if (closing) return;
-  currentStatus = await lightweightStatus({verifyPublic});
+  const next = await lightweightStatus({verifyPublic});
+  // Local-only refreshes and window-driven public checks may finish out of
+  // order. Always publish the monitor's LATEST evidence for this exact URL.
+  const live = publicMonitor.snapshot();
+  const fingerprint = next.provider === 'local' ? ''
+    : `${next.provider}|${String(next.publicUrl).replace(/\/$/, '')}`;
+  if (live.fingerprint === fingerprint) Object.assign(next, publicStatusFields(live));
+  // A configuration change while an old probe was awaiting the network must
+  // not re-publish the previous provider/hostname.
+  const deployment = readJson(path.join(CONFIG, 'deployment.json'));
+  const configuration = readJson(path.join(CONFIG, 'config.json'));
+  const activeProvider = deployment.localOnly ? 'local' : deployment.tunnelProvider || 'local';
+  const activeUrl = deployment.localOnly ? '' : configuration.publicBaseUrl || '';
+  if (next.provider !== activeProvider || next.publicUrl !== activeUrl) return currentStatus;
+  currentStatus = next;
   if (!windowRef?.isDestroyed()) windowRef.webContents.send('ds:status', currentStatus);
   return currentStatus;
 }
@@ -325,8 +333,9 @@ function installHandlers() {
     root: ROOT, applyPending: fs.existsSync(APPLY_PENDING),
   }));
   register('getConfig', () => runManager('show-config'));
-  // Explicit renderer refreshes are user-visible health checks and may verify
-  // the configured public MCP endpoint. Background status pushes stay local.
+  // Explicit renderer refreshes verify the public MCP endpoint. The frequent
+  // 20-second status pushes stay local; a separate 60-second main-process
+  // background verification keeps evidence fresh while the window is hidden.
   register('getStatus', () => publishStatus(true));
   // Pollable while runManager('update-stage') is busy. The updater already
   // persists progress; do not start any extra background downloads.
@@ -854,6 +863,13 @@ app.whenReady().then(() => {
       try { watchers.push(fs.watch(directory, debounced)); } catch {}
     }
     refreshHandle = setInterval(() => publishStatus().catch(() => {}), 20_000);
+    // Unlike cheap local status pushes, this low-frequency background probe
+    // refreshes positive HTTPS evidence even when the renderer is throttled,
+    // minimized or hidden in the tray. Concurrent foreground probes coalesce
+    // in createPublicHealthMonitor; no new manager/service process is spawned.
+    if (!smokeMode) publicRefreshHandle = setInterval(() => {
+      if (!closing) publishStatus(true).catch(() => {});
+    }, 60_000);
     // The existing lightweight Node fallback broker handles input/capture
     // requests after explicitly enabled permissions. It does not launch the
     // WinForms frontend; its lease expires if this window is terminated.
@@ -905,6 +921,7 @@ app.on('before-quit', (event) => {
   closePromptOpen = false;
   allowWindowClose = true;
   if (refreshHandle) clearInterval(refreshHandle);
+  if (publicRefreshHandle) clearInterval(publicRefreshHandle);
   if (computerUseHeartbeat) clearInterval(computerUseHeartbeat);
   if (computerUseIndicatorTimer) clearInterval(computerUseIndicatorTimer);
   computerUseIndicator?.dispose();

@@ -153,7 +153,9 @@ export function App() {
   const [closePreference,setClosePreference] = useState<''|'minimize-tray'|'exit-ui'>('');
   useEffect(()=>{
     let active=true;
-    const unStatus=window.devspace.onStatus(value=>{if(active)setStatus(value);});
+    const updateStatus=(value:any)=>setStatus((previous:any)=>
+      previous?.checkedAt>value?.checkedAt?previous:value);
+    const unStatus=window.devspace.onStatus(value=>{if(active)updateStatus(value);});
     const unProgress=window.devspace.onProgress(value=>{if(active)setProgress(value);});
     const unClose=window.devspace.onCloseRequest(()=>{
       if(active){setCloseOpen(true);setRememberClose(false);setCloseBusy(false);}
@@ -161,7 +163,9 @@ export function App() {
     window.devspace.getClosePreference().then(choice=>{if(active)setClosePreference(choice);}).catch(()=>{});
     window.devspace.initialize().then(data=>{
       if(!active)return;
-      setConfig(data.config);setStatus(data.status);setRoot(data.root);setApplyPending(data.applyPending);
+      setConfig(data.config);
+      setStatus((previous:any)=>previous?.checkedAt>data.status?.checkedAt?previous:data.status);
+      setRoot(data.root);setApplyPending(data.applyPending);
       setDraft(fromConfig(data.config));
       if(!data.config.configured){setWizard(true);setStep(0);}
     }).catch(e=>{if(active)setError(getError(e));});
@@ -176,7 +180,7 @@ export function App() {
       inFlight=true;
       try {
         const next=await window.devspace.getStatus();
-        if(active)setStatus(next);
+      if(active)setStatus((previous:any)=>previous?.checkedAt>next?.checkedAt?previous:next);
       } catch {}
       finally {inFlight=false;}
     };
@@ -276,7 +280,7 @@ export function App() {
   if(!draft||!config)return <div className="startup"><Spinner size="large"/><h2>正在连接 DevSpace…</h2><p>{error||'读取本地配置，不会修改现有部署。'}</p></div>;
   return <div className="desktop">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV1</small></span></div>
+      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV2</small></span></div>
       <div className="side-group">
         {([['home',<HomeRegular/>,'主页'],['agents',<ServerRegular/>,'远程服务器'],
           ['extensions',<PlugConnectedRegular/>,'插件与工具'],
@@ -287,7 +291,7 @@ export function App() {
           <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
       <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span>v1.1.66 dev1</span></div>
+        <div className="sidebar-status"><span>v1.1.66 dev2</span></div>
       </div>
     </aside>
     <main className="main">
@@ -296,7 +300,8 @@ export function App() {
         sessions:'会话与回退',memories:'Memories',oauth:'OAuth 客户端',services:'服务与桌面控制',
         diagnose:'诊断中心',settings:'设置',
       }[page]}</h1></div><div className="top-actions"><span className={'status-pill '+(status?.localHealthy?'ok':'')}>{status?.localHealthy?'● 服务正常':'○ 服务未连接'}</span>
-        <Button appearance="subtle" icon={<ArrowClockwiseRegular/>} onClick={()=>window.devspace.getStatus().then(setStatus)}>刷新</Button></div></header>
+        <Button appearance="subtle" icon={<ArrowClockwiseRegular/>} onClick={()=>window.devspace.getStatus().then(next=>
+          setStatus((previous:any)=>previous?.checkedAt>next?.checkedAt?previous:next))}>刷新</Button></div></header>
       <div className="page-body">
         {error&&<div className="alert error" role="alert"><strong>操作未完成</strong><span>{error}</span><Button appearance="subtle" onClick={()=>setError('')}>关闭</Button></div>}
         {notice&&<div className="alert success" role="status"><CheckmarkCircleRegular/><span>{notice}</span><Button appearance="subtle" onClick={()=>setNotice('')}>关闭</Button></div>}
@@ -355,10 +360,10 @@ export function App() {
               <span className="metric-status-title"><span className={'metric-status-dot '+(status?.localHealthy?'healthy':'error')} aria-label={status?.localHealthy?'本地 MCP 正常':'本地 MCP 异常'}/><small>本地 MCP</small></span>
               <strong>{status?.localHealthy?'已连接':'未连接'}</strong><p>{status?.localUrl}</p></div>
             <div className="metric"><span className="metric-icon"><CloudRegular/></span>
-              <span className="metric-status-title"><span className={'metric-status-dot '+(status?.provider==='local'?'idle':status?.publicState==='healthy'?'healthy':status?.publicState==='unhealthy'?'error':'checking')}
+              <span className="metric-status-title"><span className={'metric-status-dot '+(status?.provider==='local'?'idle':status?.publicState==='healthy'?'healthy':status?.publicState==='unhealthy'?'error':status?.publicState==='stale'?'idle':'checking')}
                 aria-label={status?.provider==='local'?'仅本机':status?.publicState==='healthy'?'公网 MCP 最近连通':status?.publicState==='unhealthy'?'公网 MCP 已确认异常':'公网连通性暂无法确认'}/><small>公网模式</small></span>
               <strong>{status?.provider==='local'?'仅本机':status?.provider}</strong>
-              <p>{status?.provider==='local'?'未启用公网入口':!status?.publicChecked?'正在核验连通性…':status?.publicState==='healthy'?(status?.publicError?'最近核验成功，本次探测延迟':'公网 MCP 已连通'):status?.publicState==='unhealthy'?'公网端点持续异常':'公网状态暂无法核验（不代表插件断联）'}</p>
+              <p>{status?.provider==='local'?'未启用公网入口':!status?.publicChecked?'正在核验连通性…':status?.publicState==='healthy'?(status?.publicError?'最近核验成功，本次探测延迟':'公网 MCP 已连通'):status?.publicState==='unhealthy'?'公网端点持续异常':status?.publicState==='stale'?'上次验证成功，正在重新核验（不代表断联）':'公网状态暂无法核验（不代表插件断联）'}</p>
               {status?.provider!=='local'&&<p className="metric-url">{status?.publicUrl||'未配置公网入口'}</p>}</div>
             <div className="metric"><span className="metric-icon"><FolderOpenRegular/></span><small>有效文件访问范围</small>
               <strong>{initialFileScope(config)==='all'?'全部可访问目录':selectedDirectoryList(config).length+' 个工作目录'}</strong>

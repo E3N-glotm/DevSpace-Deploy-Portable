@@ -34,5 +34,13 @@ test('home visibility drives a five-second public MCP verification',()=>{
   assert.match(probe,/metadataStatus === 200 && mcpStatus === 401/);
   assert.match(probe,/recentSuccessMs = 120_000/);
   assert.match(probe,/timeoutMs = 8000/);
-  assert.match(main,/Background status pushes stay local/);
+  assert.match(main,/20-second status pushes stay local/);
+  assert.match(main,/publicRefreshHandle = setInterval/);
+  assert.match(main,/publishStatus\(true\)\.catch\(\(\) => \{\}\)/);
+  assert.match(main, /60_000\)/, 'background public health verification runs at bounded intervals');
+  assert.match(main, /Object\.assign\(next, publicStatusFields\(live\)\)/,
+    'late local-only callbacks must not override more recent public evidence');
+  assert.match(main, /if \(publicRefreshHandle\) clearInterval\(publicRefreshHandle\)/);
+  assert.match(app, /status\?\.publicState==='stale'\?'idle'/,
+    'expired success is a neutral stale state, not an amber transient disconnect');
 });
