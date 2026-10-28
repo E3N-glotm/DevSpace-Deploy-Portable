@@ -2,7 +2,7 @@
 // DevSpace Portable Next: the renderer never receives Node, a shell, file IO,
 // OAuth credentials, or a generic command runner. Only the main process can
 // access the existing manager and the Windows clipboard.
-const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, net, Tray, Menu, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, net, Tray, Menu, screen, nativeImage } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
@@ -13,6 +13,10 @@ const {createComputerUseIndicator} = require('./computer-use-indicator.cjs');
 
 const ROOT = path.resolve(process.env.DEVSPACE_PORTABLE_ROOT || path.join(__dirname, '../..'));
 const HERE = path.resolve(__dirname, '..');
+// A single checked-in brand resource is shared by the taskbar, window and tray.
+// Never extract an incidental icon from the legacy compatibility launcher.
+const BRAND_ICON_PNG = path.join(ROOT, 'setup', 'assets', 'devspace-portable.png');
+const BRAND_ICON_ICO = path.join(ROOT, 'setup', 'assets', 'devspace-portable.ico');
 const MANAGER = path.join(ROOT, 'setup', 'portable-manager.cjs');
 const NODE = path.join(ROOT, 'runtime', 'node', 'node.exe');
 const CONFIG = path.join(ROOT, 'data', 'config');
@@ -605,6 +609,7 @@ function createWindow() {
     width: 1220, height: 820, minWidth: 860, minHeight: 640,
     backgroundColor: '#f7f8fb', title: 'DevSpace Portable Next',
     show: false, autoHideMenuBar: true,
+    icon: BRAND_ICON_ICO,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false, contextIsolation: true, sandbox: true,
@@ -648,11 +653,10 @@ async function minimizeToTray() {
   trayTransition = true;
   try {
     if (!trayIcon) {
-      // Use the actual installed executable's Windows icon; no additional
-      // icon download, background Node worker, or legacy WinForms process.
-      const executable = path.join(ROOT,'DevSpace-Portable.exe');
-      const icon = await app.getFileIcon(fs.existsSync(executable) ? executable : process.execPath,
-        {size:'small'});
+      // Keep the multi-resolution brand icon instead of Windows' small
+      // generic launcher bitmap (which was visibly blurry at 16x16).
+      let icon = nativeImage.createFromPath(BRAND_ICON_ICO);
+      if (icon.isEmpty()) icon = nativeImage.createFromPath(BRAND_ICON_PNG);
       if (icon.isEmpty()) throw new Error('无法加载托盘图标。');
       trayIcon = new Tray(icon);
       trayIcon.setToolTip('DevSpace Portable');

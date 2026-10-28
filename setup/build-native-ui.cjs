@@ -53,6 +53,7 @@ const TARGETS = [
 const SHARED_SOURCES = [
   path.join(ROOT, "setup", "native", "DevSpaceBrandIcon.cs"),
 ];
+const BRAND_ICO = path.join(ROOT, "setup", "assets", "devspace-portable.ico");
 
 function run(file, args) {
   const result = childProcess.spawnSync(file, args, {
@@ -77,6 +78,7 @@ for (const target of TARGETS) {
 for (const source of SHARED_SOURCES) {
   if (!fs.existsSync(source)) throw new Error(`Shared native UI source was not found: ${source}`);
 }
+if (!fs.existsSync(BRAND_ICO)) throw new Error(`Branded Windows application icon is missing: ${BRAND_ICO}`);
 
 const vsRoot = run(VSWHERE, [
   "-latest",
@@ -118,6 +120,7 @@ for (const target of TARGETS) {
     "/deterministic+",
     "/debug-",
     "/langversion:latest",
+    ...(target.target === "winexe" ? [`/win32icon:${BRAND_ICO}`] : []),
     `/out:${target.output}`,
     ...references.map((reference) => `/reference:${reference}`),
     ...(target.shared ? SHARED_SOURCES : []),

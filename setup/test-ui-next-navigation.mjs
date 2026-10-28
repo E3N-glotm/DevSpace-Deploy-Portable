@@ -21,8 +21,13 @@ if(effectiveIteration<4){
 const alias=join(root,'DevSpace-Portable.exe');
 const next=join(root,'DevSpace-Portable-Next.exe');
 const electron=join(root,'ui-next','runtime','electron.exe');
-assert.ok(statSync(alias).size<20_000,'default executable must be the compact Electron launcher, not the old WinForms UI');
-assert.ok(statSync(next).size<20_000,'Next alias must be present for existing shortcuts');
+// Since dev2 the lightweight Win32 launcher embeds the complete multi-DPI
+// brand ICO (~45 KiB). The obsolete 20 KiB size ceiling would mistake a
+// correctly branded compatibility launcher for the removed legacy WinForms UI.
+assert.ok(statSync(alias).size<125_000,'default executable must remain a compact Electron launcher, not the old WinForms UI');
+assert.ok(statSync(next).size<125_000,'Next alias must remain a compact launcher for existing shortcuts');
+assert.equal(statSync(alias).size,statSync(next).size,
+  'Default and Next launcher should use the same branded native launcher layout');
 const run=spawnSync(electron,[join(root,'ui-next'),'--devspace-ui-navigation-smoke','--disable-gpu'],{
   cwd:root,env:{...process.env,DEVSPACE_PORTABLE_ROOT:root},
   timeout:90_000,encoding:'utf8',windowsHide:true,maxBuffer:128*1024,
