@@ -112,6 +112,7 @@ export function AgentsPage() {
   const [formBusy,setFormBusy]=useState(false);
   const [formError,setFormError]=useState('');
   const [formNotice,setFormNotice]=useState('');
+  const [hostKeyReview,setHostKeyReview]=useState<any>(null);
   const [command,setCommand]=useState('');
   const findProfile=(id:string,item:Item|null)=>profiles.find(p=>String(p.key||'').toLowerCase()===id.toLowerCase())||
     profiles.find(p=>String(p.key||'').toLowerCase()===('name:'+value(item,'name')).toLowerCase())||null;
@@ -134,7 +135,7 @@ export function AgentsPage() {
     setOriginalRoots(Array.isArray(item?.writableRoots)?item.writableRoots.map(String):[]);
     setRootText(Array.isArray(item?.writableRoots)&&item.writableRoots.length
       ?item.writableRoots.map(String).join('\n'):value(item||null,'installRoot'));
-    setFull(item?.accessMode==='full-access');setCommand('');setFormError('');setFormNotice('');
+    setFull(item?.accessMode==='full-access');setCommand('');setFormError('');setFormNotice('');setHostKeyReview(null);
     const pref=net.data?.connections?.[id] || item?.metadata || {};
     setConnectionMode(pref.connectionMode==='lan'?'lan':'internet');
     setSshHost(String(saved?.host||''));setSshPort(String(saved?.port||22));
@@ -154,11 +155,22 @@ export function AgentsPage() {
     });
     // Never keep a submitted password in the renderer's state.
     if(password)setCredential('');
+    return Boolean(secret);
   }
-  async function connectServer(){
-    if(!ready||formBusy)return;
-    setFormBusy(true);setFormError('');setFormNotice('');setCommand('');
-    try{
+  async function handleSshFailure(error:unknown,retry:'save'|'recover'|'reenroll'){
+    const message=explain(error);
+    setFormError(message);
+    setHostKeyReview(null);
+    if(message.includes('SSH_HOST_KEY_CHANGED')){
+      try {
+        const review=await window.devspace.admin('remote-ssh-hostkey-inspect',{key});
+        setHostKeyReview({...review,retry});
+      } catch (inspectionError) {
+        setFormError(message+' 主机指纹读取失败：'+explain(inspectionError));
+      }
+    }
+  }
+  async function attemptConnect(){
       const mode=connectionMode;
       let serverUrl=String(net.data?.internetDefaultUrl||'');
       if(mode==='lan'){
@@ -166,14 +178,32 @@ export function AgentsPage() {
         serverUrl=String(network.serverUrl||'');
         if(network.restartRequired)await window.devspace.runAction('restart-local');
       }
-      await saveSsh();
+      const sshUpdated=await saveSsh();
       const roots=full?[]:scopedRoots;
       const changed=Boolean(!selected||name.trim()!==agent?.name||installRoot.trim()!==agent?.installRoot
         ||full!==(agent?.accessMode==='full-access') ||
         (!full&&JSON.stringify([...roots].sort())!==JSON.stringify([...originalRoots].sort())));
       const networkChanged=mode!==existingMode || Boolean(existingUrl&&serverUrl&&existingUrl!==serverUrl);
       if(selected&&!changed&&!networkChanged){
-        setFormNotice('SSH 连接信息已保存。');
+        const remoteStatus=String(agent?.status||'').toLowerCase();
+        const offline=remoteStatus==='offline';
+        if(remoteStatus==='revoked'){
+          // Revoked Agent credentials cannot be resurrected by an SSH restart.
+          // Never silently create a new identity on a password-only save.
+          await window.devspace.admin('remote-ssh-test',{key});
+          setFormNotice('新 SSH 凭据已保存并验证，但此 Agent 凭据已撤销。请明确确认“重新登记为新 Agent”以生成新身份。');
+        }else if(offline){
+          // Saving new credentials must also verify them and restore an
+          // existing offline Agent, without allocating a new enrollment.
+          await window.devspace.admin('remote-ssh-test',{key});
+          await window.devspace.admin('remote-ssh-recover',{
+            key,agentId:selected,installRoot:installRoot.trim(),writableRoots:full?[]:scopedRoots,
+          },true);
+          setFormNotice('新 SSH 凭据已验证，离线 Agent 已恢复连接。');
+        }else if(sshUpdated){
+          await window.devspace.admin('remote-ssh-test',{key});
+          setFormNotice('SSH 凭据已保存并通过验证；在线 Agent 无需重启。');
+        }else setFormNotice('SSH 连接信息已保存，在线 Agent 保持运行。');
       }else if(selected&&!changed&&networkChanged){
         await window.devspace.admin('remote-ssh-switch-network',{
           key,agentId:selected,installRoot:installRoot.trim(),
@@ -190,20 +220,83 @@ export function AgentsPage() {
         setFormNotice(selected?'服务器已更新并连接。':'服务器已添加并连接。');
       }
       await Promise.all([b.load(),ssh.load(),net.load()]);
-    }catch(e){setFormError(explain(e));}
+  }
+  async function connectServer(){
+    if(!ready||formBusy)return;
+    setFormBusy(true);setFormError('');setFormNotice('');setHostKeyReview(null);setCommand('');
+    try{await attemptConnect();}
+    catch(e){await handleSshFailure(e,'save');}
     finally{setFormBusy(false);}
   }
-  async function recover(){
-    if(!selected||formBusy)return;
-    setFormBusy(true);setFormError('');setFormNotice('');
-    try{
+  async function attemptRecover(){
       await saveSsh();
+      await window.devspace.admin('remote-ssh-test',{key});
       await window.devspace.admin('remote-ssh-recover',{
-        key,agentId:selected,installRoot:installRoot.trim(),writableRoots:originalRoots,
+        key,agentId:selected,installRoot:installRoot.trim(),writableRoots:full?[]:scopedRoots,
       },true);
       setFormNotice('Agent 已重新连接。');
       await Promise.all([b.load(),ssh.load()]);
-    }catch(e){setFormError(explain(e));}
+  }
+  async function recover(){
+    if(!selected||formBusy)return;
+    setFormBusy(true);setFormError('');setFormNotice('');setHostKeyReview(null);
+    try{
+      if(agent?.status==='revoked'){
+        await saveSsh();
+        setFormError('该 Agent 凭据已撤销，SSH 重启无法重新激活旧身份。请使用“重新登记为新 Agent”。');
+      }else await attemptRecover();
+    }
+    catch(e){await handleSshFailure(e,'recover');}
+    finally{setFormBusy(false);}
+  }
+  async function attemptReEnroll(){
+    await saveSsh();
+    await window.devspace.admin('remote-ssh-test',{key});
+    let serverUrl=existingUrl;
+    if(connectionMode==='lan'){
+      const network=await window.devspace.admin('agent-network-prepare',{
+        host:sshHost.trim(),port:Number(sshPort),
+      },true);
+      serverUrl=String(network.serverUrl||'');
+      if(network.restartRequired)await window.devspace.runAction('restart-local');
+    }
+    const result=await window.devspace.admin('remote-ssh-deploy',{
+      key,agentId:'',name:name.trim(),installRoot:installRoot.trim(),
+      accessMode:full?'full-access':'scoped',writableRoots:full?[]:scopedRoots,
+      connectionMode,...(connectionMode==='lan'?{serverUrl}:{}),
+    },true);
+    if(result?.agent?.id)setSelected(String(result.agent.id));
+    setFormNotice('新 Agent 已登记并上线；旧的已撤销凭据保持撤销状态。');
+    await Promise.all([b.load(),ssh.load(),net.load()]);
+  }
+  async function reEnrollRevoked(){
+    if(!selected||agent?.status!=='revoked'||formBusy)return;
+    const approved=window.confirm('当前 Agent 凭据已撤销，不能恢复旧身份。\n确认使用本服务器创建一个新的 Agent ID 并保持旧身份撤销？不会删除旧记录。');
+    if(!approved)return;
+    setFormBusy(true);setFormError('');setFormNotice('');setHostKeyReview(null);
+    try{await attemptReEnroll();}
+    catch(e){await handleSshFailure(e,'reenroll');}
+    finally{setFormBusy(false);}
+  }
+  async function trustHostKeyAndRetry(){
+    if(!hostKeyReview||formBusy)return;
+    const newKeys=(hostKeyReview.fingerprints||[]).map((entry:any)=>entry.type+' '+entry.fingerprint).join('\n');
+    const oldKeys=(hostKeyReview.previouslyTrusted||[]).map((entry:any)=>entry.type+' '+entry.fingerprint).join('\n');
+    const approved=window.confirm('远程 SSH 主机身份发生变化。请先通过可信渠道核实服务器指纹，可能涉及重装或主机被替换。\n\n目标：'
+      +hostKeyReview.host+':'+hostKeyReview.port+'\n原信任指纹：\n'+(oldKeys||'无')
+      +'\n\n本次服务器指纹：\n'+newKeys+'\n\n确认两者变化属实并信任当前主机吗？');
+    if(!approved)return;
+    const retry=hostKeyReview.retry;
+    setFormBusy(true);setFormError('');setFormNotice('');
+    try{
+      await window.devspace.admin('remote-ssh-hostkey-approve',{
+        key,scanId:hostKeyReview.scanId,confirmed:true,
+      },true);
+      setHostKeyReview(null);
+      if(retry==='recover')await attemptRecover();
+      else if(retry==='reenroll')await attemptReEnroll();
+      else await attemptConnect();
+    }catch(e){await handleSshFailure(e,retry);}
     finally{setFormBusy(false);}
   }
   async function manualCommand(){
@@ -231,6 +324,11 @@ export function AgentsPage() {
     <ActionRow><Button appearance="primary" onClick={()=>prepare('')} disabled={formBusy}>添加服务器</Button>
       <Button onClick={b.load} disabled={b.busy}>刷新状态</Button></ActionRow>
     <Message error={formError||b.error} notice={formNotice}/>
+    {hostKeyReview&&<div className="op-message op-warning">
+      SSH 主机指纹已变化（{hostKeyReview.host}:{hostKeyReview.port}）。请通过可信渠道核对以下 SHA-256 指纹后再确认信任。
+      {(hostKeyReview.fingerprints||[]).map((entry:any)=><div key={entry.type}>{entry.type}：{entry.fingerprint}</div>)}
+      <Button disabled={formBusy} onClick={trustHostKeyAndRetry}>确认主机指纹并重新连接</Button>
+    </div>}
     <div className="op-columns">
       <Selection items={agents} selected={selected} onSelect={id=>{if(!formBusy)prepare(id);}} getId={a=>String(a.id||'')}
         describe={a=>{const state=statusMeta(a.status);return <><span className="agent-title-row">
@@ -266,6 +364,10 @@ export function AgentsPage() {
           <ActionRow><Button appearance="primary" disabled={!ready||formBusy} onClick={connectServer}>
             {formBusy?'正在连接…':selected?'保存并更新':'添加并连接'}</Button>
             {selected&&<Button disabled={formBusy||!sshHost.trim()} onClick={recover}>SSH 恢复离线 Agent</Button>}</ActionRow>
+          {selected&&agent?.status==='revoked'&&<div className="op-message op-warning">
+            当前 Agent 凭据已撤销，无法通过修改 SSH 密码或重启恢复。重新登记会生成新的 Agent ID，旧身份保持撤销。
+            <Button disabled={!ready||formBusy} onClick={reEnrollRevoked}>重新登记为新 Agent</Button>
+          </div>}
           <details className="op-subtle"><summary>其他操作</summary>
             <ActionRow><Button disabled={!ready||formBusy} onClick={manualCommand}>生成手动安装命令</Button>
               {selected&&<Button disabled={formBusy} onClick={async()=>{await b.call('remote-agent-revoke',{agentId:selected},true);}}>撤销凭据</Button>}

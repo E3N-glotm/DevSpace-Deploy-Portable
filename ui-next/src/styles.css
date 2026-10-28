@@ -91,6 +91,7 @@
 .op-message{border-radius:8px;padding:11px 14px;font-size:12px;margin:12px 0;line-height:1.6;overflow-wrap:anywhere}
 .op-error{color:#831b25;background:#fff0f2;border:1px solid #df9ca6}
 .op-success{color:#165635;background:#e9f9ef;border:1px solid #93cfaa}
+.op-warning{color:#69440b;background:#fff8e8;border:1px solid #e5c687;display:flex;flex-direction:column;align-items:flex-start;gap:8px}
 .op-command{background:#f2f7ff;border:1px solid #bfd3eb;border-radius:9px;padding:15px;display:flex;flex-direction:column;gap:10px}
 .op-command code{font-family:Consolas,monospace;font-size:12px;color:#1b385c;overflow-wrap:anywhere;user-select:text}
 .operation-output{background:#15263c;color:#f0f5ff;border-radius:10px;padding:14px;max-height:55vh;overflow:auto;font-family:Consolas,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}

@@ -27,6 +27,8 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
     .find(file=>fs.existsSync(file));
   const askpass = path.join(root,"DevSpace-SshAskPass.exe");
   const assetRoot = path.join(root,"app","node_modules","@waishnav","devspace","dist","linux-agent");
+  const {createSshHostKeyTrust} = require("./ssh-hostkey-trust.cjs");
+  const hostTrust = createSshHostKeyTrust({root,restrictAcl});
   const pick = (p,upper,lower,defaultValue="") => p?.[upper] ?? p?.[lower] ?? defaultValue;
   const publicProfile = p=>({
     key:String(pick(p,"Key","key")),host:String(pick(p,"Host","host")),
@@ -85,6 +87,7 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
     if(password&&!fs.existsSync(askpass))throw new Error("DevSpace SSH password helper is missing.");
     const host=p.host.includes(":")&&!p.host.startsWith("[")?"["+p.host+"]":p.host;
     const args=["-o","ConnectTimeout=10","-o","ConnectionAttempts=2",
+      "-o","UserKnownHostsFile="+hostTrust.ensure(),
       "-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR",
       "-o","BatchMode="+(password?"no":"yes"),
       ...(password?["-o","NumberOfPasswordPrompts=2"]:[]),
@@ -144,7 +147,7 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
     const result=execute(profile,script.join("\n"),18000);
     const state=result.output.match(/^DEVSPACE_AGENT_STATE=(.+)$/m)?.[1]?.trim();
     if(result.exitCode!==0||!state||!state.startsWith("/")||/[\r\n\0]/.test(state))
-      throw new Error("Cannot verify an existing remote state matching the Agent ID; refusing to install another instance.");
+      throw new Error("Cannot verify an existing remote state matching the Agent ID; refusing to install another instance. "+(result.error||result.output).slice(-650));
     return state.replace(/\/+$/,"");
   }
   function stopVerifiedState(profile,state) {
@@ -378,6 +381,13 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       persist(s);return {ok:true,deleted:s.Profiles.length!==count};
     }
     const profile=find(payload.key);
+    if(action==="hostkey-inspect"){
+      // Read-only review; a new SSH password never authorizes a new host key.
+      return hostTrust.inspect(publicProfile(profile));
+    }
+    if(action==="hostkey-approve"){
+      return hostTrust.approve(publicProfile(profile),payload.scanId,payload.confirmed);
+    }
     if(action==="test"){
       const result=execute(profile,"set -e\nprintf 'DEVSPACE_SSH_OK\\n'\nuname -s 2>/dev/null || true\nhostname 2>/dev/null || true",25000);
       if(result.exitCode!==0||!result.output.includes("DEVSPACE_SSH_OK"))throw new Error("SSH test failed: "+result.error);
@@ -576,7 +586,8 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       let consecutiveHealthy=0;
       for(let attempt=0;attempt<8;attempt++){
         const agents=(await remoteAdmin("list",{})).agents||[];
-        const found=agents.find(a=>agentId?a.id===agentId:a.name===name);
+        const found=agents.find(a=>agentId?a.id===agentId
+          :a.name===name && a.status!=="revoked" && Date.parse(a.connectedAt||"")>=startedAfter);
         consecutiveHealthy=freshOnlineAgent(found,startedAfter)?consecutiveHealthy+1:0;
         if(consecutiveHealthy>=2)
           return {ok:true,agent:found};

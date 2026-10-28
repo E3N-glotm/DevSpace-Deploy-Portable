@@ -79,8 +79,8 @@ const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
-const PORTABLE_VERSION = "1.1.66";
-const PORTABLE_DEV_ITERATION = "";
+const PORTABLE_VERSION = "1.1.67";
+const PORTABLE_DEV_ITERATION = "dev1";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -4636,8 +4636,16 @@ async function main() {
     } else if (command === "remote-agent-delete") {
       stdoutJson(await runRemoteAgentAdmin("delete", await readStdinJson()));
     } else if (command.startsWith("remote-ssh-") &&
-      new Set(["list", "save", "test", "probe", "deploy", "recover", "switch-network", "delete"]).has(command.slice("remote-ssh-".length))) {
-      stdoutJson(await runRemoteSshAdmin(command.slice("remote-ssh-".length), await readStdinJson()));
+      new Set(["list", "save", "test", "probe", "deploy", "recover", "switch-network", "delete",
+        "hostkey-inspect", "hostkey-approve"]).has(command.slice("remote-ssh-".length))) {
+      try {
+        stdoutJson(await runRemoteSshAdmin(command.slice("remote-ssh-".length), await readStdinJson()));
+      } catch (error) {
+        // This is deliberately the only error detail forwarded to the UI.
+        // The full SSH stderr can contain untrusted remote text or secrets.
+        const {sshFailureCode} = require("./ssh-error-codes.cjs");
+        throw new Error("DEVSPACE_SSH_SAFE_CODE="+sshFailureCode(error));
+      }
     } else if (command === "log-paths") {
       const provider = selectedTunnelProvider();
       stdoutJson({

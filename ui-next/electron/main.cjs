@@ -30,14 +30,14 @@ const ACTIONS = new Set([
 // Explicitly enumerate existing manager commands. The renderer can neither
 // choose an arbitrary command nor access Node, shell, or a filesystem API.
 const ADMIN_READ = new Set([
-  'remote-agent-list','remote-ssh-list','remote-ssh-probe','agent-network-get','plugin-list','continuation-list','review-list',
+  'remote-agent-list','remote-ssh-list','remote-ssh-probe','remote-ssh-hostkey-inspect','agent-network-get','plugin-list','continuation-list','review-list',
   'review-details','memory-list','oauth-client-list',
   'continuation-cutoff-estimate-get','log-paths','network-proxy-state',
   'dashboard-status','update-check',
 ]);
 const ADMIN_WRITE = new Set([
   'remote-agent-create-enrollment','remote-agent-revoke','remote-agent-delete',
-  'remote-ssh-save','remote-ssh-test','remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','agent-network-set','agent-network-prepare',
+  'remote-ssh-save','remote-ssh-test','remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','remote-ssh-hostkey-approve','agent-network-set','agent-network-prepare',
   'plugin-install','plugin-export','plugin-enable','plugin-disable',
   'plugin-uninstall','plugin-slot-bind','plugin-slot-unbind','plugin-refresh',
   'continuation-lock','continuation-unlock','continuation-pause',
@@ -54,7 +54,7 @@ const ADMIN_WRITE = new Set([
 ]);
 const ADMIN_DESTRUCTIVE = new Set([
   'remote-agent-revoke','remote-agent-delete','plugin-uninstall',
-  'remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','agent-network-set','agent-network-prepare',
+  'remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','remote-ssh-hostkey-approve','agent-network-set','agent-network-prepare',
   'continuation-stop','continuation-delete','review-rollback',
   'review-restore-safety','memory-delete','oauth-client-rotate-secret',
   'oauth-client-delete','uninstall-tasks','disable','update-launch',
@@ -187,6 +187,24 @@ function runManager(action, payload, timeoutMs = 90_000) {
       }
       if (code !== 0) {
         // Never pass potentially credential-bearing stdout/stderr to the renderer.
+        if(action.startsWith('remote-ssh-')){
+          const match=stderr.match(/DEVSPACE_SSH_SAFE_CODE=([A-Z_]+)/);
+          const reason=match?.[1]||'UNKNOWN';
+          const hints={
+            HOST_KEY_CHANGED:'远程 SSH 主机指纹与原记录不同。请核验新指纹并明确确认信任后重试；仅修改密码无法绕过主机身份校验。',
+            AUTH_FAILED:'SSH 登录认证失败。请核对新密码、用户名或私钥；保存 SSH 凭据不等于验证成功。',
+            SSH_TIMEOUT:'SSH 连接超时。请检查服务器地址、端口、VPN 与网络。',
+            SSH_REFUSED:'SSH 连接被拒绝或无法访问。请检查远端 SSH 服务、端口映射与防火墙。',
+            PASSWORD_HELPER:'SSH 密码辅助程序或 Windows 加密凭据不可用。',
+            STATE_NOT_FOUND:'已能执行 SSH，但没有找到与此 Agent ID 相符的状态目录。不会覆盖其他 Agent，请核对安装目录。',
+            CONTROLLER_UNREACHABLE:'远程 Linux 无法连接当前 DevSpace Agent 入口，已阻止不安全重启。请检查 LAN 地址、端口或隧道。',
+            HEARTBEAT_MISSING:'SSH 操作完成，但新 Agent 尚未向控制端报告有效心跳。请检查远端运行日志。',
+            REMOTE_RESTART_FAILED:'已匹配 Agent 身份，但无法安全完成进程重启。请检查远端权限与状态日志。',
+            UNKNOWN:'SSH 管理操作未完成。请检查本机诊断日志，或先使用 SSH 连接测试。',
+          };
+          reject(new Error('SSH_'+reason+': '+(hints[reason]||hints.UNKNOWN)));
+          return;
+        }
         reject(new Error(`管理操作 ${action} 失败（退出码 ${code}），请到诊断页查看安全日志。`));
         return;
       }
