@@ -1,12 +1,12 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.67",
-  "builtAt": "2026-10-28T11:36:46+08:00",
+  "builtAt": "2026-10-28T11:52:27+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
   },
-  "displayVersion": "1.1.67 dev2",
+  "displayVersion": "1.1.67",
   "runtime": {
     "node": "24.18.1",
     "gitForWindows": "2.51.2.windows.1",
@@ -588,13 +588,13 @@
     "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-coordinator.js.sha256": "7fc5888e1db98312194f7a8f31a4fd74b2438d689f042baab10482b052ef6a49",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/continuation-guard.js.sha256": "bbda61fe239f34fb3037c55588f10b2bccc0554f16371be2dcb583ffec27814a",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.css.sha256": "a036708e820b58f75cdb6211066a875ae1382e8d8a7cbfb127283965d88b91cf",
-    "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js.sha256": "c9ee60f880366c17d735b3a98256f86cebd0fd2f1d69836b7c81bef46ed128d6",
+    "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-enhancements.js.sha256": "8ac895e0eb02dec751b8c168c6968ba908bbb0be6c2ed2a8453fe33eb3ff41bf",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/runtime-timeline.css.sha256": "619ba8244f3f4fb8e7635224781b1a0afc625a6fea8bd6a3140919a1fb46a80f",
     "app/node_modules/@waishnav/devspace/dist/ui/assets/session-review.css.sha256": "43bcb84871dc9bb00cd51b65b3ac18cb43743c40b7e2a3893bf5041923a3acd4",
     "app/node_modules/@waishnav/devspace/dist/ui/workspace-app.html.sha256": "2427125c28866f2d143441b071725f424b3eae456f8135729e5fb125bd440c6a",
     "app/node_modules/@waishnav/devspace/dist/workspace-store.js.sha256": "0c465194a343c63dcf66976295890e21a95955960f7dd821ba3620d25b44afe0",
     "app/node_modules/@waishnav/devspace/dist/workspaces.js.sha256": "8ed1f40b419c8fc96214cd1d40424bd2afea8bf8fc4bc1d358635ddb22e7e963",
-    "app/package-lock.json.sha256": "814eec78f52c0f81aeee3157d32775772ca073c0ef27796da41827d240a5696c",
+    "app/package-lock.json.sha256": "b045dd60e4ec0f34376e59b16bf30d7f8264c587a8070723a7fc1ea707e88c4c",
     "app/package.json.sha256": "d3fd0979b5fafe044da3556acc8ecc8e79106bfdb5773a2f8dedab7b397b1deb",
     "app/plugin-admin.mjs.sha256": "33941a87c72221008b67cb2229cfbd9225bf5035ef52e75897f06953f8b50136",
     "app/plugin-dispatcher.mjs.sha256": "e2389bb5b07947b0f0a8699b5784d3bbf4ec24d4a8d91a8286634e30ff14a87c",
@@ -682,17 +682,18 @@
     "docs/releases/HOTFIX-1.1.64.md.sha256": "bf4e07d456943d44d5153aa86065c94dcce5ec0f160b99ab3e6c251a7e250a7a",
     "docs/releases/HOTFIX-1.1.65.md.sha256": "3422afd1d00f421deed6a9a27c23a46dd0b727986af87de0ace501807c958316",
     "docs/releases/HOTFIX-1.1.66.md.sha256": "a40991106a01eccd67f2debc68cc19d9433698ff7ddd5cd61e106437bb5a8247",
+    "docs/releases/HOTFIX-1.1.67.md.sha256": "d7855218cee9691cb33435fdece3a727ff954cb785a67cc9a62fcdf1bd60890e",
     "docs/releases/HOTFIX-1.1.7.md.sha256": "ff933198773788193d73d87f861d7abaabd0b3299f6e87090c049b7d5589899e",
     "docs/releases/HOTFIX-1.1.8.md.sha256": "6cf9c3997017b030d57ff095c87aaf0b5299c24c141fe42f015a7ec00bd71f09",
     "docs/releases/HOTFIX-1.1.9.md.sha256": "0bb546acfafaa0ea69d83790eb95a6bea2f113b936cb5116ec7968ad58da218e",
-    "packages/waishnav-devspace-1.0.7.tgz.sha256": "4f51b9640882e33cf6a27875c839d2135049093953d198427fcf3d386455acb7",
+    "packages/waishnav-devspace-1.0.7.tgz.sha256": "582d616091acb9873425c5933dc79a0cf6a044709b1d1ef508cca83f4d9427e4",
     "runtime/node/node.exe.sha256": "ac51903c4c111815d52280b1fdcc8da067cbb37e2fe1a765097b85c3292c8582",
     "scripts/bootstrap-dev.ps1.sha256": "cdb31440e4f389e67d7e2ab51efcdd0fb8110980b24e4489dc488198ae3decd5",
     "scripts/hydrate-runtime-from-release.ps1.sha256": "84052dc514b0e25d2915851fd8aeb5132e449867fc4753bdfd9cb006c10d0fd0",
     "scripts/pack-devspace-core.mjs.sha256": "f10359ddc0dd7162c01ffd6fdc0f14dbadfb7f19dd9593a16c0c52e0af7c48ba",
     "scripts/pack-devspace-core.py.sha256": "be1cdacc75ea78fef74827bda58dbe63b4a9a39fa13ac92faedb17bf5c53ede5",
     "scripts/publish-github-release.ps1.sha256": "e23bb2b21c5c0c2b5597f346850e62484589c2fc52a2214424da31e5c70592a1",
-    "scripts/start-devspace.sh.sha256": "fd6442608ff18fddedeefeef323053bcf00bf42c7ab8ac9377250953c936608d",
+    "scripts/start-devspace.sh.sha256": "7e50c06b23a221d875b67aaf4ba9cc7e3c157518218b18a21acab9e654d28b45",
     "scripts/start-tunnel.cmd.sha256": "7f46d9acf63e632fff252d6302a4aa28a7dd23d355f3b4d4ac14bf78199178c9",
     "scripts/start-tunnel.sh.sha256": "1065b667659a26560dd2c7c108b63cc68f511a08ee6305623abd51e6408c2b87",
     "scripts/test-source.ps1.sha256": "d9a711dbaec7f38af71fdab91ab420677bf3b4d236f20c9a92edd1bf9708941b",
@@ -731,7 +732,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "eaccfe66adea6044ebe35406a90256d90f851a3b57c15f32b4397bdd4437cf06",
+    "setup/portable-manager.cjs.sha256": "fb902c0d7cc996946bfcbe237033693d6c0abaa465e983a40b759b5766be5eec",
     "setup/portable-updater.ps1.sha256": "1fc0e3c7951d860b7eca83bfbc4e2f7a5d4ff4ee7dc62fe2bc328651d84c8f24",
     "setup/remote-ssh-admin.cjs.sha256": "a32f1c361507f616aaf8171ebf2f33b7c272948bd5a35a3d308e68ec5124b58f",
     "setup/ssh-error-codes.cjs.sha256": "81cfc4fe775f221b1f358f12d33b068ac9d5cf5f0cb88d67a99d809f280d8945",
@@ -788,11 +789,11 @@
     "setup/test-upstream-workspace-reuse.mjs.sha256": "87a4d35a9eb1ddfb154cecf625adc410d2db414e9716e0e8426cb0b76d59ba12",
     "setup/test-windows-app-icon.mjs.sha256": "2f48e3da2331fa5ed67a19799c61179c1527e0c9a888de08147529fd1497fd20",
     "setup/tunnel-launcher.cjs.sha256": "e6c70fa208032d45481cf28dd0904b5fb20a5173e8a9f7029d64d3f71ca08e3e",
-    "ui-next/dist/index.html.sha256": "c941713d27fe07d07f5bb2c8b45e13df223cc246348ff516ff903411b7de6890",
+    "ui-next/dist/index.html.sha256": "0a032abaf7750ca5c2785cf47b4479e668dcdff0c8d53125c13cdee4564ad406",
     "ui-next/electron/main.cjs.sha256": "bfa3a79d6d1a755182674b745f5a64d41a803f097e287934bfb139cf1922663d",
     "ui-next/electron/preload.cjs.sha256": "368cdb5660bc83d02e138b5268e87683254217d155b7f046461c305f14032bb9",
     "ui-next/electron/update-status.cjs.sha256": "a3deb18c8d98905721ae1035ba1d39ff05cd9c8421dda91ae830f2a81a64c2e6",
-    "ui-next/package.json.sha256": "22af8d3c7b68ed14b9067554492839dc3844dac5e5279ce8dd2b05f13ec2181b",
+    "ui-next/package.json.sha256": "9ae9d2aa84d19bfb5dfb195633fe683175108e99ea1bd8fa55f35a1bc53b4537",
     "ui-next/runtime/electron.exe.sha256": "62c62d170a95aa4a3eb3df05f0d56a3654ab4344f7452e21dea1334afed7100f"
   },
   "policy": {
@@ -807,10 +808,5 @@
     "defaultBindHost": "127.0.0.1",
     "defaultPort": 7676,
     "quickTunnelAllowed": false
-  },
-  "development": {
-    "channel": "dev",
-    "iteration": 2,
-    "label": "dev2"
   }
 }
