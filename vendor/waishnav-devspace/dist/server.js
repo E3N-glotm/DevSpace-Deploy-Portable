@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
-import { extname } from "node:path";
+import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -45,6 +45,7 @@ import { formatLocalAgentProviderAvailabilitySummary, getLocalAgentProviderAvail
 import { linuxAgentAsset, RemoteAgentManager } from "./remote-agent-manager.js";
 import { startAgentLanGateway } from "./agent-lan-gateway.js";
 import { createContinuationSupervisorScheduler } from "./continuation-supervisor.js";
+import { createModelWorkerRuntime } from "./model-worker-runtime.js";
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
 // Each MCP transport owns a complete McpServer/tool registration graph. A
@@ -3063,6 +3064,48 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         toolMeta: (kind) => toolWidgetDescriptorMeta(config, kind),
         appToolMeta: (kind) => appCallableToolMeta(config, kind),
     });
+    // These are first-party MCP tools, not plugin slots or OpenCode adapters.
+    // The model is never selected implicitly for a normal DevSpace call.
+    const workerResult = (value) => ({
+        content: [textBlock(JSON.stringify(value, null, 2))],
+        structuredContent: {result:JSON.stringify(value),data:value},
+    });
+    registerAppTool(server,"model_worker_list",{
+        title:"List configured DevSpace Workers",
+        description:"List explicitly configured local/cloud model Worker profiles without disclosing API keys. Use before model_delegate_task. Other MCP calls do not invoke models automatically.",
+        inputSchema:{},
+        outputSchema:resultOutputSchema({data:z.unknown()}),
+        ...toolWidgetDescriptorMeta(config,"workspace"),
+        annotations:READ_ONLY_TOOL_ANNOTATIONS,
+    },async()=>workerResult({models:runtimeServices.modelWorker.models()}));
+    registerAppTool(server,"model_delegate_task",{
+        title:"Delegate to configured model Worker",
+        description:"Explicitly delegate a bounded task to a user-configured model (e.g. local Ollama Qwen). ChatGPT remains supervisor/reviewer. Default is read-only; allowWrites=true explicitly authorizes bounded edits in the opened local workspace. Worker cannot run shell commands or access credentials. First open the workspace and obtain its workspaceId.",
+        inputSchema:{
+            workspaceId:z.string(),
+            modelId:z.string().describe("ID from model_worker_list, not the model's display name."),
+            instruction:z.string().min(1).max(8000),
+            allowWrites:z.boolean().optional().describe("Default false. True explicitly delegates file edits."),
+            maxSteps:z.number().int().min(1).max(20).optional(),
+            timeoutSeconds:z.number().int().min(30).max(3600).optional(),
+        },
+        outputSchema:resultOutputSchema({data:z.unknown()}),
+        ...toolWidgetDescriptorMeta(config,"workspace"),
+        annotations:SHELL_TOOL_ANNOTATIONS,
+    },async input=>workerResult(runtimeServices.modelWorker.delegate(input)));
+    for(const [toolName,action,description] of [
+        ["model_task_status","status","Get bounded model Worker progress, tool counts, token usage and estimated cost."],
+        ["model_task_result","result","Read the final Worker answer, bounded evidence and failure reason for independent ChatGPT verification. The Worker is never itself a source of proof."],
+        ["model_task_cancel","cancel","Cancel a running Worker job and abort its current model HTTP request."],
+    ]){
+        registerAppTool(server,toolName,{
+            title:toolName,description,
+            inputSchema:{taskId:z.string()},
+            outputSchema:resultOutputSchema({data:z.unknown()}),
+            ...toolWidgetDescriptorMeta(config,"workspace"),
+            annotations:action==="cancel"?SHELL_TOOL_ANNOTATIONS:READ_ONLY_TOOL_ANNOTATIONS,
+        },async({taskId})=>workerResult(runtimeServices.modelWorker[action](taskId)));
+    }
     if (process.env.DEVSPACE_DYNAMIC_PLUGIN_ALIASES !== "0")
         registerDynamicPluginTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);
     registerAppTool(server, "open_workspace", {
@@ -4326,6 +4369,16 @@ export function createServer(config = loadConfig(), options = {}) {
             };
         },
     });
+    const modelWorker = createModelWorkerRuntime({
+        portableRoot:process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..",".."),
+        config,workspaces,reviewCheckpoints,hookManager,
+        prepareWrite:(workspaceId,workspace,rel)=>prepareMutation(reviewCheckpoints,hookManager,{
+            workspaceId,workspaceRoot:workspace.root,paths:[rel],toolName:"model_worker_edit",
+        }),
+        finishWrite:(workspaceId,workspace,rel,success)=>finishMutation(reviewCheckpoints,hookManager,{
+            workspaceId,workspaceRoot:workspace.root,paths:[rel],toolName:"model_worker_edit",success,
+        }),
+    });
     const processSessions = new ProcessSessionManager({ stateDir: config.stateDir, runtimeState });
     const fileWatches = new FileWatchManager(runtimeState);
     const permissionRules = new PermissionRuleEngine(config, runtimeState);
@@ -4645,6 +4698,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     hookManager,
                     remoteAgents,
                     continuationSupervisor,
+                    modelWorker,
                 });
                 initializedServer = server;
                 await server.connect(transport);

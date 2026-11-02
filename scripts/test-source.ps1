@@ -128,6 +128,7 @@ $Tests = @(
     "setup/test-memory-workspace-path.mjs",
     "setup/test-ssh-password-hostkey-recovery.mjs",
     "setup/test-windows-app-icon.mjs",
+    "vendor/waishnav-devspace/test/model-worker-runtime.test.mjs",
     "setup/test-runtime-log-ui.mjs",
     "setup/test-portable-ui-workflows.mjs",
     "setup/test-oauth-client-compatibility.mjs",

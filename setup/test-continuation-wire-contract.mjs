@@ -74,6 +74,13 @@ let samplingClient;
 try {
   await client.connect(transport);
   const { tools } = await client.listTools();
+  for (const name of ["model_worker_list", "model_delegate_task", "model_task_status",
+    "model_task_result", "model_task_cancel"]) {
+    const match = tools.find((tool) => tool.name === name);
+    assert.ok(match, `native model Worker tool ${name} must be discoverable over real MCP transport`);
+    assert.ok(match.inputSchema && match.outputSchema,
+      `native model Worker tool ${name} must have explicit schemas`);
+  }
   assert.deepEqual(tools.filter((tool) => `${tool.name} ${tool.description}`.includes("continuation_task"))
     .map((tool) => tool.name), ["continuation_task"],
   "exact task-control discovery must not load unrelated tool schemas");
