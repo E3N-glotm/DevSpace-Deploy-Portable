@@ -2,7 +2,7 @@
 // DevSpace Portable Next: the renderer never receives Node, a shell, file IO,
 // OAuth credentials, or a generic command runner. Only the main process can
 // access the existing manager and the Windows clipboard.
-const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, net, Tray, Menu, screen, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, clipboard, dialog, shell, session, net, Tray, Menu, screen, nativeImage, safeStorage } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
@@ -10,6 +10,7 @@ const {createClosePolicy} = require('./close-policy.cjs');
 const {createPublicHealthMonitor, publicStatusFields} = require('./public-health.cjs');
 const {readUpdateState} = require('./update-status.cjs');
 const {createComputerUseIndicator} = require('./computer-use-indicator.cjs');
+const {createModelProviderService} = require('./model-providers.cjs');
 
 const ROOT = path.resolve(process.env.DEVSPACE_PORTABLE_ROOT || path.join(__dirname, '../..'));
 const HERE = path.resolve(__dirname, '..');
@@ -350,6 +351,19 @@ function secret(kind) {
   return match ? match[2].trim() : '';
 }
 function installHandlers() {
+  // Model credentials remain in Electron's main process, encrypted with
+  // Windows DPAPI via safeStorage. Never expose decrypted keys to the UI.
+  const modelProviders = createModelProviderService({
+    root:ROOT,cryptoService:safeStorage,
+    // Cloud provider requests must follow the same Windows proxy/PAC behavior
+    // as the existing public MCP health checker.
+    fetchImpl:(url,options)=>net.fetch(url,options),
+  });
+  register('modelProvidersList',()=>modelProviders.list());
+  register('modelProvidersSave',payload=>operation(()=>modelProviders.save(payload)));
+  register('modelProvidersDelete',id=>operation(()=>modelProviders.remove(id)));
+  register('modelProvidersDiscover',id=>modelProviders.discover(id));
+  register('modelProvidersProbe',(id,tools)=>modelProviders.probe(id,{tools:tools===true}));
   register('initialize', async () => ({
     config: await runManager('show-config'), status: await publishStatus(),
     root: ROOT, applyPending: fs.existsSync(APPLY_PENDING),
@@ -751,7 +765,7 @@ app.whenReady().then(() => {
           }
           if (navigationSmokeMode && view.bridge && view.hasRoot) {
             const coverage = [];
-            const pageIds = ['home','agents','extensions','tasks',
+            const pageIds = ['home','agents','models','extensions','tasks',
               'sessions','memories','oauth','services','diagnose','settings'];
             for (const pageId of pageIds) {
               const clicked = await activeWindow.webContents.executeJavaScript(`(() => {

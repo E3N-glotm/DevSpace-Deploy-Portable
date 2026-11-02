@@ -20,8 +20,10 @@ function hooks({ownedTaskXml}={}){
       ? require('../electron/close-policy.cjs')
       :n==='./public-health.cjs'
         ? require('../electron/public-health.cjs')
-      :n==='./computer-use-indicator.cjs'
-        ? require('../electron/computer-use-indicator.cjs')
+       :n==='./computer-use-indicator.cjs'
+         ? require('../electron/computer-use-indicator.cjs')
+       :n==='./model-providers.cjs'
+         ? require('../electron/model-providers.cjs')
       :n==='./update-status.cjs'
         ? require('../electron/update-status.cjs')
       :n==='node:child_process'&&ownedTaskXml!==undefined

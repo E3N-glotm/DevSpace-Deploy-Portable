@@ -11,8 +11,9 @@ import {operationNames, standardOperations, fullOperations, detectOperationMode,
   initialFileScope, selectedDirectoryList, compileAccessSettings} from './access-policy';
 import { AgentsPage, PluginsPage, ContinuationsPage, SessionsPage,
   MemoriesPage, OAuthPage, ServicePage, DiagnosticsPage, UpdatesPage } from './Operations';
+import {ModelProvidersPage} from './ModelProviders';
 
-type Page = 'home' | 'agents' | 'extensions' | 'tasks' |
+type Page = 'home' | 'agents' | 'models' | 'extensions' | 'tasks' |
   'sessions' | 'memories' | 'oauth' | 'services' | 'diagnose' | 'settings';
 type SettingsSection = 'basic' | 'files' | 'operations' | 'updates';
 const settingsSections: {id:SettingsSection;label:string;description:string}[] = [
@@ -283,6 +284,7 @@ export function App() {
       <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE</small></span></div>
       <div className="side-group">
         {([['home',<HomeRegular/>,'主页'],['agents',<ServerRegular/>,'远程服务器'],
+          ['models',<CodeRegular/>,'模型提供商'],
           ['extensions',<PlugConnectedRegular/>,'插件与工具'],
           ['tasks',<AppsRegular/>,'续轮任务'],['sessions',<SearchRegular/>,'会话与回退'],
           ['memories',<KeyRegular/>,'Memories'],['oauth',<LockClosedRegular/>,'OAuth 客户端'],
@@ -296,7 +298,7 @@ export function App() {
     </aside>
     <main className="main">
       <header className="topbar"><div><span className="eyebrow">DEVSPACE / {wizard?'首次设置':page.toUpperCase()}</span><h1>{wizard?'设置 DevSpace':{
-        home:'控制台',agents:'远程服务器',extensions:'插件与工具',tasks:'续轮任务',
+        home:'控制台',agents:'远程服务器',models:'模型提供商',extensions:'插件与工具',tasks:'续轮任务',
         sessions:'会话与回退',memories:'Memories',oauth:'OAuth 客户端',services:'服务与桌面控制',
         diagnose:'诊断中心',settings:'设置',
       }[page]}</h1></div><div className="top-actions"><span className={'status-pill '+(status?.localHealthy?'ok':'')}>{status?.localHealthy?'● 服务正常':'○ 服务未连接'}</span>
@@ -413,6 +415,7 @@ export function App() {
             </div>}
           {settingsSection==='updates'&&<UpdatesPage/>}</>}
         {!wizard&&page==='agents'&&<AgentsPage/>}
+        {!wizard&&page==='models'&&<ModelProvidersPage/>}
         {!wizard&&page==='extensions'&&<PluginsPage/>}
         {!wizard&&page==='tasks'&&<ContinuationsPage/>}
         {!wizard&&page==='sessions'&&<SessionsPage/>}

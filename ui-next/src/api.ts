@@ -31,6 +31,21 @@ export type UpdateState = {progress:UpdateProgress|null;lastInstall:{
   success:boolean;version:string;servicesRecovered:boolean;occurredAt:number;
 }|null};
 export type CloseChoice = 'minimize-tray' | 'exit-ui' | 'cancel';
+export type ModelProvider = {
+  id:string; name:string; type:'deepseek'|'custom'|'ollama'|'vllm';
+  baseUrl:string; model:string; api:'chat'|'responses';
+  role:'worker'|'reviewer'|'planner';
+  contextLength:number;maxOutputTokens:number;maxTaskUSD:number;
+  inputPerMillionUSD:number;outputPerMillionUSD:number;
+  hasKey:boolean;keyEncrypted:boolean;
+};
+export type ModelProviderDraft = Omit<ModelProvider,'hasKey'|'keyEncrypted'> & {
+  apiKey?:string;clearKey?:boolean;
+};
+export type ModelDiscovery = {reachable:boolean;httpStatus:number;models:string[];reason?:string};
+export type ModelProbe = {connected:boolean;httpStatus:number;
+  functionCalling:'supported'|'unsupported'|'not-tested';returnedToolCall?:boolean;
+  usage?:{inputTokens:number;outputTokens:number;estimatedUSD:number}|null};
 export type Backend = {
   initialize(): Promise<{config: Config; status: any; root: string; applyPending:boolean}>;
   getConfig(): Promise<Config>;
@@ -44,6 +59,11 @@ export type Backend = {
   pickPlugin(): Promise<string|null>;
   pickExport(suggestedName:string): Promise<string|null>;
   admin(action:string,payload:Record<string,unknown>,confirmed?:boolean):Promise<any>;
+  modelProvidersList():Promise<ModelProvider[]>;
+  modelProvidersSave(config:ModelProviderDraft):Promise<ModelProvider>;
+  modelProvidersDelete(id:string):Promise<{removed:boolean}>;
+  modelProvidersDiscover(id:string):Promise<ModelDiscovery>;
+  modelProvidersProbe(id:string,tools?:boolean):Promise<ModelProbe>;
   copyUrl(kind: 'local' | 'public'): Promise<{copied: boolean}>;
   chooseFolder(): Promise<string | null>;
   runAction(action: 'diagnose' | 'restart-local' | 'restart-tunnel' | 'plugin-list' | 'continuation-list' | 'memory-list' | 'review-list' | 'oauth-client-list' | 'update-check'): Promise<unknown>;

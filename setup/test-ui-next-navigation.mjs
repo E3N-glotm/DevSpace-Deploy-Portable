@@ -37,7 +37,7 @@ const resultLine=run.stdout.trim().split(/\r?\n/).findLast(line=>line.startsWith
 assert.ok(resultLine,'missing Electron navigation acceptance');
 const result=JSON.parse(resultLine);
 assert.equal(result.smoke,true);
-assert.equal(result.navigation.length,10);
+assert.equal(result.navigation.length,11,'Native model provider page must be a first-class navigation destination');
 assert.ok(result.navigation.every(row=>row.clicked&&row.hasPanel&&!row.legacyLaunch&&!row.error));
 if(effectiveIteration>=5){
   if(effectiveIteration<8){
