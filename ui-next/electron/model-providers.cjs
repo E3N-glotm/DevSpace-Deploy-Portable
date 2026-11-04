@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {isIP} = require('node:net');
 const {randomUUID} = require('node:crypto');
+const {createModelUsageStore,emptyStats} = require('../../setup/model-usage.cjs');
 
 const TYPES = new Set(['deepseek','custom','ollama','vllm']);
 const ROLES = new Set(['worker','reviewer','planner']);
@@ -93,7 +94,8 @@ function makeBudget(model){
   };
 }
 function apiPath(base,suffix){return base.replace(/\/$/,'')+'/'+suffix;}
-function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fetch,filesystem=fs}){
+function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fetch,
+  filesystem=fs,usageStore=createModelUsageStore(root)}){
   if(!cryptoService||typeof cryptoService.encryptString!=='function'||typeof cryptoService.decryptString!=='function')
     throw Error('缺少系统加密服务');
   const filename=path.join(root,'data','config','model-providers.json');
@@ -146,6 +148,10 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     const model=load().find(m=>m.id===id);
     if(!model)throw Error('模型尚未保存');
     return model;
+  }
+  function stats(id){
+    const model=get(id);
+    return model.model?usageStore.stats(id,model.model):emptyStats(id,'');
   }
   function auth(model){
     if(!model.encryptedKey)return {};
@@ -206,6 +212,10 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
   async function probe(id,{tools=false}={}){
     const model=get(id);
     if(!model.model)throw Error('请先从模型列表选择或输入模型标识');
+    const startedAt=new Date().toISOString();
+    const startedNs=process.hrtime.bigint();
+    let succeeded=false;
+    let actualUsage=null;
     // An intentionally harmless local echo function; it does not run commands.
     const tool={type:'function',function:{name:'devspace_probe_echo',
       description:'Test whether structured tool calls are supported; no side effects',
@@ -222,24 +232,45 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
       max_tokens:80,
       ...(tools?{tools:[tool],tool_choice:'required'}:{}),
     };
-    const result=await request(model,isResponses?'responses':'chat/completions',
-      {method:'POST',body});
-    if(!result.ok)return {connected:false,httpStatus:result.status,
-      functionCalling:tools?'unsupported':'not-tested'};
-    const output=result.data;
-    const calls=isResponses?
-      (Array.isArray(output.output)?output.output:[]).filter(o=>o.type==='function_call'):
-      (output.choices||[]).flatMap(c=>c.message?.tool_calls||[]);
-    const supported=calls.some(c=>String(c.name||c.function?.name)==='devspace_probe_echo');
-    return {connected:true,httpStatus:result.status,
-      functionCalling:tools?(supported?'supported':'unsupported'):'not-tested',
-      returnedToolCall:tools?supported:false,
-      usage:output.usage?{
-        inputTokens:Number(output.usage.prompt_tokens||output.usage.input_tokens||0),
-        outputTokens:Number(output.usage.completion_tokens||output.usage.output_tokens||0),
-        estimatedUSD:estimateCost(output.usage,model),
-      }:null};
+    try{
+      const result=await request(model,isResponses?'responses':'chat/completions',
+        {method:'POST',body});
+      if(!result.ok)return {connected:false,httpStatus:result.status,
+        functionCalling:tools?'unsupported':'not-tested'};
+      const output=result.data;
+      const calls=isResponses?
+        (Array.isArray(output.output)?output.output:[]).filter(o=>o.type==='function_call'):
+        (output.choices||[]).flatMap(c=>c.message?.tool_calls||[]);
+      const supported=calls.some(c=>String(c.name||c.function?.name)==='devspace_probe_echo');
+      actualUsage=output.usage||null;
+      succeeded=true;
+      return {connected:true,httpStatus:result.status,
+        functionCalling:tools?(supported?'supported':'unsupported'):'not-tested',
+        returnedToolCall:tools?supported:false,
+        usage:output.usage?{
+          inputTokens:Number(output.usage.prompt_tokens||output.usage.input_tokens||0),
+          outputTokens:Number(output.usage.completion_tokens||output.usage.output_tokens||0),
+          estimatedUSD:estimateCost(output.usage,model),
+        }:null};
+    }finally{
+      try{
+        usageStore.record({
+          profileId:id,model:model.model,
+          source:tools?'function-test':'connection-test',
+          success:succeeded,startedAt,
+          durationMs:Math.round(Number(process.hrtime.bigint()-startedNs)/1e6),
+          inputTokens:Number(actualUsage?.prompt_tokens||actualUsage?.input_tokens||0),
+          outputTokens:Number(actualUsage?.completion_tokens||actualUsage?.output_tokens||0),
+          estimatedUSD:actualUsage?estimateCost(actualUsage,model):0,
+          usageReported:Boolean(actualUsage),
+        });
+      }catch{
+        // Never let an accounting storage failure conceal the API result or
+        // expose remote request details. The statistics endpoint remains readable.
+        console.warn('MODEL_USAGE_WRITE_FAILED');
+      }
+    }
   }
-  return {list,save,remove,discover,probe,makeBudget,filename};
+  return {list,save,remove,discover,probe,stats,makeBudget,filename};
 }
 module.exports={createModelProviderService,validate,normalizeUrl,makeBudget,estimateCost};

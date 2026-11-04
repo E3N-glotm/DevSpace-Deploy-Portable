@@ -46,6 +46,14 @@ export type ModelDiscovery = {reachable:boolean;httpStatus:number;models:string[
 export type ModelProbe = {connected:boolean;httpStatus:number;
   functionCalling:'supported'|'unsupported'|'not-tested';returnedToolCall?:boolean;
   usage?:{inputTokens:number;outputTokens:number;estimatedUSD:number}|null};
+export type ModelUsageStats = {
+  profileId:string;model:string;firstCallAt:string|null;lastCallAt:string|null;
+  lastCompletedAt:string|null;lastDurationMs:number|null;lastStatus:'success'|'failed'|null;
+  totalCalls:number;successfulCalls:number;failedCalls:number;
+  inputTokens:number;outputTokens:number;totalTokens:number;
+  totalDurationMs:number;estimatedUSD:number;usageMissingCalls:number;
+  corruptRecords:number;bySource:{worker:number;'connection-test':number;'function-test':number};
+};
 export type Backend = {
   initialize(): Promise<{config: Config; status: any; root: string; applyPending:boolean}>;
   getConfig(): Promise<Config>;
@@ -64,6 +72,7 @@ export type Backend = {
   modelProvidersDelete(id:string):Promise<{removed:boolean}>;
   modelProvidersDiscover(id:string):Promise<ModelDiscovery>;
   modelProvidersProbe(id:string,tools?:boolean):Promise<ModelProbe>;
+  modelProvidersStats(id:string):Promise<ModelUsageStats>;
   copyUrl(kind: 'local' | 'public'): Promise<{copied: boolean}>;
   chooseFolder(): Promise<string | null>;
   runAction(action: 'diagnose' | 'restart-local' | 'restart-tunnel' | 'plugin-list' | 'continuation-list' | 'memory-list' | 'review-list' | 'oauth-client-list' | 'update-check'): Promise<unknown>;

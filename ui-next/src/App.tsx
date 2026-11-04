@@ -281,7 +281,7 @@ export function App() {
   if(!draft||!config)return <div className="startup"><Spinner size="large"/><h2>正在连接 DevSpace…</h2><p>{error||'读取本地配置，不会修改现有部署。'}</p></div>;
   return <div className="desktop">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV2</small></span></div>
+      <div className="brand"><span className="brand-mark"><CodeRegular/></span><span>DevSpace<small>PORTABLE · DEV3</small></span></div>
       <div className="side-group">
         {([['home',<HomeRegular/>,'主页'],['agents',<ServerRegular/>,'远程服务器'],
           ['models',<CodeRegular/>,'模型提供商'],
@@ -293,7 +293,7 @@ export function App() {
           <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
       <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span>v1.1.68 dev2</span></div>
+        <div className="sidebar-status"><span>v1.1.68 dev3</span></div>
       </div>
     </aside>
     <main className="main">

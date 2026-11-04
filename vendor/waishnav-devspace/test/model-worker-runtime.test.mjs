@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import {createRequire} from "node:module";
 // Use the production-packed core so its ESM dependencies resolve the same way
 // as in the Windows Portable runtime, not a separate vendor/node_modules tree.
 import { createModelWorkerRuntime, safeWorkerPath, publicModelProfiles } from "../../../app/node_modules/@waishnav/devspace/dist/model-worker-runtime.js";
 
 const repo = resolve(import.meta.dirname, "..", "..", "..");
+const {createModelUsageStore}=createRequire(import.meta.url)(resolve(repo,"setup","model-usage.cjs"));
 const reports = resolve(repo, "reports");
 mkdirSync(reports,{recursive:true});
 
@@ -35,6 +37,7 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0 }={}){
     let count=0,writeStarted=0,writeFinished=0;
     const runtime=createModelWorkerRuntime({
         portableRoot:root,
+        usageStore:createModelUsageStore(root),
         workspaces:{getWorkspace:id=>{
             assert.equal(id,"ws_test");return {root:project,backend:"local"};
         }},
@@ -91,6 +94,15 @@ test("default read-only worker calls a real workspace read and produces evidence
         assert.ok(done.estimatedUSD>0);
         assert.ok(done.answer.includes("Examined workspace"));
         assert.equal(f.counts().writeStarted,0);
+        const stats=createModelUsageStore(f.root).stats("qwen_worker","local-qwen:latest");
+        assert.equal(stats.totalCalls,2);
+        assert.equal(stats.successfulCalls,2);
+        assert.equal(stats.bySource.worker,2);
+        assert.equal(stats.inputTokens,200);
+        assert.equal(stats.outputTokens,70);
+        assert.equal(stats.totalTokens,270);
+        assert.equal(stats.failedCalls,0);
+        assert.ok(stats.lastCallAt);
     }finally{f.dispose();}
 });
 test("explicit writes go through the same before/after mutation guard",async()=>{
@@ -128,6 +140,11 @@ test("HTTP failures are bounded and do not leak remote response bodies",async()=
         const done=await eventually(()=>f.runtime.result(started.taskId));
         assert.equal(done.status,"failed");
         assert.equal(done.error,"MODEL_HTTP_401");
+        const stats=createModelUsageStore(f.root).stats("qwen_worker","local-qwen:latest");
+        assert.equal(stats.totalCalls,1);
+        assert.equal(stats.failedCalls,1);
+        assert.equal(stats.usageMissingCalls,1);
+        assert.equal(stats.lastStatus,"failed");
     }finally{f.dispose();}
 });
 test("cloud profiles with Electron-encrypted credentials are rejected rather than decrypted unsafely",()=>{
@@ -151,6 +168,7 @@ test("single-writer workspace lock prevents simultaneous modifying workers",asyn
     writeFileSync(resolve(f.root,"data","config","model-providers.json"),JSON.stringify(config));
     const worker=createModelWorkerRuntime({
         portableRoot:f.root,
+        usageStore:createModelUsageStore(f.root),
         workspaces:{getWorkspace:()=>({backend:"local",root:f.project})},
         config:{permissions:{allowShellMutation:true,allowArbitraryCommands:false}},
         fetchImpl:async()=>{await suspended;return response({choices:[{message:{content:"done"}}]});},

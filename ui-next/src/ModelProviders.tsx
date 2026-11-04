@@ -1,7 +1,7 @@
 import {useCallback,useEffect,useState} from 'react';
 import {Button,Field,Input,Radio,RadioGroup,Spinner} from '@fluentui/react-components';
 import {ArrowClockwiseRegular,DeleteRegular,SaveRegular,ShieldCheckmarkRegular} from '@fluentui/react-icons';
-import type {ModelProvider,ModelProviderDraft,ModelDiscovery,ModelProbe} from './api';
+import type {ModelProvider,ModelProviderDraft,ModelDiscovery,ModelProbe,ModelUsageStats} from './api';
 
 type ProviderType=ModelProviderDraft['type'];
 type Role=ModelProviderDraft['role'];
@@ -23,6 +23,17 @@ function message(e:unknown):string {
   const str=e instanceof Error?e.message:String(e);
   return str.length>220?str.slice(0,220):str;
 }
+const count=(value:number)=>value.toLocaleString('zh-CN');
+function duration(value:number|null):string{
+  if(value===null)return '暂无';
+  if(value<1000)return value+' ms';
+  if(value<60_000)return (value/1000).toFixed(2)+' 秒';
+  if(value<3_600_000)return (value/60_000).toFixed(2)+' 分钟';
+  return (value/3_600_000).toFixed(2)+' 小时';
+}
+function localTime(value:string|null):string{
+  return value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'暂无';
+}
 const names:Record<ProviderType,string>={
   deepseek:'DeepSeek 官方 API',
   custom:'自定义 OpenAI 兼容 API',
@@ -41,10 +52,33 @@ export function ModelProvidersPage(){
   const [notice,setNotice]=useState('');
   const [discovery,setDiscovery]=useState<ModelDiscovery|null>(null);
   const [probe,setProbe]=useState<ModelProbe|null>(null);
+  const [usage,setUsage]=useState<ModelUsageStats|null>(null);
+  const [usageError,setUsageError]=useState('');
   const saved=items.find(x=>x.id===selected);
   const update=(values:Partial<ModelProviderDraft>)=>setForm(old=>({...old,...values}));
   const reload=useCallback(async()=>setItems(await window.devspace.modelProvidersList()),[]);
   useEffect(()=>{reload().catch(e=>setError(message(e)));},[reload]);
+  const refreshUsage=useCallback(async(id:string,model:string)=>{
+    try{
+      const next=await window.devspace.modelProvidersStats(id);
+      if(next.model!==model)return;
+      setUsage(next);setUsageError('');
+    }catch(e){setUsageError(message(e));}
+  },[]);
+  useEffect(()=>{
+    if(!selected||!saved?.model){setUsage(null);setUsageError('');return;}
+    let active=true;
+    const id=selected,model=saved.model;
+    const refresh=async()=>{
+      try{
+        const next=await window.devspace.modelProvidersStats(id);
+        if(active&&next.model===model){setUsage(next);setUsageError('');}
+      }catch(e){if(active)setUsageError(message(e));}
+    };
+    setUsage(null);void refresh();
+    const timer=setInterval(()=>void refresh(),10_000);
+    return ()=>{active=false;clearInterval(timer);};
+  },[selected,saved?.model]);
   async function discover(id:string){
     const result=await window.devspace.modelProvidersDiscover(id);
     setDiscovery(result);
@@ -54,12 +88,14 @@ export function ModelProvidersPage(){
   function choose(savedModel:ModelProvider){
     setSelected(savedModel.id);setForm({...savedModel});setKey('');
     setClearKey(false);setDiscovery(null);setProbe(null);setError('');setNotice('');
+    setUsage(null);setUsageError('');
     discover(savedModel.id).catch(e=>setError(message(e)));
   }
   function newProfile(){
     const next=draft();next.id='model-'+Date.now().toString(36);
     setSelected('');setForm(next);setKey('');setClearKey(false);
     setDiscovery(null);setProbe(null);setError('');setNotice('');
+    setUsage(null);setUsageError('');
   }
   function changeType(type:ProviderType){
     const preset=defaults[type];
@@ -89,7 +125,10 @@ export function ModelProvidersPage(){
         setError('服务能够返回响应，但没有生成预期的结构化工具调用；不能认为支持 Function Calling。');
       else setNotice(functions?'实际工具调用测试通过（只调用无副作用的探测函数）。':'实际模型请求已成功返回。');
     }catch(e){setError(message(e));}
-    finally{setBusy(false);}
+    finally{
+      setBusy(false);
+      if(saved?.model)void refreshUsage(saved.id,saved.model);
+    }
   }
   async function remove(){
     if(!selected||!window.confirm('删除此模型配置及其加密凭据？'))return;
@@ -188,6 +227,31 @@ export function ModelProvidersPage(){
           </Field>
         </div>
         <p className="op-subtle">上下文长度由你配置，请以模型实际限制为准。价格为自行填写的估算单价；费用上限会保存在配置中，真正的任务调用还需由执行器进行预算扣减，不代表供应商账单硬限制。连接与 Function Calling 测试会发送少量实际请求，云端 API 可能计费。</p>
+        {selected&&saved?.model&&<section className="models-usage" aria-label="当前选中模型的调用统计">
+          <div className="models-usage-header">
+            <strong>选中模型的调用统计</strong>
+            <Button size="small" icon={<ArrowClockwiseRegular/>}
+              onClick={()=>void refreshUsage(saved.id,saved.model)}>刷新统计</Button>
+          </div>
+          <div className="models-usage-grid">
+            <div><small>最后调用时间</small><strong>{usage?localTime(usage.lastCallAt):'—'}</strong></div>
+            <div><small>最近一次耗时</small><strong>{duration(usage?.lastDurationMs??null)}</strong></div>
+            <div><small>累计 API 调用</small><strong>{count(usage?.totalCalls??0)} 次</strong></div>
+            <div><small>成功 / 失败</small><strong>{count(usage?.successfulCalls??0)} / {count(usage?.failedCalls??0)}</strong></div>
+            <div><small>输入 Token</small><strong>{count(usage?.inputTokens??0)}</strong></div>
+            <div><small>输出 Token</small><strong>{count(usage?.outputTokens??0)}</strong></div>
+            <div><small>总 Token</small><strong>{count(usage?.totalTokens??0)}</strong></div>
+            <div><small>累计请求耗时</small><strong>{duration(usage?.totalDurationMs??0)}</strong></div>
+            <div><small>估算费用</small><strong>${(usage?.estimatedUSD??0).toFixed(6)} USD</strong></div>
+          </div>
+          <p className="op-subtle">统计范围：MCP Worker 推理 {count(usage?.bySource.worker??0)} 次，
+            连接测试 {count(usage?.bySource['connection-test']??0)} 次，
+            Function Calling 测试 {count(usage?.bySource['function-test']??0)} 次。
+            从 dev3 启用后开始累计，重启不清零；不包含 Open WebUI 或其他应用直接请求模型服务的调用。</p>
+          {(usage?.usageMissingCalls??0)>0&&<p className="op-subtle">有 {count(usage?.usageMissingCalls??0)} 次请求未返回 Token 使用量，因此 Token 合计只包含服务端实际报告的数据。</p>}
+          {(usage?.corruptRecords??0)>0&&<p className="op-message op-error">统计记录中有 {count(usage?.corruptRecords??0)} 条无法解析，已跳过，累计值可能偏低。</p>}
+          {usageError&&<p className="op-message op-error">统计读取失败：{usageError}</p>}
+        </section>}
         <div className="models-actions">
           <Button appearance="primary" icon={<SaveRegular/>} disabled={busy} onClick={save}>保存配置</Button>
           <Button icon={<ArrowClockwiseRegular/>} disabled={busy||!selected}

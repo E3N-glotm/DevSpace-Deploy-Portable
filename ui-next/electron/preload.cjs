@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('devspace', Object.freeze({
   modelProvidersDelete: id => invoke('modelProvidersDelete', id),
   modelProvidersDiscover: id => invoke('modelProvidersDiscover', id),
   modelProvidersProbe: (id, tools=false) => invoke('modelProvidersProbe', id, tools),
+  modelProvidersStats: id => invoke('modelProvidersStats', id),
   copyUrl: kind => invoke('copyUrl', kind),
   chooseFolder: () => invoke('chooseFolder'),
   runAction: action => invoke('runAction', action),

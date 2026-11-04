@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve, relative, isAbsolute, sep } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { resolve, relative, isAbsolute, sep, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
     readFileTool, grepFilesTool, listDirectoryTool, writeFileTool, editFileTool,
 } from "./pi-tools.js";
@@ -70,7 +72,25 @@ export function createModelWorkerRuntime({
     portableRoot, config, workspaces, reviewCheckpoints, hookManager,
     fetchImpl = globalThis.fetch, readProfiles = publicModelProfiles,
     prepareWrite = async () => {}, finishWrite = async () => {},
+    usageStore,
 }) {
+    // The MCP server and Electron UI are distinct processes. Both write
+    // independent, atomic model-request events into the same Portable data
+    // directory; no live process memory or OAuth token is shared.
+    const coreDirectory=dirname(fileURLToPath(import.meta.url));
+    const modelUsageModule=[
+        // Packaged Portable first. The statistics file must be tied to the
+        // same user-data root as the profile, not to the module's location.
+        resolve(portableRoot,"setup","model-usage.cjs"),
+        // Source checkout running a freshly packed core beside an older
+        // live install (the regression test harness uses this arrangement).
+        resolve(coreDirectory,"../../../../../setup/model-usage.cjs"),
+        resolve(coreDirectory,"../../../setup/model-usage.cjs"),
+    ].find(file=>existsSync(file));
+    if(!usageStore && !modelUsageModule)throw new Error("MODEL_USAGE_MODULE_MISSING");
+    const accounting=usageStore ?? createRequire(import.meta.url)(
+        modelUsageModule
+    ).createModelUsageStore(portableRoot);
     const jobs = new Map();
     const restricted = (text, n = MAX_TOOL_REPLY) => String(text || "").slice(0, n);
     function snapshot(job, includeAnswer = false) {
@@ -174,6 +194,10 @@ export function createModelWorkerRuntime({
         if (remaining < outputReserve) throw new Error("MODEL_TASK_BUDGET_EXHAUSTED");
         const maxTokens=Math.min(2048,Math.max(16,model.maxOutputTokens||2048));
         const controller=new AbortController();job.controller=controller;
+        const startedAt=new Date().toISOString();
+        const startedNs=process.hrtime.bigint();
+        let succeeded=false;
+        let actualUsage=null;
         const timeout=setTimeout(()=>controller.abort(),Math.max(1,Math.min(180000,job.deadline-Date.now())));
         try {
             const url=model.baseUrl.replace(/\/$/,"")+"/chat/completions";
@@ -191,14 +215,36 @@ export function createModelWorkerRuntime({
             let json;
             try {json=JSON.parse(raw);}catch {throw new Error("MODEL_INVALID_JSON");}
             const usage=json.usage||{};
+            actualUsage=json.usage||null;
+            const reply=json.choices?.[0]?.message;
+            if(!reply)throw new Error("MODEL_NO_MESSAGE");
+            succeeded=true;
             job.inputTokens+=Number(usage.prompt_tokens||0);
             job.outputTokens+=Number(usage.completion_tokens||0);
             job.estimatedUSD+=
                 ((Number(usage.prompt_tokens||0)*(model.inputPerMillionUSD||0))+
                  (Number(usage.completion_tokens||0)*(model.outputPerMillionUSD||0)))/1e6;
             if(job.estimatedUSD>job.maxTaskUSD)throw new Error("MODEL_TASK_BUDGET_EXHAUSTED");
-            return json.choices?.[0]?.message;
-        } finally {clearTimeout(timeout);job.controller=null;}
+            return reply;
+        } finally {
+            clearTimeout(timeout);job.controller=null;
+            try{
+                accounting.record({
+                    profileId:job.modelId,model:model.model,source:"worker",
+                    success:succeeded,startedAt,
+                    durationMs:Math.round(Number(process.hrtime.bigint()-startedNs)/1e6),
+                    inputTokens:Number(actualUsage?.prompt_tokens||actualUsage?.input_tokens||0),
+                    outputTokens:Number(actualUsage?.completion_tokens||actualUsage?.output_tokens||0),
+                    estimatedUSD:actualUsage?(
+                        Number(actualUsage.prompt_tokens||actualUsage.input_tokens||0)
+                          *Number(model.inputPerMillionUSD||0)
+                        +Number(actualUsage.completion_tokens||actualUsage.output_tokens||0)
+                          *Number(model.outputPerMillionUSD||0)
+                    )/1e6:0,
+                    usageReported:Boolean(actualUsage),
+                });
+            }catch{console.warn("MODEL_USAGE_WRITE_FAILED");}
+        }
     }
     async function run(job,workspace,model) {
         job.status="running";

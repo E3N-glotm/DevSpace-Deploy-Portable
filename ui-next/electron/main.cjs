@@ -364,6 +364,7 @@ function installHandlers() {
   register('modelProvidersDelete',id=>operation(()=>modelProviders.remove(id)));
   register('modelProvidersDiscover',id=>modelProviders.discover(id));
   register('modelProvidersProbe',(id,tools)=>modelProviders.probe(id,{tools:tools===true}));
+  register('modelProvidersStats',id=>modelProviders.stats(id));
   register('initialize', async () => ({
     config: await runManager('show-config'), status: await publishStatus(),
     root: ROOT, applyPending: fs.existsSync(APPLY_PENDING),

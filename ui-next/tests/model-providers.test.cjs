@@ -125,11 +125,31 @@ test('native Electron bridge exposes dedicated model calls, not a plugin executi
   const main=fs.readFileSync(path.join(__dirname,'../electron/main.cjs'),'utf8');
   const preload=fs.readFileSync(path.join(__dirname,'../electron/preload.cjs'),'utf8');
   const app=fs.readFileSync(path.join(__dirname,'../src/App.tsx'),'utf8');
-  for(const action of ['modelProvidersList','modelProvidersSave','modelProvidersDelete','modelProvidersDiscover','modelProvidersProbe']){
+  for(const action of ['modelProvidersList','modelProvidersSave','modelProvidersDelete','modelProvidersDiscover','modelProvidersProbe','modelProvidersStats']){
     assert.ok(main.includes("register('"+action+"'"),action);
     assert.ok(preload.includes(action+':'),action);
   }
   assert.match(main,/cryptoService:safeStorage/);
   assert.match(app,/models:'模型提供商'/);
   assert.match(app,/<ModelProvidersPage\/>/);
+});
+test('provider connection probe is reflected in durable selected-model statistics',async()=>{
+  const {root,service,cleanup}=fixture(async()=>json({
+    choices:[{message:{content:'OK'}}],usage:{prompt_tokens:20,completion_tokens:7},
+  }));
+  try{
+    service.save(input());
+    await service.probe('local_1');
+    const before=service.stats('local_1');
+    assert.equal(before.totalCalls,1);
+    assert.equal(before.successfulCalls,1);
+    assert.equal(before.inputTokens,20);
+    assert.equal(before.outputTokens,7);
+    assert.equal(before.bySource['connection-test'],1);
+    const restored=createModelProviderService({root,cryptoService:{
+      isEncryptionAvailable:()=>true,encryptString:x=>Buffer.from(x),
+      decryptString:x=>x.toString(),
+    }});
+    assert.deepEqual(restored.stats('local_1'),before);
+  }finally{cleanup();}
 });
