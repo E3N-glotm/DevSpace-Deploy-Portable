@@ -728,7 +728,7 @@ export function ServicePage({config,onConfigChange}:ServiceProps) {
           if(r?.enabled===next)setAuto(next);
         }}/></div>
       <div className="op-toggle"><div><strong>强制模型工作流</strong>
-        <small>默认关闭：上游模型可自主决定是否委派。开启后，DevSpace MCP 的任务操作必须先经过已允许调用的本地 Worker 并取得成功结果，否则拒绝继续；诊断、配置、取消任务等控制操作不受影响。当前 Worker 仅支持本地工作区。</small></div>
+        <small>默认关闭：上游模型可自主决定是否委派。开启后，仅本地工作区的受控操作需要先提交已允许调用的 Worker；GPT 可在 Worker 运行时并行读取和规划，涉及写入时仍需遵守互斥与结果检查。当前 Worker 不支持远程工作区，因此远程 Agent 操作不受此门禁拦截。设置立即生效，无需重启 MCP。</small></div>
         <Switch checked={forcedModel} disabled={busy} onChange={async(_e,d)=>{
           const next=d.checked;const r=await act('set-model-workflow',{enabled:next});
           if(r?.enabled===next)setForcedModel(next);

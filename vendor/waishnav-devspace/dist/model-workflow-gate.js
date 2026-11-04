@@ -38,6 +38,7 @@ export function modelWorkflowPolicy(root){
 export function createModelWorkflowGate({
     portableRoot,modelWorker,readPolicy=()=>modelWorkflowPolicy(portableRoot),
     now=()=>Date.now(),grantTtlMs=GRANT_TTL_MS,
+    isRemoteWorkspaceId=()=>false,
 }){
     const connectionIdentity=randomUUID();
     const owners=new Map();
@@ -84,6 +85,21 @@ export function createModelWorkflowGate({
                 if(args?.mode==="worktree")return blocked("MODEL_WORKFLOW_BOOTSTRAP_WORKTREE_DENIED",
                     "Mandatory model workflow permits only checkout when opening a workspace. Do not create a new worktree before delegation.");
                 return {allowed:true};
+            }
+            // The built-in Worker can only open local checkout workspaces.
+            // Do not deadlock a remote-agent session behind an impossible
+            // delegation. Trust the registry, never a caller-supplied backend.
+            let remote=false;
+            if(workspaceId){
+                try{remote=isRemoteWorkspaceId(workspaceId)===true;}
+                catch{remote=false;}
+            }
+            if(remote){
+                if(writerBusy&&!READ_ONLY.has(name))return blocked(
+                    "MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY",
+                    "A write-capable Worker is already editing this workspace.");
+                return {allowed:true,scope:"remote-workspace",
+                    delegationRequired:false};
             }
             let active;
             try{active=enabledProfiles();}

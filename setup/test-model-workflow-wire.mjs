@@ -186,7 +186,22 @@ try{
     setPolicy(false,"policy-two");
     const optional=await client.callTool({name:readTool.name,arguments:argumentsRead});
     assert.notEqual(optional.isError,true,"optional mode must restore upstream tool selection");
-    console.log("PASS real OAuth/MCP async mandatory gate: immediate parallel Host read, exclusive Worker write, result-review barrier, disable/optional mode");
+    assert.equal((await client.callTool({name:"model_worker_list",arguments:{}}))
+        .structuredContent?.data?.mandatoryModelWorkflow,false,
+        "Same MCP session must observe disabled policy without reconnecting");
+    setPolicy(true,"policy-three");
+    assert.equal((await client.callTool({name:"model_worker_list",arguments:{}}))
+        .structuredContent?.data?.mandatoryModelWorkflow,true,
+        "Same MCP session must observe policy re-enable without reconnecting");
+    const localAfterReenable=await client.callTool({
+        name:readTool.name,arguments:argumentsRead});
+    assert.equal(localAfterReenable.isError,true,
+        "A new policy revision must invalidate the previous local-workspace delegation");
+    setPolicy(false,"policy-four");
+    assert.notEqual((await client.callTool({
+        name:readTool.name,arguments:argumentsRead})).isError,true,
+        "Final disabled policy must unblock existing MCP session again");
+    console.log("PASS real OAuth/MCP async mandatory gate: parallel Host read, exclusive Worker write, result-review barrier, dynamic policy disable/enable/disable");
 }finally{
     try{await client?.close();}catch{}
     try{await transport?.close();}catch{}

@@ -46,7 +46,7 @@ import { linuxAgentAsset, RemoteAgentManager } from "./remote-agent-manager.js";
 import { startAgentLanGateway } from "./agent-lan-gateway.js";
 import { createContinuationSupervisorScheduler } from "./continuation-supervisor.js";
 import { createModelWorkerRuntime } from "./model-worker-runtime.js";
-import { createModelWorkflowGate, modelWorkflowPolicy } from "./model-workflow-gate.js";
+import { createModelWorkflowGate } from "./model-workflow-gate.js";
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
 // Each MCP transport owns a complete McpServer/tool registration graph. A
@@ -2998,14 +2998,10 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
 }
 function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, runtimeServices) {
     const reviewToolCursors = new Map();
-    const modelWorkflowRoot=process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..","..");
-    let mandatoryModelInstruction="";
-    try{
-        if(modelWorkflowPolicy(modelWorkflowRoot).enabled)
-            mandatoryModelInstruction=" Mandatory model workflow: after open_workspace, call model_worker_list, delegate to an allowed Worker, wait until completed and call model_task_result before workspace or plugin operations. Failed tasks cannot authorize tools.";
-    }catch{
-        mandatoryModelInstruction=" Mandatory model policy is unreadable; workspace tools will fail closed until the owner repairs the policy.";
-    }
+    // Do not freeze the current on/off value in MCP session instructions:
+    // Portable can change the policy without restarting a client session.
+    // The gate reads the authoritative user setting for every tool call.
+    const mandatoryModelInstruction=" Model workflow is a live Portable setting. Check model_worker_list.mandatoryModelWorkflow for its current value. When enabled, local workspace tasks require an explicit Worker dispatch, but the Host may continue read-only inspection while the Worker runs. Remote-agent workspaces are exempt until remote Worker delegation exists. Never infer the current toggle state from session initialization instructions.";
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
@@ -3081,7 +3077,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_worker_list",{
         title:"List configured DevSpace Workers",
-        description:"List enabled callable Worker profiles without disclosing API keys. When mandatory model workflow is enabled, dispatch an explicit Worker before protected workspace tools. Host inspection can proceed while the Worker runs; write-capable Worker and Host mutations are serialized.",
+        description:"List enabled callable Worker profiles without disclosing API keys. Mandatory workflow is a live setting for local workspaces only: dispatch an explicit Worker first, then Host inspection can proceed while it runs. Remote-agent workspaces remain accessible without local Worker delegation; write-capable Worker and Host mutations stay serialized.",
         inputSchema:{},
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
@@ -4730,6 +4726,8 @@ export function createServer(config = loadConfig(), options = {}) {
                         const gate=createModelWorkflowGate({
                             portableRoot:process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..",".."),
                             modelWorker,
+                            isRemoteWorkspaceId:workspaceId=>
+                                isRemoteWorkspace(workspaces.getWorkspace(workspaceId)),
                         });
                         modelWorkflowGates.set(transport,gate);
                         return gate;

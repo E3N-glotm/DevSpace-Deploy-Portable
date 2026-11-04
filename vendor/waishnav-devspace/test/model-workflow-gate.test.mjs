@@ -26,7 +26,8 @@ function fixture(){
             (hostWrites.get(workspaceId)||0)-1),
     };
     const gate=createModelWorkflowGate({portableRoot:repo,modelWorker:worker,
-        readPolicy:()=>policy,now:()=>clock,grantTtlMs:3000});
+        readPolicy:()=>policy,now:()=>clock,grantTtlMs:3000,
+        isRemoteWorkspaceId:id=>id==="ws-remote"});
     return {gate,worker,hostWrites,
         delegate:(taskId="task1",workspaceId="ws1",scope="chat",allowWrites=false)=>{
             const result={taskId,workspaceId,modelId:"w1",
@@ -75,6 +76,20 @@ test("no enabled Worker, missing workspace and no completed delegation all fail 
     f.noWorkers();
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"}).code,
         "MODEL_WORKFLOW_NO_ENABLED_WORKER");
+});
+test("forced mode never blocks real remote-agent workspace operations for lack of a local Worker",()=>{
+    const f=fixture();f.enable();f.noWorkers();
+    for(const name of ["read","exec_command","apply_patch","show_changes"]){
+        const decision=f.gate.authorize(name,{workspaceId:"ws-remote"},"remote-chat");
+        assert.equal(decision.allowed,true,name);
+        assert.equal(decision.scope,"remote-workspace",name);
+        assert.equal(decision.delegationRequired,false,name);
+    }
+    assert.equal(f.gate.authorize("exec_command",{workspaceId:"ws1"}).code,
+        "MODEL_WORKFLOW_NO_ENABLED_WORKER");
+    assert.equal(f.gate.authorize("exec_command",{workspaceId:"invented-remote-id"}).code,
+        "MODEL_WORKFLOW_NO_ENABLED_WORKER",
+        "Untrusted workspaceId strings must not bypass the registry-backed remote check");
 });
 test("dispatch immediately unlocks Host inspection without waiting for Worker completion",()=>{
     const f=fixture();f.enable();
@@ -166,4 +181,6 @@ test("MCP HTTP transport handles all tools/call including plugin tools",()=>{
     assert.match(s,/Batch tools\/call requests are disabled/);
     assert.match(s,/modelWorkflowGate\?\.onDelegate/);
     assert.match(s,/modelWorkflowGate\?\.onResult/);
+    assert.match(s,/isRemoteWorkspaceId:workspaceId=>/);
+    assert.doesNotMatch(s,/wait until completed and call model_task_result before workspace/);
 });

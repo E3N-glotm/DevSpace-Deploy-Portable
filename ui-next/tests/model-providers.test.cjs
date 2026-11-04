@@ -150,6 +150,14 @@ test('legacy model defaults to callable; disabling persists and cannot run API t
     assert.notEqual(service.list()[0].callPolicyRevision,initial.callPolicyRevision);
   }finally{cleanup();}
 });
+test('disabled model can be edited without automatic API discovery or false red failures',()=>{
+  const source=fs.readFileSync(path.join(__dirname,'../src/ModelProviders.tsx'),'utf8');
+  assert.match(source,/if\(savedModel\.allowCalls===false\)/);
+  assert.match(source,/if\(stored\.allowCalls!==false\)/);
+  assert.match(source,/discoveryGeneration\.current\+\+/);
+  assert.match(source,/selectedRef\.current!==id\|\|discoveryGeneration\.current!==generation/);
+  assert.match(source,/disabled=\{busy\|\|!selected\|\|saved\?\.allowCalls===false\}/);
+});
 test('disabled profile retains encrypted key without exposing it',()=>{
   const {root,service,cleanup}=fixture();
   try{

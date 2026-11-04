@@ -1,4 +1,4 @@
-import {useCallback,useEffect,useState} from 'react';
+import {useCallback,useEffect,useRef,useState} from 'react';
 import {Button,Field,Input,Radio,RadioGroup,Spinner,Switch} from '@fluentui/react-components';
 import {ArrowClockwiseRegular,DeleteRegular,SaveRegular,ShieldCheckmarkRegular} from '@fluentui/react-icons';
 import type {ModelProvider,ModelProviderDraft,ModelDiscovery,ModelProbe,ModelUsageStats} from './api';
@@ -55,6 +55,8 @@ export function ModelProvidersPage(){
   const [probe,setProbe]=useState<ModelProbe|null>(null);
   const [usage,setUsage]=useState<ModelUsageStats|null>(null);
   const [usageError,setUsageError]=useState('');
+  const selectedRef=useRef('');
+  const discoveryGeneration=useRef(0);
   const saved=items.find(x=>x.id===selected);
   const update=(values:Partial<ModelProviderDraft>)=>setForm(old=>({...old,...values}));
   const reload=useCallback(async()=>setItems(await window.devspace.modelProvidersList()),[]);
@@ -81,19 +83,37 @@ export function ModelProvidersPage(){
     return ()=>{active=false;clearInterval(timer);};
   },[selected,saved?.model]);
   async function discover(id:string){
-    const result=await window.devspace.modelProvidersDiscover(id);
+    const generation=++discoveryGeneration.current;
+    let result:ModelDiscovery;
+    try{result=await window.devspace.modelProvidersDiscover(id);}
+    catch(e){
+      // A reply from an earlier selection (or a now-disabled model) must
+      // not repaint the current editor as a failed request.
+      if(selectedRef.current!==id||discoveryGeneration.current!==generation)return;
+      throw e;
+    }
+    if(selectedRef.current!==id||discoveryGeneration.current!==generation)return;
     setDiscovery(result);
     if(!result.reachable)setError('获取模型列表失败：HTTP '+result.httpStatus);
     else setNotice('已发现 '+result.models.length+' 个模型标识；请确认所选模型的实际上下文容量。');
   }
   function choose(savedModel:ModelProvider){
+    selectedRef.current=savedModel.id;
+    discoveryGeneration.current++;
     setSelected(savedModel.id);setForm({...savedModel});setKey('');
     setClearKey(false);setDiscovery(null);setProbe(null);setError('');setNotice('');
     setUsage(null);setUsageError('');
-    discover(savedModel.id).catch(e=>setError(message(e)));
+    if(savedModel.allowCalls===false){
+      setNotice('该模型已关闭“允许调用”。可以查看或编辑配置；启用后才能获取模型列表或发送测试请求。');
+      return;
+    }
+    discover(savedModel.id).catch(e=>{
+      if(selectedRef.current===savedModel.id)setError(message(e));
+    });
   }
   function newProfile(){
     const next=draft();next.id='model-'+Date.now().toString(36);
+    selectedRef.current='';discoveryGeneration.current++;
     setSelected('');setForm(next);setKey('');setClearKey(false);
     setDiscovery(null);setProbe(null);setError('');setNotice('');
     setUsage(null);setUsageError('');
@@ -107,11 +127,15 @@ export function ModelProvidersPage(){
     setBusy(true);setError('');setNotice('');setProbe(null);
     try{
       const stored=await window.devspace.modelProvidersSave({...form,apiKey:key||undefined,clearKey});
+      selectedRef.current=stored.id;discoveryGeneration.current++;
       setSelected(stored.id);setForm({...stored});setKey('');setClearKey(false);
       await reload();
       setNotice('模型配置已保存，API Key '+(stored.hasKey?'已由 Windows 安全加密存储':'未配置')+'。');
-      try{await discover(stored.id);}
-      catch(e){setError('配置保存成功，但模型列表获取失败：'+message(e));}
+      if(stored.allowCalls!==false){
+        try{await discover(stored.id);}
+        catch(e){if(selectedRef.current===stored.id)
+          setError('配置保存成功，但模型列表获取失败：'+message(e));}
+      }
     }catch(e){setError(message(e));}
     finally{setBusy(false);}
   }
@@ -146,6 +170,10 @@ export function ModelProvidersPage(){
       const result=await window.devspace.modelProvidersSetAllowed(id,enabled);
       setItems(items=>items.map(item=>item.id===id?result:item));
       if(selected===id)setForm(form=>({...form,allowCalls:result.allowCalls}));
+      if(!result.allowCalls&&selectedRef.current===id){
+        discoveryGeneration.current++;
+        setDiscovery(null);setProbe(null);
+      }
       setNotice(enabled?'已允许该模型接受新调用。':'已禁止该模型的新调用和后续推理；正在执行的请求会在下一检查点中止。');
     }catch(e){setError(message(e));}
     finally{setBusy(false);}
@@ -271,10 +299,10 @@ export function ModelProvidersPage(){
         </section>}
         <div className="models-actions">
           <Button appearance="primary" icon={<SaveRegular/>} disabled={busy} onClick={save}>保存配置</Button>
-          <Button icon={<ArrowClockwiseRegular/>} disabled={busy||!selected}
+          <Button icon={<ArrowClockwiseRegular/>} disabled={busy||!selected||saved?.allowCalls===false}
             onClick={async()=>{setBusy(true);setError('');try{await discover(selected);}catch(e){setError(message(e));}finally{setBusy(false);}}}>获取模型列表</Button>
-          <Button disabled={busy||!selected} onClick={()=>check(false)}>测试连接</Button>
-          <Button icon={<ShieldCheckmarkRegular/>} disabled={busy||!selected} onClick={()=>check(true)}>检测 Function Calling</Button>
+          <Button disabled={busy||!selected||saved?.allowCalls===false} onClick={()=>check(false)}>测试连接</Button>
+          <Button icon={<ShieldCheckmarkRegular/>} disabled={busy||!selected||saved?.allowCalls===false} onClick={()=>check(true)}>检测 Function Calling</Button>
           {selected&&<Button icon={<DeleteRegular/>} disabled={busy} onClick={remove}>删除</Button>}
           {busy&&<Spinner size="tiny"/>}
         </div>
