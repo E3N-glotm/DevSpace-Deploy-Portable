@@ -14,7 +14,9 @@ const MAX_TASKS = 32;
 const MAX_TASK_TEXT = 8000;
 const MAX_MODEL_RESPONSE = 512 * 1024;
 const MAX_TOOL_REPLY = 14000;
-const MAX_TOOL_CALLS = 24;
+// Long-running Workers are bounded by their explicit step/time/cost budgets,
+// not by a hidden 24-tool-call quota. Memory usage is bounded separately.
+const WORKER_HISTORY_MESSAGES = 120;
 const TOOL_DEFINITIONS = [
     { type: "function", function: {
         name: "read_file", description: "Read a UTF-8 project file from the authorized workspace. Do not read secrets.",
@@ -287,7 +289,7 @@ export function createModelWorkerRuntime({
                     job.answer=restricted(result.content,12000);
                     job.status="completed";return;
                 }
-                if(job.toolCalls+calls.length>MAX_TOOL_CALLS)
+                if(job.toolCalls+calls.length>Math.max(1000,job.maxSteps*8))
                     throw new Error("MODEL_TOOL_CALL_LIMIT_REACHED");
                 messages.push({role:"assistant",content:result.content||null,tool_calls:calls});
                 for(const call of calls){
@@ -300,6 +302,32 @@ export function createModelWorkerRuntime({
                     messages.push({role:"tool",tool_call_id:call.id,content:output});
                 }
                 job.steps++;
+                if(job.evidence.length>100)
+                    job.evidence.splice(0,job.evidence.length-100);
+                // Repeated tools should not grow every subsequent model prompt
+                // without bound. Keep the instructions and recent complete
+                // assistant/tool turns. Older turns can be re-read as needed.
+                if(messages.length>WORKER_HISTORY_MESSAGES){
+                    let remove=messages.length-WORKER_HISTORY_MESSAGES;
+                    // Never truncate between an assistant tool_calls message
+                    // and its tool results: preserve a valid Chat Completions
+                    // message sequence.
+                    let cut=2;
+                    while(remove>0 && cut<messages.length-2){
+                        if(messages[cut].role==="assistant"&&
+                            Array.isArray(messages[cut].tool_calls)){
+                            const groupSize=1+messages[cut].tool_calls.length;
+                            cut+=groupSize;remove-=groupSize;
+                        }else{cut++;remove--;}
+                    }
+                    if(cut>2){
+                        messages.splice(2,cut-2);
+                        messages.splice(2,0,{role:"system",content:
+                            "Earlier tool history has been compacted to fit the model context. "+
+                            "The original user task remains in the first user message. "+
+                            "Inspect workspace files again when specific prior details are needed."});
+                    }
+                }
             }
             throw new Error("MODEL_TASK_STEP_LIMIT_REACHED");
         }catch(error){
@@ -326,7 +354,7 @@ export function createModelWorkerRuntime({
             if(count<=1)activeHostMutations.delete(workspaceId);
             else activeHostMutations.set(workspaceId,count-1);
         },
-        delegate({workspaceId,modelId,instruction,allowWrites=false,maxSteps=8,timeoutSeconds=600}){
+        delegate({workspaceId,modelId,instruction,allowWrites=false,maxSteps=1000,timeoutSeconds=3600}){
             const workspace=workspaces.getWorkspace(workspaceId);
             if(workspace.backend!=="local")throw new Error("MODEL_WORKER_LOCAL_WORKSPACE_ONLY");
             if(allowWrites && (activeHostMutations.get(workspaceId)||0)>0)
@@ -339,8 +367,8 @@ export function createModelWorkerRuntime({
             if(allowWrites!==true && allowWrites!==false)throw new Error("INVALID_WRITE_AUTHORIZATION");
             if(allowWrites && !config.permissions.allowShellMutation
                 && !config.permissions.allowArbitraryCommands)throw new Error("WRITE_PERMISSION_DENIED");
-            if(!Number.isInteger(maxSteps)||maxSteps<1||maxSteps>20)throw new Error("INVALID_TASK_STEPS");
-            if(!Number.isInteger(timeoutSeconds)||timeoutSeconds<30||timeoutSeconds>3600)
+            if(!Number.isInteger(maxSteps)||maxSteps<1||maxSteps>100000)throw new Error("INVALID_TASK_STEPS");
+            if(!Number.isInteger(timeoutSeconds)||timeoutSeconds<30||timeoutSeconds>86400)
                 throw new Error("INVALID_TASK_TIMEOUT");
             const model=getProfile(modelId);
             const taskId="mworker_"+randomUUID();

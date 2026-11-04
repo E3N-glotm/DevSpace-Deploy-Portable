@@ -33,14 +33,18 @@ const allowedExecutables = new Set([
 ]);
 const isNetworkSelfTest = process.argv.includes("--network-self-test");
 const isPublicHealthSelfTest = process.argv.includes("--public-health-self-test");
-const requestedProvider = isNetworkSelfTest
+const requestedProvider = (isNetworkSelfTest || isPublicHealthSelfTest)
   ? (String(process.env.DEVSPACE_TEST_TUNNEL_PROVIDER || "ngrok").toLowerCase() === "cloudflare" ? "cloudflare" : "ngrok")
   : requestedExecutable.toLowerCase().endsWith("cloudflared.exe") ? "cloudflare" : "ngrok";
 const NETWORK_POLL_MS = 5_000;
 const PUBLIC_HEALTH_POLL_MS = 15_000;
 const PUBLIC_HEALTH_FAILURE_THRESHOLD = 3;
 const PUBLIC_HEALTH_AGENT_MISMATCH_THRESHOLD = 3;
+// Cloudflared has no ngrok-style authenticated agent API. Require sustained
+// public transport failures with a healthy local MCP and an owned tunnel child.
+const PUBLIC_HEALTH_CLOUDFLARE_FAILURE_THRESHOLD = 12;
 const PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 5 * 60_000;
+const PUBLIC_HEALTH_CLOUDFLARE_MAX_COOLDOWN_MS = 30 * 60_000;
 let child = null;
 let stopping = false;
 let restartTimer = null;
@@ -53,6 +57,7 @@ let lastPublicHealthProbeAt = 0;
 let publicHealthFailureCount = 0;
 let publicHealthAgentMismatchCount = 0;
 let lastPublicHealthRestartAt = 0;
+let cloudflareRecoveryCooldownMs = PUBLIC_HEALTH_RESTART_COOLDOWN_MS;
 let lastPublicHealth = {
   checkedAt: null,
   healthy: null,
@@ -249,7 +254,15 @@ function probePublicEndpointHealth(network) {
   const publicObservation = curlHttpObservation(`${runtime.publicBaseUrl}/mcp`, network);
   const healthy = publicObservation.status === 401;
   const agent = healthy ? { reachable: null, matchingTunnel: null } : probeOwnedNgrokAgent(runtime.publicBaseUrl);
-  const recoveryEligible = requestedProvider === "ngrok" && agent.reachable === true && agent.matchingTunnel === false;
+  const ownedCloudflare = requestedProvider === "cloudflare" &&
+    (Boolean(child?.pid) ||
+      (isPublicHealthSelfTest && process.env.DEVSPACE_TEST_CLOUDFLARE_OWNED === "1"));
+  const cloudflareTransportFailure = ownedCloudflare && network.pathAvailable !== false &&
+    ["connect", "timeout"].includes(publicObservation.errorKind) &&
+    publicObservation.status === 0;
+  const recoveryEligible =
+    (requestedProvider === "ngrok" && agent.reachable === true && agent.matchingTunnel === false) ||
+    cloudflareTransportFailure;
   return {
     checkedAt: new Date().toISOString(),
     healthy,
@@ -280,23 +293,41 @@ function maybeRecoverPublicEndpoint(network) {
   if (lastPublicHealth.healthy) {
     publicHealthFailureCount = 0;
     publicHealthAgentMismatchCount = 0;
+    cloudflareRecoveryCooldownMs = PUBLIC_HEALTH_RESTART_COOLDOWN_MS;
     return false;
   }
   publicHealthFailureCount += 1;
   publicHealthAgentMismatchCount = lastPublicHealth.recoveryEligible ? publicHealthAgentMismatchCount + 1 : 0;
   if (publicHealthFailureCount < PUBLIC_HEALTH_FAILURE_THRESHOLD) return false;
-  if (publicHealthAgentMismatchCount < PUBLIC_HEALTH_AGENT_MISMATCH_THRESHOLD) return false;
-  if (now - lastPublicHealthRestartAt < PUBLIC_HEALTH_RESTART_COOLDOWN_MS) return false;
+  const evidenceThreshold = requestedProvider === "cloudflare"
+    ? PUBLIC_HEALTH_CLOUDFLARE_FAILURE_THRESHOLD
+    : PUBLIC_HEALTH_AGENT_MISMATCH_THRESHOLD;
+  if (publicHealthAgentMismatchCount < evidenceThreshold) return false;
+  const currentCooldown = requestedProvider === "cloudflare"
+    ? cloudflareRecoveryCooldownMs : PUBLIC_HEALTH_RESTART_COOLDOWN_MS;
+  if (now - lastPublicHealthRestartAt < currentCooldown) return false;
 
   lastPublicHealthRestartAt = now;
+  if (requestedProvider === "cloudflare") {
+    cloudflareRecoveryCooldownMs = Math.min(
+      PUBLIC_HEALTH_CLOUDFLARE_MAX_COOLDOWN_MS,
+      cloudflareRecoveryCooldownMs * 2,
+    );
+  }
   publicHealthFailureCount = 0;
   publicHealthAgentMismatchCount = 0;
   reconnectCount += 1;
   lastReconnectAt = new Date(now).toISOString();
-  terminateChild("owned-ngrok-agent-missing-expected-tunnel");
+  if (requestedProvider === "cloudflare") {
+    terminateChild("owned-cloudflared-sustained-public-transport-failure");
+  } else {
+    terminateChild("owned-ngrok-agent-missing-expected-tunnel");
+  }
   writeNetworkState(network, {
     status: "recovering",
-    transition: "owned-agent-mismatch-reconnect",
+    transition: requestedProvider === "cloudflare"
+      ? "owned-cloudflared-transport-reconnect"
+      : "owned-agent-mismatch-reconnect",
     appliedPathSignature: lastObservedPathSignature || network.pathSignature || null,
     publicEndpointHealthy: false,
     publicHealthFailureCount,
@@ -309,6 +340,7 @@ function maybeRecoverPublicEndpoint(network) {
     publicHealthAgentReachable: lastPublicHealth.agentReachable,
     publicHealthAgentMatchingTunnel: lastPublicHealth.agentMatchingTunnel,
     publicHealthRecoveryEligible: lastPublicHealth.recoveryEligible,
+    publicHealthRecoveryCooldownMs: cloudflareRecoveryCooldownMs,
     publicHealthError: lastPublicHealth.error,
   });
   scheduleReconcile(1_500);

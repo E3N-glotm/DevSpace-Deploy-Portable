@@ -16,7 +16,7 @@ const cache=join(projectRoot,".test-cache");
 mkdirSync(cache,{recursive:true});
 const root=mkdtempSync(join(cache,"mandatory-worker-wire-"));
 const previousRoot=process.env.DEVSPACE_PORTABLE_ROOT;
-let mcp,modelServer,modelListener,transport,client,provider;
+let mcp,modelServer,modelListener,transport,client,transport2,client2,provider;
 function setPolicy(enabled,revision="policy-one"){
     writeFileSync(join(root,"data","config","model-workflow.json"),
         JSON.stringify({formatVersion:1,enabled,updatedAt:revision}));
@@ -72,7 +72,8 @@ try{
     process.env.DEVSPACE_PLUGIN_ROOT=join(root,"plugins");
     const config=loadConfig({...process.env,
         DEVSPACE_CONFIG_DIR:configDir,DEVSPACE_STATE_DIR:stateDir,
-        DEVSPACE_TOOL_MODE:"codex",DEVSPACE_WIDGETS:"changes",
+        DEVSPACE_TOOL_MODE:process.env.DEVSPACE_TEST_WORKFLOW_TOOL_MODE==="full"
+            ?"full":"codex",DEVSPACE_WIDGETS:"changes",
         DEVSPACE_SUBAGENTS:"0",DEVSPACE_LOG_REQUESTS:"0",
         DEVSPACE_LOG_TOOL_CALLS:"0",
         DEVSPACE_PERMISSION_PROFILE:"custom",
@@ -105,6 +106,9 @@ try{
     }
     const readTool=tools.find(x=>["read","read_file"].includes(x.name));
     assert.ok(readTool,"Missing read tool");
+    const hostCommandTool=tools.find(x=>["exec_command","bash"].includes(x.name));
+    assert.ok(hostCommandTool,
+        "Missing command tool in the selected DevSpace tool mode");
     const opened=await client.callTool({
         name:"open_workspace",arguments:{path:workspace,mode:"checkout"},
     });
@@ -112,6 +116,12 @@ try{
         ||opened.structuredContent?.workspace?.workspaceId;
     assert.ok(workspaceId,"open_workspace should return workspaceId");
     const argumentsRead={workspaceId,path:"safe.txt"};
+    const hostCommandArguments=hostCommandTool.name==="bash"
+        ?{workspaceId,command:"node --version"}
+        :{workspaceId,argv:["node","--version"],yieldTimeMs:1000};
+    const callHostCommand=()=>client.callTool({
+        name:hostCommandTool.name,arguments:hostCommandArguments,
+    });
     const blocked=await client.callTool({name:readTool.name,arguments:argumentsRead});
     assert.equal(blocked.isError,true,"MCP read bypassed mandatory Worker gate");
     assert.match(contentText(blocked),/MODEL_WORKFLOW_DELEGATION_REQUIRED/);
@@ -119,7 +129,7 @@ try{
     assert.equal(list.structuredContent?.data?.mandatoryModelWorkflow,true);
     const delegated=await client.callTool({name:"model_delegate_task",arguments:{
         workspaceId,modelId:"worker-one",instruction:"Review project only",
-        allowWrites:false,maxSteps:2,timeoutSeconds:90,
+        allowWrites:false,maxSteps:1000,timeoutSeconds:7200,
     }});
     const taskId=delegated.structuredContent?.data?.taskId;
     assert.ok(taskId);
@@ -150,9 +160,7 @@ try{
     assert.notEqual((await client.callTool({
         name:readTool.name,arguments:argumentsRead})).isError,true,
         "Host must be able to inspect project during a write-capable Worker");
-    const concurrentWrite=await client.callTool({name:"exec_command",arguments:{
-        workspaceId,argv:["node","--version"],yieldTimeMs:1000,
-    }});
+    const concurrentWrite=await callHostCommand();
     assert.equal(concurrentWrite.isError,true,
         "A running write-capable Worker must block Host mutation-capable calls");
     assert.match(contentText(concurrentWrite),/MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY/);
@@ -163,17 +171,13 @@ try{
         await sleep(25);
     }
     assert.equal(writerResult.structuredContent?.data?.status,"completed");
-    const needsReview=await client.callTool({name:"exec_command",arguments:{
-        workspaceId,argv:["node","--version"],yieldTimeMs:1000,
-    }});
+    const needsReview=await callHostCommand();
     assert.equal(needsReview.isError,true,
         "Write-capable Worker outcome must be inspected before Host mutation");
     const reviewedWriter=await client.callTool({
         name:"model_task_result",arguments:{taskId:writerId}});
     assert.equal(reviewedWriter.structuredContent?.data?.status,"completed");
-    const unblockedWrite=await client.callTool({name:"exec_command",arguments:{
-        workspaceId,argv:["node","--version"],yieldTimeMs:1000,
-    }});
+    const unblockedWrite=await callHostCommand();
     assert.notEqual(unblockedWrite.isError,true,contentText(unblockedWrite));
     profiles.models[0].allowCalls=false;
     profiles.models[0].callPolicyRevision="p-two";
@@ -201,8 +205,44 @@ try{
     assert.notEqual((await client.callTool({
         name:readTool.name,arguments:argumentsRead})).isError,true,
         "Final disabled policy must unblock existing MCP session again");
-    console.log("PASS real OAuth/MCP async mandatory gate: parallel Host read, exclusive Worker write, result-review barrier, dynamic policy disable/enable/disable");
+    // A new transport gets its own MCP session, but both calls below belong to
+    // the same logical ChatGPT conversation. This previously failed because
+    // the tool handler and HTTP boundary used independent scope identities.
+    profiles.models[0].allowCalls=true;
+    profiles.models[0].callPolicyRevision="p-three";
+    writeFileSync(profilesFile,JSON.stringify(profiles));
+    setPolicy(true,"policy-five");
+    const scoped=(peer,name,args,scope)=>peer.callTool({
+        name,arguments:args,_meta:{"openai/session":scope},
+    });
+    const scopedDelegated=await scoped(client,"model_delegate_task",{
+        workspaceId,modelId:"worker-one",instruction:"Review project only",
+        allowWrites:false,maxSteps:1000,timeoutSeconds:7200,
+    },"chat-reconnected");
+    assert.ok(scopedDelegated.structuredContent?.data?.taskId,
+        "Scoped delegate must return a Worker task");
+    const scopedRead=await scoped(client,readTool.name,argumentsRead,"chat-reconnected");
+    assert.notEqual(scopedRead.isError,true,
+        "HTTP scope and Worker handler scope must match in one MCP transport");
+    transport2=new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${modelListener.address().port}/mcp`),{
+        requestInit:{headers:{Authorization:`Bearer ${token.access_token}`}},
+    });
+    client2=new Client({name:"mandatory-workflow-reconnect",version:"1"});
+    await client2.connect(transport2);
+    const restored=await scoped(client2,readTool.name,argumentsRead,"chat-reconnected");
+    assert.notEqual(restored.isError,true,
+        "Same conversation must keep its grant across MCP transport reconnect");
+    const isolated=await scoped(client2,readTool.name,argumentsRead,"other-chat");
+    assert.equal(isolated.isError,true,
+        "Different conversation cannot borrow the grant after reconnect");
+    const noMeta=await client2.callTool({name:readTool.name,arguments:argumentsRead});
+    assert.equal(noMeta.isError,true,
+        "A new MCP session without a conversation id cannot reuse earlier grants");
+    console.log("PASS real OAuth/MCP async mandatory gate: parallel Host read, writer exclusion, result review, live policy, scoped reconnect and cross-chat isolation");
 }finally{
+    try{await client2?.close();}catch{}
+    try{await transport2?.close();}catch{}
     try{await client?.close();}catch{}
     try{await transport?.close();}catch{}
     try{modelListener?.closeAllConnections();}catch{}

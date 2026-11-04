@@ -21,7 +21,7 @@ async function eventually(get) {
     }
     throw new Error("TASK_NEVER_FINISHED");
 }
-function prepare({ allowCalls=false, noTool=false, errorStatus=0 }={}){
+function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRounds=0 }={}){
     const root=mkdtempSync(resolve(reports,".tmp-native-model-"));
     const project=resolve(root,"project");
     mkdirSync(project);
@@ -49,7 +49,7 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0 }={}){
             assert.ok(!opts.headers.Authorization);
             assert.match(_url,/\/chat\/completions$/);
             if(errorStatus)return {ok:false,status:errorStatus};
-            if(noTool||count>1)return response({choices:[{message:{
+            if(noTool||count>(repeatToolRounds||1))return response({choices:[{message:{
                 role:"assistant",content:"Examined workspace and completed the bounded task.",
             }}],usage:{prompt_tokens:100,completion_tokens:30}});
             const tools=JSON.parse(opts.body).tools;
@@ -103,6 +103,26 @@ test("default read-only worker calls a real workspace read and produces evidence
         assert.equal(stats.totalTokens,270);
         assert.equal(stats.failedCalls,0);
         assert.ok(stats.lastCallAt);
+    }finally{f.dispose();}
+});
+test("Worker supports more than 20 steps and 24 tools with bounded history",async()=>{
+    const f=prepare({repeatToolRounds:80});
+    try{
+        const started=f.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",
+            instruction:"Repeated safe reads",maxSteps:1000,timeoutSeconds:7200});
+        const done=await eventually(()=>f.runtime.result(started.taskId));
+        assert.equal(done.status,"completed",JSON.stringify(done));
+        assert.equal(done.steps,80);
+        assert.equal(done.toolCalls,80);
+        assert.ok(done.evidence.length<=25,
+            "public evidence must remain bounded for long-running tasks");
+        assert.equal(f.counts().count,81);
+        assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",
+            modelId:"qwen_worker",instruction:"Invalid",maxSteps:100001}),
+            /INVALID_TASK_STEPS/);
+        assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",
+            modelId:"qwen_worker",instruction:"Invalid",timeoutSeconds:86401}),
+            /INVALID_TASK_TIMEOUT/);
     }finally{f.dispose();}
 });
 test("explicit writes go through the same before/after mutation guard",async()=>{

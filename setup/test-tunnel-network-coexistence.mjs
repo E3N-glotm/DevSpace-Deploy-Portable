@@ -59,7 +59,7 @@ function resolveNetwork(overrides = {}) {
   return JSON.parse(result.stdout.trim());
 }
 
-function resolvePublicHealth(mode, agentMode = "") {
+function resolvePublicHealth(mode, agentMode = "", overrides = {}) {
   const result = spawnSync(NODE, [LAUNCHER, "--public-health-self-test"], {
     cwd: ROOT,
     env: {
@@ -69,6 +69,7 @@ function resolvePublicHealth(mode, agentMode = "") {
       DEVSPACE_TEST_ROUTE_SIGNATURE: "route-a",
       DEVSPACE_TEST_PUBLIC_HEALTH: mode,
       DEVSPACE_TEST_NGROK_AGENT_HEALTH: agentMode,
+      ...overrides,
     },
     encoding: "utf8",
     windowsHide: true,
@@ -151,6 +152,26 @@ try {
   const localBroken = resolvePublicHealth("local-failing");
   assert.equal(localBroken.actionable, false,
     "a local MCP outage must not be misdiagnosed as a tunnel fault");
+  const cloudflareOwned = resolvePublicHealth("failing","",{
+    DEVSPACE_TEST_TUNNEL_PROVIDER:"cloudflare",
+    DEVSPACE_TEST_CLOUDFLARE_OWNED:"1",
+  });
+  assert.equal(cloudflareOwned.recoveryEligible,true,
+    "only an owned cloudflared child with transport failure may accrue recovery evidence");
+  const cloudflareUnowned = resolvePublicHealth("failing","",{
+    DEVSPACE_TEST_TUNNEL_PROVIDER:"cloudflare",
+    DEVSPACE_TEST_CLOUDFLARE_OWNED:"0",
+  });
+  assert.equal(cloudflareUnowned.recoveryEligible,false,
+    "never restart an unrelated cloudflared process");
+  for(const kind of ["dns-failing","tls-failing","local-failing"]){
+    const observation=resolvePublicHealth(kind,"",{
+      DEVSPACE_TEST_TUNNEL_PROVIDER:"cloudflare",
+      DEVSPACE_TEST_CLOUDFLARE_OWNED:"1",
+    });
+    assert.equal(observation.recoveryEligible,false,
+      kind+" must never trigger cloudflared restart");
+  }
 
   writeFileSync(join(configDir, "deployment.json"), JSON.stringify({
     formatVersion: 5,
@@ -192,6 +213,10 @@ try {
     "recovery must require repeated owned-agent mismatch evidence in addition to public failures");
   assert.match(launcherSource, /PUBLIC_HEALTH_RESTART_COOLDOWN_MS = 5 \* 60_000/,
     "public-health recovery must use hysteresis/backoff during wider internet outages");
+  assert.match(launcherSource, /PUBLIC_HEALTH_CLOUDFLARE_FAILURE_THRESHOLD = 12/,
+    "cloudflared must require three minutes of consecutive transport failures");
+  assert.match(launcherSource, /owned-cloudflared-sustained-public-transport-failure/,
+    "cloudflare recovery must terminate only the owned tunnel child");
   assert.match(launcherSource, /agent\.reachable === true && agent\.matchingTunnel === false/,
     "public self-probe failure alone must not authorize a destructive restart");
   assert.match(launcherSource, /terminateChild\("owned-ngrok-agent-missing-expected-tunnel"\)/,

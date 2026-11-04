@@ -53,6 +53,7 @@ function completed(taskId="task1",workspaceId="ws1"){
     return {taskId,workspaceId,modelId:"w1",status:"completed"};
 }
 
+test("MCP transport reconnect shares worker grants but isolates conversations",()=>{const f=fixture();f.enable();f.delegate("reconnect-task","ws1","chat-one");const g=createModelWorkflowGate({modelWorker:f.worker,readPolicy:()=>({enabled:true,updatedAt:"revision-2"}),now:()=>1000,grantTtlMs:3000});assert.equal(g.authorize("read",{workspaceId:"ws1"},"chat-one").allowed,true);assert.equal(g.authorize("read",{workspaceId:"ws1"},"chat-two").allowed,false);});
 test("default mode permits upstream model to use tools without delegation",()=>{
     const f=fixture();
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"}).allowed,true);
@@ -62,7 +63,7 @@ test("forced mode preserves discovery, cancellation, diagnosis and the checkout 
     const f=fixture();f.enable();
     for(const name of ["model_worker_list","model_delegate_task","model_task_status",
         "model_task_result","model_task_cancel","continuation_task",
-        "continuation_anchor","continuation_sender","doctor","capabilities"]){
+        "continuation_anchor","continuation_sender","doctor","capabilities", "plugin_list","plugin_read","permission_rules_list","process_list","audit_log_list","session_list","memory_list","hook_list"]){
         assert.equal(f.gate.authorize(name,{}).allowed,true,name);
     }
     assert.equal(f.gate.authorize("open_workspace",{mode:"checkout"}).allowed,true);

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
@@ -47,6 +48,15 @@ import { startAgentLanGateway } from "./agent-lan-gateway.js";
 import { createContinuationSupervisorScheduler } from "./continuation-supervisor.js";
 import { createModelWorkerRuntime } from "./model-worker-runtime.js";
 import { createModelWorkflowGate } from "./model-workflow-gate.js";
+// A single MCP logical tool call may cross the HTTP/SDK handler boundary.
+// Bind its *authenticated transport* and optional ChatGPT conversation scope
+// once, then use that exact identity for both delegation and authorization.
+// AsyncLocalStorage avoids cross-request scope leaks on concurrent calls.
+const modelWorkflowRequestScope = new AsyncLocalStorage();
+function modelWorkflowScope(context) {
+    return modelWorkflowRequestScope.getStore()?.scope
+        ?? openAiConversationScopeId(context?._meta);
+}
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
 // Each MCP transport owns a complete McpServer/tool registration graph. A
@@ -3097,8 +3107,8 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             modelId:z.string().describe("ID from model_worker_list, not the model's display name."),
             instruction:z.string().min(1).max(8000),
             allowWrites:z.boolean().optional().describe("Default false. True explicitly delegates file edits."),
-            maxSteps:z.number().int().min(1).max(20).optional(),
-            timeoutSeconds:z.number().int().min(30).max(3600).optional(),
+            maxSteps:z.number().int().min(1).max(100000).optional(),
+            timeoutSeconds:z.number().int().min(30).max(86400).optional(),
         },
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
@@ -3106,7 +3116,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     },async (input,context)=>{
         const started=runtimeServices.modelWorker.delegate(input);
         runtimeServices.modelWorkflowGate?.onDelegate(
-            started,openAiConversationScopeId(context?._meta));
+            started,modelWorkflowScope(context));
         return workerResult(started);
     });
     for(const [toolName,action,description] of [
@@ -3124,7 +3134,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             const result=runtimeServices.modelWorker[action](taskId);
             if(action==="result")
                 runtimeServices.modelWorkflowGate?.onResult(
-                    result,openAiConversationScopeId(context?._meta));
+                    result,modelWorkflowScope(context));
             return workerResult(result);
         });
     }
@@ -4759,11 +4769,18 @@ export function createServer(config = loadConfig(), options = {}) {
                 }
                 const call=req.method==="POST"&&req.body?.method==="tools/call"
                     ?req.body.params:null;
+                // Missing openai/session cannot be treated as a new random
+                // transport-local grant on every HTTP request. The verified
+                // MCP session is a safe fallback: it never crosses users or
+                // reconnects unless an explicit conversation scope is sent.
+                const scope=call
+                    ?(openAiConversationScopeId(call._meta)||
+                        (sessionId?"mcp-session:"+sessionId:undefined))
+                    :undefined;
                 if(call){
                     const gate=modelWorkflowGates.get(transport);
                     const decision=gate?.authorize(
-                        String(call.name||""),call.arguments||{},
-                        openAiConversationScopeId(call._meta));
+                        String(call.name||""),call.arguments||{},scope);
                     if(decision?.allowed===false){
                         logEvent(config.logging,"warn","model_workflow_tool_blocked",{
                             tool:String(call.name||""),
@@ -4790,7 +4807,12 @@ export function createServer(config = loadConfig(), options = {}) {
                         return;
                     }
                 }
-                await transport.handleRequest(req, res, req.body);
+                if(call){
+                    await modelWorkflowRequestScope.run({scope},()=>
+                        transport.handleRequest(req,res,req.body));
+                }else{
+                    await transport.handleRequest(req,res,req.body);
+                }
             }
             finally {
                 releaseHostMutation?.();

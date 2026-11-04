@@ -8,11 +8,15 @@ import {randomUUID} from "node:crypto";
 // work. Mutations are serialized while a write-capable Worker is active.
 // Control/recovery tools remain usable at all times.
 const GRANT_TTL_MS = 5 * 60_000;
+// Session-scoped MCP gate objects are reconstructed on transport reconnect.
+// Keep grants on the shared worker runtime without adding mutable, public
+// properties to it or leaking grants into a different Portable instance.
+const sharedWorkerGrants = new WeakMap();
 const EXEMPT = new Set([
     "model_worker_list", "model_delegate_task", "model_task_status",
     "model_task_result", "model_task_cancel",
     "continuation_task", "continuation_anchor", "continuation_sender",
-    "doctor", "doctor_history", "capabilities", "health",
+    "doctor", "doctor_history", "capabilities", "health", "plugin_list", "plugin_read", "permission_rules_list", "process_list", "audit_log_list", "session_list", "memory_list", "hook_list",
 ]);
 const READ_ONLY = new Set([
     "read", "read_attachment", "show_changes", "session_changes",
@@ -41,8 +45,12 @@ export function createModelWorkflowGate({
     isRemoteWorkspaceId=()=>false,
 }){
     const connectionIdentity=randomUUID();
-    const owners=new Map();
-    const grants=new Map();
+    let state=sharedWorkerGrants.get(modelWorker);
+    if(!state){
+        state={owners:new Map(),grants:new Map()};
+        sharedWorkerGrants.set(modelWorker,state);
+    }
+    const {owners,grants}=state;
     const who=conversationScopeId=>conversationScopeId
         ? "conversation:"+conversationScopeId:"session:"+connectionIdentity;
     const key=(scope,workspaceId)=>scope+"\0"+workspaceId;
