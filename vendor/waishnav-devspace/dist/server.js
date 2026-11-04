@@ -46,6 +46,7 @@ import { linuxAgentAsset, RemoteAgentManager } from "./remote-agent-manager.js";
 import { startAgentLanGateway } from "./agent-lan-gateway.js";
 import { createContinuationSupervisorScheduler } from "./continuation-supervisor.js";
 import { createModelWorkerRuntime } from "./model-worker-runtime.js";
+import { createModelWorkflowGate, modelWorkflowPolicy } from "./model-workflow-gate.js";
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
 // Each MCP transport owns a complete McpServer/tool registration graph. A
@@ -2997,13 +2998,21 @@ function registerRuntimeStateTools(server, config, workspaces, runtimeState, fil
 }
 function createMcpServer(config, workspaces, reviewCheckpoints, processSessions, localAgentProviders, incomingArtifactAdapters, runtimeServices) {
     const reviewToolCursors = new Map();
+    const modelWorkflowRoot=process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..","..");
+    let mandatoryModelInstruction="";
+    try{
+        if(modelWorkflowPolicy(modelWorkflowRoot).enabled)
+            mandatoryModelInstruction=" Mandatory model workflow: after open_workspace, call model_worker_list, delegate to an allowed Worker, wait until completed and call model_task_result before workspace or plugin operations. Failed tasks cannot authorize tools.";
+    }catch{
+        mandatoryModelInstruction=" Mandatory model policy is unreadable; workspace tools will fail closed until the owner repairs the policy.";
+    }
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
         version: DEVSPACE_SERVER_VERSION,
         description: "Local coding workspace and durable execution runtime for MCP clients, with persistent processes, sessions, diagnostics, events, permission rules, and local plugins.",
     }, {
-        instructions: serverInstructions(config),
+        instructions: serverInstructions(config)+mandatoryModelInstruction,
     });
     const workspaceResourceUri = workspaceAppUri(config);
     const continuationAnchorResourceUri = workspaceAppAnchorUri(config);
@@ -3072,12 +3081,18 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_worker_list",{
         title:"List configured DevSpace Workers",
-        description:"List explicitly configured local/cloud model Worker profiles without disclosing API keys. Use before model_delegate_task. Other MCP calls do not invoke models automatically.",
+        description:"List enabled callable Worker profiles without disclosing API keys. When mandatory model workflow is enabled, explicitly delegate and inspect a successful result before other workspace tools are allowed.",
         inputSchema:{},
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
         annotations:READ_ONLY_TOOL_ANNOTATIONS,
-    },async()=>workerResult({models:runtimeServices.modelWorker.models()}));
+    },async()=>{
+        let mandatoryEnabled=false;
+        try{mandatoryEnabled=runtimeServices.modelWorkflowGate?.policy().enabled===true;}
+        catch{mandatoryEnabled=true;}
+        return workerResult({models:runtimeServices.modelWorker.models(),
+            mandatoryModelWorkflow:mandatoryEnabled});
+    });
     registerAppTool(server,"model_delegate_task",{
         title:"Delegate to configured model Worker",
         description:"Explicitly delegate a bounded task to a user-configured model (e.g. local Ollama Qwen). ChatGPT remains supervisor/reviewer. Default is read-only; allowWrites=true explicitly authorizes bounded edits in the opened local workspace. Worker cannot run shell commands or access credentials. First open the workspace and obtain its workspaceId.",
@@ -3092,7 +3107,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
         annotations:SHELL_TOOL_ANNOTATIONS,
-    },async input=>workerResult(runtimeServices.modelWorker.delegate(input)));
+    },async (input,context)=>{
+        const started=runtimeServices.modelWorker.delegate(input);
+        runtimeServices.modelWorkflowGate?.onDelegate(
+            started,openAiConversationScopeId(context?._meta));
+        return workerResult(started);
+    });
     for(const [toolName,action,description] of [
         ["model_task_status","status","Get bounded model Worker progress, tool counts, token usage and estimated cost."],
         ["model_task_result","result","Read the final Worker answer, bounded evidence and failure reason for independent ChatGPT verification. The Worker is never itself a source of proof."],
@@ -3104,7 +3124,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             outputSchema:resultOutputSchema({data:z.unknown()}),
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:action==="cancel"?SHELL_TOOL_ANNOTATIONS:READ_ONLY_TOOL_ANNOTATIONS,
-        },async({taskId})=>workerResult(runtimeServices.modelWorker[action](taskId)));
+        },async({taskId},context)=>{
+            const result=runtimeServices.modelWorker[action](taskId);
+            if(action==="result")
+                runtimeServices.modelWorkflowGate?.onResult(
+                    result,openAiConversationScopeId(context?._meta));
+            return workerResult(result);
+        });
     }
     if (process.env.DEVSPACE_DYNAMIC_PLUGIN_ALIASES !== "0")
         registerDynamicPluginTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);
@@ -4379,6 +4405,7 @@ export function createServer(config = loadConfig(), options = {}) {
             workspaceId,workspaceRoot:workspace.root,paths:[rel],toolName:"model_worker_edit",success,
         }),
     });
+    const modelWorkflowGates=new WeakMap();
     const processSessions = new ProcessSessionManager({ stateDir: config.stateDir, runtimeState });
     const fileWatches = new FileWatchManager(runtimeState);
     const permissionRules = new PermissionRuleEngine(config, runtimeState);
@@ -4699,6 +4726,14 @@ export function createServer(config = loadConfig(), options = {}) {
                     remoteAgents,
                     continuationSupervisor,
                     modelWorker,
+                    modelWorkflowGate:(()=>{
+                        const gate=createModelWorkflowGate({
+                            portableRoot:process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..",".."),
+                            modelWorker,
+                        });
+                        modelWorkflowGates.set(transport,gate);
+                        return gate;
+                    })(),
                 });
                 initializedServer = server;
                 await server.connect(transport);
@@ -4708,6 +4743,42 @@ export function createServer(config = loadConfig(), options = {}) {
                 return;
             }
             try {
+                // Enforce at the MCP transport boundary, rather than only in
+                // selected first-party tools. This also covers plugin and
+                // feature tools whose handlers bypass registerAppTool().
+                if(req.method==="POST"&&Array.isArray(req.body)
+                    && req.body.some(entry=>entry?.method==="tools/call")){
+                    let mandatory=false;
+                    try{mandatory=modelWorkflowGates.get(transport)?.policy().enabled===true;}
+                    catch{mandatory=true;}
+                    if(mandatory){
+                        res.status(400).json({jsonrpc:"2.0",id:null,
+                            error:{code:-32600,message:
+                                "Batch tools/call requests are disabled in mandatory model workflow. Send one tool call at a time."}});
+                        return;
+                    }
+                }
+                const call=req.method==="POST"&&req.body?.method==="tools/call"
+                    ?req.body.params:null;
+                if(call){
+                    const gate=modelWorkflowGates.get(transport);
+                    const decision=gate?.authorize(
+                        String(call.name||""),call.arguments||{},
+                        openAiConversationScopeId(call._meta));
+                    if(decision?.allowed===false){
+                        logEvent(config.logging,"warn","model_workflow_tool_blocked",{
+                            tool:String(call.name||""),
+                            code:decision.code,sessionIdPrefix:sessionIdPrefix(sessionId),
+                        });
+                        res.status(200).json({
+                            jsonrpc:"2.0",id:req.body.id,
+                            result:{content:[textBlock(
+                                `DevSpace mandatory model workflow blocked ${String(call.name||"")} before execution: ${decision.code}. ${decision.message}`
+                            )],isError:true},
+                        });
+                        return;
+                    }
+                }
                 await transport.handleRequest(req, res, req.body);
             }
             finally {

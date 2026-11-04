@@ -159,6 +159,19 @@ test("cloud profiles with Electron-encrypted credentials are rejected rather tha
             instruction:"Do not read secrets"}),/MODEL_API_KEY_NEEDS_SECURE_NATIVE_VAULT_BRIDGE/);
     }finally{f.dispose();}
 });
+test("disabled profile is omitted from callable Worker list and explicit delegation is rejected",()=>{
+    const f=prepare();
+    try{
+        const filename=resolve(f.root,"data","config","model-providers.json");
+        const data=JSON.parse(readFileSync(filename,"utf8"));
+        data.models[0].allowCalls=false;
+        writeFileSync(filename,JSON.stringify(data));
+        assert.deepEqual(f.runtime.models(),[]);
+        assert.throws(()=>f.runtime.delegate({
+            workspaceId:"ws_test",modelId:"qwen_worker",instruction:"Read files",
+        }),/WORKER_PROFILE_DISABLED/);
+    }finally{f.dispose();}
+});
 test("single-writer workspace lock prevents simultaneous modifying workers",async()=>{
     let release;
     const suspended=new Promise(resolve=>{release=resolve;});

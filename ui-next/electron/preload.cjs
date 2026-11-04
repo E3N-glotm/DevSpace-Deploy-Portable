@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('devspace', Object.freeze({
   admin: (action,payload,confirmed=false) => invoke('admin', action, payload, confirmed),
   modelProvidersList: () => invoke('modelProvidersList'),
   modelProvidersSave: config => invoke('modelProvidersSave', config),
+  modelProvidersSetAllowed: (id,enabled) => invoke('modelProvidersSetAllowed',id,enabled),
   modelProvidersDelete: id => invoke('modelProvidersDelete', id),
   modelProvidersDiscover: id => invoke('modelProvidersDiscover', id),
   modelProvidersProbe: (id, tools=false) => invoke('modelProvidersProbe', id, tools),

@@ -125,13 +125,40 @@ test('native Electron bridge exposes dedicated model calls, not a plugin executi
   const main=fs.readFileSync(path.join(__dirname,'../electron/main.cjs'),'utf8');
   const preload=fs.readFileSync(path.join(__dirname,'../electron/preload.cjs'),'utf8');
   const app=fs.readFileSync(path.join(__dirname,'../src/App.tsx'),'utf8');
-  for(const action of ['modelProvidersList','modelProvidersSave','modelProvidersDelete','modelProvidersDiscover','modelProvidersProbe','modelProvidersStats']){
+  for(const action of ['modelProvidersList','modelProvidersSave','modelProvidersDelete','modelProvidersDiscover','modelProvidersProbe','modelProvidersStats','modelProvidersSetAllowed']){
     assert.ok(main.includes("register('"+action+"'"),action);
     assert.ok(preload.includes(action+':'),action);
   }
   assert.match(main,/cryptoService:safeStorage/);
   assert.match(app,/models:'模型提供商'/);
   assert.match(app,/<ModelProvidersPage\/>/);
+});
+test('legacy model defaults to callable; disabling persists and cannot run API tests',async()=>{
+  const {root,service,cleanup}=fixture(async()=>json({data:[]}));
+  try{
+    const initial=service.save(input());
+    assert.equal(initial.allowCalls,true);
+    const disabled=service.setAllowed('local_1',false);
+    assert.equal(disabled.allowCalls,false);
+    assert.equal(service.list()[0].allowCalls,false);
+    await assert.rejects(service.probe('local_1'),/MODEL_CALLS_DISABLED/);
+    await assert.rejects(service.discover('local_1'),/MODEL_CALLS_DISABLED/);
+    assert.equal(service.save({...input({name:'Renamed'})}).allowCalls,false);
+    assert.equal(service.save({...input({allowCalls:true,name:'Stale edit'})}).allowCalls,false,
+      'an older model editor snapshot must never silently re-enable a disabled Worker');
+    assert.equal(service.setAllowed('local_1',true).allowCalls,true);
+    assert.notEqual(service.list()[0].callPolicyRevision,initial.callPolicyRevision);
+  }finally{cleanup();}
+});
+test('disabled profile retains encrypted key without exposing it',()=>{
+  const {root,service,cleanup}=fixture();
+  try{
+    service.save({...input(),apiKey:'KEEP-ENCRYPTED'});
+    service.setAllowed('local_1',false);
+    const stored=fs.readFileSync(path.join(root,'data','config','model-providers.json'),'utf8');
+    assert.ok(!stored.includes('KEEP-ENCRYPTED'));
+    assert.equal(service.list()[0].hasKey,true);
+  }finally{cleanup();}
 });
 test('provider connection probe is reflected in durable selected-model statistics',async()=>{
   const {root,service,cleanup}=fixture(async()=>json({

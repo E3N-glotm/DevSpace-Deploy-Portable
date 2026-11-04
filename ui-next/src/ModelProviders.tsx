@@ -1,5 +1,5 @@
 import {useCallback,useEffect,useState} from 'react';
-import {Button,Field,Input,Radio,RadioGroup,Spinner} from '@fluentui/react-components';
+import {Button,Field,Input,Radio,RadioGroup,Spinner,Switch} from '@fluentui/react-components';
 import {ArrowClockwiseRegular,DeleteRegular,SaveRegular,ShieldCheckmarkRegular} from '@fluentui/react-icons';
 import type {ModelProvider,ModelProviderDraft,ModelDiscovery,ModelProbe,ModelUsageStats} from './api';
 
@@ -17,6 +17,7 @@ function draft(type:ProviderType='deepseek'):ModelProviderDraft {
     id:'model-'+type,name:preset.name,type,baseUrl:preset.url,model:preset.model,
     api:'chat',role:'worker',contextLength:32768,maxOutputTokens:4096,
     maxTaskUSD:1,inputPerMillionUSD:0,outputPerMillionUSD:0,
+    allowCalls:true,
   };
 }
 function message(e:unknown):string {
@@ -139,6 +140,16 @@ export function ModelProvidersPage(){
     }catch(e){setError(message(e));}
     finally{setBusy(false);}
   }
+  async function toggleAllowed(id:string,enabled:boolean){
+    setBusy(true);setError('');setNotice('');
+    try{
+      const result=await window.devspace.modelProvidersSetAllowed(id,enabled);
+      setItems(items=>items.map(item=>item.id===id?result:item));
+      if(selected===id)setForm(form=>({...form,allowCalls:result.allowCalls}));
+      setNotice(enabled?'已允许该模型接受新调用。':'已禁止该模型的新调用和后续推理；正在执行的请求会在下一检查点中止。');
+    }catch(e){setError(message(e));}
+    finally{setBusy(false);}
+  }
   const number=(field:keyof Pick<ModelProviderDraft,'contextLength'|'maxOutputTokens'|'maxTaskUSD'|'inputPerMillionUSD'|'outputPerMillionUSD'>)=>
     (value:string)=>update({[field]:value===''?0:Number(value)});
 
@@ -151,11 +162,17 @@ export function ModelProvidersPage(){
       <aside className="models-list">
         <div className="models-list-head"><strong>已保存配置</strong><Button size="small" onClick={newProfile}>新增模型</Button></div>
         {items.length===0&&<p className="op-subtle">尚未添加模型配置</p>}
-        {items.map(item=><button type="button" key={item.id}
-          className={'models-item '+(selected===item.id?'selected':'')} onClick={()=>choose(item)}>
-          <strong>{item.name}</strong><small>{item.model} · {names[item.type]}</small>
-          <small>{item.hasKey?'密钥已加密保存':'不使用密钥'} · {item.role}</small>
-        </button>)}
+        {items.map(item=><div className="models-item-row" key={item.id}>
+          <button type="button" className={'models-item '+(selected===item.id?'selected':'')}
+            onClick={()=>choose(item)}>
+            <strong>{item.name}</strong><small>{item.model} · {names[item.type]}</small>
+            <small>{item.hasKey?'密钥已加密保存':'不使用密钥'} · {item.role}</small>
+          </button>
+          <div className="models-item-toggle">
+            <Switch label="允许调用" checked={item.allowCalls} disabled={busy}
+              onChange={(_e,d)=>void toggleAllowed(item.id,d.checked)}/>
+          </div>
+        </div>)}
       </aside>
       <div className="models-editor">
         {error&&<div className="op-message op-error" role="alert">{error}</div>}

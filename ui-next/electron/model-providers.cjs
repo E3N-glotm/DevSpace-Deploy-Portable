@@ -71,8 +71,11 @@ function validate(input,{hasKey=false}={}){
   const maxTaskUSD=n('maxTaskUSD',0.01,1000,1);
   const inputPerMillionUSD=n('inputPerMillionUSD',0,10000,0);
   const outputPerMillionUSD=n('outputPerMillionUSD',0,10000,0);
+  if(input.allowCalls!==undefined&&typeof input.allowCalls!=='boolean')
+    throw Error('允许调用必须是布尔值');
   return {id,type,name,baseUrl:normalizeUrl(input.baseUrl,type,hasKey),model,api,role,
-    contextLength,maxOutputTokens,maxTaskUSD,inputPerMillionUSD,outputPerMillionUSD};
+    contextLength,maxOutputTokens,maxTaskUSD,inputPerMillionUSD,outputPerMillionUSD,
+    allowCalls:input.allowCalls!==false};
 }
 
 function estimateCost(usage,model) {
@@ -120,7 +123,8 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
   }
   function visible(entry){
     const {[KEY_FIELD]:hidden,...safe}=entry;
-    return {...safe,hasKey:Boolean(hidden),keyEncrypted:Boolean(hidden)};
+    return {...safe,allowCalls:entry.allowCalls!==false,
+      hasKey:Boolean(hidden),keyEncrypted:Boolean(hidden)};
   }
   function list(){return load().map(visible);}
   function save(payload){
@@ -133,8 +137,14 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     if(newKey && !available())throw Error('当前系统无法安全加密 API Key，未保存');
     const encryptedKey=clearKey?'':newKey?
       cryptoService.encryptString(newKey).toString('base64'):old?.encryptedKey||'';
-    const model=validate(input,{hasKey:Boolean(encryptedKey)});
-    const stored={...model,...(encryptedKey?{encryptedKey}:{})};
+    // Editing a profile cannot silently override an explicit disable from a
+    // different UI snapshot. Only modelProvidersSetAllowed changes this flag.
+    const model=validate({...input,allowCalls:old
+      ?old.allowCalls!==false:input.allowCalls!==false},{hasKey:Boolean(encryptedKey)});
+    // Every profile edit invalidates any short-lived mandatory-workflow
+    // approval previously issued for this model in an MCP session.
+    const stored={...model,callPolicyRevision:randomUUID(),
+      ...(encryptedKey?{encryptedKey}:{})};
     persist([...models.filter(m=>m.id!==model.id),stored]);
     return visible(stored);
   }
@@ -148,6 +158,19 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     const model=load().find(m=>m.id===id);
     if(!model)throw Error('模型尚未保存');
     return model;
+  }
+  function setAllowed(id,enabled){
+    if(!ID.test(String(id))||typeof enabled!=='boolean')
+      throw Error('无效模型调用开关参数');
+    const models=load(),index=models.findIndex(m=>m.id===id);
+    if(index===-1)throw Error('模型尚未保存');
+    const next=[...models];
+    next[index]={...models[index],allowCalls:enabled,callPolicyRevision:randomUUID()};
+    persist(next);
+    return visible(next[index]);
+  }
+  function assertAllowed(model){
+    if(model.allowCalls===false)throw Error('MODEL_CALLS_DISABLED');
   }
   function stats(id){
     const model=get(id);
@@ -201,6 +224,7 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
   }
   async function discover(id){
     const model=get(id);
+    assertAllowed(model);
     const result=await request(model,'models');
     if(!result.ok)return {reachable:false,httpStatus:result.status,models:[],reason:'HTTP_'+result.status};
     const models=Array.isArray(result.data?.data)?result.data.data:
@@ -211,6 +235,7 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
   }
   async function probe(id,{tools=false}={}){
     const model=get(id);
+    assertAllowed(model);
     if(!model.model)throw Error('请先从模型列表选择或输入模型标识');
     const startedAt=new Date().toISOString();
     const startedNs=process.hrtime.bigint();
@@ -271,6 +296,6 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
       }
     }
   }
-  return {list,save,remove,discover,probe,stats,makeBudget,filename};
+  return {list,save,remove,setAllowed,discover,probe,stats,makeBudget,filename};
 }
 module.exports={createModelProviderService,validate,normalizeUrl,makeBudget,estimateCost};

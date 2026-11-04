@@ -690,8 +690,13 @@ export function ServicePage({config,onConfigChange}:ServiceProps) {
   const [notice,setNotice]=useState('');
   const [output,setOutput]=useState<any>(null);
   const [auto,setAuto]=useState(Boolean(config?.autoContinuationEnabled));
+  const [forcedModel,setForcedModel]=useState(Boolean(config?.forceModelWorkflowEnabled));
   const [computer,setComputer]=useState(Boolean(config?.features?.computerUse));
-  useEffect(()=>{setAuto(Boolean(config?.autoContinuationEnabled));setComputer(Boolean(config?.features?.computerUse));},[config]);
+  useEffect(()=>{
+    setAuto(Boolean(config?.autoContinuationEnabled));
+    setForcedModel(Boolean(config?.forceModelWorkflowEnabled));
+    setComputer(Boolean(config?.features?.computerUse));
+  },[config]);
   const act=async(action:string,payload:Record<string,unknown>={},danger=false)=>{
     if(danger&&!window.confirm('将修改当前服务或任务。确定继续？'))return;
     setBusy(true);setError('');setNotice('');
@@ -721,6 +726,12 @@ export function ServicePage({config,onConfigChange}:ServiceProps) {
         <Switch checked={auto} disabled={busy} onChange={async(_e,d)=>{
           const next=d.checked;const r=await act('set-auto-continuation',{enabled:next});
           if(r?.enabled===next)setAuto(next);
+        }}/></div>
+      <div className="op-toggle"><div><strong>强制模型工作流</strong>
+        <small>默认关闭：上游模型可自主决定是否委派。开启后，DevSpace MCP 的任务操作必须先经过已允许调用的本地 Worker 并取得成功结果，否则拒绝继续；诊断、配置、取消任务等控制操作不受影响。当前 Worker 仅支持本地工作区。</small></div>
+        <Switch checked={forcedModel} disabled={busy} onChange={async(_e,d)=>{
+          const next=d.checked;const r=await act('set-model-workflow',{enabled:next});
+          if(r?.enabled===next)setForcedModel(next);
         }}/></div>
       <div className="op-toggle"><div><strong>Computer Use 桌面控制</strong>
         <small>启用前必须应用包含桌面控制许可的权限设置。使用现有文件队列 Broker，不启动旧 WinForms。</small></div>

@@ -64,7 +64,8 @@ export function publicModelProfiles(root) {
     if (config.version !== 1 || !Array.isArray(config.models))
         throw new Error("MODEL_CONFIG_UNSUPPORTED");
     return config.models.map(({ encryptedKey, ...entry }) => ({
-        ...entry, hasKey: Boolean(encryptedKey),
+        ...entry, allowCalls:entry.allowCalls!==false,
+        hasKey: Boolean(encryptedKey),
     }));
 }
 
@@ -115,6 +116,7 @@ export function createModelWorkerRuntime({
         const models = readProfiles(portableRoot);
         const model = models.find(p => p.id === id);
         if (!model || model.role !== "worker") throw new Error("WORKER_PROFILE_NOT_FOUND");
+        if (model.allowCalls === false) throw new Error("WORKER_PROFILE_DISABLED");
         if (model.hasKey) throw new Error("MODEL_API_KEY_NEEDS_SECURE_NATIVE_VAULT_BRIDGE");
         if (!model.model || model.api !== "chat")
             throw new Error("WORKER_REQUIRES_CHAT_COMPLETIONS_MODEL");
@@ -128,6 +130,7 @@ export function createModelWorkerRuntime({
         return model;
     }
     async function tool(job, call, workspace) {
+        getProfile(job.modelId);
         const name = String(call?.function?.name || "");
         const allowed = ["read_file","list_directory","grep_files","edit_file"];
         if (!allowed.includes(name)) throw new Error("WORKER_TOOL_NOT_ALLOWED");
@@ -187,6 +190,7 @@ export function createModelWorkerRuntime({
         return restricted((result?.content||[]).map(c=>c.text||"").join("\n"));
     }
     async function infer(job, model, messages, tools) {
+        getProfile(job.modelId);
         const remaining = job.maxTaskUSD - job.estimatedUSD;
         // Refuse a new paid request if remaining budget cannot cover even
         // the configured maximum output tokens. True billing varies by provider.
@@ -194,6 +198,13 @@ export function createModelWorkerRuntime({
         if (remaining < outputReserve) throw new Error("MODEL_TASK_BUDGET_EXHAUSTED");
         const maxTokens=Math.min(2048,Math.max(16,model.maxOutputTokens||2048));
         const controller=new AbortController();job.controller=controller;
+        // Disabling a profile is a hard stop even for a request which is
+        // already waiting on the model HTTP endpoint.
+        const disabledCheck=setInterval(()=>{
+            try{getProfile(job.modelId);}
+            catch{controller.abort();}
+        },500);
+        disabledCheck.unref?.();
         const startedAt=new Date().toISOString();
         const startedNs=process.hrtime.bigint();
         let succeeded=false;
@@ -227,6 +238,7 @@ export function createModelWorkerRuntime({
             if(job.estimatedUSD>job.maxTaskUSD)throw new Error("MODEL_TASK_BUDGET_EXHAUSTED");
             return reply;
         } finally {
+            clearInterval(disabledCheck);
             clearTimeout(timeout);job.controller=null;
             try{
                 accounting.record({
@@ -262,9 +274,11 @@ export function createModelWorkerRuntime({
             const allowedTools=TOOL_DEFINITIONS.filter(t=>job.allowWrites||
                 t.function.name!=="edit_file");
             for(let index=0;index<job.maxSteps;index++){
+                getProfile(job.modelId);
                 if(job.cancelled)throw new Error("MODEL_TASK_CANCELLED");
                 if(Date.now()>job.deadline)throw new Error("MODEL_TASK_TIMEOUT");
                 const result=await infer(job,model,messages,allowedTools);
+                getProfile(job.modelId);
                 if(!result)throw new Error("MODEL_NO_MESSAGE");
                 const calls=Array.isArray(result.tool_calls)?result.tool_calls:[];
                 if(!calls.length){
@@ -293,7 +307,7 @@ export function createModelWorkerRuntime({
             job.instruction=""; /* never retain task prompt after completion */}
     }
     return {
-        models:()=>readProfiles(portableRoot).filter(m=>m.role==="worker"),
+        models:()=>readProfiles(portableRoot).filter(m=>m.role==="worker"&&m.allowCalls!==false),
         delegate({workspaceId,modelId,instruction,allowWrites=false,maxSteps=8,timeoutSeconds=600}){
             const workspace=workspaces.getWorkspace(workspaceId);
             if(workspace.backend!=="local")throw new Error("MODEL_WORKER_LOCAL_WORKSPACE_ONLY");

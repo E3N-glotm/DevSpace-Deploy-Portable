@@ -19,6 +19,8 @@ const CONFIG_DIR = process.env.DEVSPACE_PORTABLE_CONFIG_DIR
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 // User-owned setting, deliberately separate from deployment and Computer Use.
 const AUTO_CONTINUATION_FILE = path.join(CONFIG_DIR, "auto-continuation.json");
+const MODEL_WORKFLOW_FILE = path.join(CONFIG_DIR, "model-workflow.json");
+const MODEL_PROVIDERS_FILE = path.join(CONFIG_DIR, "model-providers.json");
 const HOST_CUTOFF_ESTIMATE_FILE = path.join(CONFIG_DIR, "host-cutoff-estimate.json");
 const AUTH_FILE = path.join(CONFIG_DIR, "auth.json");
 const NGROK_CONFIG = path.join(CONFIG_DIR, "ngrok.yml");
@@ -80,7 +82,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.68";
-const PORTABLE_DEV_ITERATION = "dev3";
+const PORTABLE_DEV_ITERATION = "dev4";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -698,6 +700,31 @@ function setAutoContinuation(input) {
     updatedAt: new Date().toISOString(),
   });
   return { ok: true, enabled: autoContinuationEnabled(), requiresRestart: false };
+}
+function forcedModelWorkflowEnabled() {
+  const policy=readJson(MODEL_WORKFLOW_FILE,{formatVersion:1,enabled:false});
+  if(policy.formatVersion!==1||typeof policy.enabled!=='boolean')
+    throw new Error("Model workflow settings are corrupt; refusing implicit fallback.");
+  return policy.enabled;
+}
+function setModelWorkflow(input){
+  if(typeof input?.enabled!=='boolean')
+    throw new Error("set-model-workflow requires boolean enabled.");
+  if(input.enabled){
+    const profiles=readJson(MODEL_PROVIDERS_FILE,{version:1,models:[]});
+    if(profiles.version!==1||!Array.isArray(profiles.models))
+      throw new Error("Model provider configuration is invalid.");
+    const available=profiles.models.some(model=>
+      model.allowCalls!==false && model.role==='worker' && model.api==='chat'
+      && typeof model.model==='string' && model.model.trim()
+      && !model.encryptedKey && typeof model.baseUrl==='string');
+    if(!available)
+      throw new Error("无法开启强制模型工作流：没有允许调用、无需解密密钥的 Chat Completions Worker。请在模型提供商中启用至少一个兼容 Worker。");
+  }
+  writeJson(MODEL_WORKFLOW_FILE,{
+    formatVersion:1,enabled:input.enabled,updatedAt:new Date().toISOString(),
+  });
+  return {ok:true,enabled:forcedModelWorkflowEnabled(),requiresRestart:false};
 }
 
 function setComputerUse(input) {
@@ -4397,6 +4424,7 @@ function showConfig() {
   if (!providerUrls[tunnelProvider] && config.publicBaseUrl) providerUrls[tunnelProvider] = config.publicBaseUrl;
   return {
     autoContinuationEnabled: autoContinuationEnabled(),
+    forceModelWorkflowEnabled: forcedModelWorkflowEnabled(),
     configured: fs.existsSync(CONFIG_FILE) && fs.existsSync(AUTH_FILE),
     localOnly: deployment.localOnly === true,
     tunnelProvider,
@@ -4477,6 +4505,8 @@ async function main() {
       stdoutJson(setComputerUse(await readStdinJson()));
     } else if (command === "set-auto-continuation") {
       stdoutJson(setAutoContinuation(await readStdinJson()));
+    } else if (command === "set-model-workflow") {
+      stdoutJson(setModelWorkflow(await readStdinJson()));
     } else if (command === "show-config") {
       stdoutJson(showConfig());
     } else if (command === "ui-open") {

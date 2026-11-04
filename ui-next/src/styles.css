@@ -96,7 +96,11 @@
 .models-layout{display:grid;grid-template-columns:220px minmax(0,1fr);gap:24px;align-items:start}
 .models-list{border-right:1px solid #d7dfeb;padding-right:16px;min-width:0;display:flex;flex-direction:column;gap:8px}
 .models-list-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:13px}
+.models-item-row{border:1px solid #d5dfed;border-radius:10px;overflow:hidden}
+.models-item-row:has(.models-item.selected){border-color:#4385cc}
 .models-item{background:#f8faff;color:#182d47;text-align:left;border:1px solid #d5dfed;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:5px;overflow-wrap:anywhere}
+.models-item-row .models-item{width:100%;border:0;border-radius:0}
+.models-item-toggle{display:flex;justify-content:space-between;align-items:center;padding:5px 10px 9px;background:#f8faff}
 .models-item:hover,.models-item.selected{background:#eaf3ff;border-color:#4385cc}
 .models-item strong{font-size:13px}.models-item small{font-size:11px;color:#516a84}
 .models-editor{min-width:0;display:flex;flex-direction:column;gap:17px}

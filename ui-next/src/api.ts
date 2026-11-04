@@ -14,6 +14,8 @@ export type Config = {
   toolMode: string; hasOwnerToken: boolean; hasNgrokToken: boolean; hasCloudflareToken: boolean;
   ngrokProxyUrl: string; features: Record<string, boolean>; mcpUrl: string;
   portableDisplayVersion: string;
+  autoContinuationEnabled?:boolean;
+  forceModelWorkflowEnabled?:boolean;
 };
 export type Settings = {
   provider: Provider; publicBaseUrl: string; port: number; allowedRoots: string[];
@@ -38,6 +40,7 @@ export type ModelProvider = {
   contextLength:number;maxOutputTokens:number;maxTaskUSD:number;
   inputPerMillionUSD:number;outputPerMillionUSD:number;
   hasKey:boolean;keyEncrypted:boolean;
+  allowCalls:boolean;
 };
 export type ModelProviderDraft = Omit<ModelProvider,'hasKey'|'keyEncrypted'> & {
   apiKey?:string;clearKey?:boolean;
@@ -69,6 +72,7 @@ export type Backend = {
   admin(action:string,payload:Record<string,unknown>,confirmed?:boolean):Promise<any>;
   modelProvidersList():Promise<ModelProvider[]>;
   modelProvidersSave(config:ModelProviderDraft):Promise<ModelProvider>;
+  modelProvidersSetAllowed(id:string,enabled:boolean):Promise<ModelProvider>;
   modelProvidersDelete(id:string):Promise<{removed:boolean}>;
   modelProvidersDiscover(id:string):Promise<ModelDiscovery>;
   modelProvidersProbe(id:string,tools?:boolean):Promise<ModelProbe>;

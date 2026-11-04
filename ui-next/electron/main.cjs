@@ -51,7 +51,7 @@ const ADMIN_WRITE = new Set([
   'review-update','review-rollback','review-restore-safety',
   'memory-upsert','memory-delete',
   'oauth-client-create','oauth-client-rotate-secret','oauth-client-delete',
-  'set-auto-continuation','set-computer-use',
+  'set-auto-continuation','set-computer-use','set-model-workflow',
   'repair-stale-proxy','restore-proxy-repair',
   'start-local','stop-local','restart-local','start-tunnel','stop-tunnel',
   'restart-tunnel','enable','disable','uninstall-tasks','install-tasks',
@@ -361,6 +361,7 @@ function installHandlers() {
   });
   register('modelProvidersList',()=>modelProviders.list());
   register('modelProvidersSave',payload=>operation(()=>modelProviders.save(payload)));
+  register('modelProvidersSetAllowed',(id,enabled)=>operation(()=>modelProviders.setAllowed(id,enabled)));
   register('modelProvidersDelete',id=>operation(()=>modelProviders.remove(id)));
   register('modelProvidersDiscover',id=>modelProviders.discover(id));
   register('modelProvidersProbe',(id,tools)=>modelProviders.probe(id,{tools:tools===true}));
