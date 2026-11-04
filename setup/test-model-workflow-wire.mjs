@@ -35,6 +35,9 @@ try{
         for await(const chunk of req)body+=chunk.toString();
         if(req.url==="/v1/chat/completions"){
             assert.equal(JSON.parse(body).model,"fake-enabled-worker");
+            if(JSON.parse(body).messages.some(m=>m.role==="user" &&
+                m.content==="Hold a write-capable Worker lease"))
+                await sleep(400);
             res.writeHead(200,{"Content-Type":"application/json"});
             res.end(JSON.stringify({choices:[{message:{role:"assistant",content:
                 "Read-only Worker has examined the task and approved review."}}],
@@ -72,6 +75,9 @@ try{
         DEVSPACE_TOOL_MODE:"codex",DEVSPACE_WIDGETS:"changes",
         DEVSPACE_SUBAGENTS:"0",DEVSPACE_LOG_REQUESTS:"0",
         DEVSPACE_LOG_TOOL_CALLS:"0",
+        DEVSPACE_PERMISSION_PROFILE:"custom",
+        DEVSPACE_ALLOW_ARBITRARY_COMMANDS:"1",
+        DEVSPACE_ALLOW_SHELL_MUTATION:"1",
     });
     mcp=createServer(config);
     modelListener=mcp.app.listen(0,"127.0.0.1");
@@ -117,6 +123,11 @@ try{
     }});
     const taskId=delegated.structuredContent?.data?.taskId;
     assert.ok(taskId);
+    assert.equal(delegated.structuredContent?.data?.allowWrites,false);
+    const readDuringDelegation=await client.callTool({
+        name:readTool.name,arguments:argumentsRead});
+    assert.notEqual(readDuringDelegation.isError,true,
+        "Dispatch must unlock Host reads without waiting for Worker completion");
     let result;
     for(let attempt=0;attempt<80;attempt++){
         result=await client.callTool({name:"model_task_status",arguments:{taskId}});
@@ -124,12 +135,46 @@ try{
         await sleep(25);
     }
     assert.equal(result.structuredContent?.data?.status,"completed",contentText(result));
-    const stillBlocked=await client.callTool({name:readTool.name,arguments:argumentsRead});
-    assert.equal(stillBlocked.isError,true,"status alone should not authorize a task");
     const verified=await client.callTool({name:"model_task_result",arguments:{taskId}});
     assert.equal(verified.structuredContent?.data?.status,"completed");
     const passed=await client.callTool({name:readTool.name,arguments:argumentsRead});
     assert.notEqual(passed.isError,true,contentText(passed));
+    const writeTask=await client.callTool({name:"model_delegate_task",arguments:{
+        workspaceId,modelId:"worker-one",
+        instruction:"Hold a write-capable Worker lease",
+        allowWrites:true,maxSteps:2,timeoutSeconds:90,
+    }});
+    const writerId=writeTask.structuredContent?.data?.taskId;
+    assert.ok(writerId,"Missing write-capable Worker task: "+contentText(writeTask));
+    assert.equal(writeTask.structuredContent?.data?.allowWrites,true);
+    assert.notEqual((await client.callTool({
+        name:readTool.name,arguments:argumentsRead})).isError,true,
+        "Host must be able to inspect project during a write-capable Worker");
+    const concurrentWrite=await client.callTool({name:"exec_command",arguments:{
+        workspaceId,argv:["node","--version"],yieldTimeMs:1000,
+    }});
+    assert.equal(concurrentWrite.isError,true,
+        "A running write-capable Worker must block Host mutation-capable calls");
+    assert.match(contentText(concurrentWrite),/MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY/);
+    let writerResult;
+    for(let attempt=0;attempt<80;attempt++){
+        writerResult=await client.callTool({name:"model_task_status",arguments:{taskId:writerId}});
+        if(writerResult.structuredContent?.data?.status==="completed")break;
+        await sleep(25);
+    }
+    assert.equal(writerResult.structuredContent?.data?.status,"completed");
+    const needsReview=await client.callTool({name:"exec_command",arguments:{
+        workspaceId,argv:["node","--version"],yieldTimeMs:1000,
+    }});
+    assert.equal(needsReview.isError,true,
+        "Write-capable Worker outcome must be inspected before Host mutation");
+    const reviewedWriter=await client.callTool({
+        name:"model_task_result",arguments:{taskId:writerId}});
+    assert.equal(reviewedWriter.structuredContent?.data?.status,"completed");
+    const unblockedWrite=await client.callTool({name:"exec_command",arguments:{
+        workspaceId,argv:["node","--version"],yieldTimeMs:1000,
+    }});
+    assert.notEqual(unblockedWrite.isError,true,contentText(unblockedWrite));
     profiles.models[0].allowCalls=false;
     profiles.models[0].callPolicyRevision="p-two";
     writeFileSync(profilesFile,JSON.stringify(profiles));
@@ -141,7 +186,7 @@ try{
     setPolicy(false,"policy-two");
     const optional=await client.callTool({name:readTool.name,arguments:argumentsRead});
     assert.notEqual(optional.isError,true,"optional mode must restore upstream tool selection");
-    console.log("PASS real OAuth/MCP forced model gate: deny -> delegate -> complete -> result -> allow -> disable -> deny -> optional allow");
+    console.log("PASS real OAuth/MCP async mandatory gate: immediate parallel Host read, exclusive Worker write, result-review barrier, disable/optional mode");
 }finally{
     try{await client?.close();}catch{}
     try{await transport?.close();}catch{}

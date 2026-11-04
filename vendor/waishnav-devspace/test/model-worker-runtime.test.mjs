@@ -116,6 +116,28 @@ test("explicit writes go through the same before/after mutation guard",async()=>
         assert.deepEqual(f.counts(),{count:2,writeStarted:1,writeFinished:1});
     }finally{f.dispose();}
 });
+test("active Host mutation prevents Worker write dispatch until released",async()=>{
+    const f=prepare({allowCalls:true});
+    try{
+        f.runtime.beginHostMutation("ws_test");
+        assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",
+            modelId:"qwen_worker",instruction:"Write while Host is editing",
+            allowWrites:true}),/WORKER_WORKSPACE_SINGLE_WRITER_BUSY/);
+        f.runtime.endHostMutation("ws_test");
+        const started=f.runtime.delegate({workspaceId:"ws_test",
+            modelId:"qwen_worker",instruction:"Edit after Host has finished",
+            allowWrites:true,maxSteps:4});
+        assert.equal(started.allowWrites,true);
+        assert.equal(f.runtime.hasActiveWriter("ws_test"),true);
+        assert.throws(()=>f.runtime.beginHostMutation("ws_test"),
+            /WORKER_WORKSPACE_SINGLE_WRITER_BUSY/);
+        const done=await eventually(()=>f.runtime.result(started.taskId));
+        assert.equal(done.status,"completed");
+        assert.equal(f.runtime.hasActiveWriter("ws_test"),false);
+        f.runtime.beginHostMutation("ws_test");
+        f.runtime.endHostMutation("ws_test");
+    }finally{f.dispose();}
+});
 test("workspace traversal, secrets, absolute paths and UNC are rejected",()=>{
     const root="E:\\src";
     for(const p of ["../outside",".git/config",".env","secrets/pass.txt",

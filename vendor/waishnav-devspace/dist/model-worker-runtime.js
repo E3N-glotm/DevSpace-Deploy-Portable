@@ -93,11 +93,13 @@ export function createModelWorkerRuntime({
         modelUsageModule
     ).createModelUsageStore(portableRoot);
     const jobs = new Map();
+    const activeHostMutations = new Map();
     const restricted = (text, n = MAX_TOOL_REPLY) => String(text || "").slice(0, n);
     function snapshot(job, includeAnswer = false) {
         return {
             taskId: job.taskId, workspaceId: job.workspaceId,
             modelId: job.modelId, status: job.status,
+            allowWrites: job.allowWrites,
             startedAt: job.startedAt, finishedAt: job.finishedAt || null,
             steps: job.steps, toolCalls: job.toolCalls,
             inputTokens: job.inputTokens, outputTokens: job.outputTokens,
@@ -308,9 +310,27 @@ export function createModelWorkerRuntime({
     }
     return {
         models:()=>readProfiles(portableRoot).filter(m=>m.role==="worker"&&m.allowCalls!==false),
+        // Exposed to the MCP admission gate to prevent concurrent Host/Worker
+        // mutations of the same workspace, including across conversations.
+        hasActiveWriter:workspaceId=>[...jobs.values()].some(j=>
+            j.workspaceId===workspaceId && j.allowWrites &&
+            ["queued","running"].includes(j.status)),
+        beginHostMutation(workspaceId){
+            if(this.hasActiveWriter(workspaceId))
+                throw new Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");
+            activeHostMutations.set(workspaceId,
+                (activeHostMutations.get(workspaceId)||0)+1);
+        },
+        endHostMutation(workspaceId){
+            const count=activeHostMutations.get(workspaceId)||0;
+            if(count<=1)activeHostMutations.delete(workspaceId);
+            else activeHostMutations.set(workspaceId,count-1);
+        },
         delegate({workspaceId,modelId,instruction,allowWrites=false,maxSteps=8,timeoutSeconds=600}){
             const workspace=workspaces.getWorkspace(workspaceId);
             if(workspace.backend!=="local")throw new Error("MODEL_WORKER_LOCAL_WORKSPACE_ONLY");
+            if(allowWrites && (activeHostMutations.get(workspaceId)||0)>0)
+                throw new Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");
             if(allowWrites && [...jobs.values()].some(j=>j.workspaceId===workspaceId &&
                 j.allowWrites && ["queued","running"].includes(j.status)))
                 throw new Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");

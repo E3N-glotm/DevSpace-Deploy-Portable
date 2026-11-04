@@ -9,10 +9,36 @@ function fixture(){
     let clock=1000;
     let policy={enabled:false,updatedAt:"revision-1"};
     let profiles=[{id:"w1",model:"qwen-local",allowCalls:true,callPolicyRevision:"profile-1"}];
-    const worker={models:()=>profiles.filter(m=>m.allowCalls!==false)};
+    const jobs=new Map();
+    const hostWrites=new Map();
+    const worker={
+        models:()=>profiles.filter(m=>m.allowCalls!==false),
+        status:id=>{
+            if(!jobs.has(id))throw new Error("UNKNOWN_MODEL_TASK");
+            return {status:jobs.get(id).status};
+        },
+        hasActiveWriter:workspaceId=>[...jobs.values()].some(j=>
+            j.workspaceId===workspaceId&&j.allowWrites&&
+            ["queued","running"].includes(j.status)),
+        beginHostMutation:workspaceId=>hostWrites.set(workspaceId,
+            (hostWrites.get(workspaceId)||0)+1),
+        endHostMutation:workspaceId=>hostWrites.set(workspaceId,
+            (hostWrites.get(workspaceId)||0)-1),
+    };
     const gate=createModelWorkflowGate({portableRoot:repo,modelWorker:worker,
         readPolicy:()=>policy,now:()=>clock,grantTtlMs:3000});
-    return {gate,worker,
+    return {gate,worker,hostWrites,
+        delegate:(taskId="task1",workspaceId="ws1",scope="chat",allowWrites=false)=>{
+            const result={taskId,workspaceId,modelId:"w1",
+                status:"running",allowWrites};
+            jobs.set(taskId,result);
+            gate.onDelegate(result,scope);
+            return result;
+        },
+        finish:(taskId="task1",status="completed")=>{
+            jobs.get(taskId).status=status;
+            return {...jobs.get(taskId)};
+        },
         enable:()=>{policy={enabled:true,updatedAt:"revision-2"};},
         disable:()=>{policy={enabled:false,updatedAt:"revision-3"};},
         rotate:()=>{policy={enabled:true,updatedAt:"revision-4"};},
@@ -50,11 +76,13 @@ test("no enabled Worker, missing workspace and no completed delegation all fail 
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"}).code,
         "MODEL_WORKFLOW_NO_ENABLED_WORKER");
 });
-test("only a completed Worker result in the originating conversation authorizes the workspace",()=>{
+test("dispatch immediately unlocks Host inspection without waiting for Worker completion",()=>{
     const f=fixture();f.enable();
-    f.gate.onDelegate(completed(),"chat-one");
+    f.delegate("task1","ws1","chat-one");
+    assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat-one").allowed,true);
+    assert.equal(f.gate.authorize("exec_command",{workspaceId:"ws1"},"chat-one").allowed,true);
     assert.equal(f.gate.onResult({...completed(),status:"running"},"chat-one").granted,false);
-    assert.equal(f.gate.onResult(completed(),"chat-two").granted,false);
+    assert.equal(f.gate.onResult(f.finish(),"chat-two").granted,false);
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat-two").allowed,false);
     assert.equal(f.gate.onResult(completed(),"chat-one").granted,true);
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat-one").allowed,true);
@@ -62,18 +90,18 @@ test("only a completed Worker result in the originating conversation authorizes 
     assert.equal(f.gate.authorize("read",{workspaceId:"ws2"},"chat-one").allowed,false);
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat-two").allowed,false);
 });
-test("failed Worker is never an authorization, and old result cannot be replayed",()=>{
+test("a failed read-only Worker can be inspected and the Host can take over",()=>{
     const f=fixture();f.enable();
-    f.gate.onDelegate(completed(),"chat");
-    assert.equal(f.gate.onResult({...completed(),status:"failed"},"chat").granted,false);
-    assert.equal(f.gate.authorize("write",{workspaceId:"ws1"},"chat").allowed,false);
-    assert.equal(f.gate.onResult(completed(),"chat").granted,true);
-    assert.equal(f.gate.onResult(completed(),"chat").granted,false);
+    f.delegate();
+    assert.equal(f.gate.authorize("write",{workspaceId:"ws1"},"chat").allowed,true);
+    const failure=f.finish("task1","failed");
+    assert.equal(f.gate.onResult(failure,"chat").granted,true);
+    assert.equal(f.gate.authorize("write",{workspaceId:"ws1"},"chat").allowed,true);
+    assert.equal(f.gate.onResult(failure,"chat").granted,false);
 });
 test("disabling or reconfiguring a Worker immediately invalidates its grant",()=>{
     const f=fixture();f.enable();
-    f.gate.onDelegate(completed(),"chat");
-    assert.equal(f.gate.onResult(completed(),"chat").granted,true);
+    f.delegate();f.gate.onResult(f.finish(),"chat");
     f.disabledWorker();
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,false);
     f.reenabledWorker();
@@ -81,14 +109,47 @@ test("disabling or reconfiguring a Worker immediately invalidates its grant",()=
 });
 test("mode changes and TTL expiry revoke previous approvals",()=>{
     const f=fixture();f.enable();
-    f.gate.onDelegate(completed(),"chat");
-    f.gate.onResult(completed(),"chat");
+    f.delegate();f.gate.onResult(f.finish(),"chat");
     f.advance(3100);
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,false);
-    f.gate.onDelegate(completed("task2"),"chat");
-    f.gate.onResult(completed("task2"),"chat");
+    f.delegate("task2");f.gate.onResult(f.finish("task2"),"chat");
     f.disable();assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,true);
     f.rotate();assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,false);
+});
+test("write-capable Worker allows parallel reads but serializes all Host mutations",()=>{
+    const f=fixture();f.enable();
+    f.delegate("write-task","ws1","chat",true);
+    assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,true);
+    assert.equal(f.gate.authorize("show_changes",{workspaceId:"ws1"},"chat").allowed,true);
+    for(const name of ["apply_patch","exec_command","write"]){
+        assert.equal(f.gate.authorize(name,{workspaceId:"ws1"},"chat").code,
+            "MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY");
+    }
+    // Cross-conversation mutation cannot race with the Worker even when
+    // that second conversation does not have a valid delegation grant.
+    assert.equal(f.gate.authorize("apply_patch",{workspaceId:"ws1"},"other").allowed,false);
+    f.finish("write-task");
+    assert.equal(f.gate.authorize("exec_command",{workspaceId:"ws1"},"chat").code,
+        "MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY");
+    assert.equal(f.gate.onResult(f.finish("write-task"),"chat").granted,true);
+    assert.equal(f.gate.authorize("exec_command",{workspaceId:"ws1"},"chat").allowed,true);
+});
+test("optional mode also protects a workspace while a write-capable Worker runs",()=>{
+    const f=fixture();
+    f.delegate("write-task","ws1","chat",true);
+    assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"different").allowed,true);
+    assert.equal(f.gate.authorize("apply_patch",{workspaceId:"ws1"},"different").code,
+        "MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY");
+    f.finish("write-task");
+    assert.equal(f.gate.authorize("apply_patch",{workspaceId:"ws1"},"different").allowed,true);
+});
+test("Host mutation leases span the MCP operation and are released afterwards",()=>{
+    const f=fixture();f.enable();f.delegate();
+    assert.equal(f.gate.enter("read",{workspaceId:"ws1"}),null);
+    const release=f.gate.enter("apply_patch",{workspaceId:"ws1"});
+    assert.equal(f.hostWrites.get("ws1"),1);
+    release();
+    assert.equal(f.hostWrites.get("ws1"),0);
 });
 test("corrupt force policy fails closed, never silently disables mandatory mode",()=>{
     const f=fixture();

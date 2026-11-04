@@ -3081,7 +3081,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_worker_list",{
         title:"List configured DevSpace Workers",
-        description:"List enabled callable Worker profiles without disclosing API keys. When mandatory model workflow is enabled, explicitly delegate and inspect a successful result before other workspace tools are allowed.",
+        description:"List enabled callable Worker profiles without disclosing API keys. When mandatory model workflow is enabled, dispatch an explicit Worker before protected workspace tools. Host inspection can proceed while the Worker runs; write-capable Worker and Host mutations are serialized.",
         inputSchema:{},
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
@@ -4742,6 +4742,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 sendJsonRpcError(res, 400, -32000, "No valid MCP session");
                 return;
             }
+            let releaseHostMutation;
             try {
                 // Enforce at the MCP transport boundary, rather than only in
                 // selected first-party tools. This also covers plugin and
@@ -4778,10 +4779,23 @@ export function createServer(config = loadConfig(), options = {}) {
                         });
                         return;
                     }
+                    try{
+                        releaseHostMutation=gate?.enter(String(call.name||""),call.arguments||{});
+                    }catch(error){
+                        const code=String(error?.message||"MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY");
+                        res.status(200).json({
+                            jsonrpc:"2.0",id:req.body.id,
+                            result:{content:[textBlock(
+                                `DevSpace workspace writer admission blocked ${String(call.name||"")}: ${code}`
+                            )],isError:true},
+                        });
+                        return;
+                    }
                 }
                 await transport.handleRequest(req, res, req.body);
             }
             finally {
+                releaseHostMutation?.();
                 sessionLease?.release();
             }
             if (initializeRequest && initializedServer) {
