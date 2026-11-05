@@ -21,6 +21,15 @@ for (const file of ["server.js", "runtime-state.js", "ui/assets/continuation-coo
 const cache = join(ROOT, ".test-cache");
 mkdirSync(cache, { recursive: true });
 const temp = mkdtempSync(join(cache, "continuation-wire-"));
+// A wire regression must never inherit the owner's live mandatory Worker
+// toggle or another test's cached Portable root. It tests the continuation
+// protocol independently of optional workflow policy.
+const previousPortableRoot = process.env.DEVSPACE_PORTABLE_ROOT;
+process.env.DEVSPACE_PORTABLE_ROOT = temp;
+mkdirSync(join(temp, "data", "config"), { recursive: true });
+writeFileSync(join(temp, "data", "config", "model-workflow.json"), JSON.stringify({
+  formatVersion: 1, enabled: false, updatedAt: "isolated-continuation-wire",
+}));
 const configDir = join(temp, "config");
 const stateDir = join(temp, "state");
 mkdirSync(configDir, { recursive: true });
@@ -562,4 +571,6 @@ try {
   await service.close();
   provider.close();
   rmSync(temp, { recursive: true, force: true });
+  if (previousPortableRoot === undefined) delete process.env.DEVSPACE_PORTABLE_ROOT;
+  else process.env.DEVSPACE_PORTABLE_ROOT = previousPortableRoot;
 }

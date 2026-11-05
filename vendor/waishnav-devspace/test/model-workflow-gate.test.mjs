@@ -5,7 +5,7 @@ import {readFileSync} from "node:fs";
 import {resolve} from "node:path";
 
 const repo=resolve(import.meta.dirname,"../../..");
-function fixture(){
+function fixture({grantTtlMs=3000,maxGrantAgeMs=24*60*60_000}={}){
     let clock=1000;
     let policy={enabled:false,updatedAt:"revision-1"};
     let profiles=[{id:"w1",model:"qwen-local",allowCalls:true,callPolicyRevision:"profile-1"}];
@@ -26,7 +26,7 @@ function fixture(){
             (hostWrites.get(workspaceId)||0)-1),
     };
     const gate=createModelWorkflowGate({portableRoot:repo,modelWorker:worker,
-        readPolicy:()=>policy,now:()=>clock,grantTtlMs:3000,
+        readPolicy:()=>policy,now:()=>clock,grantTtlMs,maxGrantAgeMs,
         isRemoteWorkspaceId:id=>id==="ws-remote"});
     return {gate,worker,hostWrites,
         delegate:(taskId="task1",workspaceId="ws1",scope="chat",allowWrites=false)=>{
@@ -131,6 +131,39 @@ test("mode changes and TTL expiry revoke previous approvals",()=>{
     f.delegate("task2");f.gate.onResult(f.finish("task2"),"chat");
     f.disable();assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,true);
     f.rotate();assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,false);
+});
+test("active read and command calls renew the idle grant, while inactivity still expires",()=>{
+    const f=fixture();f.enable();
+    f.delegate();f.gate.onResult(f.finish(),"chat");
+    f.advance(2500);
+    assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,true);
+    f.advance(2500);
+    assert.equal(f.gate.authorize("exec_command",{workspaceId:"ws1"},"chat").allowed,true,
+        "A continuous monitoring workflow must not expire after its first five minutes");
+    f.advance(2500);
+    assert.equal(f.gate.authorize("write_stdin",{workspaceId:"ws1"},"chat").allowed,true);
+    f.advance(3001);
+    assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").code,
+        "MODEL_WORKFLOW_DELEGATION_EXPIRED");
+});
+test("denied cross-conversation operations cannot keep a grant alive",()=>{
+    const f=fixture();f.enable();
+    f.delegate();f.gate.onResult(f.finish(),"chat");
+    f.advance(2500);
+    assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"different").allowed,false);
+    f.advance(501);
+    assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").code,
+        "MODEL_WORKFLOW_DELEGATION_EXPIRED");
+});
+test("absolute grant deadline applies even under continuous successful polling",()=>{
+    const f=fixture({maxGrantAgeMs:7000});f.enable();
+    f.delegate();f.gate.onResult(f.finish(),"chat");
+    f.advance(2000);assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,true);
+    f.advance(2000);assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,true);
+    f.advance(2000);assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").allowed,true);
+    f.advance(1000);
+    assert.equal(f.gate.authorize("read",{workspaceId:"ws1"},"chat").code,
+        "MODEL_WORKFLOW_DELEGATION_EXPIRED");
 });
 test("write-capable Worker allows parallel reads but serializes all Host mutations",()=>{
     const f=fixture();f.enable();

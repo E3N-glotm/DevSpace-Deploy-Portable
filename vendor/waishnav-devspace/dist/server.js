@@ -794,12 +794,12 @@ function permissionInstruction(config) {
 }
 function commandToolDescription(config, toolName) {
     if (config.permissions.allowArbitraryCommands) {
-        return `Run a command in the opened workspace backend. Local workspaces execute as the current Windows user; remote-agent workspaces execute directly on the selected Linux host as the Agent service user, without SSH/SFTP. The owner has authorized arbitrary host commands, network operations, credential helpers, shell-based file changes, installers, and long-running or interactive processes when requested. Use tty=true for commands that require a real console. Call open_workspace first and pass workspaceId. Windows ACLs/UAC apply locally; Linux allowedRoots and the Agent user's permissions apply remotely.`;
+        return `Run a command in the opened workspace backend. Local workspaces execute as the current Windows user; remote-agent workspaces execute directly on the selected Linux host as the Agent service user, without SSH/SFTP. The owner has authorized arbitrary host commands, network operations, credential helpers, shell-based file changes, installers, and long-running or interactive processes when requested. Use tty=true for commands that require a real console. Call open_workspace first and pass workspaceId. Windows ACLs/UAC apply locally; Linux allowedRoots and the Agent user's permissions apply remotely. For monitoring independent training/watchers, do not launch sleep 200/300/900 commands just to delay another read; read the latest saved snapshot or use process_attach with yieldTimeMs=0 instead.`;
     }
     const mutation = config.permissions.allowShellMutation
         ? "Shell-based file changes are authorized."
         : "Prefer structured write/edit/apply_patch tools for file changes.";
-    return `Run a command inside an open workspace for coding, inspection, tests, builds, package scripts, version control, and other owner-authorized operations. ${mutation} Call open_workspace first and pass workspaceId.`;
+    return `Run a command inside an open workspace for coding, inspection, tests, builds, package scripts, version control, and other owner-authorized operations. ${mutation} Call open_workspace first and pass workspaceId. For monitoring independent training/watchers, do not launch sleep 200/300/900 commands just to delay another read; read the latest saved snapshot or use process_attach with yieldTimeMs=0 instead.`;
 }
 function workingDirectoryDescription(config) {
     return config.permissions.allowExternalPaths
@@ -2065,7 +2065,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
     });
     registerAppTool(server, "write_stdin", {
         title: "Write to process",
-        description: "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C.",
+        description: "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C. A running=true response without output is a successful poll, not an MCP outage. For a remote monitoring process, prefer process_attach with yieldTimeMs=0 and read its persisted watcher/feed output instead of repeatedly holding a 30-second MCP request for a sleep command.",
         inputSchema: {
             workspaceId: z.string().describe("Workspace identifier used to start the process."),
             sessionId: z.number().optional().describe("Legacy process session identifier returned by exec_command."),
@@ -2161,7 +2161,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions, 
     });
     registerAppTool(server, "process_attach", {
         title: "Attach process",
-        description: "Attach to a stable processHandle after an MCP reconnect. Returns current status and any newly buffered output. Processes only recognized after a full DevSpace restart are reported but may not have reattachable stdin/output streams.",
+        description: "Attach to a stable processHandle after an MCP reconnect. Returns current status and any newly buffered output. Use yieldTimeMs=0 for an immediate status snapshot without a long-lived MCP HTTP request. A running process with no new output is normal, not evidence of disconnection. Processes only recognized after a full DevSpace restart are reported but may not have reattachable stdin/output streams.",
         inputSchema: {
             workspaceId: z.string().describe("Workspace that owns the process."),
             processHandle: z.string().describe("Stable process handle."),

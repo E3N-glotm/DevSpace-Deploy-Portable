@@ -8,6 +8,9 @@ import {randomUUID} from "node:crypto";
 // work. Mutations are serialized while a write-capable Worker is active.
 // Control/recovery tools remain usable at all times.
 const GRANT_TTL_MS = 5 * 60_000;
+// Active long-running MCP workflows refresh this idle lease. An absolute
+// deadline still requires explicit re-delegation after a bounded workday.
+const MAX_GRANT_AGE_MS = 24 * 60 * 60_000;
 // Session-scoped MCP gate objects are reconstructed on transport reconnect.
 // Keep grants on the shared worker runtime without adding mutable, public
 // properties to it or leaking grants into a different Portable instance.
@@ -42,6 +45,7 @@ export function modelWorkflowPolicy(root){
 export function createModelWorkflowGate({
     portableRoot,modelWorker,readPolicy=()=>modelWorkflowPolicy(portableRoot),
     now=()=>Date.now(),grantTtlMs=GRANT_TTL_MS,
+    maxGrantAgeMs=MAX_GRANT_AGE_MS,
     isRemoteWorkspaceId=()=>false,
 }){
     const connectionIdentity=randomUUID();
@@ -54,6 +58,14 @@ export function createModelWorkflowGate({
     const who=conversationScopeId=>conversationScopeId
         ? "conversation:"+conversationScopeId:"session:"+connectionIdentity;
     const key=(scope,workspaceId)=>scope+"\0"+workspaceId;
+    function renewActiveGrant(approval){
+        const current=now();
+        const deadline=approval.createdAt+maxGrantAgeMs;
+        if(current>=deadline)return false;
+        // Denied actions must never extend an old authorization.
+        approval.expiresAt=Math.min(current+grantTtlMs,deadline);
+        return true;
+    }
     function enabledProfiles(){
         return modelWorker.models().filter(m=>m.allowCalls!==false);
     }
@@ -130,14 +142,21 @@ export function createModelWorkflowGate({
             catch{return blocked("MODEL_WORKFLOW_TASK_MISSING",
                 "The delegated Worker task is no longer available; dispatch a new one.");}
             const running=["queued","running"].includes(workerStatus);
+            if(now()>=approval.createdAt+maxGrantAgeMs)return blocked(
+                "MODEL_WORKFLOW_DELEGATION_EXPIRED",
+                "The delegated workflow has reached its maximum age.");
             if(!running&&approval.expiresAt<=now())return blocked(
                 "MODEL_WORKFLOW_DELEGATION_EXPIRED",
                 "The most recent Worker delegation has expired.");
-            if(READ_ONLY.has(name))return {allowed:true,via:approval.modelId,
-                workerStatus,parallel:true};
+            if(READ_ONLY.has(name)){
+                renewActiveGrant(approval);
+                return {allowed:true,via:approval.modelId,
+                    workerStatus,parallel:true};
+            }
             if(writerBusy || (approval.allowWrites&&!approval.reviewed))return blocked(
                 "MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY",
                 "A write-capable Worker has not finished and had its outcome inspected; concurrent Host writes are unsafe.");
+            renewActiveGrant(approval);
             return {allowed:true,via:approval.modelId,workerStatus};
         },
         onDelegate(result,conversationScopeId){
@@ -163,7 +182,13 @@ export function createModelWorkflowGate({
             });
             if(owners.size>128){
                 for(const [id,entry] of owners){
-                    if(now()-entry.createdAt>GRANT_TTL_MS)owners.delete(id);
+                    if(now()-entry.createdAt>maxGrantAgeMs)owners.delete(id);
+                }
+            }
+            if(grants.size>256){
+                for(const [id,entry] of grants){
+                    if(entry.expiresAt<=now()||
+                        entry.createdAt+maxGrantAgeMs<=now())grants.delete(id);
                 }
             }
         },
@@ -189,7 +214,8 @@ export function createModelWorkflowGate({
                 return {granted:false};
             grant.reviewed=true;
             grant.workerOutcome=result.status;
-            grant.expiresAt=now()+grantTtlMs;
+            grant.expiresAt=Math.min(now()+grantTtlMs,
+                grant.createdAt+maxGrantAgeMs);
             owners.delete(result.taskId);
             return {granted:true,workerOutcome:result.status,
                 expiresAt:grant.expiresAt};

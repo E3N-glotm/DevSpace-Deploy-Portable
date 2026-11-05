@@ -293,7 +293,7 @@ export function App() {
           <button type="button" key={id} data-page={id} className={'nav '+(!wizard&&page===id?'active':'')} onClick={()=>select(id)}>{icon}<span>{title}</span></button>)}
       </div>
       <div className="sidebar-bottom"><button data-page="settings" className={'nav '+(!wizard&&page==='settings'?'active':'')} onClick={()=>select('settings')}><SettingsRegular/>设置</button>
-        <div className="sidebar-status"><span>v1.1.68 dev7</span></div>
+        <div className="sidebar-status"><span>v1.1.68 dev8</span></div>
       </div>
     </aside>
     <main className="main">
