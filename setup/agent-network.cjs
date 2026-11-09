@@ -29,15 +29,49 @@ function validateAgentUrl(value,mode) {
 function validateLanSettings(settings) {
   const enabled=settings?.enabled===true;
   const port=Number(settings?.port??7677);
-  const bindHost=String(settings?.bindHost||"0.0.0.0").trim();
+  // The legacy bindHost remains the first address for old UI/config readers.
+  // New configurations can bind several explicit private IPv4 interfaces on
+  // the same Agent-only port; never implicitly expand them to all adapters.
+  const supplied=settings?.bindHosts;
+  if(supplied!==undefined&&(!Array.isArray(supplied)||!supplied.length||supplied.length>8))
+    throw new Error("Agent LAN bindHosts must contain 1-8 IPv4 addresses.");
+  const bindHosts=(supplied===undefined?[String(settings?.bindHost||"0.0.0.0")]:supplied)
+    .map(value=>typeof value==="string"?value.trim():"");
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("LAN Agent gateway port must be 1024-65535.");
-  if(bindHost!=="0.0.0.0"&&!privateIpv4(bindHost))throw new Error("LAN Agent bind host must be 0.0.0.0 or a local private IPv4 address.");
-  return {formatVersion:1,enabled,port,bindHost};
+  if(bindHosts.some(host=>host!=="0.0.0.0"&&!privateIpv4(host)))
+    throw new Error("Agent LAN bind hosts must be private IPv4 addresses or 0.0.0.0.");
+  if(new Set(bindHosts).size!==bindHosts.length)
+    throw new Error("Agent LAN bind hosts must be distinct.");
+  if(bindHosts.length>1&&bindHosts.includes("0.0.0.0"))
+    throw new Error("Agent LAN 0.0.0.0 wildcard cannot be combined with specific interfaces.");
+  return {formatVersion:1,enabled,port,bindHost:bindHosts[0],bindHosts};
 }
 function agentNetworkPath(root){return path.join(process.env.DEVSPACE_PORTABLE_CONFIG_DIR||path.join(root,"data","config"),"agent-network.json");}
 function readAgentNetwork(root) {
   try {return validateLanSettings(JSON.parse(fs.readFileSync(agentNetworkPath(root),"utf8")));}
   catch(error){if(error.code==="ENOENT")return validateLanSettings({});throw error;}
+}
+
+function prepareLanBindings(previousSettings,address) {
+  const previous=validateLanSettings(previousSettings);
+  if(!privateIpv4(address))throw new Error("无法为局域网 Agent 选择有效的私有 IPv4 监听地址。");
+  // Preserve already enrolled Agent endpoints, adding only the new interface.
+  // Explicit wildcard configuration keeps its legacy semantics unchanged.
+  const previousHosts=previous.bindHosts;
+  const bindHosts=!previous.enabled?[address]:
+    previousHosts.includes("0.0.0.0")||previousHosts.includes(address)
+      ?previousHosts:[...previousHosts,address];
+  const settings=validateLanSettings({...previous,enabled:true,bindHosts});
+  return {settings,restartRequired:!previous.enabled||
+    JSON.stringify(previousHosts)!==JSON.stringify(settings.bindHosts)};
+}
+
+function lanAgentEndpointEnabled(settings,url) {
+  const lan=validateLanSettings(settings);
+  const origin=validateAgentUrl(url,"lan");
+  const endpoint=new URL(origin);
+  return lan.enabled&&Number(endpoint.port)===lan.port&&
+    (lan.bindHosts.includes("0.0.0.0")||lan.bindHosts.includes(endpoint.hostname));
 }
 
 function lanControllerAddress(sshHost,interfaces=os.networkInterfaces(),preferred="") {
@@ -83,4 +117,5 @@ async function resolveLanControllerAddress(host,port=22,interfaces=os.networkInt
   }catch{}
   return lanControllerAddress(host,interfaces,preferred);
 }
-module.exports={privateIpv4,validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork,lanControllerAddress,resolveLanControllerAddress};
+module.exports={privateIpv4,validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork,
+  prepareLanBindings,lanAgentEndpointEnabled,lanControllerAddress,resolveLanControllerAddress};

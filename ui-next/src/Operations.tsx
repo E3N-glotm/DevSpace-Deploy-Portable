@@ -358,9 +358,16 @@ export function AgentsPage() {
               onChange={(_e,d)=>setCredential(d.value)}
               placeholder={activeProfile?.hasPassword?'已保存（留空保留）':'密码、私钥路径或留空用默认密钥'}/></Field>
           </div>
-          <div className="op-toggle"><div><strong>局域网连接</strong>
-            <small>{connectionMode==='lan'?'服务器不需要访问互联网（仅限可信局域网）':'关闭时使用现有公网入口'}</small></div>
-            <Switch checked={connectionMode==='lan'} onChange={(_e,d)=>setConnectionMode(d.checked?'lan':'internet')}/></div>
+        <div className="op-toggle"><div><strong>局域网连接</strong>
+          <small>{connectionMode==='lan'?'服务器不需要访问互联网（仅限可信局域网）':'关闭时使用现有公网入口'}</small></div>
+          <Switch checked={connectionMode==='lan'} onChange={(_e,d)=>setConnectionMode(d.checked?'lan':'internet')}/></div>
+        {connectionMode==='lan'&&<p className="op-path-help">
+          Agent 网关端口：{net.data?.settings?.port||7677}；已配置监听地址：
+          {Array.isArray(net.data?.settings?.bindHosts)&&net.data.settings.bindHosts.length
+            ?net.data.settings.bindHosts.join('、')
+            :String(net.data?.settings?.bindHost||'尚未配置')}。
+          新服务器将按 Windows 实际路由自动选择和追加网卡 IP，保留现有地址；新增监听地址需要重启本地 MCP 才能生效。
+        </p>}
           <ActionRow><Button appearance="primary" disabled={!ready||formBusy} onClick={connectServer}>
             {formBusy?'正在连接…':selected?'保存并更新':'添加并连接'}</Button>
             {selected&&<Button disabled={formBusy||!sshHost.trim()} onClick={recover}>SSH 恢复离线 Agent</Button>}</ActionRow>

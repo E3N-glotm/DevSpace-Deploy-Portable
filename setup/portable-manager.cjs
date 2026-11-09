@@ -5,7 +5,8 @@ const path = require("path");
 const crypto = require("crypto");
 const childProcess = require("child_process");
 const {remoteSshAdminFactory} = require("./remote-ssh-admin.cjs");
-const {validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork,resolveLanControllerAddress} = require("./agent-network.cjs");
+const {validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork,
+  prepareLanBindings,lanAgentEndpointEnabled,resolveLanControllerAddress} = require("./agent-network.cjs");
 const os = require("os");
 const http = require("http");
 const dns = require("dns").promises;
@@ -82,7 +83,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.68";
-const PORTABLE_DEV_ITERATION = "dev8";
+const PORTABLE_DEV_ITERATION = "dev9";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -2030,8 +2031,8 @@ async function runRemoteAgentAdmin(action, payload = {}) {
     const setting=readAgentNetwork(ROOT);
     const url=mode==="lan" ? validateAgentUrl(payload.serverUrl,"lan")
       : validateAgentUrl(payload.serverUrl||config.publicBaseUrl,"internet");
-    if(mode==="lan" && (!setting.enabled || Number(new URL(url).port)!==setting.port))
-      throw new Error("Enable the matching LAN Agent gateway port and restart the local MCP service before enrolling a LAN Agent.");
+    if(mode==="lan" && !lanAgentEndpointEnabled(setting,url))
+      throw new Error("Enable the matching LAN Agent gateway interface and port, then restart local MCP before enrolling a LAN Agent.");
     payload={...payload,connectionMode:mode,serverUrl:url};
   }
   return remoteModule.remoteAgentAdmin({
@@ -2053,8 +2054,8 @@ async function runRemoteSshAdmin(action, payload = {}) {
       :validateAgentUrl(payload.serverUrl,"lan");
     if(mode==="lan"){
       const lan=readAgentNetwork(ROOT);
-      if(!lan.enabled || Number(new URL(desired).port)!==lan.port)
-        throw new Error("LAN Agent listener is disabled or its port does not match the requested URL.");
+      if(!lanAgentEndpointEnabled(lan,desired))
+        throw new Error("LAN Agent listener is disabled or the requested URL is not on a configured interface/port.");
     }
     const result=await service.handle(action,{...payload,serverUrl:desired});
     if(result?.ok){
@@ -2080,6 +2081,12 @@ function agentNetworkSet(payload){
   const settings=validateLanSettings(payload);
   if(settings.enabled && settings.port===Number(readJson(CONFIG_FILE,{}).port||7676))
     throw new Error("Agent LAN port must differ from the local MCP listener port.");
+  if(settings.enabled&&!settings.bindHosts.includes("0.0.0.0")){
+    const active=Object.values(os.networkInterfaces()).flat().filter(x=>
+      x?.family==="IPv4"&&!x.internal).map(x=>x.address);
+    if(settings.bindHosts.some(host=>!active.includes(host)))
+      throw new Error("局域网 Agent 监听地址不属于当前 Windows 网卡；请核对网卡 IP 后重试。");
+  }
   fs.mkdirSync(CONFIG_DIR,{recursive:true});
   writeJson(agentNetworkPath(ROOT),settings);
   restrictAcl(agentNetworkPath(ROOT));
@@ -2098,20 +2105,16 @@ async function agentNetworkPrepare(payload){
   const address=await resolveLanControllerAddress(sshHost,portNumber,os.networkInterfaces(),preferred);
   const port=previous.port;
   const serverUrl=validateAgentUrl(`http://${address}:${port}`,"lan");
-  const requested=validateLanSettings({...previous,enabled:true,
-    bindHost:previous.enabled?previous.bindHost:address});
-  // Never silently rebind an existing listener that serves other LAN Agents.
-  if(requested.bindHost!=="0.0.0.0"&&requested.bindHost!==address)
-    throw new Error("已有局域网 Agent 入口绑定其他网卡；请先在高级设置中调整监听地址。");
+  const {settings:requested,restartRequired}=prepareLanBindings(previous,address);
   if(requested.port===Number(readJson(CONFIG_FILE,{}).port||7676))
     throw new Error("局域网 Agent 端口不能与 MCP 端口相同。");
-  const restartRequired=!previous.enabled||previous.bindHost!==requested.bindHost;
   if(restartRequired){
     fs.mkdirSync(CONFIG_DIR,{recursive:true});
     writeJson(agentNetworkPath(ROOT),requested);
     restrictAcl(agentNetworkPath(ROOT));
   }
-  return {ok:true,serverUrl,restartRequired,port,bindHost:requested.bindHost};
+  return {ok:true,serverUrl,restartRequired,port,
+    bindHost:requested.bindHost,bindHosts:requested.bindHosts};
 }
 
 function installTasks() {
@@ -4691,6 +4694,20 @@ async function main() {
       writeOutput("Commands: configure set-computer-use show-config ui-open ui-heartbeat ui-runtime-poll ui-close ui-status list-drives install-tasks start start-local start-tunnel stop stop-local stop-tunnel shutdown restart restart-local restart-tunnel enable disable uninstall-tasks status dashboard-status network-proxy-state repair-stale-proxy restore-proxy-repair test diagnose verify-files update-check update-stage update-stage-force-full update-launch install-cloudflared plugin-list plugin-refresh seed-bundled-plugins plugin-install plugin-export plugin-enable plugin-disable plugin-uninstall plugin-slot-bind plugin-slot-unbind review-list review-details review-update review-rollback review-restore-safety memory-list memory-upsert memory-delete oauth-client-list oauth-client-create oauth-client-rotate-secret oauth-client-delete remote-agent-list remote-agent-create-enrollment remote-agent-revoke remote-agent-delete log-paths portable-processes get\n");
     }
   } catch (error) {
+    if(command==="agent-network-prepare"){
+      // Electron is intentionally forbidden to receive raw stderr, which can
+      // contain untrusted host names and secrets. Emit only a fixed safe code.
+      const message=String(error?.message||"");
+      const code=message.includes("服务器 SSH IP")?"INVALID_SSH_HOST":
+        message.includes("SSH 端口无效")?"INVALID_SSH_PORT":
+        message.includes("多个局域网网卡")?"AMBIGUOUS_INTERFACE":
+        message.includes("无法自动确定")?"NO_LOCAL_ROUTE":
+        message.includes("must contain 1-8")?"BINDING_LIMIT":
+        message.includes("端口不能与 MCP")?"PORT_CONFLICT":
+        error?.code==="EACCES"||error?.code==="EPERM"?"CONFIG_PERMISSION":
+        "UNKNOWN";
+      process.stderr.write("DEVSPACE_AGENT_NETWORK_SAFE_CODE="+code+"\n");
+    }
     fail(error && error.stack ? error.stack : error);
   }
 }

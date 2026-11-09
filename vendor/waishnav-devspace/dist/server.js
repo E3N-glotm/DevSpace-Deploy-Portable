@@ -4963,8 +4963,13 @@ if (await isMainModule()) {
         if (shuttingDown)
             return;
         shuttingDown = true;
-        if(agentLanServer)await new Promise(resolve=>agentLanServer.close(()=>resolve()));
-        await shutdownHttpServer(httpServer, close);
+        // WebSocket-upgraded connections are not drained by http.Server.close
+        // itself. Begin closing every LAN listener, then close the shared Agent
+        // manager (which closes active WebSockets) without awaiting the LAN
+        // close callback first; otherwise graceful shutdown can deadlock.
+        const lanClosed=agentLanServer?new Promise((resolve,reject)=>
+            agentLanServer.close(error=>error?reject(error):resolve())):Promise.resolve();
+        await Promise.all([shutdownHttpServer(httpServer, close),lanClosed]);
         process.exit(0);
     };
     const handleShutdown = () => {

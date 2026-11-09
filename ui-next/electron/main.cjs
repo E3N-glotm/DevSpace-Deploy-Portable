@@ -192,6 +192,21 @@ function runManager(action, payload, timeoutMs = 90_000) {
       }
       if (code !== 0) {
         // Never pass potentially credential-bearing stdout/stderr to the renderer.
+        if(action==='agent-network-prepare'){
+          const reason=stderr.match(/DEVSPACE_AGENT_NETWORK_SAFE_CODE=([A-Z_]+)/)?.[1]||'UNKNOWN';
+          const hints={
+            INVALID_SSH_HOST:'服务器地址无效，请填写正确的 SSH IP 或主机名。',
+            INVALID_SSH_PORT:'SSH 端口无效，请填写 1–65535。',
+            AMBIGUOUS_INTERFACE:'有多张网卡匹配服务器路由，无法唯一确定 Agent 入口地址。',
+            NO_LOCAL_ROUTE:'无法确定服务器可访问的本机局域网 IP，请检查网卡及路由。',
+            BINDING_LIMIT:'最多支持同时监听 8 个明确指定的局域网地址，请检查旧地址配置。',
+            PORT_CONFLICT:'局域网 Agent 端口与本地 MCP 端口冲突，请调整配置。',
+            CONFIG_PERMISSION:'写入局域网 Agent 配置被 Windows 权限拒绝。',
+            UNKNOWN:'局域网 Agent 入口准备失败，请查看 DevSpace 诊断日志。',
+          };
+          reject(new Error('AGENT_NETWORK_'+reason+': '+(hints[reason]||hints.UNKNOWN)));
+          return;
+        }
         if(action.startsWith('remote-ssh-')){
           const match=stderr.match(/DEVSPACE_SSH_SAFE_CODE=([A-Z_]+)/);
           const reason=match?.[1]||'UNKNOWN';
