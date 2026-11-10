@@ -160,6 +160,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "docs/releases/DEV-1.1.68-dev7.md",
             "docs/releases/DEV-1.1.68-dev8.md",
             "docs/releases/DEV-1.1.68-dev9.md",
+            "docs/releases/DEV-1.1.68-dev10.md",
             "ui-next/src/Operations.tsx",
             "setup/test-tunnel-network-coexistence.mjs",
             "setup/test-network-isolation-contract.mjs",

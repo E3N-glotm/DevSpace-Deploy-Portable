@@ -245,8 +245,10 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       "set -eu","state="+quote(state),"override="+quote(desiredUrl),
       "python3 - \"$state\" \"$override\" <<'PY'",
       "import base64,json,os,pathlib,socket,ssl,sys,urllib.parse",
-      "config=json.loads((pathlib.Path(sys.argv[1])/'config.json').read_text())",
-      "base=sys.argv[2] or str((config.get('servers') or [config.get('server')])[0])",
+      "base=sys.argv[2]",
+      "if not base:",
+      " config=json.loads((pathlib.Path(sys.argv[1])/'config.json').read_text())",
+      " base=str((config.get('servers') or [config.get('server')])[0])",
       "u=urllib.parse.urlparse(base)",
       "if u.scheme not in ('http','https') or not u.hostname:raise SystemExit('DEVSPACE_AGENT_URL_INVALID')",
       "port=u.port or (443 if u.scheme=='https' else 80)",
@@ -566,6 +568,11 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       const requestedRoot=String(payload.installRoot||"").trim();
       if(!name||!requestedRoot||accessMode==="scoped"&&!roots.length)
         throw new Error("Agent name, install root and scoped roots are required.");
+      // A newly enrolled LAN Agent must reach the controller from the remote
+      // Linux host. Checking only the Windows listener is insufficient across
+      // NAT/VPN boundaries (e.g. H200 -> Windows 192.168.221.x). Probe before
+      // creating any enrollment or writing remote installation files.
+      if(connectionMode==="lan")probeAgentEndpoint(profile,"",serverUrl);
       const installRoot=verifyInstallRoot(profile,requestedRoot,accessMode==="full-access");
       // Fail closed if an older installation's state cannot be attributed to
       // the exact Agent ID; the old WinForms UI stopped old state before update.

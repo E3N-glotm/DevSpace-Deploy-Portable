@@ -113,6 +113,8 @@ try {
       if(script.includes("DEVSPACE_AGENT_STATE_NOT_FOUND"))
         return failProbe?{status:44,stdout:"",stderr:"DEVSPACE_AGENT_STATE_NOT_FOUND"}:
           {status:0,stdout:"DEVSPACE_AGENT_STATE="+state+"\n",stderr:""};
+      if(script.includes("DEVSPACE_AGENT_WS_STATUS"))
+        return {status:1,stdout:"",stderr:"DEVSPACE_AGENT_WS_NOT_UPGRADED"};
       if(script.includes("DEVSPACE_AGENT_STATE_STOPPED=")){
         stopped++;
         return {status:0,stdout:"DEVSPACE_AGENT_STATE_STOPPED="+state+"\n",stderr:""};
@@ -136,6 +138,17 @@ try {
     await assert.rejects(mockRemote.handle("save",{key:"agent-existing",
       host:"gpu2.example.test",port:2022,userName:"ubuntu",
       privateKeyPath:join(scratch,"does-not-exist")}),/私钥/);
+    // Initial LAN onboarding must fail before enrollment/allocation or any
+    // remote stop/install when the remote host cannot reach the controller.
+    await assert.rejects(mockRemote.handle("deploy",{
+      key:"agent-existing",agentId:"",name:"new-lan-agent",
+      installRoot:"/home/ubuntu/workspace",accessMode:"scoped",
+      writableRoots:["/home/ubuntu/workspace"],
+      connectionMode:"lan",serverUrl:"http://192.168.221.238:7677",
+    }),/远程 Linux 无法连接 Agent 服务入口/);
+    assert.equal(enrolled,0,"no enrollment token may be allocated for an unreachable controller");
+    assert.equal(stopped,0,"no running Agent may be stopped for an unreachable controller");
+    assert.equal(installed,0,"no installer may run for an unreachable controller");
     const updated=await mockRemote.handle("deploy",{
       key:"agent-existing",agentId:"agent-existing",name:"test-agent",
       installRoot:"/home/ubuntu/workspace",accessMode:"scoped",

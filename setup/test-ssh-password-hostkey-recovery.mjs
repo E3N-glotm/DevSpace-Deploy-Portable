@@ -72,6 +72,10 @@ try{
   assert.ok(scanCount>=5);
   assert.equal(sshFailureCode(new Error("WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!")),"HOST_KEY_CHANGED");
   assert.equal(sshFailureCode(new Error("Permission denied (publickey,password).")),"AUTH_FAILED");
+  assert.equal(sshFailureCode(new Error("SSH 私钥文件不存在或不是有效文件。")),"SSH_KEY_INVALID");
+  assert.equal(sshFailureCode(new Error("Cannot verify a writable remote Agent install root: DEVSPACE_AGENT_INSTALL_ROOT_NOT_WRITABLE")),"INSTALL_ROOT_INVALID");
+  assert.equal(sshFailureCode(new Error("远程 Linux 无法连接 Agent 服务入口；不重启 Agent。检查 Windows 局域网 IP、监听端口、防火墙或公网隧道。")),"CONTROLLER_UNREACHABLE");
+  assert.equal(sshFailureCode(new Error("Agent SSH installer failed: exit 45")),"INSTALL_FAILED");
   assert.equal(sshFailureCode(new Error("DEVSPACE_AGENT_STATE_NOT_FOUND")),"STATE_NOT_FOUND");
   assert.equal(sshFailureCode(new Error("Agent SSH process restarted, but no new controller heartbeat was observed.")),"HEARTBEAT_MISSING");
   console.log("SSH new-password host-identity consent, safe diagnostics and profile-local trust checks passed.");
