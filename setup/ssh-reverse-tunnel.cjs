@@ -131,9 +131,15 @@ function makeAdmin(root) {
     writeJson:atomicJson,restrictAcl:()=>{},
     remoteAdmin:()=>{throw new Error("Agent enrollment is not available to the tunnel supervisor.");}});
 }
-async function supervise(root,key,{launch=()=>makeAdmin(root).launchReverseSsh(key,spec)}={}) {
+async function supervise(root,key,{launch,adminFactory=makeAdmin}={}) {
   const spec=entries(root).tunnels[key];
   if(!spec?.enabled)return;
+  // Default-parameter expressions have a separate lexical scope in JS and
+  // cannot reference `spec` declared in the function body. Construct the
+  // production launcher only after the specification has been initialized.
+  // Previously the implicit launcher threw ReferenceError before SSH spawned;
+  // tests passing a custom `launch` accidentally missed the production path.
+  const launchSsh=launch||(()=>adminFactory(root).launchReverseSsh(key,spec));
   const run=locations(root).run;
   fs.mkdirSync(run,{recursive:true});
   const statusFile=statePath(root,key),stopFile=stopPath(root,key);
@@ -152,7 +158,7 @@ async function supervise(root,key,{launch=()=>makeAdmin(root).launchReverseSsh(k
       lastPhase="starting";record();
       let exited=false;
       try{
-        child=launch();
+        child=launchSsh();
         child.once("error",()=>{exited=true;});
         child.once("exit",()=>{exited=true;});
       }catch{exited=true;}
@@ -173,6 +179,7 @@ async function supervise(root,key,{launch=()=>makeAdmin(root).launchReverseSsh(k
     }
   }finally{
     shutdown();lastPhase="stopped";record();
+    process.off("SIGTERM",shutdown);process.off("SIGINT",shutdown);
   }
 }
 if(require.main===module){
@@ -182,4 +189,4 @@ if(require.main===module){
   else {process.exitCode=2;}
 }
 module.exports={keyId,validateSpec,locations,entries,writeEntry,state,status,
-  spawnSupervisor,stopTunnel,stopAll,requestStopAll,reconcile,makeAdmin,supervise};
+  spawnSupervisor,stopTunnel,stopPath,stopAll,requestStopAll,reconcile,makeAdmin,supervise};

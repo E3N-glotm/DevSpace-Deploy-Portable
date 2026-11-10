@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {createRequire} from "node:module";
-import {mkdtempSync,mkdirSync,rmSync,readFileSync} from "node:fs";
+import {mkdtempSync,mkdirSync,rmSync,readFileSync,unlinkSync} from "node:fs";
 import {spawn} from "node:child_process";
 import {join,resolve} from "node:path";
 
@@ -73,9 +73,35 @@ try{
   assert.equal(tunnel.status(temp,key).active,false);
   assert.equal(child.killed,true);
   assert.equal(tunnel.reconcile(temp).started,0);
+  // Exercise the *production default launch path*: only the SSH factory is
+  // stubbed. Passing a custom `launch` here would conceal the parameter-scope
+  // ReferenceError which prevented dev11's detached supervisor from working.
+  tunnel.writeEntry(temp,{key,localHost,localPort,remotePort,enabled:true});
+  unlinkSync(tunnel.stopPath(temp,key));
+  let defaultFactoryCalls=0,defaultLaunchCalls=0,defaultChild=null;
+  const defaultSupervision=tunnel.supervise(temp,key,{adminFactory:factoryRoot=>{
+    assert.equal(factoryRoot,temp);
+    defaultFactoryCalls++;
+    return {launchReverseSsh:(actualKey,actualSpec)=>{
+      assert.equal(actualKey,key);
+      assert.deepEqual(actualSpec,spec);
+      defaultLaunchCalls++;
+      defaultChild=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],
+        {stdio:"ignore",windowsHide:true});
+      return defaultChild;
+    }};
+  }});
+  const defaultDeadline=Date.now()+6000;
+  while(Date.now()<defaultDeadline&&defaultLaunchCalls<1)await sleep(50);
+  assert.equal(defaultFactoryCalls,1,"the default SSH launcher must resolve its factory");
+  assert.equal(defaultLaunchCalls,1,"the default SSH launcher must capture the initialized spec");
+  await tunnel.stopTunnel(temp,key,{disable:true,timeoutMs:7000});
+  await defaultSupervision;
+  assert.equal(tunnel.status(temp,key).active,false);
   console.log(JSON.stringify({reverseMode:true,loopbackOnly:true,
     samePortWindowsGateway:true,sshFlags:true,
-    persistedConfig:true,autoReconnect:true,gracefulStop:true,modeIsolated:true}));
+    persistedConfig:true,autoReconnect:true,gracefulStop:true,modeIsolated:true,
+    defaultProductionLauncher:true}));
 }finally{
   rmSync(temp,{recursive:true,force:true});
 }
