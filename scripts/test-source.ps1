@@ -110,6 +110,8 @@ Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-agent-downgr
 
 Write-Host "==> setup/test-agent-network-lan.mjs"
 Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-agent-network-lan.mjs") -FailureMessage "Test failed: setup/test-agent-network-lan.mjs"
+Write-Host "==> setup/test-ssh-reverse-tunnel.mjs"
+Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-ssh-reverse-tunnel.mjs") -FailureMessage "Test failed: setup/test-ssh-reverse-tunnel.mjs"
 
 Write-Host "==> setup/test-agent-ssh-recovery-contract.mjs"
 Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-agent-ssh-recovery-contract.mjs") -FailureMessage "Test failed: setup/test-agent-ssh-recovery-contract.mjs"

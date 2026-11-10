@@ -35,7 +35,7 @@ const ACTIONS = new Set([
 // Explicitly enumerate existing manager commands. The renderer can neither
 // choose an arbitrary command nor access Node, shell, or a filesystem API.
 const ADMIN_READ = new Set([
-  'remote-agent-list','remote-ssh-list','remote-ssh-probe','remote-ssh-hostkey-inspect','agent-network-get','plugin-list','continuation-list','review-list',
+  'remote-agent-list','remote-ssh-list','remote-ssh-probe','remote-ssh-hostkey-inspect','remote-ssh-tunnel-status','remote-ssh-connectivity','agent-network-get','agent-network-suggest','plugin-list','continuation-list','review-list',
   'review-details','memory-list','oauth-client-list',
   'continuation-cutoff-estimate-get','log-paths','network-proxy-state',
   'dashboard-status','update-check',
@@ -43,6 +43,7 @@ const ADMIN_READ = new Set([
 const ADMIN_WRITE = new Set([
   'remote-agent-create-enrollment','remote-agent-revoke','remote-agent-delete',
   'remote-ssh-save','remote-ssh-test','remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','remote-ssh-hostkey-approve','agent-network-set','agent-network-prepare',
+  'remote-ssh-tunnel-start','remote-ssh-tunnel-stop',
   'plugin-install','plugin-export','plugin-enable','plugin-disable',
   'plugin-uninstall','plugin-slot-bind','plugin-slot-unbind','plugin-refresh',
   'continuation-lock','continuation-unlock','continuation-pause',
@@ -60,6 +61,7 @@ const ADMIN_WRITE = new Set([
 const ADMIN_DESTRUCTIVE = new Set([
   'remote-agent-revoke','remote-agent-delete','plugin-uninstall',
   'remote-ssh-deploy','remote-ssh-recover','remote-ssh-switch-network','remote-ssh-delete','remote-ssh-hostkey-approve','agent-network-set','agent-network-prepare',
+  'remote-ssh-tunnel-start','remote-ssh-tunnel-stop',
   'continuation-stop','continuation-delete','review-rollback',
   'review-restore-safety','memory-delete','oauth-client-rotate-secret',
   'oauth-client-delete','uninstall-tasks','disable','update-launch',
@@ -221,6 +223,7 @@ function runManager(action, payload, timeoutMs = 90_000) {
             STATE_NOT_FOUND:'已能执行 SSH，但没有找到与此 Agent ID 相符的状态目录。不会覆盖其他 Agent，请核对安装目录。',
             CONTROLLER_UNREACHABLE:'SSH 登录正常，但远程 Linux 无法反向连接 DevSpace Agent 入口；已阻止新安装或不安全重启。请检查远端到控制端的路由、TCP 7677、防火墙或使用经验证的 SSH 回连隧道。',
             INSTALL_FAILED:'SSH 登录正常，但远端 Agent 安装程序执行失败。请检查安装目录权限、依赖及远端安装日志。',
+            REVERSE_FORWARD_UNAVAILABLE:'SSH 登录可能正常，但远端端口转发未建立。请检查 sshd 的 AllowTcpForwarding、GatewayPorts 与远端端口占用；隧道必须仅监听 127.0.0.1。',
             HEARTBEAT_MISSING:'SSH 操作完成，但新 Agent 尚未向控制端报告有效心跳。请检查远端运行日志。',
             REMOTE_RESTART_FAILED:'已匹配 Agent 身份，但无法安全完成进程重启。请检查远端权限与状态日志。',
             UNKNOWN:'SSH 管理操作未完成。请检查本机诊断日志，或先使用 SSH 连接测试。',
@@ -610,6 +613,9 @@ async function recoverOfflineAgents() {
   try { assertNoForeignServiceOwnership(); } catch { return; }
   remoteAutoRecoverBusy = true;
   try {
+    // If the UI was closed or the machine rebooted, relaunch configured SSH
+    // supervisors before attempting to restart an existing remote Agent.
+    await runManager('remote-ssh-tunnel-reconcile',{},20_000).catch(()=>{});
     const stored = await runManager('remote-ssh-list', {}, 20_000);
     const profiles = Array.isArray(stored.profiles) ? stored.profiles : [];
     if (!profiles.some(p=>p.autoRecover)) return;

@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -4958,6 +4959,13 @@ if (await isMainModule()) {
     let agentLanServer;
     try { agentLanServer=await startAgentLanGateway(config,remoteAgents); }
     catch(error) { await shutdownHttpServer(httpServer,close); throw error; }
+    // Scheduled MCP startup must restore configured SSH reverse tunnels even
+    // when the Electron UI is closed; this starts only detached supervisors.
+    try {
+        const portableRoot=resolve(config.stateDir,"..","..");
+        const supervisor=resolve(portableRoot,"setup","ssh-reverse-tunnel.cjs");
+        if(existsSync(supervisor))createRequire(import.meta.url)(supervisor).reconcile(portableRoot);
+    }catch(error){console.warn("SSH reverse startup reconciliation unavailable:",error?.code||"error");}
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown)

@@ -5,6 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 const childProcess = require("child_process");
 const {remoteSshAdminFactory} = require("./remote-ssh-admin.cjs");
+const reverseTunnel = require("./ssh-reverse-tunnel.cjs");
 const {validateAgentUrl,validateLanSettings,agentNetworkPath,readAgentNetwork,
   prepareLanBindings,lanAgentEndpointEnabled,resolveLanControllerAddress} = require("./agent-network.cjs");
 const os = require("os");
@@ -83,7 +84,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.68";
-const PORTABLE_DEV_ITERATION = "dev10";
+const PORTABLE_DEV_ITERATION = "dev11";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -2027,9 +2028,10 @@ async function runRemoteAgentAdmin(action, payload = {}) {
   const remoteModule = await import(moduleUrl);
   const config = readJson(CONFIG_FILE, {});
   if(action==="create-enrollment"){
-    const mode=payload.connectionMode==="lan"?"lan":"internet";
+    const mode=["lan","ssh-reverse"].includes(payload.connectionMode)
+      ?payload.connectionMode:"internet";
     const setting=readAgentNetwork(ROOT);
-    const url=mode==="lan" ? validateAgentUrl(payload.serverUrl,"lan")
+    const url=mode!=="internet" ? validateAgentUrl(payload.serverUrl,mode)
       : validateAgentUrl(payload.serverUrl||config.publicBaseUrl,"internet");
     if(mode==="lan" && !lanAgentEndpointEnabled(setting,url))
       throw new Error("Enable the matching LAN Agent gateway interface and port, then restart local MCP before enrolling a LAN Agent.");
@@ -2047,11 +2049,58 @@ async function runRemoteSshAdmin(action, payload = {}) {
   const service=remoteSshAdminFactory({
     root: ROOT, readJson, writeJson, restrictAcl, remoteAdmin: runRemoteAgentAdmin,
   });
+  if(action==="tunnel-status"){
+    return reverseTunnel.status(ROOT,String(payload.key||""));
+  }
+  if(action==="tunnel-stop"){
+    return reverseTunnel.stopTunnel(ROOT,String(payload.key||""),{disable:true});
+  }
+  if(action==="tunnel-reconcile")return reverseTunnel.reconcile(ROOT);
+  if(action==="tunnel-start"){
+    const key=String(payload.key||"");
+    const local=validateAgentUrl(payload.localServerUrl,"lan");
+    const config=readAgentNetwork(ROOT);
+    if(!lanAgentEndpointEnabled(config,local))
+      throw new Error("SSH reverse tunnel requires an enabled, matching Windows Agent-only LAN gateway.");
+    const destination=new URL(local);
+    const existing=reverseTunnel.entries(ROOT).tunnels[key];
+    const same=existing?.localHost===destination.hostname&&
+      existing?.localPort===Number(destination.port);
+    const remotePort=same&&existing.remotePort
+      ?existing.remotePort:service.pickReversePort(key);
+    const spec=reverseTunnel.validateSpec({key,remotePort,
+      localHost:destination.hostname,localPort:Number(destination.port),enabled:true});
+    if(existing && !same && reverseTunnel.state(ROOT,key).active)
+      await reverseTunnel.stopTunnel(ROOT,key);
+    reverseTunnel.writeEntry(ROOT,spec);
+    reverseTunnel.spawnSupervisor(ROOT,key);
+    let lastError;
+    for(let i=0;i<4;i++){
+      await new Promise(resolve=>setTimeout(resolve,1500));
+      try{
+        const current=reverseTunnel.status(ROOT,key);
+        if(!current.active||current.phase!=="running"||!current.sshPid)
+          throw new Error("SSH reverse tunnel supervisor has not confirmed a live SSH process.");
+        service.probeReverseUrl(key,spec.serverUrl);
+        service.verifyReverseLoopback(key,spec.remotePort);
+        return {ok:true,connectionMode:"ssh-reverse",serverUrl:spec.serverUrl,
+          remotePort:spec.remotePort,tunnel:reverseTunnel.status(ROOT,key)};
+      }catch(error){
+        lastError=error;
+        if(String(error?.message||"").includes("SSH_REVERSE_FORWARD_UNSAFE_BINDING")){
+          await reverseTunnel.stopTunnel(ROOT,key,{disable:true});
+          throw error;
+        }
+      }
+    }
+    if(!existing?.enabled)await reverseTunnel.stopTunnel(ROOT,key,{disable:true});
+    throw new Error("SSH_REVERSE_FORWARD_UNAVAILABLE: SSH remote port forwarding did not establish a loopback-only Agent WebSocket endpoint.");
+  }
   if(action==="switch-network"){
     const mode=payload.connectionMode;
     const cfg=readJson(CONFIG_FILE,{});
     const desired=mode==="internet"?validateAgentUrl(payload.serverUrl||cfg.publicBaseUrl,"internet")
-      :validateAgentUrl(payload.serverUrl,"lan");
+      :validateAgentUrl(payload.serverUrl,mode);
     if(mode==="lan"){
       const lan=readAgentNetwork(ROOT);
       if(!lanAgentEndpointEnabled(lan,desired))
@@ -2066,7 +2115,14 @@ async function runRemoteSshAdmin(action, payload = {}) {
     }
     return result;
   }
-  return service.handle(action,payload);
+  const result=await service.handle(action,payload);
+  if(action==="deploy" && result?.ok && payload.connectionMode==="ssh-reverse" && result.agent?.id){
+    const store=readJson(path.join(CONFIG_DIR,"agent-connections.json"),{});
+    store[String(result.agent.id)]={connectionMode:"ssh-reverse",serverUrl:payload.serverUrl};
+    writeJson(path.join(CONFIG_DIR,"agent-connections.json"),store);
+    restrictAcl(path.join(CONFIG_DIR,"agent-connections.json"));
+  }
+  return result;
 }
 function agentNetworkGet(){
   const settings=readAgentNetwork(ROOT);
@@ -2115,6 +2171,16 @@ async function agentNetworkPrepare(payload){
   }
   return {ok:true,serverUrl,restartRequired,port,
     bindHost:requested.bindHost,bindHosts:requested.bindHosts};
+}
+async function agentNetworkSuggest(payload){
+  const host=String(payload.host||"").trim(),port=Number(payload.port||22);
+  if(!host||!/^[A-Za-z0-9.:-]+$/.test(host)||!Number.isInteger(port)||port<1||port>65535)
+    throw new Error("Invalid SSH destination for Agent network suggestion.");
+  const previous=readAgentNetwork(ROOT);
+  const preferred=previous.bindHost==="0.0.0.0"?"":previous.bindHost;
+  const address=await resolveLanControllerAddress(host,port,os.networkInterfaces(),preferred);
+  return {ok:true,serverUrl:validateAgentUrl(`http://${address}:${previous.port}`,"lan"),
+    listenerConfigured:lanAgentEndpointEnabled(previous,`http://${address}:${previous.port}`)};
 }
 
 function installTasks() {
@@ -2922,6 +2988,9 @@ function stopOrphanedComputerUseBrokers() {
 function stopServices(options = {}) {
   const deployment = readJson(DEPLOYMENT_FILE, { port: 7676 });
   fs.mkdirSync(RUN_DIR, { recursive: true });
+  // Full shutdown stops Portable-owned SSH supervisors; restart-local does not.
+  reverseTunnel.requestStopAll(ROOT);
+  sleepSync(1500);
   writeAtomic(TUNNEL_STOP_FILE, "stop\n");
   const managedTasks = [TASK_TUNNEL, TASK_MCP].filter((task) => taskOwnedByRoot(task));
   const enabledBeforeStop = new Map(managedTasks.map((task) => [task, taskEnabled(task)]));
@@ -4662,6 +4731,8 @@ async function main() {
       stdoutJson(agentNetworkSet(await readStdinJson()));
     } else if (command === "agent-network-prepare") {
       stdoutJson(await agentNetworkPrepare(await readStdinJson()));
+    } else if (command === "agent-network-suggest") {
+      stdoutJson(await agentNetworkSuggest(await readStdinJson()));
     } else if (command === "remote-agent-create-enrollment") {
       stdoutJson(await runRemoteAgentAdmin("create-enrollment", await readStdinJson()));
     } else if (command === "remote-agent-revoke") {
@@ -4670,6 +4741,7 @@ async function main() {
       stdoutJson(await runRemoteAgentAdmin("delete", await readStdinJson()));
     } else if (command.startsWith("remote-ssh-") &&
       new Set(["list", "save", "test", "probe", "deploy", "recover", "switch-network", "delete",
+        "tunnel-start","tunnel-stop","tunnel-status","tunnel-reconcile","connectivity",
         "hostkey-inspect", "hostkey-approve"]).has(command.slice("remote-ssh-".length))) {
       try {
         stdoutJson(await runRemoteSshAdmin(command.slice("remote-ssh-".length), await readStdinJson()));

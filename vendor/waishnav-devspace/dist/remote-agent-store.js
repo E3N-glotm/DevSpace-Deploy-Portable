@@ -268,7 +268,8 @@ export function remoteAgentAdmin({ stateDir, action, payload = {}, publicBaseUrl
         if (action === "create-enrollment") {
             const enrollment = store.createEnrollment(payload);
             const base = String(payload.serverUrl || publicBaseUrl || "").replace(/\/+$/, "");
-            const connectionMode=payload.connectionMode==="lan"?"lan":"internet";
+            const connectionMode=["lan","ssh-reverse"].includes(payload.connectionMode)
+                ?payload.connectionMode:"internet";
             const rootArgs = enrollment.writableRoots.map((root) => `--writable-root '${root.replace(/'/g, `'"'"'`)}'`).join(" ");
             const stateKey = enrollment.agentId || `enroll-${sha256(enrollment.token).slice(0, 12)}`;
             const stateDir = `${enrollment.installRoot.replace(/\/+$/, "")}/.devspace-agent/${stateKey}`;

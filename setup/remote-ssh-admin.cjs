@@ -79,6 +79,15 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
     return profile;
   }
   function execute(profile, script, timeout=30000) {
+    const {executable,args:baseArgs,env}=sshConnection(profile);
+    const args=[...baseArgs,"bash","-s"];
+    const result=cp.spawnSync(executable,args,{cwd:root,input:String(script).replace(/\r\n?/g,"\n")+"\n",
+      encoding:"utf8",windowsHide:true,timeout,maxBuffer:1024*1024,env});
+    if(result.error)throw new Error("SSH execution timed out or failed to start.");
+    return {exitCode:result.status,output:String(result.stdout||"").slice(-6000),
+      error:String(result.stderr||"").slice(-3000)};
+  }
+  function sshConnection(profile) {
     if(!ssh)throw new Error("Bundled Git SSH and Windows OpenSSH are missing.");
     const p=publicProfile(profile),password=protect("decrypt",pick(profile,"ProtectedPassword","protectedPassword"));
     const identity=String(p.privateKeyPath||"").trim();
@@ -92,15 +101,78 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       "-o","BatchMode="+(password?"no":"yes"),
       ...(password?["-o","NumberOfPasswordPrompts=2"]:[]),
       ...(identity?["-i",identity,"-o","IdentitiesOnly=yes"]:[]),
-      "-p",String(p.port),p.userName+"@"+host,"bash","-s"];
+      "-p",String(p.port),p.userName+"@"+host];
     const env={...process.env};
     if(password){env.SSH_ASKPASS=askpass;env.SSH_ASKPASS_REQUIRE="force";
       env.DISPLAY="devspace";env.DEVSPACE_SSH_PASSWORD=password;}
-    const result=cp.spawnSync(ssh,args,{cwd:root,input:String(script).replace(/\r\n?/g,"\n")+"\n",
-      encoding:"utf8",windowsHide:true,timeout,maxBuffer:1024*1024,env});
-    if(result.error)throw new Error("SSH execution timed out or failed to start.");
-    return {exitCode:result.status,output:String(result.stdout||"").slice(-6000),
-      error:String(result.stderr||"").slice(-3000)};
+    return {executable:ssh,args,env};
+  }
+  function launchReverseSsh(key,{remotePort,localHost,localPort}) {
+    const {privateIpv4}=require("./agent-network.cjs");
+    if(!privateIpv4(localHost)||!Number.isInteger(localPort)||localPort<1024||localPort>65535
+      ||!Number.isInteger(remotePort)||remotePort<1024||remotePort>65535)
+      throw new Error("Invalid restricted SSH reverse tunnel forwarding configuration.");
+    const {executable,args,env}=sshConnection(find(key));
+    return cp.spawn(executable,reverseSshArgs(args,{remotePort,localHost,localPort}),
+      {cwd:root,windowsHide:true,stdio:"ignore",env});
+  }
+  function reverseSshArgs(baseArgs,{remotePort,localHost,localPort}) {
+    const {privateIpv4}=require("./agent-network.cjs");
+    if(!privateIpv4(localHost)||!Number.isInteger(localPort)||localPort<1024||localPort>65535
+      ||!Number.isInteger(remotePort)||remotePort<1024||remotePort>65535)
+      throw new Error("Invalid restricted SSH reverse forwarding configuration.");
+    return [...baseArgs.slice(0,-1),
+      "-o","ExitOnForwardFailure=yes","-o","ServerAliveInterval=15",
+      "-o","ServerAliveCountMax=3","-o","TCPKeepAlive=yes",
+      "-N","-T","-R",`127.0.0.1:${remotePort}:${localHost}:${localPort}`,
+      baseArgs[baseArgs.length-1]];
+  }
+  function verifyReverseLoopback(key,port) {
+    const script=[
+      "python3 - "+quote(String(port))+" <<'PY'",
+      "import pathlib,sys",
+      "port=int(sys.argv[1]);seen=0",
+      "for file in ('/proc/net/tcp','/proc/net/tcp6'):",
+      " try: lines=pathlib.Path(file).read_text().splitlines()[1:]",
+      " except OSError:continue",
+      " for row in lines:",
+      "  fields=row.split();local=fields[1];state=fields[3]",
+      "  address,hexport=local.split(':')",
+      "  if int(hexport,16)!=port or state!='0A':continue",
+      "  seen+=1",
+      "  if address not in ('0100007F','00000000000000000000000001000000'):",
+      "   print('DEVSPACE_REVERSE_BOUND_NONLOOPBACK');sys.exit(3)",
+      "print('DEVSPACE_REVERSE_LOOPBACK_OK' if seen else 'DEVSPACE_REVERSE_NO_LISTENER')",
+      "sys.exit(0 if seen else 4)",
+      "PY",
+    ].join("\n");
+    const out=execute(find(key),script,24000);
+    if(out.exitCode!==0||!out.output.includes("DEVSPACE_REVERSE_LOOPBACK_OK"))
+      throw new Error("SSH_REVERSE_FORWARD_UNSAFE_BINDING: Remote SSH port is not restricted to loopback.");
+    return true;
+  }
+  function pickReversePort(key,existingPort=0) {
+    const profile=find(key);
+    const start=18700+(crypto.createHash("sha256").update(key).digest().readUInt16BE(0)%900);
+    const candidates=existingPort?[Number(existingPort)]:Array.from({length:36},(_,i)=>18700+(start-18700+i)%900);
+    const script=[
+      "python3 - "+candidates.map(quote).join(" ")+" <<'PY'",
+      "import socket,sys",
+      "for value in sys.argv[1:]:",
+      " port=int(value)",
+      " try:",
+      "  with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as s:",
+      "   s.bind(('127.0.0.1',port))",
+      "  print('DEVSPACE_REVERSE_PORT='+str(port));sys.exit(0)",
+      " except OSError: pass",
+      "sys.exit(3)",
+      "PY",
+    ].join("\n");
+    const out=execute(profile,script,28000);
+    const port=Number(out.output.match(/^DEVSPACE_REVERSE_PORT=(\d+)$/m)?.[1]||0);
+    if(out.exitCode!==0||!Number.isInteger(port)||!candidates.includes(port))
+      throw new Error("No remote loopback port is available for the SSH reverse tunnel.");
+    return port;
   }
   const quote=value=>"'"+String(value).replace(/'/g,"'\\''")+"'";
   const hash=bytes=>crypto.createHash("sha256").update(bytes).digest("hex");
@@ -346,7 +418,8 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       "--agent-sha256",hash(files[1]),"--access-mode",accessMode,
       "--install-root",data.installRoot||enrollment.installRoot,
       "--state-dir",stateDirOverride||enrollment.stateDir,"--agent-file",'"$tmp_dir/devspace-agent.py"'];
-    args.push("--connection-mode",enrollment.connectionMode==="lan"?"lan":"internet");
+    args.push("--connection-mode",
+      ["lan","ssh-reverse"].includes(enrollment.connectionMode)?enrollment.connectionMode:"internet");
     if(!args[1]||!args[3]||!args[13])throw new Error("Enrollment missing required server, token, or state directory.");
     if(sshUser==="root")args.push("--user","root","--allow-root-service");
     if(accessMode!=="full-access")for(const writableRoot of roots)args.push("--writable-root",writableRoot);
@@ -383,6 +456,16 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       persist(s);return {ok:true,deleted:s.Profiles.length!==count};
     }
     const profile=find(payload.key);
+    if(action==="connectivity"){
+      const lan=payload.lanUrl?validateAgentUrl(payload.lanUrl,"lan"):"";
+      const internet=payload.internetUrl?validateAgentUrl(payload.internetUrl,"internet"):"";
+      let lanReachable=false,internetReachable=false;
+      if(lan){try{probeAgentEndpoint(profile,"",lan);lanReachable=true;}catch{}}
+      if(internet){try{probeAgentEndpoint(profile,"",internet);internetReachable=true;}catch{}}
+      return {ok:true,sshAuthenticated:true,lanReachable,internetReachable,
+        recommendation:lanReachable?"lan":internetReachable?"internet":"ssh-reverse",
+        reverseTunnelRequiresPortForwardVerification:true};
+    }
     if(action==="hostkey-inspect"){
       // Read-only review; a new SSH password never authorizes a new host key.
       return hostTrust.inspect(publicProfile(profile));
@@ -508,7 +591,7 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       const agentId=String(payload.agentId||"").trim();
       if(!agentId)throw new Error("Agent ID required for an identity-fenced endpoint probe.");
       const state=findExistingState(profile,agentId,[],String(payload.installRoot||""));
-      const mode=payload.connectionMode==="lan"?"lan":"internet";
+      const mode=["lan","ssh-reverse"].includes(payload.connectionMode)?payload.connectionMode:"internet";
       const url=payload.serverUrl?validateAgentUrl(payload.serverUrl,mode):"";
       probeAgentEndpoint(profile,state,url);
       return {ok:true,agentId,endpointReachable:true,mode,checkedVia:"read-only SSH WebSocket HTTP 101 probe"};
@@ -552,11 +635,12 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
     }
     if(action==="deploy"){
       const agentId=String(payload.agentId||""),name=String(payload.name||"").trim();
-      const connectionMode=payload.connectionMode==="lan"?"lan":"internet";
+      const connectionMode=["lan","ssh-reverse"].includes(payload.connectionMode)
+        ?payload.connectionMode:"internet";
       const serverUrl=payload.serverUrl
         ? validateAgentUrl(payload.serverUrl,connectionMode) : "";
-      if(connectionMode==="lan"&&!serverUrl)
-        throw new Error("LAN Agent SSH deployment requires the Windows LAN Agent URL.");
+      if(connectionMode!=="internet"&&!serverUrl)
+        throw new Error("LAN or SSH reverse Agent deployment requires an explicit Agent URL.");
       const accessMode=payload.accessMode==="full-access"?"full-access":"scoped";
       const roots=accessMode==="full-access"?[]:Array.isArray(payload.writableRoots)?
         [...new Set(payload.writableRoots.map(String).map(x=>x.trim()).filter(Boolean))]:[];
@@ -572,7 +656,7 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       // Linux host. Checking only the Windows listener is insufficient across
       // NAT/VPN boundaries (e.g. H200 -> Windows 192.168.221.x). Probe before
       // creating any enrollment or writing remote installation files.
-      if(connectionMode==="lan")probeAgentEndpoint(profile,"",serverUrl);
+      if(connectionMode!=="internet")probeAgentEndpoint(profile,"",serverUrl);
       const installRoot=verifyInstallRoot(profile,requestedRoot,accessMode==="full-access");
       // Fail closed if an older installation's state cannot be attributed to
       // the exact Agent ID; the old WinForms UI stopped old state before update.
@@ -604,6 +688,8 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
     }
     throw new Error("Unknown SSH admin action.");
   }
-  return {handle,offlineInstall,publicProfile};
+  return {handle,offlineInstall,publicProfile,launchReverseSsh,pickReversePort,
+    verifyReverseLoopback,reverseSshArgs,
+    probeReverseUrl:(key,url)=>probeAgentEndpoint(find(key),"",validateAgentUrl(url,"ssh-reverse"))};
 }
 module.exports={remoteSshAdminFactory,freshOnlineAgent};

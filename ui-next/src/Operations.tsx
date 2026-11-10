@@ -102,7 +102,9 @@ export function AgentsPage() {
   const [name,setName]=useState('');
   const [installRoot,setInstallRoot]=useState('');
   const [full,setFull]=useState(false);
-  const [connectionMode,setConnectionMode]=useState<'internet'|'lan'>('internet');
+  const [connectionMode,setConnectionMode]=useState<'internet'|'lan'|'ssh-reverse'>('internet');
+  const [reverseState,setReverseState]=useState('');
+  const [connectionDiagnosis,setConnectionDiagnosis]=useState('');
   const [sshHost,setSshHost]=useState('');
   const [sshPort,setSshPort]=useState('22');
   const [sshUser,setSshUser]=useState('ubuntu');
@@ -137,7 +139,9 @@ export function AgentsPage() {
       ?item.writableRoots.map(String).join('\n'):value(item||null,'installRoot'));
     setFull(item?.accessMode==='full-access');setCommand('');setFormError('');setFormNotice('');setHostKeyReview(null);
     const pref=net.data?.connections?.[id] || item?.metadata || {};
-    setConnectionMode(pref.connectionMode==='lan'?'lan':'internet');
+    setConnectionMode(pref.connectionMode==='lan'||pref.connectionMode==='ssh-reverse'
+      ?pref.connectionMode:'internet');
+    setReverseState('');setConnectionDiagnosis('');
     setSshHost(String(saved?.host||''));setSshPort(String(saved?.port||22));
     setSshUser(String(saved?.userName||'ubuntu'));
     setCredential(String(saved?.privateKeyPath||''));
@@ -170,15 +174,48 @@ export function AgentsPage() {
       }
     }
   }
+  async function prepareConnectionEndpoint(mode:'internet'|'lan'|'ssh-reverse'){
+    if(mode==='internet')return String(net.data?.internetDefaultUrl||'');
+    const network=await window.devspace.admin('agent-network-prepare',{
+      host:sshHost.trim(),port:Number(sshPort),
+    },true);
+    if(network.restartRequired)await window.devspace.runAction('restart-local');
+    const localServerUrl=String(network.serverUrl||'');
+    if(mode==='lan')return localServerUrl;
+    setReverseState('正在验证 SSH 反向隧道…');
+    const tunnel=await window.devspace.admin('remote-ssh-tunnel-start',{
+      key,localServerUrl,
+    },true);
+    setReverseState('SSH 反向隧道已连接');
+    return String(tunnel.serverUrl||'');
+  }
+  async function detectConnection(){
+    if(!sshHost.trim()||!validPort||!sshUser.trim()||formBusy)return;
+    setFormBusy(true);setFormError('');setConnectionDiagnosis('');
+    try{
+      await saveSsh();
+      await window.devspace.admin('remote-ssh-test',{key});
+      const suggestion=await window.devspace.admin('agent-network-suggest',{
+        host:sshHost.trim(),port:Number(sshPort),
+      });
+      const probe=await window.devspace.admin('remote-ssh-connectivity',{
+        key,lanUrl:suggestion.serverUrl,
+        internetUrl:String(net.data?.internetDefaultUrl||''),
+      });
+      const recommended=probe.recommendation as 'internet'|'lan'|'ssh-reverse';
+      setConnectionMode(recommended);
+      setConnectionDiagnosis(recommended==='lan'
+        ?'已验证 Linux 可直连局域网 Agent 入口。'
+        :recommended==='internet'
+          ?'已验证 Linux 可直连公网 Agent 入口。'
+          :'局域网和公网 Agent 入口均未通过远端回连测试，建议尝试 SSH 反向隧道；是否允许 -R 将在启动时验证。');
+    }catch(error){await handleSshFailure(error,'save');}
+    finally{setFormBusy(false);}
+  }
   async function attemptConnect(){
       const mode=connectionMode;
-      let serverUrl=String(net.data?.internetDefaultUrl||'');
-      if(mode==='lan'){
-        const network=await window.devspace.admin('agent-network-prepare',{host:sshHost.trim(),port:Number(sshPort)},true);
-        serverUrl=String(network.serverUrl||'');
-        if(network.restartRequired)await window.devspace.runAction('restart-local');
-      }
       const sshUpdated=await saveSsh();
+      const serverUrl=await prepareConnectionEndpoint(mode);
       const roots=full?[]:scopedRoots;
       const changed=Boolean(!selected||name.trim()!==agent?.name||installRoot.trim()!==agent?.installRoot
         ||full!==(agent?.accessMode==='full-access') ||
@@ -209,12 +246,14 @@ export function AgentsPage() {
           key,agentId:selected,installRoot:installRoot.trim(),
           connectionMode:mode,serverUrl,
         },true);
+        if(existingMode==='ssh-reverse'&&mode!=='ssh-reverse')
+          await window.devspace.admin('remote-ssh-tunnel-stop',{key},true);
         setFormNotice('已更新连接方式，Agent 已重新上线。');
       }else{
         const result=await window.devspace.admin('remote-ssh-deploy',{
           key,agentId:selected,name:name.trim(),installRoot:installRoot.trim(),
           accessMode:full?'full-access':'scoped',writableRoots:roots,
-          connectionMode:mode,...(mode==='lan'?{serverUrl}:{}),
+          connectionMode:mode,...(mode!=='internet'?{serverUrl}:{}),
         },true);
         if(result?.agent?.id)setSelected(String(result.agent.id));
         setFormNotice(selected?'服务器已更新并连接。':'服务器已添加并连接。');
@@ -231,6 +270,7 @@ export function AgentsPage() {
   async function attemptRecover(){
       await saveSsh();
       await window.devspace.admin('remote-ssh-test',{key});
+      if(connectionMode==='ssh-reverse')await prepareConnectionEndpoint('ssh-reverse');
       await window.devspace.admin('remote-ssh-recover',{
         key,agentId:selected,installRoot:installRoot.trim(),writableRoots:full?[]:scopedRoots,
       },true);
@@ -250,20 +290,13 @@ export function AgentsPage() {
     finally{setFormBusy(false);}
   }
   async function attemptReEnroll(){
-    await saveSsh();
-    await window.devspace.admin('remote-ssh-test',{key});
-    let serverUrl=existingUrl;
-    if(connectionMode==='lan'){
-      const network=await window.devspace.admin('agent-network-prepare',{
-        host:sshHost.trim(),port:Number(sshPort),
-      },true);
-      serverUrl=String(network.serverUrl||'');
-      if(network.restartRequired)await window.devspace.runAction('restart-local');
-    }
+      await saveSsh();
+      await window.devspace.admin('remote-ssh-test',{key});
+    const serverUrl=await prepareConnectionEndpoint(connectionMode);
     const result=await window.devspace.admin('remote-ssh-deploy',{
       key,agentId:'',name:name.trim(),installRoot:installRoot.trim(),
       accessMode:full?'full-access':'scoped',writableRoots:full?[]:scopedRoots,
-      connectionMode,...(connectionMode==='lan'?{serverUrl}:{}),
+      connectionMode,...(connectionMode!=='internet'?{serverUrl}:{}),
     },true);
     if(result?.agent?.id)setSelected(String(result.agent.id));
     setFormNotice('新 Agent 已登记并上线；旧的已撤销凭据保持撤销状态。');
@@ -302,14 +335,13 @@ export function AgentsPage() {
   async function manualCommand(){
     setFormError('');
     try{
-      const network=connectionMode==='lan'
-        ?await window.devspace.admin('agent-network-prepare',{host:sshHost.trim(),port:Number(sshPort)},true):null;
-      if(network?.restartRequired)await window.devspace.runAction('restart-local');
+      await saveSsh();
+      const serverUrl=await prepareConnectionEndpoint(connectionMode);
       const response=await window.devspace.admin('remote-agent-create-enrollment',{
         agentId:selected,name:name.trim(),installRoot:installRoot.trim(),
         accessMode:full?'full-access':'scoped',
         writableRoots:full?[]:scopedRoots,
-        connectionMode,...(connectionMode==='lan'?{serverUrl:network.serverUrl}:{}),
+        connectionMode,...(connectionMode!=='internet'?{serverUrl}:{}),
       });
       setCommand(String(response?.installCommand||''));
     }catch(e){setFormError(explain(e));}
@@ -334,7 +366,10 @@ export function AgentsPage() {
         describe={a=>{const state=statusMeta(a.status);return <><span className="agent-title-row">
           <span className={'agent-status-dot '+state.tone} title={state.label} aria-label={state.label}/>
           <strong>{titleFor(a,'name','hostname','id')}</strong></span>
-          <small>{state.label} · {(net.data?.connections?.[a.id]?.connectionMode||a.metadata?.connectionMode)==='lan'?'局域网':'公网'} · {a.hostname||a.id}</small></>}}/>
+          <small>{state.label} · {(() => {
+            const mode=net.data?.connections?.[a.id]?.connectionMode||a.metadata?.connectionMode;
+            return mode==='ssh-reverse'?'SSH 反向隧道':mode==='lan'?'局域网':'公网';
+          })()} · {a.hostname||a.id}</small></>}}/>
       <div className="op-editor">
         <h3>{selected?'编辑服务器':'添加服务器'}</h3>
         <div className="op-form">
@@ -358,15 +393,27 @@ export function AgentsPage() {
               onChange={(_e,d)=>setCredential(d.value)}
               placeholder={activeProfile?.hasPassword?'已保存（留空保留）':'密码、私钥路径或留空用默认密钥'}/></Field>
           </div>
-        <div className="op-toggle"><div><strong>局域网连接</strong>
-          <small>{connectionMode==='lan'?'服务器不需要访问互联网（仅限可信局域网）':'关闭时使用现有公网入口'}</small></div>
-          <Switch checked={connectionMode==='lan'} onChange={(_e,d)=>setConnectionMode(d.checked?'lan':'internet')}/></div>
+        <Field label="Agent 连接方式"><select className="op-select" value={connectionMode}
+          onChange={event=>{setConnectionMode(event.target.value as 'internet'|'lan'|'ssh-reverse');setReverseState('');setConnectionDiagnosis('');}}>
+          <option value="internet">公网连接</option>
+          <option value="lan">局域网直连</option>
+          <option value="ssh-reverse">SSH 反向隧道</option>
+        </select></Field>
+        <ActionRow><Button onClick={detectConnection} disabled={!sshHost.trim()||!validPort||!sshUser.trim()||formBusy}>
+          检测并推荐连接方式
+        </Button></ActionRow>
+        {connectionDiagnosis&&<p className="op-path-help">{connectionDiagnosis}</p>}
         {connectionMode==='lan'&&<p className="op-path-help">
           Agent 网关端口：{net.data?.settings?.port||7677}；已配置监听地址：
           {Array.isArray(net.data?.settings?.bindHosts)&&net.data.settings.bindHosts.length
             ?net.data.settings.bindHosts.join('、')
             :String(net.data?.settings?.bindHost||'尚未配置')}。
           新服务器将按 Windows 实际路由自动选择和追加网卡 IP，保留现有地址；新增监听地址需要重启本地 MCP 才能生效。
+        </p>}
+        {connectionMode==='ssh-reverse'&&<p className="op-path-help">
+          Windows 将使用已保存的 SSH 凭据建立并自动恢复反向隧道；远端 Agent 仅连接 Linux 本机
+          127.0.0.1 的自动分配端口，不需要从远端直接访问 Windows IP。首次连接会验证 SSH
+          端口转发权限及 Agent WebSocket 回连。{reverseState}
         </p>}
           <ActionRow><Button appearance="primary" disabled={!ready||formBusy} onClick={connectServer}>
             {formBusy?'正在连接…':selected?'保存并更新':'添加并连接'}</Button>

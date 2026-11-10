@@ -20,10 +20,15 @@ function validateAgentUrl(value,mode) {
   if(mode==="lan"){
     if(url.protocol!=="http:"||!privateIpv4(url.hostname)||!url.port)
       throw new Error("LAN Agent URL must be http://private-IPv4:port.");
+  }else if(mode==="ssh-reverse"){
+    // This endpoint lives on the remote Linux host, never on a public NIC.
+    if(url.protocol!=="http:"||url.hostname!=="127.0.0.1"||!url.port||
+       Number(url.port)<1024||Number(url.port)>65535)
+      throw new Error("SSH reverse Agent URL must be http://127.0.0.1:port.");
   }else if(mode==="internet"){
     if(url.protocol!=="https:"||!url.hostname)
       throw new Error("Internet Agent URL must be a valid HTTPS origin.");
-  }else throw new Error("Agent connection mode must be internet or lan.");
+  }else throw new Error("Agent connection mode must be internet, lan or ssh-reverse.");
   return url.origin;
 }
 function validateLanSettings(settings) {

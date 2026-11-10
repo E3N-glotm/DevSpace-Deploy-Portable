@@ -94,6 +94,14 @@ try{
   assert.equal(registered.connectionMode,"lan");
   assert.match(registered.installCommand,/--connection-mode 'lan'/);
   assert.match(registered.installCommand,/curl -fsSL 'http:\/\/192\.168\.1\.30:/);
+  const reverseRegistered=remoteAgentAdmin({stateDir:config.stateDir,action:"create-enrollment",
+    payload:{name:"ssh-reverse-new",installRoot:"/home/ubuntu",accessMode:"full-access",
+      connectionMode:"ssh-reverse",serverUrl:"http://127.0.0.1:18767"},
+    publicBaseUrl:"https://agent.example.com"});
+  assert.equal(reverseRegistered.connectionMode,"ssh-reverse");
+  assert.equal(reverseRegistered.serverUrl,"http://127.0.0.1:18767");
+  assert.match(reverseRegistered.installCommand,/--connection-mode 'ssh-reverse'/);
+  assert.match(reverseRegistered.installCommand,/curl -fsSL 'http:\/\/127\.0\.0\.1:18767/);
   const enrollment=agent.store.createEnrollment({name:"lan-test-agent",accessMode:"full-access",
     writableRoots:[],installRoot:"/home/ubuntu"});
   const ws=new WebSocket("ws://127.0.0.1:"+port+"/agent/v1/connect",{headers:{Host:"192.168.1.30:"+port}});

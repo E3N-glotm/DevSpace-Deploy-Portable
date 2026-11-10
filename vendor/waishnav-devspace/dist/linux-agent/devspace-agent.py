@@ -1761,7 +1761,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     enroll_parser = subparsers.add_parser("enroll", help="Enroll this Linux host with a Windows DevSpace control plane")
     enroll_parser.add_argument("--server", required=True)
-    enroll_parser.add_argument("--connection-mode", choices=("internet", "lan"), default="internet")
+    enroll_parser.add_argument("--connection-mode", choices=("internet", "lan", "ssh-reverse"), default="internet")
     enroll_parser.add_argument("--token", required=True)
     enroll_parser.add_argument("--name", required=True)
     enroll_parser.add_argument("--writable-root", "--allowed-root", dest="writable_root", action="append")

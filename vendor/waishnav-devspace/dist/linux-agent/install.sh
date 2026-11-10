@@ -41,7 +41,7 @@ done
 [[ -n "$TOKEN" ]] || { echo "--token is required" >&2; exit 2; }
 [[ -n "$NAME" ]] || { echo "--name is required" >&2; exit 2; }
 [[ "$ACCESS_MODE" == "scoped" || "$ACCESS_MODE" == "full-access" ]] || { echo "--access-mode must be scoped or full-access" >&2; exit 2; }
-[[ "$CONNECTION_MODE" == "internet" || "$CONNECTION_MODE" == "lan" ]] || { echo "--connection-mode must be internet or lan" >&2; exit 2; }
+[[ "$CONNECTION_MODE" == "internet" || "$CONNECTION_MODE" == "lan" || "$CONNECTION_MODE" == "ssh-reverse" ]] || { echo "--connection-mode must be internet, lan or ssh-reverse" >&2; exit 2; }
 if [[ "$ACCESS_MODE" == "scoped" ]]; then
   ((${#WRITABLE_ROOTS[@]} > 0)) || { echo "Scoped mode requires at least one --writable-root" >&2; exit 2; }
 fi

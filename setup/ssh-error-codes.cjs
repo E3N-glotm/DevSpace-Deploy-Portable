@@ -13,6 +13,7 @@ const patterns = [
   ["STATE_NOT_FOUND", /DEVSPACE_AGENT_STATE_NOT_FOUND|Cannot verify an existing remote state matching the Agent ID/i],
   ["CONTROLLER_UNREACHABLE", /DEVSPACE_AGENT_WS_NOT_UPGRADED|DEVSPACE_AGENT_URL_INVALID|Linux .* Agent .* entrance|Agent WebSocket route|remote Linux.*Agent|远程 Linux 无法连接 Agent 服务入口/i],
   ["INSTALL_FAILED", /Agent SSH installer failed|Bundled Linux Agent asset missing|Bundled Agent SHA-256 does not match|Agent staging\/self-test failed/i],
+  ["REVERSE_FORWARD_UNAVAILABLE", /SSH_REVERSE_FORWARD_UNAVAILABLE|SSH_REVERSE_FORWARD_UNSAFE_BINDING|SSH reverse tunnel.*did not|SSH remote port forwarding.*not establish/i],
   ["HEARTBEAT_MISSING", /no new controller heartbeat|no healthy heartbeat was observed/i],
   ["REMOTE_RESTART_FAILED", /Verified remote Agent restart failed|Could not safely stop the verified old Agent/i],
 ];
