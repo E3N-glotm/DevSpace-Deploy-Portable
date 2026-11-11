@@ -65,9 +65,9 @@ export function publicModelProfiles(root) {
     catch (e) { if (e?.code === "ENOENT") return []; throw new Error("MODEL_CONFIG_UNREADABLE"); }
     if (config.version !== 1 || !Array.isArray(config.models))
         throw new Error("MODEL_CONFIG_UNSUPPORTED");
-    return config.models.map(({ encryptedKey, ...entry }) => ({
+    return config.models.map(({ encryptedKey,workerEncryptedKey, ...entry }) => ({
         ...entry, allowCalls:entry.allowCalls!==false,
-        hasKey: Boolean(encryptedKey),
+        hasKey: Boolean(encryptedKey),hasWorkerKey:Boolean(workerEncryptedKey),
     }));
 }
 
@@ -75,7 +75,7 @@ export function createModelWorkerRuntime({
     portableRoot, config, workspaces, reviewCheckpoints, hookManager,
     fetchImpl = globalThis.fetch, readProfiles = publicModelProfiles,
     prepareWrite = async () => {}, finishWrite = async () => {},
-    usageStore,
+    usageStore,credentialVault,
 }) {
     // The MCP server and Electron UI are distinct processes. Both write
     // independent, atomic model-request events into the same Portable data
@@ -94,6 +94,13 @@ export function createModelWorkerRuntime({
     const accounting=usageStore ?? createRequire(import.meta.url)(
         modelUsageModule
     ).createModelUsageStore(portableRoot);
+    const vaultModule=[
+        resolve(portableRoot,"setup","model-dpapi-vault.cjs"),
+        resolve(coreDirectory,"../../../../../setup/model-dpapi-vault.cjs"),
+        resolve(coreDirectory,"../../../setup/model-dpapi-vault.cjs"),
+    ].find(file=>existsSync(file));
+    const vault=credentialVault ?? (vaultModule
+        ?createRequire(import.meta.url)(vaultModule).createModelDpapiVault():null);
     const jobs = new Map();
     const activeHostMutations = new Map();
     const restricted = (text, n = MAX_TOOL_REPLY) => String(text || "").slice(0, n);
@@ -121,7 +128,8 @@ export function createModelWorkerRuntime({
         const model = models.find(p => p.id === id);
         if (!model || model.role !== "worker") throw new Error("WORKER_PROFILE_NOT_FOUND");
         if (model.allowCalls === false) throw new Error("WORKER_PROFILE_DISABLED");
-        if (model.hasKey) throw new Error("MODEL_API_KEY_NEEDS_SECURE_NATIVE_VAULT_BRIDGE");
+        if (model.hasKey && !model.hasWorkerKey)
+            throw new Error("MODEL_API_KEY_NEEDS_SECURE_NATIVE_VAULT_BRIDGE");
         if (!model.model || model.api !== "chat")
             throw new Error("WORKER_REQUIRES_CHAT_COMPLETIONS_MODEL");
         const url = new URL(model.baseUrl);
@@ -132,6 +140,29 @@ export function createModelWorkerRuntime({
             && !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(url.hostname))
             throw new Error("UNSAFE_HTTP_MODEL_URL");
         return model;
+    }
+    function workerAuthorization(model){
+        if(!model.hasKey)return {};
+        if(!vault)throw new Error("MODEL_WORKER_VAULT_UNAVAILABLE");
+        // Public model listings intentionally omit both encrypted key fields.
+        // Read the user-scoped ciphertext directly from the local private
+        // configuration, ensuring the same saved profile/revision is active.
+        let saved;
+        try{
+            const file=resolve(portableRoot,"data","config","model-providers.json");
+            const models=JSON.parse(readFileSync(file,"utf8"));
+            saved=models.models?.find(p=>p.id===model.id);
+        }catch{throw new Error("MODEL_WORKER_VAULT_UNAVAILABLE");}
+        if(!saved?.workerEncryptedKey||!saved?.encryptedKey||
+            saved.callPolicyRevision!==model.callPolicyRevision||
+            saved.allowCalls===false||saved.role!=="worker")
+            throw new Error("MODEL_WORKER_VAULT_PROFILE_CHANGED");
+        let secret;
+        try{secret=vault.decryptString(saved.workerEncryptedKey);}
+        catch{throw new Error("MODEL_WORKER_VAULT_DECRYPT_FAILED");}
+        if(typeof secret!=="string"||!secret||secret.length>8192||/[\r\n]/.test(secret))
+            throw new Error("MODEL_WORKER_VAULT_INVALID_SECRET");
+        return {Authorization:"Bearer "+secret};
     }
     async function tool(job, call, workspace) {
         getProfile(job.modelId);
@@ -216,11 +247,14 @@ export function createModelWorkerRuntime({
         const timeout=setTimeout(()=>controller.abort(),Math.max(1,Math.min(180000,job.deadline-Date.now())));
         try {
             const url=model.baseUrl.replace(/\/$/,"")+"/chat/completions";
+            const authorization=workerAuthorization(model);
             const response=await fetchImpl(url,{
-                method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},
+                method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json",
+                    ...authorization},
                 redirect:"error",signal:controller.signal,
                 body:JSON.stringify({model:model.model,messages,tools,tool_choice:"auto",stream:false,
-                    max_tokens:maxTokens,temperature:0}),
+                    max_tokens:maxTokens,
+                    ...(model.type==="deepseek"?{thinking:{type:"disabled"}}:{temperature:0})}),
             });
             if(!response.ok)throw new Error("MODEL_HTTP_"+response.status);
             const length=Number(response.headers?.get?.("content-length")||0);

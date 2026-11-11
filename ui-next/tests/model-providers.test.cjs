@@ -14,9 +14,13 @@ function fixture(fetchImpl=async()=>{throw Error('Unmocked network')}) {
     encryptString:x=>Buffer.from('encrypted:'+Buffer.from(x).toString('base64')),
     decryptString:x=>Buffer.from(String(x).replace(/^encrypted:/,''),'base64').toString('utf8'),
   };
-  const service=createModelProviderService({root,cryptoService,fetchImpl});
+  const credentialVault={
+    encryptString:s=>'worker-dpapi:'+Buffer.from(s).toString('base64'),
+    decryptString:s=>Buffer.from(s.replace(/^worker-dpapi:/,''),'base64').toString('utf8'),
+  };
+  const service=createModelProviderService({root,cryptoService,fetchImpl,credentialVault});
   const cleanup=()=>fs.rmSync(root,{recursive:true,force:true});
-  return {root,service,cleanup};
+  return {root,service,cleanup,credentialVault,cryptoService};
 }
 function input(overrides={}){return {
   id:'local_1',type:'ollama',name:'本地 Ollama',baseUrl:'http://127.0.0.1:11434/v1',
@@ -38,12 +42,52 @@ test('credentials are encrypted at rest, omitted from listings, and survive ordi
     const raw=fs.readFileSync(path.join(root,'data','config','model-providers.json'),'utf8');
     assert.ok(!raw.includes('TEST-SUPER-SECRET'));
     assert.ok(raw.includes('encryptedKey'));
+    assert.ok(raw.includes('workerEncryptedKey'));
+    assert.ok(!raw.includes('"apiKey":"TEST-SUPER-SECRET"'));
+    assert.equal(saved.workerEncryptedKey,undefined);
+    assert.equal(saved.workerCredentialReady,true);
     const changed=service.save({...input({name:'改名'})});
     assert.equal(changed.hasKey,true);
     assert.equal(service.list()[0].name,'改名');
     assert.equal(service.save({...input(),clearKey:true}).hasKey,false);
     assert.equal(service.remove('local_1').removed,true);
     assert.deepEqual(service.list(),[]);
+  }finally{cleanup();}
+});
+test('legacy Electron-only credential is transparently rewrapped for the MCP Worker',()=>{
+  const {root,service,cleanup,credentialVault,cryptoService}=fixture();
+  try{
+    service.save({...input(),apiKey:'OLD-LEGACY-KEY'});
+    const file=path.join(root,'data','config','model-providers.json');
+    const old=JSON.parse(fs.readFileSync(file,'utf8'));
+    delete old.models[0].workerEncryptedKey;
+    fs.writeFileSync(file,JSON.stringify(old));
+    const restored=createModelProviderService({root,cryptoService,credentialVault});
+    assert.equal(restored.list()[0].workerCredentialReady,true);
+    const config=JSON.parse(fs.readFileSync(file,'utf8'));
+    assert.equal(credentialVault.decryptString(config.models[0].workerEncryptedKey),'OLD-LEGACY-KEY');
+    assert.equal(restored.list()[0].workerEncryptedKey,undefined);
+  }finally{cleanup();}
+});
+test('DeepSeek tool probe explicitly disables thinking before requiring a tool call',async()=>{
+  let requestBody;
+  const {service,cleanup}=fixture(async(url,options)=>{
+    if(url.endsWith('/chat/completions')){
+      requestBody=JSON.parse(options.body);
+      return json({choices:[{message:{tool_calls:[{type:'function',
+        function:{name:'devspace_probe_echo',arguments:'{"ok":true}'}}]}}]});
+    }
+    throw Error('Unexpected API endpoint');
+  });
+  try{
+    service.save({...input({type:'deepseek',name:'DeepSeek',model:'deepseek-flash',
+      baseUrl:'https://api.deepseek.com/v1'}),apiKey:'PROBE-KEY'});
+    const result=await service.probe('local_1',{tools:true});
+    assert.equal(result.connected,true);
+    assert.equal(result.functionCalling,'supported');
+    assert.deepEqual(requestBody.thinking,{type:'disabled'});
+    assert.equal(requestBody.tool_choice,'required');
+    assert.equal(requestBody.model,'deepseek-flash');
   }finally{cleanup();}
 });
 test('cannot persist API secrets if OS encryption is unavailable',()=>{

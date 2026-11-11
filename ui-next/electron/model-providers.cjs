@@ -7,6 +7,7 @@ const path = require('node:path');
 const {isIP} = require('node:net');
 const {randomUUID} = require('node:crypto');
 const {createModelUsageStore,emptyStats} = require('../../setup/model-usage.cjs');
+const {createModelDpapiVault} = require('../../setup/model-dpapi-vault.cjs');
 
 const TYPES = new Set(['deepseek','custom','ollama','vllm']);
 const ROLES = new Set(['worker','reviewer','planner']);
@@ -98,7 +99,8 @@ function makeBudget(model){
 }
 function apiPath(base,suffix){return base.replace(/\/$/,'')+'/'+suffix;}
 function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fetch,
-  filesystem=fs,usageStore=createModelUsageStore(root)}){
+  filesystem=fs,usageStore=createModelUsageStore(root),
+  credentialVault=createModelDpapiVault()}){
   if(!cryptoService||typeof cryptoService.encryptString!=='function'||typeof cryptoService.decryptString!=='function')
     throw Error('缺少系统加密服务');
   const filename=path.join(root,'data','config','model-providers.json');
@@ -122,10 +124,32 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     }finally{try{filesystem.unlinkSync(pending);}catch{}}
   }
   function visible(entry){
-    const {[KEY_FIELD]:hidden,...safe}=entry;
+    const {[KEY_FIELD]:hidden,workerEncryptedKey:workerHidden,...safe}=entry;
     return {...safe,allowCalls:entry.allowCalls!==false,
-      hasKey:Boolean(hidden),keyEncrypted:Boolean(hidden)};
+      hasKey:Boolean(hidden),keyEncrypted:Boolean(hidden),
+      workerCredentialReady:Boolean(workerHidden)};
   }
+  function migrateWorkerCredentials(){
+    // Older profiles were encrypted only for Electron safeStorage. Rewrap
+    // once, inside Electron's trusted main process, into user-scoped DPAPI so
+    // the separate Node MCP Worker can authenticate without receiving the
+    // plaintext key from a renderer, CLI argument or tool response.
+    if(!available())return false;
+    const entries=load();let changed=false;
+    const updated=entries.map(entry=>{
+      if(!entry.encryptedKey||entry.workerEncryptedKey)return entry;
+      const secret=cryptoService.decryptString(Buffer.from(entry.encryptedKey,'base64'));
+      const workerEncryptedKey=credentialVault.encryptString(secret);
+      changed=true;
+      return {...entry,workerEncryptedKey};
+    });
+    if(changed)persist(updated);
+    return changed;
+  }
+  // The UI may be closed while the MCP server keeps running; migrate saved
+  // encrypted model keys when Electron next starts, without user re-entry.
+  try{migrateWorkerCredentials();}
+  catch{console.warn('MODEL_WORKER_CREDENTIAL_MIGRATION_UNAVAILABLE');}
   function list(){return load().map(visible);}
   function save(payload){
     const input=payload&&typeof payload==='object'?payload:{};
@@ -137,6 +161,10 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     if(newKey && !available())throw Error('当前系统无法安全加密 API Key，未保存');
     const encryptedKey=clearKey?'':newKey?
       cryptoService.encryptString(newKey).toString('base64'):old?.encryptedKey||'';
+    const workerEncryptedKey=clearKey?'':newKey?
+      credentialVault.encryptString(newKey):old?.workerEncryptedKey||
+        (encryptedKey?credentialVault.encryptString(
+          cryptoService.decryptString(Buffer.from(encryptedKey,'base64'))):'');
     // Editing a profile cannot silently override an explicit disable from a
     // different UI snapshot. Only modelProvidersSetAllowed changes this flag.
     const model=validate({...input,allowCalls:old
@@ -144,7 +172,7 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     // Every profile edit invalidates any short-lived mandatory-workflow
     // approval previously issued for this model in an MCP session.
     const stored={...model,callPolicyRevision:randomUUID(),
-      ...(encryptedKey?{encryptedKey}:{})};
+      ...(encryptedKey?{encryptedKey,workerEncryptedKey}:{})};
     persist([...models.filter(m=>m.id!==model.id),stored]);
     return visible(stored);
   }
@@ -249,12 +277,14 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     const body=isResponses?{
       model:model.model,input:'Call devspace_probe_echo with ok=true.',
       max_output_tokens:80,
+      ...(tools&&model.type==='deepseek'?{reasoning:{effort:'none'}}:{}),
       ...(tools?{tools:[{type:'function',name:tool.function.name,
         description:tool.function.description,parameters:tool.function.parameters}]}:{}),
     }:{
       model:model.model,messages:[{role:'user',
         content:tools?'Call devspace_probe_echo with ok=true.':'Reply with the word OK.'}],
       max_tokens:80,
+      ...(tools&&model.type==='deepseek'?{thinking:{type:'disabled'}}:{}),
       ...(tools?{tools:[tool],tool_choice:'required'}:{}),
     };
     try{

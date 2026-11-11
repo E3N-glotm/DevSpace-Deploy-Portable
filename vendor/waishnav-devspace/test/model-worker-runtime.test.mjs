@@ -21,17 +21,22 @@ async function eventually(get) {
     }
     throw new Error("TASK_NEVER_FINISHED");
 }
-function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRounds=0 }={}){
+function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRounds=0,
+    protectedKey=false,deepseek=false }={}){
     const root=mkdtempSync(resolve(reports,".tmp-native-model-"));
     const project=resolve(root,"project");
     mkdirSync(project);
     writeFileSync(resolve(project,"example.txt"),"hello\nworld\n");
     mkdirSync(resolve(root,"data","config"),{recursive:true});
     const model={
-        id:"qwen_worker",name:"Local Qwen",type:"ollama",role:"worker",api:"chat",
-        baseUrl:"http://127.0.0.1:11434/v1",model:"local-qwen:latest",maxTaskUSD:1,
+        id:"qwen_worker",name:"Local Qwen",type:deepseek?"deepseek":"ollama",role:"worker",api:"chat",
+        baseUrl:deepseek?"https://api.deepseek.com/v1":"http://127.0.0.1:11434/v1",
+        model:deepseek?"deepseek-flash":"local-qwen:latest",maxTaskUSD:1,
         maxOutputTokens:1024,inputPerMillionUSD:1,outputPerMillionUSD:1,
+        callPolicyRevision:"revision-1",
     };
+    if(protectedKey){model.encryptedKey="NATIVE_CIPHERTEXT";
+        model.workerEncryptedKey="DPAPI_CIPHERTEXT";}
     writeFileSync(resolve(root,"data","config","model-providers.json"),
         JSON.stringify({version:1,models:[model]}));
     let count=0,writeStarted=0,writeFinished=0;
@@ -42,12 +47,20 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRoun
             assert.equal(id,"ws_test");return {root:project,backend:"local"};
         }},
         config:{permissions:{allowShellMutation:true,allowArbitraryCommands:false}},
+        credentialVault:{decryptString:value=>{
+            assert.equal(value,"DPAPI_CIPHERTEXT");
+            return "TEST-ONLY-WORKER-KEY";
+        }},
         prepareWrite:async()=>{writeStarted++;},
         finishWrite:async(_id,_ws,_p,ok)=>{writeFinished++;assert.equal(ok,true);},
         fetchImpl:async(_url,opts)=>{
             count++;
-            assert.ok(!opts.headers.Authorization);
+            if(protectedKey)assert.equal(opts.headers.Authorization,"Bearer TEST-ONLY-WORKER-KEY");
+            else assert.ok(!opts.headers.Authorization);
             assert.match(_url,/\/chat\/completions$/);
+            const sent=JSON.parse(opts.body);
+            if(deepseek){assert.deepEqual(sent.thinking,{type:"disabled"});
+                assert.equal(sent.model,"deepseek-flash");}
             if(errorStatus)return {ok:false,status:errorStatus};
             if(noTool||count>(repeatToolRounds||1))return response({choices:[{message:{
                 role:"assistant",content:"Examined workspace and completed the bounded task.",
@@ -78,6 +91,37 @@ test("model list never exposes encrypted keys",()=>{
         assert.equal(models[0].model,"local-qwen:latest");
         assert.equal(models[0].encryptedKey,undefined);
         assert.equal(f.runtime.models().length,1);
+    }finally{f.dispose();}
+});
+test("encrypted DeepSeek Worker credential is used for tool calls but never exposed via MCP",async()=>{
+    const f=prepare({protectedKey:true,deepseek:true});
+    try{
+        const publicModels=publicModelProfiles(f.root);
+        assert.equal(publicModels[0].hasKey,true);
+        assert.equal(publicModels[0].hasWorkerKey,true);
+        assert.equal(publicModels[0].encryptedKey,undefined);
+        assert.equal(publicModels[0].workerEncryptedKey,undefined);
+        const job=f.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",
+            instruction:"Read the project example file",maxSteps:4});
+        const finished=await eventually(()=>f.runtime.result(job.taskId));
+        assert.equal(finished.status,"completed",JSON.stringify(finished));
+        assert.equal(finished.toolCalls,1);
+        assert.equal(finished.evidence[0].tool,"read_file");
+        assert.ok(!JSON.stringify(finished).includes("TEST-ONLY-WORKER-KEY"));
+        assert.deepEqual(f.counts(),{count:2,writeStarted:0,writeFinished:0});
+    }finally{f.dispose();}
+});
+test("legacy Electron-only encrypted Worker key is explicitly unavailable until native migration",async()=>{
+    const f=prepare({protectedKey:true});
+    try{
+        const file=resolve(f.root,"data","config","model-providers.json");
+        const config=JSON.parse(readFileSync(file,"utf8"));
+        delete config.models[0].workerEncryptedKey;
+        writeFileSync(file,JSON.stringify(config));
+        assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",
+            instruction:"Read the file",maxSteps:3}),
+        /MODEL_API_KEY_NEEDS_SECURE_NATIVE_VAULT_BRIDGE/);
+        assert.equal(f.counts().count,0);
     }finally{f.dispose();}
 });
 test("default read-only worker calls a real workspace read and produces evidence",async()=>{

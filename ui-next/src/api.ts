@@ -40,9 +40,10 @@ export type ModelProvider = {
   contextLength:number;maxOutputTokens:number;maxTaskUSD:number;
   inputPerMillionUSD:number;outputPerMillionUSD:number;
   hasKey:boolean;keyEncrypted:boolean;
+  workerCredentialReady?:boolean;
   allowCalls:boolean;
 };
-export type ModelProviderDraft = Omit<ModelProvider,'hasKey'|'keyEncrypted'> & {
+export type ModelProviderDraft = Omit<ModelProvider,'hasKey'|'keyEncrypted'|'workerCredentialReady'> & {
   apiKey?:string;clearKey?:boolean;
 };
 export type ModelDiscovery = {reachable:boolean;httpStatus:number;models:string[];reason?:string};

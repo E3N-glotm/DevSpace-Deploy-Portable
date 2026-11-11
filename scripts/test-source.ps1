@@ -131,6 +131,7 @@ $Tests = @(
     "setup/test-ssh-password-hostkey-recovery.mjs",
     "setup/test-windows-app-icon.mjs",
     "setup/test-model-usage.cjs",
+    "setup/test-model-dpapi-vault.mjs",
     "setup/test-model-workflow-setting.cjs",
     "setup/test-model-workflow-wire.mjs",
     "vendor/waishnav-devspace/test/model-workflow-gate.test.mjs",

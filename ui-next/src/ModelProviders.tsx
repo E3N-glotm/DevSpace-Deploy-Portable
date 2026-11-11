@@ -6,7 +6,7 @@ import type {ModelProvider,ModelProviderDraft,ModelDiscovery,ModelProbe,ModelUsa
 type ProviderType=ModelProviderDraft['type'];
 type Role=ModelProviderDraft['role'];
 const defaults:Record<ProviderType,{url:string;name:string;model:string}>={
-  deepseek:{url:'https://api.deepseek.com/v1',name:'DeepSeek',model:'deepseek-chat'},
+  deepseek:{url:'https://api.deepseek.com/v1',name:'DeepSeek',model:'deepseek-flash'},
   custom:{url:'https://example.com/v1',name:'自定义 API',model:''},
   ollama:{url:'http://127.0.0.1:11434/v1',name:'Ollama 本地模型',model:''},
   vllm:{url:'http://127.0.0.1:8000/v1',name:'vLLM / llama.cpp',model:''},
@@ -107,6 +107,8 @@ export function ModelProvidersPage(){
       setNotice('该模型已关闭“允许调用”。可以查看或编辑配置；启用后才能获取模型列表或发送测试请求。');
       return;
     }
+    if(savedModel.hasKey&&savedModel.role==='worker'&&!savedModel.workerCredentialReady)
+      setNotice('此模型的旧 API 凭据尚未建立 Worker 专用 DPAPI 加密桥接；请重新启动 DevSpace 桌面界面或重新保存模型配置。');
     discover(savedModel.id).catch(e=>{
       if(selectedRef.current===savedModel.id)setError(message(e));
     });
@@ -194,7 +196,8 @@ export function ModelProvidersPage(){
           <button type="button" className={'models-item '+(selected===item.id?'selected':'')}
             onClick={()=>choose(item)}>
             <strong>{item.name}</strong><small>{item.model} · {names[item.type]}</small>
-            <small>{item.hasKey?'密钥已加密保存':'不使用密钥'} · {item.role}</small>
+            <small>{item.hasKey?(item.role==='worker'&&!item.workerCredentialReady
+              ?'密钥待建立 Worker 安全桥接':'密钥已加密保存'):'不使用密钥'} · {item.role}</small>
           </button>
           <div className="models-item-toggle">
             <Switch label="允许调用" checked={item.allowCalls} disabled={busy}
