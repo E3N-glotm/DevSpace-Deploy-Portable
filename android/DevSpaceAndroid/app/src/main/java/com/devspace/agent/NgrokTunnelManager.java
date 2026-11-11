@@ -94,15 +94,27 @@ final class NgrokTunnelManager implements AutoCloseable {
                 listener.onTunnelState("ngrok 连接中", "Android-native Agent SDK " + NGROK_SDK_VERSION + " · " + config.publicBaseUrl());
                 int hostPid = android.os.Process.myPid();
                 String hostProcess = context.getPackageName();
+                String shortProcess = hostProcess.startsWith("com.")
+                        ? hostProcess.substring(4) : hostProcess;
+                String expectedComm = shortProcess.substring(0, Math.min(15, shortProcess.length()));
+                String alternateComm = hostProcess.substring(0, Math.min(15, hostProcess.length()));
                 String command = "set -e; mkdir -p " + ShellEscaper.quote(ROOT_DIR)
+                        + "; host_comm=$(cat /proc/" + hostPid + "/comm 2>/dev/null || true)"
+                        + "; host_start=$(awk '{print $22}' /proc/" + hostPid + "/stat 2>/dev/null || true)"
+                        + "; case \"$host_comm\" in " + ShellEscaper.quote(expectedComm)
+                        + "|" + ShellEscaper.quote(alternateComm) + ") ;; *) exit 1;; esac"
+                        + "; case \"$host_start\" in ''|*[!0-9]*) exit 1;; esac"
                         + "; runtime_pid=$$; echo \"$runtime_pid\" > " + ShellEscaper.quote(PID_FILE)
                         + "; (while kill -0 \"$runtime_pid\" 2>/dev/null; do "
-                        + "host_cmd=$(tr '\\000' '\\n' < /proc/" + hostPid + "/cmdline 2>/dev/null | head -n 1 || true); "
-                        + "if [ \"$host_cmd\" != " + ShellEscaper.quote(hostProcess) + " ]; then "
+                        + "current_start=$(awk '{print $22}' /proc/" + hostPid + "/stat 2>/dev/null || true); "
+                        + "if [ \"$current_start\" != \"$host_start\" ]; then "
                         + "kill -TERM \"$runtime_pid\" 2>/dev/null || true; sleep 1; "
                         + "kill -KILL \"$runtime_pid\" 2>/dev/null || true; "
-                        + "rm -f " + ShellEscaper.quote(PID_FILE) + "; exit 0; fi; "
-                        + "sleep 1; done; rm -f " + ShellEscaper.quote(PID_FILE)
+                        + "if [ \"$(cat " + ShellEscaper.quote(PID_FILE) + " 2>/dev/null)\" = \"$runtime_pid\" ]; then "
+                        + "rm -f " + ShellEscaper.quote(PID_FILE) + "; fi; exit 0; fi; "
+                        + "sleep 15; done; "
+                        + "if [ \"$(cat " + ShellEscaper.quote(PID_FILE) + " 2>/dev/null)\" = \"$runtime_pid\" ]; then "
+                        + "rm -f " + ShellEscaper.quote(PID_FILE) + "; fi"
                         + ") >/dev/null 2>&1 & "
                         + "exec " + ShellEscaper.quote(ROOT_BINARY);
                 Process current = rootShell.startProcess(command);
@@ -287,7 +299,11 @@ final class NgrokTunnelManager implements AutoCloseable {
         try {
             rootShell.exec("if [ -f " + ShellEscaper.quote(PID_FILE) + " ]; then "
                             + "pid=$(cat " + ShellEscaper.quote(PID_FILE) + " 2>/dev/null || true); "
-                            + "case \"$pid\" in ''|*[!0-9]*) ;; *) kill \"$pid\" 2>/dev/null || true ;; esac; fi; "
+                            + "case \"$pid\" in ''|*[!0-9]*) ;; *) "
+                            + "exe=$(readlink /proc/$pid/exe 2>/dev/null || true); "
+                            + "case \"$exe\" in " + ShellEscaper.quote(ROOT_BINARY)
+                            + "|" + ShellEscaper.quote(ROOT_BINARY + " (deleted)")
+                            + ") kill \"$pid\" 2>/dev/null || true ;; esac ;; esac; fi; "
                             + "rm -f " + ShellEscaper.quote(PID_FILE),
                     null, 10, 128 * 1024);
         } catch (Exception ignored) {}

@@ -1,5 +1,13 @@
 # DevSpace Mobile 1.1.44 Android Standalone MCP
 
+### 1.1.51-android.15：修复旧隧道遗留的 tr 高 CPU 死循环
+
+- 2026-11-11 实机定位：旧 DevSpace Mobile 进程退出后，其 Cloudflare 保活子进程仍运行 `tr '\\000' '\\n' < /proc/<旧PID>/cmdline | head -n 1`，在消失的 procfs 句柄上出现零字节 read 忙循环。真实进程连续约 8 小时 35 分钟占用接近 100% 的一颗 CPU 核心；与 FCM 守护进程无关。
+- Cloudflare 和 ngrok 保活改为通过进程启动时间（`/proc/<PID>/stat` 的第 22 字段）识别原始 App PID，并核对 Android 实际 `comm` 名称，避免 PID 重用；完全删除不受限 `tr | head` 读取链。
+- 将保活检查从 1 秒降至 15 秒一次；旧隧道退出时，只有其 PID 仍然是当前 PID 文件的所有者，才能清理 PID/Token，避免覆盖新隧道状态。
+- 断线重连、手动关闭及启动时清理代码不再对 `/proc/PID/cmdline` 执行 `tr`，改为使用 `/proc/PID/exe` 精确核验隧道二进制身份，防止误杀同 PID 的无关进程。
+- 只改变 DevSpace Mobile APK 的隧道生命周期管理，不涉及系统充电、FCM、代理或其它 Magisk 模块。旧异常进程已在实机选择性停止，保留新隧道连接；源码静态回归和本地 Android SDK 编译通过。用户升级前请保留旧 APK 备份，升级可能暂时中断 MCP。
+
 ### 1.1.44：锁屏与 Wi-Fi／移动数据切换诊断
 
 - 前台服务继续尊重用户的“保持 CPU WakeLock”开关；锁屏本身不表示公网连接一定存活。

@@ -232,8 +232,11 @@ public final class DevSpaceAgentService extends Service {
                 + ShellEscaper.quote(root + "/cloudflared.pid") + "; do "
                 + "[ -f \"$f\" ] || continue; pid=$(cat \"$f\" 2>/dev/null || true); "
                 + "case \"$pid\" in ''|*[!0-9]*) ;; *) "
-                + "cmd=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null || true); "
-                + "case \"$cmd\" in *devspace-mobile/ngrok-android-sdk*|*devspace-mobile/cloudflared-*) kill \"$pid\" 2>/dev/null || true ;; esac ;; esac; "
+                + "exe=$(readlink /proc/$pid/exe 2>/dev/null || true); "
+                + "case \"$f:$exe\" in "
+                + "*/ngrok.pid:*/devspace-mobile/ngrok-android-sdk-*|"
+                + "*/cloudflared.pid:*/devspace-mobile/cloudflared-*) "
+                + "kill \"$pid\" 2>/dev/null || true ;; esac ;; esac; "
                 + "rm -f \"$f\"; done; rm -f " + ShellEscaper.quote(root + "/tunnel.token");
         try { rootShell.exec(command, null, 10, 128 * 1024); } catch (Exception ignored) {}
     }
