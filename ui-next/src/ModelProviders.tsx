@@ -56,10 +56,12 @@ export function ModelProvidersPage(){
   const [probe,setProbe]=useState<ModelProbe|null>(null);
   const [usage,setUsage]=useState<ModelUsageStats|null>(null);
   const [usageError,setUsageError]=useState('');
+  const [groupDialog,setGroupDialog]=useState(false);
+  const [showReasoningAdvanced,setShowReasoningAdvanced]=useState(false);
   const selectedRef=useRef('');
   const discoveryGeneration=useRef(0);
   const saved=items.find(x=>x.id===selected);
-  const update=(values:Partial<ModelProviderDraft>)=>setForm(old=>({...old,...values}));
+  const update=(values:Partial<ModelProviderDraft>)=>{setForm(old=>({...old,...values}));setProbe(null);};
   const reload=useCallback(async()=>setItems(await window.devspace.modelProvidersList()),[]);
   useEffect(()=>{reload().catch(e=>setError(message(e)));},[reload]);
   const refreshUsage=useCallback(async(id:string,model:string)=>{
@@ -142,16 +144,16 @@ export function ModelProvidersPage(){
     }catch(e){setError(message(e));}
     finally{setBusy(false);}
   }
-  async function check(functions:boolean){
+  async function check(functions:boolean,reasoning=false){
     if(!selected){setError('请先保存模型配置。');return;}
     setBusy(true);setError('');setNotice('');
     try{
-      const result=await window.devspace.modelProvidersProbe(selected,functions);
+      const result=await window.devspace.modelProvidersProbe(selected,functions,reasoning);
       setProbe(result);
       if(!result.connected)setError('模型调用未成功：HTTP '+result.httpStatus);
       else if(functions && result.functionCalling!=='supported')
         setError('服务能够返回响应，但没有生成预期的结构化工具调用；不能认为支持 Function Calling。');
-      else setNotice(functions?'实际工具调用测试通过（只调用无副作用的探测函数）。':'实际模型请求已成功返回。');
+      else setNotice(reasoning?'实际推理探测请求已返回；请查看下方响应证据。':functions?'实际工具调用测试通过（只调用无副作用的探测函数）。':'实际模型请求已成功返回。');
     }catch(e){setError(message(e));}
     finally{
       setBusy(false);
@@ -183,11 +185,13 @@ export function ModelProvidersPage(){
   }
   const number=(field:keyof Pick<ModelProviderDraft,'contextLength'|'maxOutputTokens'|'maxTaskUSD'|'inputPerMillionUSD'|'outputPerMillionUSD'>)=>
     (value:string)=>update({[field]:value===''?0:Number(value)});
+  const savedForProbe=Boolean(saved&&['type','baseUrl','model','api','reasoningEffort','reasoningAdapter','maxOutputTokens'].every(k=>String(form[k as keyof ModelProviderDraft]??'')===String(saved[k as keyof ModelProvider]??''))&&!key&&!clearKey);
+  const actualContext=discovery?.contexts?.[form.model];
 
   return <div className="panel models-page">
     <div className="section-heading"><div><h2>模型提供商</h2>
       <p>统一管理云端和本地模型。API 凭据仅保存在本机，现有 ChatGPT MCP 接入保持不变。</p></div>
-      <span>DevSpace 内置功能</span>
+      <Button appearance="primary" onClick={()=>setGroupDialog(true)}>创建 / 管理模型组</Button>
     </div>
     <div className="models-layout">
       <aside className="models-list">
@@ -196,7 +200,7 @@ export function ModelProvidersPage(){
         {items.map(item=><div className="models-item-row" key={item.id}>
           <button type="button" className={'models-item '+(selected===item.id?'selected':'')}
             onClick={()=>choose(item)}>
-            <strong>{item.name}</strong><small>{item.model} · {names[item.type]}</small>
+            <strong>{item.name} · {Math.round(item.contextLength/1024)}K</strong><small>{item.model} · {names[item.type]}</small>
             <small>{item.hasKey?(item.role==='worker'&&!item.workerCredentialReady
               ?'密钥待建立 Worker 安全桥接':'密钥已加密保存'):'不使用密钥'} · {item.role}</small>
           </button>
@@ -261,14 +265,23 @@ export function ModelProvidersPage(){
               onChange={(_,v)=>number('maxOutputTokens')(v.value)}/>
           </Field>
         </div>
+        {actualContext&&actualContext!==form.contextLength?<div className="op-message op-warning">模型服务声明的上下文为 {actualContext.toLocaleString()} Token，当前配置为 {form.contextLength.toLocaleString()}。配置值只控制 Agent 自身的上下文管理；如需修改后端实际容量，请选择对应的模型标识。</div>:null}
         <div className="models-two">
           <Field label="Agent 思考程度"><select className="op-select" value={form.reasoningEffort||'auto'} onChange={e=>update({reasoningEffort:e.target.value as ModelProviderDraft['reasoningEffort']})}>
-            <option value="auto">Auto</option><option value="off">关闭</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="extra-high">Extra High</option>
+            <option value="auto">自动 · 供应商默认</option><option value="off">关闭</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="extra-high">最高</option>
           </select></Field>
-          <Field label="推理参数适配"><select className="op-select" value={form.reasoningAdapter||'native'} onChange={e=>update({reasoningAdapter:e.target.value as ModelProviderDraft['reasoningAdapter']})}>
-            <option value="native">供应商原生 / 默认</option><option value="openai">OpenAI reasoning_effort</option>
-          </select></Field>
+          <Field label="验证实际推理"><Button disabled={busy||!savedForProbe||saved?.allowCalls===false} onClick={()=>void check(false,true)}>检测思考配置</Button></Field>
         </div>
+        <p className="op-subtle">默认自动适配 DeepSeek、Qwen 和已知兼容格式。检测会发送少量真实请求（云端可能计费）；未保存修改需先保存。HTTP 成功只证明请求被接受，不能证明服务端严格执行了指定档位。</p>
+        <Button size="small" onClick={()=>setShowReasoningAdvanced(x=>!x)}>{showReasoningAdvanced?'收起':'展开'}高级推理适配</Button>
+        {showReasoningAdvanced&&<Field label="推理参数适配（通常不需要修改）"><select className="op-select" value={form.reasoningAdapter==='openai'?'openai':'auto'} onChange={e=>update({reasoningAdapter:e.target.value as ModelProviderDraft['reasoningAdapter']})}><option value="auto">自动识别 / 供应商原生</option><option value="openai">手动指定 OpenAI reasoning_effort</option></select></Field>}
+        {probe?.reasoning&&<section className="models-probe" aria-label="推理检测证据">
+          <strong>{probe.reasoning.accepted?'请求已被接受':'请求未通过'} · {probe.reasoning.applied.adapter}</strong>
+          <p>正式任务映射：{probe.reasoning.planned.requested} → {probe.reasoning.planned.effective}；实际拟发送参数：{JSON.stringify(probe.reasoning.planned.parameters)}</p>
+          <p>本次短探测实际发送：{JSON.stringify(probe.reasoning.applied.parameters)}{probe.reasoning.applied.effective!==probe.reasoning.planned.effective?'（探测输出上限较小，不等于正式任务容量）':''}</p>
+          <p>服务端返回思考内容：{probe.reasoning.reasoningReturned?'有（'+probe.reasoning.reasoningChars+' 字符）':'未观察到'}；思考 Token：{probe.reasoning.reasoningTokens??'未报告'}。</p>
+          <p>{probe.reasoning.planned.effective==='unsupported'?'无已知控制协议，当前档位无法保证生效。':probe.reasoning.reasoningReturned?'已观察到实际思考输出，具体档位仍取决于后端实现。':'尚无可验证的思考内容，不能判定档位是否生效。'}</p>
+        </section>}
         <Switch label="视觉模型（允许向此模型发送 Computer Use 截图）" checked={form.vision===true} onChange={(_,d)=>update({vision:d.checked})}/>
         <div className="models-three">
           <Field label="每任务费用上限（USD）">
@@ -326,6 +339,6 @@ export function ModelProvidersPage(){
         </div>}
       </div>
     </div>
-    <AgentGroupsPanel profiles={items}/>
+    {groupDialog&&<AgentGroupsPanel profiles={items} open={groupDialog} onClose={()=>setGroupDialog(false)}/>}
   </div>;
 }

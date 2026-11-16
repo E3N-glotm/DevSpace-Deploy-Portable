@@ -39,6 +39,7 @@ const result=JSON.parse(resultLine);
 assert.equal(result.smoke,true);
 assert.equal(result.navigation.length,12,'Native Agent Runtime page must be a first-class navigation destination');
 assert.ok(result.navigation.every(row=>row.clicked&&row.hasPanel&&!row.legacyLaunch&&!row.error));
+assert.ok(result.navigation.filter(row=>['models','agent-runtime'].includes(row.page)).every(row=>row.dialogFlow===true),'group management and optional task creation must open/close as separate dialogs');
 if(effectiveIteration>=5){
   if(effectiveIteration<8){
     assert.equal(result.heroService?.found,true,'Dark hero must show service action');

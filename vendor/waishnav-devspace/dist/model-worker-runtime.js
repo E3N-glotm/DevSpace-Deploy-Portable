@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve, relative, isAbsolute, sep, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import reasoningAdapter from "./reasoning-adapter.cjs";
 import {
     readFileTool, grepFilesTool, listDirectoryTool, writeFileTool, editFileTool,
 } from "./pi-tools.js";
@@ -309,16 +310,14 @@ export function createModelWorkerRuntime({
         try {
             const url=model.baseUrl.replace(/\/$/,"")+"/chat/completions";
             const authorization=workerAuthorization(model,agent);
-            const effort=model.reasoningEffort||"auto";
-            const thinking=model.type==="deepseek"
-                ?{thinking:{type:agent&&effort!=="off"&&effort!=="auto"?"enabled":"disabled"}}
-                :agent&&model.reasoningAdapter==="openai"&&effort!=="auto"&&effort!=="off"?{reasoning_effort:effort==="extra-high"?"xhigh":effort}:{temperature:0};
+            const reasoning=reasoningAdapter.resolveReasoning(model,maxTokens);
+            const thinking=agent?reasoning.parameters:model.type==="deepseek"?{thinking:{type:"disabled"}}:{temperature:0};
             const response=await fetchImpl(url,{
                 method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json",
                     ...authorization},
                 redirect:"error",signal:controller.signal,
                 body:JSON.stringify({model:model.model,messages,tools,tool_choice:"auto",stream:agent,
-                    ...(agent&&model.type==="deepseek"?{stream_options:{include_usage:true}}:{}),
+                    ...(agent?{stream_options:{include_usage:true}}:{}),
                     max_tokens:maxTokens,
                     ...thinking}),
             });
@@ -345,6 +344,7 @@ export function createModelWorkerRuntime({
                 ((Number(usage.prompt_tokens||0)*(model.inputPerMillionUSD||0))+
                  (Number(usage.completion_tokens||0)*(model.outputPerMillionUSD||0)))/1e6;
             if(job.estimatedUSD>job.maxTaskUSD)throw new Error("MODEL_TASK_BUDGET_EXHAUSTED");
+            if(agent)job.reasoning={...reasoning,...reasoningAdapter.reasoningEvidence(reply,usage),usageReported:Boolean(actualUsage)};
             return reply;
         } finally {
             clearInterval(disabledCheck);
@@ -448,7 +448,7 @@ export function createModelWorkerRuntime({
             const job={modelId:agent.profileId,deadline:task.deadline,maxTaskUSD:model.maxTaskUSD||1,
                 inputTokens:agent.inputTokens,outputTokens:agent.outputTokens,estimatedUSD:agent.estimatedUSD};
             try{return await withBackend(model,signal,()=>infer(job,model,messages,tools,true,signal,onDelta));}
-            finally{agent.inputTokens=job.inputTokens;agent.outputTokens=job.outputTokens;agent.estimatedUSD=job.estimatedUSD;}
+            finally{agent.inputTokens=job.inputTokens;agent.outputTokens=job.outputTokens;agent.estimatedUSD=job.estimatedUSD;if(job.reasoning)agent.reasoning=job.reasoning;}
         },
         beginAgentWriter(workspaceId,id){
             if(this.hasActiveWriter(workspaceId)||(activeHostMutations.get(workspaceId)||0)>0)

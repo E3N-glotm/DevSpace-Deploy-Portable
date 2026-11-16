@@ -4,11 +4,22 @@ import {createRequire} from "node:module";
 // Exercise the same packed core and dependency tree shipped with Portable.
 import {createAgentRuntime,compactAgentMessages} from "../../../app/node_modules/@waishnav/devspace/dist/agent-runtime.js";
 import {collectAgentStream} from "../../../app/node_modules/@waishnav/devspace/dist/model-worker-runtime.js";
+import reasoningAdapter from "../../../app/node_modules/@waishnav/devspace/dist/reasoning-adapter.cjs";
 const require=createRequire(new URL("../../../app/package.json",import.meta.url));
 const Database=require("better-sqlite3");
 const call=(name,args,id="c"+Math.random())=>({id,type:"function",function:{name,arguments:JSON.stringify(args)}});
 const reply=(...tool_calls)=>({content:null,tool_calls});
 const delay=()=>new Promise(r=>setTimeout(r,10));
+test("Qwen Flash automatic adapter sends bounded thinking budget and never invents reasoning usage",()=>{
+    const model={type:"ollama",model:"qwen3.8-flash-next-iq3xxs-128k",reasoningAdapter:"native",maxOutputTokens:32768};
+    const expected={off:0,low:512,medium:2048,high:8192,"extra-high":16384};
+    for(const [reasoningEffort,budget] of Object.entries(expected)){
+        const plan=reasoningAdapter.resolveReasoning({...model,reasoningEffort});
+        assert.deepEqual(plan.parameters,{thinking_budget_tokens:budget,reasoning_budget_tokens:budget});
+    }
+    assert.deepEqual(reasoningAdapter.resolveReasoning({...model,reasoningEffort:"auto"}).parameters,{});
+    assert.deepEqual(reasoningAdapter.reasoningEvidence({reasoning_content:"abc"},{}),{reasoningReturned:true,reasoningChars:3,reasoningTokens:null});
+});
 async function until(runtime,id,states){for(let i=0;i<200;i++){const s=runtime.status(id);if(states.includes(s.status))return s;await delay();}throw Error("TIMEOUT");}
 function fixture(overrides={}){
     const sqlite=overrides.sqlite||new Database(":memory:");
@@ -42,6 +53,19 @@ test("default group independently reviews, records events and workspace memory",
     assert.equal(done.agents.length,2);
     assert.ok(f.runtime.events(t.id).some(e=>e.kind==="message"));
     assert.ok(f.runtime.events(t.id).some(e=>e.kind==="review"&&e.decision==="approve"));
+    await f.runtime.close();f.sqlite.close();
+});
+test("review threshold cannot complete a group before all configured members participate",async()=>{
+    const profiles=[1,2,3].map(i=>({id:"p"+i,name:"Agent "+i,role:"worker",api:"chat",allowCalls:true,callPolicyRevision:"r"+i,contextLength:32000,maxOutputTokens:1024}));
+    const f=fixture({profiles:()=>profiles,groups:()=>[{id:"g",members:profiles.map(p=>p.id),isDefault:true,requiredReviews:1}],request:async(_t,a)=>{
+        if(a.id==="a1")return reply(call("agent_finish",{decision:"submit",summary:"verified"}));
+        if(a.id==="a2")return reply(call("agent_finish",{decision:"approve",summary:"reviewed"}));
+        return {content:"Third agent independently participated",tool_calls:[]};
+    }});
+    const t=f.runtime.start({workspaceId:"ws",instruction:"task"});
+    const done=await until(f.runtime,t.id,["completed","paused"]);
+    assert.equal(done.status,"completed",done.error);
+    assert.deepEqual(done.agents.map(a=>a.steps),[1,1,1]);
     await f.runtime.close();f.sqlite.close();
 });
 test("scope, explicit grants, sensitive memory and single agent acceptance",async()=>{

@@ -1,92 +1,120 @@
-import {useCallback,useEffect,useState} from 'react';
-import {Button,Field,Input,Switch,Textarea} from '@fluentui/react-components';
+import {useCallback,useEffect,useRef,useState} from 'react';
+import {Button,Dialog,DialogSurface,DialogBody,DialogTitle,DialogContent,Field,Input,Switch,Textarea} from '@fluentui/react-components';
 import type {AgentEvent,AgentGroup,AgentTask,ModelProvider} from './api';
 
 const empty=():AgentGroup=>({id:'',name:'',members:[],isDefault:false,requiredReviews:1});
 const errorText=(e:unknown)=>e instanceof Error?e.message:String(e);
-export function AgentGroupsPanel({profiles}:{profiles:ModelProvider[]}){
+const profileLabel=(p:ModelProvider)=>p.name+' · '+p.model+' · '+Math.round(p.contextLength/1024)+'K · '+p.id;
+export function AgentGroupsPanel({profiles,open,onClose}:{profiles:ModelProvider[];open:boolean;onClose:()=>void}){
   const [groups,setGroups]=useState<AgentGroup[]>([]);
   const [form,setForm]=useState<AgentGroup>(empty);
   const [error,setError]=useState('');
+  const [notice,setNotice]=useState('');
   const reload=useCallback(async()=>setGroups(await window.devspace.agentGroupsList()),[]);
-  useEffect(()=>{void reload().catch(e=>setError(errorText(e)));},[reload]);
-  async function save(){try{const next=await window.devspace.agentGroupsSave(form);setForm(next);await reload();setError('');}catch(e){setError(errorText(e));}}
-  return <section className="panel" style={{marginTop:20}}>
-    <div className="section-heading"><div><h2>模型组</h2><p>配置模型组后，Agent Runtime 默认使用指定的组。未配置时，现有 Worker 接口保持原样。</p></div><Button onClick={()=>setForm(empty())}>新增模型组</Button></div>
-    {error&&<div className="op-message op-error">{error}</div>}
-    <div className="models-layout"><aside className="models-list">
-      {groups.map(g=><button key={g.id} className={'models-item '+(g.id===form.id?'selected':'')} onClick={()=>setForm({...g})}><strong>{g.name}{g.isDefault?' · 默认':''}</strong><small>{g.members.length} 个成员 · {g.requiredReviews} 个独立审查</small></button>)}
-    </aside><div className="models-editor">
-      <Field label="模型组名称"><Input value={form.name} onChange={(_,d)=>setForm(x=>({...x,name:d.value}))}/></Field>
-      <Switch label="设为默认模型组" checked={form.isDefault} onChange={(_,d)=>setForm(x=>({...x,isDefault:d.checked}))}/>
-      <strong>成员（引用已保存的模型配置）</strong>
-      {profiles.filter(p=>p.api==='chat').map(p=><label key={p.id} className="models-check"><input type="checkbox" checked={form.members.includes(p.id)} onChange={e=>setForm(x=>({...x,members:e.target.checked?[...x.members,p.id]:x.members.filter(id=>id!==p.id),requiredReviews:1}))}/>{p.name} · {p.model} · {p.contextLength.toLocaleString()} Token · {p.role}{p.allowCalls?'':'（已禁用）'}</label>)}
-      <Field label="所需独立审查数量"><Input type="number" min={1} max={Math.max(1,form.members.length-1)} value={String(form.requiredReviews)} onChange={(_,d)=>setForm(x=>({...x,requiredReviews:Number(d.value)}))}/></Field>
-      <div className="models-actions"><Button appearance="primary" onClick={()=>void save()}>保存模型组</Button>{form.id&&<Button onClick={async()=>{try{await window.devspace.agentGroupsDelete(form.id);setForm(empty());await reload();}catch(e){setError(errorText(e));}}}>删除模型组</Button>}</div>
-    </div></div>
-  </section>;
+  useEffect(()=>{if(open){setForm(empty());setError('');setNotice('');void reload().catch(e=>setError(errorText(e)));}},[open,reload]);
+  async function save(){try{const next=await window.devspace.agentGroupsSave(form);setForm(next);await reload();setError('');setNotice('模型组已保存');}catch(e){setError(errorText(e));}}
+  return <Dialog open={open} onOpenChange={(_,d)=>{if(!d.open)onClose();}}>
+    <DialogSurface className="agent-dialog"><DialogBody>
+      <DialogTitle>模型组管理</DialogTitle>
+      <DialogContent>
+        <p className="op-subtle">模型组引用已保存的模型配置。默认组用于上游 Agent 委派；各成员独立上下文，共用同一后端时按槽位排队。</p>
+        <div className="models-actions"><Button onClick={()=>{setForm(empty());setNotice('');}}>创建模型组</Button><Button onClick={onClose}>返回</Button></div>
+        {error&&<div className="op-message op-error">{error}</div>}
+        {notice&&<div className="op-message op-success">{notice}</div>}
+        <div className="agent-group-layout">
+          <aside className="models-list">{groups.map(g=><button key={g.id} className={'models-item '+(g.id===form.id?'selected':'')} onClick={()=>{setForm({...g});setNotice('');}}><strong>{g.name}{g.isDefault?' · 默认':''}</strong><small>{g.members.length} 个成员 · {g.requiredReviews} 个独立审查</small></button>)}</aside>
+          <div className="models-editor">
+            <Field label="模型组名称"><Input value={form.name} onChange={(_,d)=>setForm(x=>({...x,name:d.value}))}/></Field>
+            <Switch label="设为默认模型组" checked={form.isDefault} onChange={(_,d)=>setForm(x=>({...x,isDefault:d.checked}))}/>
+            <strong>成员（引用已保存的模型配置）</strong>
+            {profiles.filter(p=>p.api==='chat').map(p=><label key={p.id} className="models-check"><input type="checkbox" disabled={!p.allowCalls&&!form.members.includes(p.id)} checked={form.members.includes(p.id)} onChange={e=>setForm(x=>{const members=e.target.checked?[...x.members,p.id]:x.members.filter(id=>id!==p.id);return {...x,members,requiredReviews:Math.min(x.requiredReviews,Math.max(1,members.length-1))};})}/>{profileLabel(p)}{p.allowCalls?'':'（已禁用）'}</label>)}
+            <Field label="所需独立审查数量"><Input type="number" min={1} max={Math.max(1,form.members.length-1)} value={String(form.requiredReviews)} onChange={(_,d)=>setForm(x=>({...x,requiredReviews:Number(d.value)}))}/></Field>
+            <div className="models-actions"><Button appearance="primary" disabled={!form.name.trim()||!form.members.length} onClick={()=>void save()}>保存模型组</Button>{form.id&&<Button onClick={async()=>{if(!window.confirm('删除此模型组？模型配置不会删除。'))return;try{await window.devspace.agentGroupsDelete(form.id);setForm(empty());await reload();}catch(e){setError(errorText(e));}}}>删除模型组</Button>}</div>
+          </div>
+        </div>
+      </DialogContent>
+    </DialogBody></DialogSurface>
+  </Dialog>;
 }
 
+const statusNames:Record<string,string>={running:'运行中',paused:'已暂停','awaiting-review':'等待验收',completed:'已完成',failed:'失败',cancelled:'已取消',ready:'就绪',waiting:'等待',submitted:'已提交',approved:'已审查'};
+const eventNames:Record<string,string>={created:'任务开始',state:'状态变更',recovered:'任务恢复','inference-start':'开始推理','inference-stream':'正在生成',output:'模型输出',message:'协作消息',review:'审查','tool-start':'调用工具','tool-result':'工具结果',compaction:'上下文压缩'};
+type TimelineEvent=AgentEvent&{taskId:string};
+const active=(t:AgentTask)=>['running','paused','awaiting-review'].includes(t.status);
+function mergeEvents(old:TimelineEvent[],incoming:TimelineEvent[]){
+  const result=[...old];
+  for(const event of incoming){
+    const previous=result[result.length-1];
+    if(previous?.kind==='inference-stream'&&previous.taskId===event.taskId&&previous.agent===event.agent&&['inference-stream','output'].includes(event.kind)&&(previous.step===undefined||event.step===undefined||previous.step===event.step))result.pop();
+    result.push(event);
+  }
+  return result.slice(-500);
+}
 export function AgentRuntimePage(){
   const [groups,setGroups]=useState<AgentGroup[]>([]);
   const [profiles,setProfiles]=useState<ModelProvider[]>([]);
   const [tasks,setTasks]=useState<AgentTask[]>([]);
-  const [selected,setSelected]=useState('');
-  const [events,setEvents]=useState<AgentEvent[]>([]);
+  const [filter,setFilter]=useState('');
+  const [events,setEvents]=useState<Record<string,TimelineEvent[]>>({});
+  const cursors=useRef<Record<string,number>>({});
+  const [createOpen,setCreateOpen]=useState(false);
   const [path,setPath]=useState('');
   const [instruction,setInstruction]=useState('');
   const [target,setTarget]=useState('');
+  const [advanced,setAdvanced]=useState(false);
   const [permissions,setPermissions]=useState({allowWrites:false,allowShell:false,allowComputer:false,allowMemory:true,allowPlugins:false});
   const [error,setError]=useState('');
   const [busy,setBusy]=useState(false);
-  const [ack,setAck]=useState(false);
-  const selectedTask=tasks.find(t=>t.id===selected);
+  const [ack,setAck]=useState<Record<string,boolean>>({});
   useEffect(()=>{void Promise.all([window.devspace.agentGroupsList(),window.devspace.modelProvidersList()]).then(([g,p])=>{setGroups(g);setProfiles(p);}).catch(e=>setError(errorText(e)));},[]);
-  const refresh=useCallback(async()=>{const next=await window.devspace.agentRuntime('list') as AgentTask[];setTasks(next);},[]);
-  useEffect(()=>{let active=true;let inflight=false;const tick=async()=>{if(inflight)return;inflight=true;try{if(active)await refresh();}catch(e){if(active)setError(errorText(e));}finally{inflight=false;}};void tick();const timer=setInterval(()=>void tick(),1500);return()=>{active=false;clearInterval(timer);};},[refresh]);
-  useEffect(()=>{
-    setEvents([]);setAck(false);if(!selected)return;let active=true;let after=0;let inflight=false;
-    const tick=async()=>{if(inflight)return;inflight=true;try{const next=await window.devspace.agentRuntime('events',{taskId:selected,after}) as AgentEvent[];if(!active)return;if(next.length){after=next[next.length-1].seq;setEvents(old=>[...old,...next].slice(-500));}}catch(e){if(active)setError(errorText(e));}finally{inflight=false;}};
-    void tick();const timer=setInterval(()=>void tick(),1200);return()=>{active=false;clearInterval(timer);};
-  },[selected]);
+  const refresh=useCallback(async()=>{const next=await window.devspace.agentRuntime('list') as AgentTask[];setTasks(next);return next;},[]);
+  useEffect(()=>{let alive=true;let inflight=false;const tick=async()=>{if(inflight)return;inflight=true;try{
+    const next=await refresh();if(!alive)return;
+    const watched=filter?next.filter(t=>t.id===filter):[...next.filter(active),...next.filter(t=>!active(t)).slice(0,5)];
+    const updates=await Promise.all(watched.map(async t=>{const batch=await window.devspace.agentRuntime('events',{taskId:t.id,after:cursors.current[t.id]||0}) as AgentEvent[];return {id:t.id,batch};}));
+    if(!alive)return;
+    for(const {id,batch} of updates)if(batch.length){cursors.current[id]=batch[batch.length-1].seq;setEvents(old=>({...old,[id]:mergeEvents(old[id]||[],batch.map(e=>({...e,taskId:id})))}));}
+  }catch(e){if(alive)setError(errorText(e));}finally{inflight=false;}};void tick();const timer=setInterval(()=>void tick(),1500);return()=>{alive=false;clearInterval(timer);};},[refresh,filter]);
   async function start(){setBusy(true);try{
     const chosen=target.startsWith('model:')?{modelId:target.slice(6)}:target?{groupId:target}:{};
-    const task=await window.devspace.agentRuntime('start',{input:{path,instruction,...chosen,...permissions}});
-    await refresh();setSelected(task.id);setError('');
+    await window.devspace.agentRuntime('start',{input:{path,instruction,...chosen,...permissions}});
+    await refresh();setFilter('');setCreateOpen(false);setInstruction('');setError('');
   }catch(e){setError(errorText(e));}finally{setBusy(false);}}
-  async function control(action:string){if(!selected)return;setBusy(true);try{await window.devspace.agentRuntime(action,{taskId:selected,acknowledge:ack});await refresh();setError('');}catch(e){setError(errorText(e));}finally{setBusy(false);}}
-  return <div className="panel models-page">
-    <div className="section-heading"><div><h2>Agent 工作台</h2><p>独立任务、模型组协作、工具记录、上下文检查点与审查。关闭此页面不会停止 MCP 服务中的任务。</p></div></div>
+  async function control(action:string,t:AgentTask){setBusy(true);try{await window.devspace.agentRuntime(action,{taskId:t.id,acknowledge:ack[t.id]===true});await refresh();setError('');}catch(e){setError(errorText(e));}finally{setBusy(false);}}
+  const shown=filter?tasks.filter(t=>t.id===filter):[...tasks.filter(active),...tasks.filter(t=>!active(t)).slice(0,5)];
+  const timeline=shown.flatMap(t=>events[t.id]||[]).sort((a,b)=>a.seq-b.seq).slice(-250);
+  const groupName=(t:AgentTask|undefined)=>groups.find(g=>g.id===t?.groupId)?.name||'单 Agent';
+  const agentLabel=(t:AgentTask|undefined,id:string|null)=>{const a=t?.agents.find(a=>a.id===id);const p=profiles.find(p=>p.id===a?.profileId);return id?(p?p.name+' · '+Math.round(p.contextLength/1024)+'K · '+id:id):'Runtime';};
+  return <div className="panel models-page agent-workbench">
+    <div className="section-heading"><div><h2>Agent 协作动态</h2><p>上游委派和本地启动的 Agent 均在这里显示，无需手动选择任务。关闭页面不会停止运行。</p></div><Button appearance="primary" onClick={()=>setCreateOpen(true)}>新建任务</Button></div>
     {error&&<div className="op-message op-error" role="alert">{error}</div>}
-    <section className="models-editor">
-      <Field label="工作区路径（本机路径或 devspace:// 远端路径）"><Input value={path} onChange={(_,d)=>setPath(d.value)}/></Field>
-      <Field label="模型或模型组"><select className="op-select" value={target} onChange={e=>setTarget(e.target.value)}><option value="">默认模型组</option>{groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}{profiles.filter(p=>p.api==='chat'&&p.allowCalls).map(p=><option key={p.id} value={'model:'+p.id}>{p.name}（单 Agent）</option>)}</select></Field>
-      <Field label="任务目标与验收条件"><Textarea value={instruction} rows={4} onChange={(_,d)=>setInstruction(d.value)}/></Field>
-      {([['allowWrites','允许编辑文件'],['allowShell','允许 Shell（继承现有权限）'],['allowComputer','允许 Computer Use（需要桌面开关）'],['allowMemory','允许工作区记忆写入'],['allowPlugins','允许已授权插件调用']] as const).map(([id,label])=><Switch key={id} label={label} checked={permissions[id]} onChange={(_,d)=>setPermissions(x=>({...x,[id]:d.checked}))}/>)}
-      <Button appearance="primary" disabled={busy||!path.trim()||!instruction.trim()} onClick={()=>void start()}>启动任务</Button>
-    </section>
-    <div className="models-layout" style={{marginTop:20}}>
-      <aside className="models-list">{tasks.map(t=><button key={t.id} className={'models-item '+(selected===t.id?'selected':'')} onClick={()=>setSelected(t.id)}><strong>{t.status} · {t.steps} 步</strong><small>{t.instruction.slice(0,100)}</small></button>)}</aside>
-      <section className="models-editor">
-        {selectedTask&&<>
-          <strong>{selectedTask.status} · {selectedTask.id}</strong>
-          <p>{selectedTask.instruction}</p>
-          {selectedTask.error&&<p className="op-message op-error">{selectedTask.error}</p>}
-          {selectedTask.pending!=null&&<Switch label="我已核对中断工具是否执行，允许恢复（不自动重放）" checked={ack} onChange={(_,d)=>setAck(d.checked)}/>}
-          <div className="models-actions">
-            <Button disabled={busy||selectedTask.status!=='running'} onClick={()=>void control('pause')}>暂停</Button>
-            <Button disabled={busy||!['paused','awaiting-review'].includes(selectedTask.status)||(selectedTask.pending!=null&&!ack)} onClick={()=>void control('resume')}>恢复</Button>
-            <Button disabled={busy||selectedTask.status!=='awaiting-review'} onClick={()=>void control('accept')}>人工验收</Button>
-            <Button disabled={busy||['completed','cancelled','failed'].includes(selectedTask.status)} onClick={()=>void control('cancel')}>取消任务</Button>
-          </div>
-          {selectedTask.agents.map(a=><div className="models-usage" key={a.id}><strong>{a.id} · {profiles.find(p=>p.id===a.profileId)?.name||a.profileId} · {a.state}</strong><p>{a.steps} 步 · 输入 {a.inputTokens.toLocaleString()} / 输出 {a.outputTokens.toLocaleString()} Token · 上下文估计 {a.contextEstimate.toLocaleString()} · ${a.estimatedUSD.toFixed(6)}</p></div>)}
-          {selectedTask.result&&<div className="models-usage"><strong>提交结果</strong><pre style={{whiteSpace:'pre-wrap'}}>{selectedTask.result}</pre></div>}
-          <strong>实时事件（最新 500 条，原始记录保留于任务库）</strong>
-          <div style={{maxHeight:650,overflow:'auto'}}>{events.map(e=><article key={e.seq} className="models-usage"><small>{new Date(e.at).toLocaleTimeString()} · {e.agent||'Runtime'} · {e.kind}</small>
-            {Object.entries(e).filter(([k])=>!['seq','at','agent','kind'].includes(k)).map(([k,v])=>v!==null&&v!==''&&<div key={k}><strong>{k==='reasoning'?'模型实际返回的推理内容':k}</strong><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',maxHeight:240,overflow:'auto'}}>{typeof v==='string'?v:JSON.stringify(v,null,2)}</pre></div>)}</article>)}</div>
-        </>}
-        {!selectedTask&&<p>选择或启动一个 Agent 任务。</p>}
-      </section>
+    <div className="agent-summary"><strong>{tasks.filter(t=>t.status==='running').length} 个运行中</strong><span>{tasks.filter(active).length} 个未结束</span><span>{tasks.filter(t=>t.status==='completed').length} 个已完成</span><select aria-label="协作动态范围" className="op-select" value={filter} onChange={e=>setFilter(e.target.value)}><option value="">全部协作动态（默认）</option>{tasks.map(t=><option key={t.id} value={t.id}>{groupName(t)} · {statusNames[t.status]||t.status} · {t.instruction.slice(0,45)}</option>)}</select></div>
+    {shown.filter(t=>active(t)||filter).map(t=><section className="models-usage" key={t.id}>
+      <div className="models-usage-header"><strong>{groupName(t)} · {statusNames[t.status]||t.status} · {t.steps} 步</strong><small>{t.id.slice(-8)}</small></div>
+      <div>{t.instruction}</div>{t.error&&<div className="op-message op-error">{t.error}</div>}
+      <div className="agent-roster">{t.agents.map(a=><div key={a.id}><strong>{agentLabel(t,a.id)}</strong><small>{statusNames[a.state]||a.state} · {a.steps} 步 · 上下文约 {a.contextEstimate.toLocaleString()}</small><small>{a.inputTokens||a.outputTokens?'输入 '+a.inputTokens.toLocaleString()+' / 输出 '+a.outputTokens.toLocaleString():'暂无服务端用量'}</small></div>)}</div>
+      {t.pending!=null&&<Switch label="我已核对中断工具是否执行，允许恢复（不自动重放）" checked={ack[t.id]===true} onChange={(_,d)=>setAck(x=>({...x,[t.id]:d.checked}))}/>}
+      <div className="models-actions"><Button disabled={busy||t.status!=='running'} onClick={()=>void control('pause',t)}>暂停</Button><Button disabled={busy||!['paused','awaiting-review'].includes(t.status)||(t.pending!=null&&!ack[t.id])} onClick={()=>void control('resume',t)}>恢复</Button><Button disabled={busy||t.status!=='awaiting-review'} onClick={()=>void control('accept',t)}>人工验收</Button><Button disabled={busy||!active(t)} onClick={()=>void control('cancel',t)}>取消任务</Button></div>
+      {t.result&&<details><summary>提交结果</summary><pre>{t.result}</pre></details>}
+    </section>)}
+    <div className="agent-feed"><h3>实时协作流</h3>{!timeline.length&&<div className="agent-empty">尚无协作记录。上游调用默认模型组后，记录会自动出现；也可通过上方按钮手动发起任务。</div>}
+      {timeline.map(e=>{const t=tasks.find(t=>t.id===e.taskId);return <article className={'agent-event '+(e.kind==='message'||e.kind==='review'?'agent-event-emphasis':'')} key={e.taskId+':'+e.seq}>
+        <div className="agent-event-head"><strong>{agentLabel(t,e.agent)}</strong><span>{eventNames[e.kind]||e.kind}</span><small>{groupName(t)} · {e.taskId.slice(-8)} · {new Date(e.at).toLocaleTimeString()}</small></div>
+        {typeof e.message==='string'&&<p>{e.to?'发送给 '+agentLabel(t,String(e.to))+'：':''}{e.message}</p>}
+        {typeof e.content==='string'&&e.content&&<pre>{e.content}</pre>}
+        {typeof e.reasoning==='string'&&e.reasoning&&<details open={e.kind==='inference-stream'}><summary>模型返回的思考内容</summary><pre>{e.reasoning}</pre></details>}
+        {Object.entries(e).filter(([k,v])=>!['seq','at','agent','kind','taskId','step','content','reasoning','message','to'].includes(k)&&v!==null&&v!==undefined&&v!=='').map(([k,v])=><details key={k} open={['name','decision','summary','status','reasoningConfig','reasoningEvidence'].includes(k)}><summary>{({name:'工具',decision:'审查决定',summary:'摘要',reasoningConfig:'实际发送的思考参数',reasoningEvidence:'响应证据'} as Record<string,string>)[k]||k}</summary><pre>{typeof v==='string'?v:JSON.stringify(v,null,2)}</pre></details>)}
+      </article>;})}
     </div>
+    {createOpen&&<Dialog open={createOpen} onOpenChange={(_,d)=>setCreateOpen(d.open)}><DialogSurface className="agent-dialog"><DialogBody><DialogTitle>新建 Agent 任务（可选）</DialogTitle><DialogContent>
+      <div className="models-editor">
+        <Field label="工作区路径"><Input value={path} onChange={(_,d)=>setPath(d.value)} contentAfter={<Button size="small" onClick={async()=>{const p=await window.devspace.chooseFolder();if(p)setPath(p);}}>浏览</Button>}/></Field>
+        <Field label="模型或模型组"><select className="op-select" value={target} onChange={e=>setTarget(e.target.value)}><option value="">默认模型组</option>{groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}{profiles.filter(p=>p.api==='chat'&&p.allowCalls).map(p=><option key={p.id} value={'model:'+p.id}>{profileLabel(p)}</option>)}</select></Field>
+        <Field label="任务目标与验收条件"><Textarea value={instruction} rows={4} onChange={(_,d)=>setInstruction(d.value)}/></Field>
+        <Button onClick={()=>setAdvanced(x=>!x)}>{advanced?'收起':'展开'}权限设置</Button>
+        {advanced&&([['allowWrites','允许编辑文件'],['allowShell','允许 Shell（继承现有权限）'],['allowComputer','允许 Computer Use（需要桌面开关）'],['allowMemory','允许工作区记忆写入'],['allowPlugins','允许已授权插件调用']] as const).map(([id,label])=><Switch key={id} label={label} checked={permissions[id]} onChange={(_,d)=>setPermissions(x=>({...x,[id]:d.checked}))}/>)}
+        <div className="models-actions"><Button appearance="primary" disabled={busy||!path.trim()||!instruction.trim()} onClick={()=>void start()}>启动任务</Button><Button onClick={()=>setCreateOpen(false)}>取消</Button></div>
+      </div>
+    </DialogContent></DialogBody></DialogSurface></Dialog>}
   </div>;
 }

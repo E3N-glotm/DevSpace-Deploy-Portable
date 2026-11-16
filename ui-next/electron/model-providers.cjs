@@ -8,6 +8,8 @@ const {isIP} = require('node:net');
 const {randomUUID} = require('node:crypto');
 const {createModelUsageStore,emptyStats} = require('../../setup/model-usage.cjs');
 const {createModelDpapiVault} = require('../../setup/model-dpapi-vault.cjs');
+const reasoningPath=path.resolve(__dirname,'../../vendor/waishnav-devspace/dist/reasoning-adapter.cjs');
+const {resolveReasoning,reasoningEvidence}=require(fs.existsSync(reasoningPath)?reasoningPath:'../../app/node_modules/@waishnav/devspace/dist/reasoning-adapter.cjs');
 
 const TYPES = new Set(['deepseek','custom','ollama','vllm']);
 const ROLES = new Set(['worker','reviewer','planner']);
@@ -75,9 +77,9 @@ function validate(input,{hasKey=false}={}){
   if(input.allowCalls!==undefined&&typeof input.allowCalls!=='boolean')
     throw Error('允许调用必须是布尔值');
   const reasoningEffort=String(input.reasoningEffort||'auto');
-  const reasoningAdapter=String(input.reasoningAdapter||'native');
+  const reasoningAdapter=String(input.reasoningAdapter||'auto');
   if(!['auto','off','low','medium','high','extra-high'].includes(reasoningEffort)
-    ||!['native','openai'].includes(reasoningAdapter))throw Error('推理配置不合法');
+    ||!['auto','native','openai'].includes(reasoningAdapter))throw Error('推理配置不合法');
   return {id,type,name,baseUrl:normalizeUrl(input.baseUrl,type,hasKey),model,api,role,
     contextLength,maxOutputTokens,maxTaskUSD,inputPerMillionUSD,outputPerMillionUSD,
     allowCalls:input.allowCalls!==false,reasoningEffort,reasoningAdapter,vision:input.vision===true};
@@ -214,9 +216,9 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     const token=cryptoService.decryptString(Buffer.from(model.encryptedKey,'base64'));
     return {Authorization:'Bearer '+token};
   }
-  async function request(model,endpoint,{method='GET',body}={}){
+  async function request(model,endpoint,{method='GET',body,timeout=REQUEST_TIMEOUT}={}){
     const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),REQUEST_TIMEOUT);
+    const timer=setTimeout(()=>controller.abort(),timeout);
     try{
       const response=await fetchImpl(apiPath(model.baseUrl,endpoint),{
         method,headers:{Accept:'application/json',...auth(model),
@@ -263,9 +265,10 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
       Array.isArray(result.data?.models)?result.data.models:[];
     return {reachable:true,httpStatus:result.status,
       models:models.slice(0,300).map(x=>typeof x==='string'?x:String(x.id||x.name||''))
-        .filter(x=>x&&x.length<=200)};
+        .filter(x=>x&&x.length<=200),
+      contexts:Object.fromEntries(models.slice(0,300).filter(x=>typeof x?.id==='string'&&Number.isSafeInteger(x.context_length)&&x.context_length>0).map(x=>[x.id,x.context_length]))};
   }
-  async function probe(id,{tools=false}={}){
+  async function probe(id,{tools=false,reasoning=false}={}){
     const model=get(id);
     assertAllowed(model);
     if(!model.model)throw Error('请先从模型列表选择或输入模型标识');
@@ -278,24 +281,29 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
       description:'Test whether structured tool calls are supported; no side effects',
       parameters:{type:'object',properties:{ok:{type:'boolean'}},required:['ok']}}};
     const isResponses=model.api==='responses';
+    const max=reasoning?Math.min(model.maxOutputTokens||4096,2048):80;
+    const planned=reasoning?resolveReasoning(model):null;
+    const applied=reasoning?resolveReasoning(model,max):null;
     const body=isResponses?{
-      model:model.model,input:'Call devspace_probe_echo with ok=true.',
-      max_output_tokens:80,
+      model:model.model,input:reasoning?'Calculate 37 * 19 and verify the answer; reply briefly.':'Call devspace_probe_echo with ok=true.',
+      max_output_tokens:max,
+      ...(applied?.parameters||{}),
       ...(tools&&model.type==='deepseek'?{reasoning:{effort:'none'}}:{}),
       ...(tools?{tools:[{type:'function',name:tool.function.name,
         description:tool.function.description,parameters:tool.function.parameters}]}:{}),
     }:{
       model:model.model,messages:[{role:'user',
-        content:tools?'Call devspace_probe_echo with ok=true.':'Reply with the word OK.'}],
-      max_tokens:80,
+        content:reasoning?'Calculate 37 * 19 and verify the answer; reply briefly.':tools?'Call devspace_probe_echo with ok=true.':'Reply with the word OK.'}],
+      max_tokens:max,
+      ...(applied?.parameters||{}),
       ...(tools&&model.type==='deepseek'?{thinking:{type:'disabled'}}:{}),
       ...(tools?{tools:[tool],tool_choice:'required'}:{}),
     };
     try{
       const result=await request(model,isResponses?'responses':'chat/completions',
-        {method:'POST',body});
+        {method:'POST',body,timeout:reasoning?90000:REQUEST_TIMEOUT});
       if(!result.ok)return {connected:false,httpStatus:result.status,
-        functionCalling:tools?'unsupported':'not-tested'};
+        functionCalling:tools?'unsupported':'not-tested',...(reasoning?{reasoning:{planned,applied,accepted:false}}:{})};
       const output=result.data;
       const calls=isResponses?
         (Array.isArray(output.output)?output.output:[]).filter(o=>o.type==='function_call'):
@@ -303,7 +311,10 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
       const supported=calls.some(c=>String(c.name||c.function?.name)==='devspace_probe_echo');
       actualUsage=output.usage||null;
       succeeded=true;
+      const responseReasoning=isResponses?(output.output||[]).filter(o=>o.type==='reasoning').flatMap(o=>o.content||[]).map(c=>c.text||'').join(''):undefined;
+      const evidence=reasoningEvidence(isResponses?{reasoning_content:responseReasoning}:output.choices?.[0]?.message,output.usage);
       return {connected:true,httpStatus:result.status,
+        ...(reasoning?{reasoning:{planned,applied,accepted:true,...evidence}}:{}),
         functionCalling:tools?(supported?'supported':'unsupported'):'not-tested',
         returnedToolCall:tools?supported:false,
         usage:output.usage?{

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import reasoningAdapter from "./reasoning-adapter.cjs";
 
 const terminal = new Set(["completed","failed","cancelled"]);
 const CONTROL = [
@@ -73,6 +74,12 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         if(!p||p.callPolicyRevision!==a.revision)throw Error("AGENT_PROFILE_CHANGED_OR_DISABLED");
         return p;
     }
+    function completeReviewed(t){
+        if(t.status!=="running"||!t.submission||t.agents.length<2)return;
+        if(t.approvals.length>=Math.min(t.requiredReviews,t.agents.length-1)&&t.agents.every(a=>a.steps>0)){
+            t.status="completed";t.result=t.submission.summary;
+        }
+    }
     function enabled(t,name){
         return READ.has(name)||(WRITE.has(name)&&t.permissions.write)||(SHELL.has(name)&&t.permissions.shell)||
             (COMPUTER.has(name)&&t.permissions.computer)||(name==="memory_upsert"&&t.permissions.memory)||
@@ -125,9 +132,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                 }else{
                     if(!t.approvals.includes(a.id))t.approvals.push(a.id);
                     a.state="approved";
-                    if(t.approvals.length>=Math.min(t.requiredReviews,t.agents.length-1)){
-                        t.status="completed";t.result=t.submission.summary;
-                    }
+                    completeReviewed(t);
                 }
             }else throw Error("INVALID_AGENT_DECISION");
             event(t,"review",a,{decision:args.decision,summary});return "Recorded "+args.decision;
@@ -175,13 +180,13 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                     event(t,"compaction",a,{estimatedTokens:estimate(a.messages),checkpoint});
                 }
                 if(estimate(a.messages)>budget)throw Error("AGENT_CONTEXT_TOO_SMALL");
-                save(t);event(t,"inference-start",a,{profileId:a.profileId,estimatedTokens:estimate(a.messages)});
+                save(t);event(t,"inference-start",a,{profileId:a.profileId,estimatedTokens:estimate(a.messages),reasoningConfig:reasoningAdapter.resolveReasoning(p)});
                 const reply=await request(t,a,p,a.messages,toolset,signal,delta=>
-                    event(t,"inference-stream",a,{content:safeText(delta.content),reasoning:safeText(delta.reasoning_content)}));
+                    event(t,"inference-stream",a,{step:a.steps+1,content:safeText(delta.content),reasoning:safeText(delta.reasoning_content)}));
                 t.steps++;a.steps++;
-                event(t,"output",a,{content:safeText(reply.content),reasoning:safeText(reply.reasoning_content??reply.reasoning??"")});
+                event(t,"output",a,{step:a.steps,content:safeText(reply.content),reasoning:safeText(reply.reasoning_content??reply.reasoning??""),reasoningEvidence:a.reasoning});
                 const calls=Array.isArray(reply.tool_calls)?reply.tool_calls:[];
-                const msg={role:"assistant",content:reply.content??null,...(calls.length?{tool_calls:calls}:{}),...(typeof reply.reasoning_content==="string"?{reasoning_content:reply.reasoning_content}:{})};
+                const msg={role:"assistant",content:reply.content??null,...(calls.length?{tool_calls:calls}:{}),...(typeof reply.reasoning_content==="string"?{reasoning_content:reply.reasoning_content}:p.type==="deepseek"?{reasoning_content:""}:{})};
                 a.messages.push(msg);
                 // Save the complete turn only after tool results have been appended.
                 for(const call of calls){
@@ -203,6 +208,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                     if(t.agents.length===1){t.status="awaiting-review";t.result=safeText(reply.content);}
                     else {const other=t.agents.find(x=>x!==a&&x.state!=="ready");if(other){other.inbox.push({from:a.id,message:safeText(reply.content,8000)});other.state="ready";}}
                 }
+                completeReviewed(t);
                 save(t);
                 if(t.status==="completed"&&t.permissions.memory&&config.features?.memories&&t.result){
                     try{

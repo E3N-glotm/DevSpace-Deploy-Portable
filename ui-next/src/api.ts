@@ -42,7 +42,7 @@ export type ModelProvider = {
   hasKey:boolean;keyEncrypted:boolean;
   workerCredentialReady?:boolean;
   reasoningEffort?:'auto'|'off'|'low'|'medium'|'high'|'extra-high';
-  reasoningAdapter?:'native'|'openai';
+  reasoningAdapter?:'auto'|'native'|'openai';
   vision?:boolean;
   allowCalls:boolean;
 };
@@ -52,9 +52,11 @@ export type ModelProviderDraft = Omit<ModelProvider,'hasKey'|'keyEncrypted'|'wor
 export type AgentGroup={id:string;name:string;members:string[];isDefault:boolean;requiredReviews:number};
 export type AgentTask={id:string;instruction:string;workspaceId:string;groupId:string|null;status:string;steps:number;error?:string;result?:string;pending?:unknown;agents:{id:string;profileId:string;state:string;steps:number;inputTokens:number;outputTokens:number;estimatedUSD:number;contextEstimate:number}[]};
 export type AgentEvent={seq:number;at:string;kind:string;agent:string|null;[key:string]:unknown};
-export type ModelDiscovery = {reachable:boolean;httpStatus:number;models:string[];reason?:string};
+export type ModelDiscovery = {reachable:boolean;httpStatus:number;models:string[];reason?:string;contexts?:Record<string,number>};
+export type ReasoningSettings={adapter:string;requested:string;effective:string;parameters:Record<string,unknown>};
 export type ModelProbe = {connected:boolean;httpStatus:number;
   functionCalling:'supported'|'unsupported'|'not-tested';returnedToolCall?:boolean;
+  reasoning?:{planned:ReasoningSettings;applied:ReasoningSettings;accepted:boolean;reasoningReturned?:boolean;reasoningChars?:number;reasoningTokens?:number|null};
   usage?:{inputTokens:number;outputTokens:number;estimatedUSD:number}|null};
 export type ModelUsageStats = {
   profileId:string;model:string;firstCallAt:string|null;lastCallAt:string|null;
@@ -82,7 +84,7 @@ export type Backend = {
   modelProvidersSetAllowed(id:string,enabled:boolean):Promise<ModelProvider>;
   modelProvidersDelete(id:string):Promise<{removed:boolean}>;
   modelProvidersDiscover(id:string):Promise<ModelDiscovery>;
-  modelProvidersProbe(id:string,tools?:boolean):Promise<ModelProbe>;
+  modelProvidersProbe(id:string,tools?:boolean,reasoning?:boolean):Promise<ModelProbe>;
   modelProvidersStats(id:string):Promise<ModelUsageStats>;
   agentGroupsList():Promise<AgentGroup[]>;
   agentGroupsSave(input:AgentGroup):Promise<AgentGroup>;

@@ -25,7 +25,7 @@ contextBridge.exposeInMainWorld('devspace', Object.freeze({
   modelProvidersSetAllowed: (id,enabled) => invoke('modelProvidersSetAllowed',id,enabled),
   modelProvidersDelete: id => invoke('modelProvidersDelete', id),
   modelProvidersDiscover: id => invoke('modelProvidersDiscover', id),
-  modelProvidersProbe: (id, tools=false) => invoke('modelProvidersProbe', id, tools),
+  modelProvidersProbe: (id, tools=false, reasoning=false) => invoke('modelProvidersProbe', id, tools, reasoning),
   modelProvidersStats: id => invoke('modelProvidersStats', id),
   agentGroupsList: () => invoke('agentGroupsList'),
   agentGroupsSave: input => invoke('agentGroupsSave',input),

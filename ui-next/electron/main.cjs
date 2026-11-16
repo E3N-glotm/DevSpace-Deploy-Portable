@@ -386,7 +386,7 @@ function installHandlers() {
   register('modelProvidersSetAllowed',(id,enabled)=>operation(()=>modelProviders.setAllowed(id,enabled)));
   register('modelProvidersDelete',id=>operation(()=>modelProviders.remove(id)));
   register('modelProvidersDiscover',id=>modelProviders.discover(id));
-  register('modelProvidersProbe',(id,tools)=>modelProviders.probe(id,{tools:tools===true}));
+  register('modelProvidersProbe',(id,tools,reasoning)=>modelProviders.probe(id,{tools:tools===true,reasoning:reasoning===true&&tools!==true}));
   register('modelProvidersStats',id=>modelProviders.stats(id));
   const groups=createAgentGroupService(ROOT,()=>modelProviders.list());
   register('agentGroupsList',()=>groups.list());
@@ -830,6 +830,29 @@ app.whenReady().then(() => {
                     legacyLaunch: !![...document.querySelectorAll('button')].find(x => /打开旧版|旧版控制中心/.test(x.textContent)),
                     error: document.querySelector('.alert.error')?.textContent || '' })`,
               );
+              if (pageId==='models'||pageId==='agent-runtime') {
+                const label=pageId==='models'?'创建 / 管理模型组':'新建任务';
+                const title=pageId==='models'?'模型组管理':'新建 Agent 任务（可选）';
+                const before=await activeWindow.webContents.executeJavaScript(`(() => {
+                  const visible=e=>e&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0;
+                  if([...document.querySelectorAll('[role=dialog]')].some(visible))return {ok:false,reason:'dialog already visible'};
+                  const root=document.querySelector('.page-body');
+                  if(!root||root.textContent.includes(${JSON.stringify(title)}))return {ok:false,reason:'inline editor'};
+                  const btn=[...root.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(label)});
+                  if(!btn)return {ok:false,reason:'missing trigger'};btn.click();return {ok:true};
+                })()`);
+                await new Promise(resolve=>setTimeout(resolve,350));
+                const opened=before.ok&&await activeWindow.webContents.executeJavaScript(`(() => {
+                  const dialog=[...document.querySelectorAll('[role=dialog]')].find(e=>e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0&&e.textContent.includes(${JSON.stringify(title)}));
+                  if(!dialog)return {ok:false,reason:'missing visible dialog'};
+                  const btn=[...dialog.querySelectorAll('button')].find(b=>['返回','取消'].includes(b.textContent.trim()));
+                  if(!btn)return {ok:false,reason:'missing close'};btn.click();return {ok:true};
+                })()`);
+                await new Promise(resolve=>setTimeout(resolve,350));
+                const closed=await activeWindow.webContents.executeJavaScript(`![...document.querySelectorAll('[role=dialog]')].some(e=>e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0&&e.textContent.includes(${JSON.stringify(title)}))`);
+                rendered.dialogFlow=Boolean(before.ok&&opened?.ok&&closed);
+                if(!rendered.dialogFlow)rendered.dialogDiagnostic={before,opened,closed};
+              }
               coverage.push({page:pageId, clicked, ...rendered});
             }
             // The overview is deliberately read-only: no second set of service
@@ -912,6 +935,7 @@ app.whenReady().then(() => {
                   .some(x=>x.textContent.trim()==='恢复每次关闭时询问');
             })()`);
             const valid = coverage.every(x => x.clicked && x.hasPanel && !x.legacyLaunch)
+              && coverage.filter(x=>['models','agent-runtime'].includes(x.page)).every(x=>x.dialogFlow===true)
               && homeHasNoDuplicateActions
               && Object.values(subpages).every(Boolean)
               && selected.found && independent.found && current.allChosen && current.fullChosen

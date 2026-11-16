@@ -33,6 +33,41 @@ function json(data,status=200) {return {
   text:async()=>JSON.stringify(data),
 };}
 
+test('Qwen Flash native reasoning settings are mapped and probe evidence distinguishes acceptance from actual reasoning',async()=>{
+  const sent=[];
+  const f=fixture(async(_url,opts)=>{
+    sent.push(JSON.parse(opts.body));
+    return json({choices:[{message:{content:'703',reasoning_content:'verified multiplication'}}],usage:{prompt_tokens:12,completion_tokens:8,completion_tokens_details:{reasoning_tokens:4}}});
+  });
+  try{
+    f.service.save(input({model:'qwen3.8-flash-next-iq3xxs-128k',reasoningEffort:'extra-high',reasoningAdapter:'native'}));
+    const result=await f.service.probe('local_1',{reasoning:true});
+    assert.equal(sent[0].thinking_budget_tokens,1024);
+    assert.equal(sent[0].reasoning_budget_tokens,1024);
+    assert.equal(result.reasoning.planned.effective,'2048 tokens');
+    assert.equal(result.reasoning.applied.effective,'1024 tokens');
+    assert.equal(result.reasoning.accepted,true);
+    assert.equal(result.reasoning.reasoningReturned,true);
+    assert.equal(result.reasoning.reasoningTokens,4);
+  }finally{f.cleanup();}
+});
+
+test('unknown reasoning protocol is not reported as an effective setting',async()=>{
+  const f=fixture(async(_url,opts)=>{
+    const body=JSON.parse(opts.body);
+    assert.equal(body.reasoning_effort,undefined);
+    return json({choices:[{message:{content:'703'}}]});
+  });
+  try{
+    f.service.save(input({reasoningEffort:'extra-high'}));
+    const result=await f.service.probe('local_1',{reasoning:true});
+    assert.equal(result.reasoning.accepted,true);
+    assert.equal(result.reasoning.planned.effective,'unsupported');
+    assert.equal(result.reasoning.reasoningReturned,false);
+    assert.equal(result.reasoning.reasoningTokens,null);
+  }finally{f.cleanup();}
+});
+
 test('credentials are encrypted at rest, omitted from listings, and survive ordinary edits',()=>{
   const {root,service,cleanup}=fixture();
   try{
