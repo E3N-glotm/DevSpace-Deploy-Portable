@@ -15,9 +15,19 @@ const completedIndicatorHoldMs = 90_000;
 let stopping = false;
 let lastStateWriteAt = 0;
 let announcedRunning = false;
+let watcher, wake, pendingWake=false;
 
-function sleep(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function wakeOnRequest(){
+  pendingWake=true;
+  wake?.();
+}
+function waitForWork(milliseconds){
+  if(pendingWake){pendingWake=false;return Promise.resolve();}
+  return new Promise(resolve=>{
+    const timer=setTimeout(finish,milliseconds);
+    function finish(){clearTimeout(timer);wake=null;pendingWake=false;resolve();}
+    wake=finish;
+  });
 }
 
 function updateState(extra = {}, force = false) {
@@ -49,6 +59,12 @@ process.on("SIGHUP", stop);
 async function main() {
   if (!leaseId) throw new Error("Computer Use broker requires a UI lease id.");
   process.chdir(ROOT);
+  const requests=path.join(path.dirname(manager.COMPUTER_USE_BROKER_FILE),'requests');
+  try {
+    fs.mkdirSync(requests,{recursive:true});
+    watcher=fs.watch(requests,(_event,name)=>{if(/^[0-9a-f-]{36}\.json$/i.test(String(name||'')))wakeOnRequest();});
+    watcher.on('error',()=>{watcher?.close();watcher=null;});
+  } catch {} // Keep bounded polling as a compatibility fallback.
   updateState({ status: "starting" }, true);
   while (!stopping) {
     const lease = manager.readJson(manager.UI_LEASE_FILE, null);
@@ -72,7 +88,7 @@ async function main() {
       failed: result.failed,
     }, !announcedRunning || Boolean(result.processed || result.failed));
     announcedRunning = true;
-    await sleep(result.processed || result.failed ? 1 : pollIntervalMs);
+    await waitForWork(result.processed || result.failed ? 1 : pollIntervalMs);
   }
 }
 
@@ -84,6 +100,7 @@ main()
     process.exitCode = 1;
   })
   .finally(() => {
+    watcher?.close();
     try {
       const state = manager.readJson(manager.COMPUTER_USE_BROKER_FILE, null);
       if (state?.pid === process.pid && state?.leaseId === leaseId) {

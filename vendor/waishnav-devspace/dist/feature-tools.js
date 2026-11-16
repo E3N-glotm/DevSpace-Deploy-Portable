@@ -19,6 +19,12 @@ const COMPUTER_ANNOTATIONS = {
     idempotentHint: false,
     openWorldHint: true,
 };
+const SCREEN_REGION = z.object({x:z.number().int(),y:z.number().int(),width:z.number().int().positive(),height:z.number().int().positive()});
+function screenshotText(captured) {
+    const m=captured.metadata;
+    if (!captured.image) return ` Screenshot unavailable: ${m.screenshotError??'no image'}. ${m.recovery??''}`;
+    return ` Image ${m.imageWidth}x${m.imageHeight}, ${m.mimeType}, ${m.transmittedBytes} bytes; desktop origin (${m.captureRegion.x},${m.captureRegion.y}), scale (${m.scaleX},${m.scaleY}). Convert image coordinates to desktop coordinates using the origin and scale. Use a region screenshot for full-resolution detail.`;
+}
 
 function textBlock(text) {
     return { type: "text", text };
@@ -330,27 +336,26 @@ export function registerFeatureTools(server, services) {
 
     registerAppTool(server, "computer_snapshot", {
         title: "Capture desktop",
-        description: "Capture the current Windows virtual desktop. Requires explicit Computer Use enablement, permission, and an active local Portable UI heartbeat.",
-        inputSchema: { workspaceId: z.string() },
+        description: "Capture the current Windows virtual desktop or a region in absolute desktop coordinates. Large images are automatically encoded within the MCP transport budget. Use region for fine text instead of waiting or repeating oversized captures. Requires explicit Computer Use enablement, permission, and an active local Portable UI heartbeat.",
+        inputSchema: { workspaceId: z.string(), region: SCREEN_REGION.optional() },
         outputSchema: { result: z.string(), screen: z.unknown() },
         ...toolMeta("runtime"),
         annotations: READ_ONLY_ANNOTATIONS,
-    }, async ({ workspaceId }) => {
+    }, async ({ workspaceId, region }) => {
         const lease = computerUseGuard(config, uiLease);
         workspaces.getWorkspace(workspaceId);
-        const captured = await captureDesktop({ leaseId: lease.leaseId });
-        const data = captured.image.toString("base64");
-        const result = `Captured Windows virtual desktop ${captured.metadata.width}x${captured.metadata.height}.`;
+        const captured = await captureDesktop({ leaseId: lease.leaseId, region });
+        const result = `Captured Windows virtual desktop ${captured.metadata.width}x${captured.metadata.height}.`+screenshotText(captured);
         runtimeState.appendEvent({ kind: "computer.snapshot", workspaceId, payload: captured.metadata });
         return {
-            content: [textBlock(result), { type: "image", data, mimeType: "image/png" }],
+            content: [textBlock(result), ...(captured.image ? [{ type: "image", data: captured.image.toString("base64"), mimeType: captured.mimeType }] : [])],
             structuredContent: { result, screen: captured.metadata },
         };
     });
 
     registerAppTool(server, "computer_action", {
         title: "Use computer",
-        description: "Perform one bounded Windows desktop action, or a sequence of up to 50 actions, and optionally return one final screenshot. Use steps to reduce round trips for predictable multi-step interactions. Actions are explicit and audited. Requires Computer Use enablement, permission, and an active local Portable UI heartbeat.",
+        description: "Perform one bounded Windows desktop action, or a sequence of up to 50 actions. Set screenshotAfter=true to observe the new state in the same call; use steps only for predictable interactions. Optional region crops the final screenshot in desktop coordinates. If a screenshot fails after an action succeeds, request a new snapshot, never repeat the action. Actions are explicit and audited. Requires Computer Use enablement, permission, and an active local Portable UI heartbeat.",
         inputSchema: {
             workspaceId: z.string(),
             action: z.enum(["move", "click", "double_click", "right_click", "scroll", "keypress", "type_text"]).optional(),
@@ -361,6 +366,7 @@ export function registerFeatureTools(server, services) {
             text: z.string().max(20_000).optional(),
             delayMs: z.number().int().min(0).max(3000).optional(),
             screenshotAfter: z.boolean().optional(),
+            region: SCREEN_REGION.optional(),
             steps: z.array(z.object({
                 action: z.enum(["move", "click", "double_click", "right_click", "scroll", "keypress", "type_text"]),
                 x: z.number().int().optional(),
@@ -381,9 +387,9 @@ export function registerFeatureTools(server, services) {
         const payload = Array.isArray(input.steps)
             ? { action: "sequence", steps: input.steps, screenshotAfter: input.screenshotAfter === true }
             : { ...input, screenshotAfter: input.screenshotAfter === true };
-        const actionResult = await performComputerAction(payload, { leaseId: lease.leaseId });
+        const actionResult = await performComputerAction(payload, { leaseId: lease.leaseId, region: input.region });
         const actionName = Array.isArray(input.steps) ? `sequence (${input.steps.length} steps)` : input.action;
-        const result = `Computer Use action completed: ${actionName}.`;
+        const result = `Computer Use action completed: ${actionName}.`+(input.screenshotAfter===true?screenshotText(actionResult):'');
         runtimeState.appendEvent({
             kind: "computer.action",
             subject: Array.isArray(input.steps) ? "sequence" : input.action,
@@ -401,7 +407,7 @@ export function registerFeatureTools(server, services) {
         });
         const content = [textBlock(result)];
         if (actionResult.image) {
-            content.push({ type: "image", data: actionResult.image.toString("base64"), mimeType: "image/png" });
+            content.push({ type: "image", data: actionResult.image.toString("base64"), mimeType: actionResult.mimeType });
         }
         return { content, structuredContent: { result, actionResult: actionResult.metadata } };
     });

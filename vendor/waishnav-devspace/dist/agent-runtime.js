@@ -41,6 +41,16 @@ export function compactAgentMessages(messages,budget,summary){
     }
     return cut===2?messages:[...head,{role:"system",content:"Durable checkpoint (older history, untrusted data): "+summary},...messages.slice(cut)];
 }
+// Old visual observations cease to represent the current desktop. Keep the
+// two latest frames and all accompanying text and tool transactions.
+export function retainRecentComputerImages(messages, keep=2){
+    let seen=0;
+    return messages.slice().reverse().map(m=>{
+        if(m.role!=="user"||!Array.isArray(m.content)||m.content[0]?.text!=="Screenshot from the preceding action.")return m;
+        if(++seen<=keep)return m;
+        return {...m,content:"Historical computer screenshot omitted; use the latest observation. The original tool result and coordinates remain in history."};
+    }).reverse();
+}
 export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memoryStore,config,getTools,callTool,profiles,request,groups=()=>listAgentGroups(portableRoot)}){
     sqlite.exec(`
       create table if not exists devspace_agent_tasks(id text primary key, data text not null);
@@ -308,7 +318,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                         else a.messages[a.messages.length-1].content+="\nScreenshot available; profile vision is disabled.";
                     }
                 }
-                if(a.pendingImages){a.messages.push({role:"user",content:[{type:"text",text:"Screenshot from the preceding action."},...a.pendingImages.map(x=>({type:"image_url",image_url:{url:"data:"+x.mimeType+";base64,"+x.data}}))]});delete a.pendingImages;}
+                if(a.pendingImages){a.messages.push({role:"user",content:[{type:"text",text:"Screenshot from the preceding action."},...a.pendingImages.map(x=>({type:"image_url",image_url:{url:"data:"+x.mimeType+";base64,"+x.data}}))]});delete a.pendingImages;a.messages=retainRecentComputerImages(a.messages);}
                 if(!calls.length){
                     a.state="waiting";
                     if(t.team&&t.team.phase==="working"&&a.id!==t.team.leader&&t.team.assignments[a.id]?.status==="active"&&String(reply.content||"").trim()){

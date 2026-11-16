@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { redactText } from "./redaction.js";
+import { fitComputerImage } from "./computer-image.js";
 
 const BASE_BROKER_TIMEOUT_MS = 12_000;
 const MAX_BROKER_TIMEOUT_MS = 60_000;
@@ -87,10 +88,21 @@ async function invokeComputerUse(payload, options = {}) {
         if (!response.success) {
             throw new Error(redactText(response.error || "Computer Use broker failed."));
         }
-        const image = response.metadata?.screenshot ? await readFile(paths.image) : undefined;
+        let metadata = response.metadata ?? {};
+        let image, mimeType;
+        if (metadata.screenshot) {
+            try {
+                ({image,mimeType,metadata}=await fitComputerImage(paths.image,await readFile(paths.image),metadata,options.region));
+            } catch (error) {
+                // Input may already have succeeded. Never make a transport error
+                // look like a failed input action that should be blindly replayed.
+                metadata={...metadata,screenshot:false,screenshotError:redactText(String(error?.message??error)).slice(0,500),recovery:"Request a new screenshot with a smaller region; do not repeat the preceding action."};
+            }
+        }
         return {
-            metadata: response.metadata ?? {},
+            metadata,
             image,
+            mimeType,
             stderr: redactText(String(response.stderr ?? "")),
         };
     }
