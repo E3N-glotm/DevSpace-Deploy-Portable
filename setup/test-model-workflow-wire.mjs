@@ -171,7 +171,7 @@ try{
     const remoteArgs={workspaceId:remoteId,path:"remote.txt"};
     assert.match(contentText(await client.callTool({name:readTool.name,arguments:remoteArgs})),/MODEL_WORKFLOW_DELEGATION_REQUIRED/);
     const remoteStarted=await client.callTool({name:"model_delegate_task",arguments:{
-        workspaceId:remoteId,modelId:"worker-one",instruction:"Read the remote workspace fixture",maxSteps:1}});
+        workspaceId:remoteId,modelId:"worker-one",useSpecifiedModel:true,instruction:"Read the remote workspace fixture",maxSteps:1}});
     assert.ok(!remoteStarted.isError,contentText(remoteStarted));
     const remoteTask=remoteStarted.structuredContent.data.taskId;
     const approvedRemote=await client.callTool({name:readTool.name,arguments:remoteArgs});
@@ -185,12 +185,12 @@ try{
     assert.equal(remoteResult.status,"completed",JSON.stringify(remoteResult));
     assert.equal(remoteResult.evidence[0].path,"remote.txt");
     assert.equal(remoteResult.evidence[0].ok,true);
+    const localUrl="http://127.0.0.1:"+modelListener.address().port+"/agent-runtime/local";
+    const uiToken=readFileSync(join(stateDir,"agent-runtime-ui.token"),"utf8");
+    const requestOptions={method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"list"})};
+    const localAction=(action,input,token=uiToken)=>fetch(localUrl,{...requestOptions,
+        headers:{...requestOptions.headers,"x-devspace-agent-token":token},body:JSON.stringify({action,input})});
     if(process.env.DEVSPACE_TEST_WORKFLOW_TOOL_MODE!=="full"){
-        const localUrl="http://127.0.0.1:"+modelListener.address().port+"/agent-runtime/local";
-        const uiToken=readFileSync(join(stateDir,"agent-runtime-ui.token"),"utf8");
-        const requestOptions={method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"list"})};
-        const localAction=(action,input,token=uiToken)=>fetch(localUrl,{...requestOptions,
-            headers:{...requestOptions.headers,"x-devspace-agent-token":token},body:JSON.stringify({action,input})});
         assert.deepEqual(await (await localAction("routing-settings")).json(),{mode:"auto",defaultWorkerId:null});
         assert.equal((await localAction("set-routing-settings",{mode:"group"},"invalid")).status,403);
         assert.equal((await localAction("set-routing-settings",{mode:"group"})).status,200);
@@ -248,7 +248,7 @@ try{
     const list=await client.callTool({name:"model_worker_list",arguments:{}});
     assert.equal(list.structuredContent?.data?.mandatoryModelWorkflow,true);
     const delegated=await client.callTool({name:"model_delegate_task",arguments:{
-        workspaceId,modelId:"worker-one",instruction:"Review project only",
+        workspaceId,modelId:"worker-one",useSpecifiedModel:true,instruction:"Review project only",
         allowWrites:false,maxSteps:1000,timeoutSeconds:7200,
     }});
     const taskId=delegated.structuredContent?.data?.taskId;
@@ -270,7 +270,7 @@ try{
     const passed=await client.callTool({name:readTool.name,arguments:argumentsRead});
     assert.notEqual(passed.isError,true,contentText(passed));
     const writeTask=await client.callTool({name:"model_delegate_task",arguments:{
-        workspaceId,modelId:"worker-one",
+        workspaceId,modelId:"worker-one",useSpecifiedModel:true,
         instruction:"Hold a write-capable Worker lease",
         allowWrites:true,maxSteps:2,timeoutSeconds:90,
     }});
@@ -336,7 +336,7 @@ try{
         name,arguments:args,_meta:{"openai/session":scope},
     });
     const scopedDelegated=await scoped(client,"model_delegate_task",{
-        workspaceId,modelId:"worker-one",instruction:"Review project only",
+        workspaceId,modelId:"worker-one",useSpecifiedModel:true,instruction:"Review project only",
         allowWrites:false,maxSteps:1000,timeoutSeconds:7200,
     },"chat-reconnected");
     assert.ok(scopedDelegated.structuredContent?.data?.taskId,
@@ -359,6 +359,65 @@ try{
     const noMeta=await client2.callTool({name:readTool.name,arguments:argumentsRead});
     assert.equal(noMeta.isError,true,
         "A new MCP session without a conversation id cannot reuse earlier grants");
+    const legacyDelegate=(input={})=>client.callTool({name:"model_delegate_task",arguments:{
+        workspaceId,modelId:"worker-two",instruction:"Check global routing from a cached MCP client",...input,
+    }});
+    const selectRouting=async mode=>assert.equal((await localAction("set-routing-settings",{mode,defaultWorkerId:"worker-one"})).status,200);
+    const legacyTask=(name,taskId)=>client.callTool({name:"model_task_"+name,arguments:{taskId}});
+    await selectRouting("group");
+    assert.match(contentText(await legacyDelegate()),/AGENT_DEFAULT_GROUP_REQUIRED/);
+    profiles.models.push({...profiles.models[0],id:"worker-two",name:"Fake second Worker",callPolicyRevision:"p-review"});
+    writeFileSync(profilesFile,JSON.stringify(profiles));
+    const groupsFile=join(configDir,"model-groups.json");
+    writeFileSync(groupsFile,JSON.stringify({version:1,groups:[{
+        id:"default-group",name:"Default",members:["worker-one","worker-two"],isDefault:true,requiredReviews:1,
+    }]}));
+    for(const [mode,hints,reason] of [["group",{},"global-group"],["auto",{independentReview:true},"independent-review"]]){
+        await selectRouting(mode);
+        const delegated=await legacyDelegate(hints);
+        assert.ok(!delegated.isError,contentText(delegated));
+        const {taskId,routing,agents}=delegated.structuredContent.data;
+        assert.equal(routing.reason,reason);
+        assert.equal(agents.length,2);
+        assert.equal((await legacyTask("status",taskId)).structuredContent?.data?.taskId,taskId);
+        assert.equal((await legacyTask("cancel",taskId)).structuredContent?.data?.status,"cancelled");
+        assert.equal((await legacyTask("result",taskId)).structuredContent?.data?.status,"cancelled");
+    }
+    for(const [mode,hints,reason] of [["auto",{},"focused-task"],["single",{independentReview:true},"global-single"]]){
+        await selectRouting(mode);
+        const delegated=await legacyDelegate(hints);
+        assert.ok(!delegated.isError,contentText(delegated));
+        const {taskId,routing,agents}=delegated.structuredContent.data;
+        assert.equal(routing.reason,reason);
+        assert.deepEqual(agents.map(a=>a.profileId),["worker-one"]);
+        let finished;
+        for(let attempt=0;attempt<80;attempt++){
+            finished=(await legacyTask("result",taskId)).structuredContent.data;
+            if(finished.status!=="running")break;
+            await sleep(25);
+        }
+        assert.equal(finished.status,"awaiting-review",JSON.stringify(finished));
+        assert.match(finished.answer,/examined the task/);
+    }
+    await selectRouting("group");
+    const desktop=await localAction("start",{path:workspace,instruction:"Desktop follows the same global mode"});
+    assert.equal(desktop.status,200);
+    const desktopGroup=await desktop.json();
+    assert.equal(desktopGroup.routing.reason,"global-group");
+    assert.equal((await legacyTask("cancel",desktopGroup.id)).structuredContent?.data?.status,"cancelled");
+    const singleDesktop=await localAction("start",{path:workspace,modelId:"worker-one",instruction:"Override this one Desktop task"});
+    assert.equal(singleDesktop.status,200);
+    const desktopOverride=await singleDesktop.json();
+    assert.equal(desktopOverride.routing.reason,"selected-single");
+    assert.equal((await legacyTask("cancel",desktopOverride.id)).structuredContent?.data?.status,"cancelled");
+    assert.equal((await (await localAction("routing-settings")).json()).mode,"group");
+    const override=await legacyDelegate({useSpecifiedModel:true});
+    assert.ok(!override.isError,contentText(override));
+    assert.equal(override.structuredContent.data.modelId,"worker-two");
+    await legacyTask("cancel",override.structuredContent.data.taskId);
+    rmSync(groupsFile);
+    profiles.models.pop();
+    writeFileSync(profilesFile,JSON.stringify(profiles));
     console.log("PASS real OAuth/MCP async mandatory gate: parallel Host read, writer exclusion, result review, live policy, scoped reconnect and cross-chat isolation");
 }finally{
     try{await client2?.close();}catch{}

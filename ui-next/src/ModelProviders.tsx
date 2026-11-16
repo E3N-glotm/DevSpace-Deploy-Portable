@@ -1,8 +1,9 @@
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {Button,Field,Input,Radio,RadioGroup,Spinner,Switch} from '@fluentui/react-components';
 import {ArrowClockwiseRegular,DeleteRegular,SaveRegular,ShieldCheckmarkRegular} from '@fluentui/react-icons';
-import type {ModelProvider,ModelProviderDraft,ModelDiscovery,ModelProbe,ModelUsageStats} from './api';
-import {AgentGroupsPanel} from './AgentRuntime';
+import type {AgentRouteMode,AgentRoutingSettings,ModelProvider,ModelProviderDraft,ModelDiscovery,ModelProbe,ModelUsageStats} from './api';
+import {AgentGroupsPanel,agentError,profileLabel} from './AgentRuntime';
+import {routeModes} from './AgentFlow';
 
 type ProviderType=ModelProviderDraft['type'];
 type Role=ModelProviderDraft['role'];
@@ -42,6 +43,43 @@ const names:Record<ProviderType,string>={
   ollama:'本地 Ollama',
   vllm:'本地 vLLM / llama.cpp',
 };
+
+function GlobalModelRouting({profiles}:{profiles:ModelProvider[]}){
+  const [routing,setRouting]=useState<AgentRoutingSettings>();
+  const [error,setError]=useState('');
+  const [saving,setSaving]=useState(false);
+  const workers=profiles.filter(profile=>profile.api==='chat'&&profile.allowCalls&&profile.role==='worker');
+  const load=useCallback(async()=>{
+    setError('');
+    try{setRouting(await window.devspace.agentRuntime('routing-settings') as AgentRoutingSettings);}
+    catch(e){setError(agentError(e));}
+  },[]);
+  useEffect(()=>{void load();},[load]);
+  async function save(input:AgentRoutingSettings){
+    setSaving(true);
+    setError('');
+    try{setRouting(await window.devspace.agentRuntime('set-routing-settings',{input}) as AgentRoutingSettings);}
+    catch(e){setError(agentError(e));}
+    finally{setSaving(false);}
+  }
+  return <section className="model-routing-settings" aria-label="全局模型调度">
+    <div><h3>全局模型调度</h3><p className="op-subtle">同时适用于 ChatGPT 通过 DevSpace MCP 委派的任务和 DevSpace 工作台新建的任务。</p></div>
+    {routing ? <div className="models-two">
+      <Field label="调度模式"><select className="op-select" value={routing.mode} disabled={saving}
+        onChange={e=>void save({...routing,mode:e.target.value as AgentRouteMode})}>
+        {Object.entries(routeModes).map(([mode,label])=><option value={mode} key={mode}>{label}</option>)}
+      </select></Field>
+      <Field label="默认单模型"><select className="op-select" value={routing.defaultWorkerId||''} disabled={saving}
+        onChange={e=>void save({...routing,defaultWorkerId:e.target.value||null})}>
+        <option value="">自动选择可用 Worker</option>
+        {routing.defaultWorkerId&&!workers.some(profile=>profile.id===routing.defaultWorkerId)&&
+          <option value={routing.defaultWorkerId}>已保存的模型不可用</option>}
+        {workers.map(profile=><option value={profile.id} key={profile.id}>{profileLabel(profile)}</option>)}
+      </select></Field>
+    </div> : error ? <Button size="small" onClick={()=>void load()}>重新读取</Button> : <Spinner size="tiny" label="读取全局设置"/>}
+    {error&&<div className="op-message op-error" role="alert">{error}</div>}
+  </section>;
+}
 
 export function ModelProvidersPage(){
   const [items,setItems]=useState<ModelProvider[]>([]);
@@ -193,6 +231,7 @@ export function ModelProvidersPage(){
       <p>统一管理云端和本地模型。API 凭据仅保存在本机，现有 ChatGPT MCP 接入保持不变。</p></div>
       <Button appearance="primary" onClick={()=>setGroupDialog(true)}>创建 / 管理模型组</Button>
     </div>
+    <GlobalModelRouting profiles={items}/>
     <div className="models-layout">
       <aside className="models-list">
         <div className="models-list-head"><strong>已保存配置</strong><Button size="small" onClick={newProfile}>新增模型</Button></div>

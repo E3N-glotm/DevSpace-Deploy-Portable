@@ -3151,9 +3151,22 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         content: [textBlock(JSON.stringify(value, null, 2))],
         structuredContent: {result:JSON.stringify(value),data:value},
     });
+    function startAgentTask(input, context) {
+        const task = runtimeServices.agentRuntime.start(input);
+        runtimeServices.modelWorkflowGate?.onAgentStart(task, modelWorkflowScope(context));
+        return task;
+    }
+    function legacyAgentView(task) {
+        return {
+            ...task,
+            taskId: task.id,
+            allowWrites: task.permissions.write,
+            answer: task.result ?? task.submission?.summary ?? "",
+        };
+    }
     registerAppTool(server,"model_worker_list",{
         title:"List configured DevSpace Workers",
-        description:"List enabled Worker and Agent profiles, model groups and the global model routing choice without API keys. Use agent_task_start for model delegation. Omit a target ID to honor the global choice, and describe independent review and parallel work through the task inputs.",
+        description:"List enabled Worker and Agent profiles, model groups and the global model routing choice without API keys. Prefer agent_task_start for delegation. Omit a target ID to honor the global choice, and describe independent review and parallel work through the task inputs. The compatibility tool model_delegate_task also follows global routing by default.",
         inputSchema:{},
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
@@ -3169,11 +3182,14 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             mandatoryModelWorkflow:mandatoryEnabled});
     });
     registerAppTool(server,"model_delegate_task",{
-        title:"Delegate to configured model Worker",
-        description:"Legacy explicit single-Worker delegation for a specified model ID. Prefer agent_task_start for shared global routing and durable tasks. Worker steps and tool calls are counted without a fixed execution cap. Default is read-only. First open the workspace.",
+        title:"Delegate to configured DevSpace models",
+        description:"Compatibility entry for model delegation. Uses the current global routing by default, including when a cached client supplies modelId. Set useSpecifiedModel only for an explicitly requested legacy single Worker. Use model_task_status/result/cancel with the returned taskId. Default is read-only. First open the workspace.",
         inputSchema:{
             workspaceId:z.string(),
-            modelId:z.string().describe("ID from model_worker_list, not the model's display name."),
+            modelId:z.string().optional().describe("Worker ID, used only when useSpecifiedModel is true."),
+            useSpecifiedModel:z.boolean().optional().describe("Use the specified legacy single Worker for this task only."),
+            independentReview:z.boolean().optional(),
+            parallelWorkstreams:z.number().int().min(0).optional(),
             instruction:z.string().min(1).max(8000),
             allowWrites:z.boolean().optional().describe("Default false. True explicitly delegates file edits."),
             timeoutSeconds:z.number().int().min(30).max(86400).optional(),
@@ -3182,15 +3198,19 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         ...toolWidgetDescriptorMeta(config,"workspace"),
         annotations:SHELL_TOOL_ANNOTATIONS,
     },async (input,context)=>{
-        const started=runtimeServices.modelWorker.delegate(input);
+        const {modelId,useSpecifiedModel,...taskInput}=input;
+        if(!useSpecifiedModel)
+            return workerResult(legacyAgentView(startAgentTask(taskInput,context)));
+        if(!modelId)throw Error("WORKER_PROFILE_NOT_FOUND");
+        const started=runtimeServices.modelWorker.delegate({...taskInput,modelId});
         runtimeServices.modelWorkflowGate?.onDelegate(
             started,modelWorkflowScope(context));
         return workerResult(started);
     });
     for(const [toolName,action,description] of [
-        ["model_task_status","status","Get bounded model Worker progress, tool counts, token usage and estimated cost."],
-        ["model_task_result","result","Read the final Worker answer, bounded evidence and failure reason for independent ChatGPT verification. The Worker is never itself a source of proof."],
-        ["model_task_cancel","cancel","Cancel a running Worker job and abort its current model HTTP request."],
+        ["model_task_status","status","Get progress for a delegated Worker or Agent task."],
+        ["model_task_result","result","Read a delegated Worker or Agent result for independent verification. For Agent tool records use agent_task_events. After verifying an Agent result marked awaiting-review, finish it with agent_task_accept."],
+        ["model_task_cancel","cancel","Cancel a delegated Worker or Agent task and abort its current model request."],
     ]){
         registerAppTool(server,toolName,{
             title:toolName,description,
@@ -3199,6 +3219,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:action==="cancel"?SHELL_TOOL_ANNOTATIONS:READ_ONLY_TOOL_ANNOTATIONS,
         },async({taskId},context)=>{
+            if(taskId.startsWith("agent_")){
+                const task=runtimeServices.agentRuntime[action==="result"?"status":action](taskId);
+                if(action==="result")
+                    runtimeServices.modelWorkflowGate?.onAgentStatus(task,modelWorkflowScope(context));
+                return workerResult(legacyAgentView(task));
+            }
             const result=runtimeServices.modelWorker[action](taskId);
             if(action==="result")
                 runtimeServices.modelWorkflowGate?.onResult(
@@ -3224,9 +3250,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:SHELL_TOOL_ANNOTATIONS,
         },async(input,context)=>{
-            const task=runtimeServices.agentRuntime.start(input);
-            runtimeServices.modelWorkflowGate?.onAgentStart(task,modelWorkflowScope(context));
-            return workerResult(task);
+            return workerResult(startAgentTask(input,context));
         });
         registerAppTool(server,"agent_task_list",{
             title:"List Agent Runtime tasks",description:"List persisted agent tasks and member status.",

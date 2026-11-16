@@ -1,17 +1,17 @@
 import {useCallback,useEffect,useMemo,useRef,useState} from 'react';
 import {Button,Dialog,DialogActions,DialogSurface,DialogBody,DialogTitle,DialogContent,Field,Input,Switch,Textarea} from '@fluentui/react-components';
 import {DeleteRegular} from '@fluentui/react-icons';
-import type {AgentEvent,AgentGroup,AgentRouteMode,AgentRoutingSettings,AgentTask,ModelProvider} from './api';
+import type {AgentEvent,AgentGroup,AgentRoutingSettings,AgentTask,ModelProvider} from './api';
 import {AgentFlow,appendFlowCards,agentStatuses,routeModes,routeReasons,type FlowCard,type FlowLane} from './AgentFlow';
 
 const empty=():AgentGroup=>({id:'',name:'',members:[],childGroups:[],isDefault:false,requiredReviews:1,parallelism:4,backendParallelism:1,leaderId:'',writerId:''});
 const errorText=(e:unknown)=>e instanceof Error?e.message:String(e);
-const profileLabel=(p:ModelProvider)=>p.name+' · '+p.model+' · '+Math.round(p.contextLength/1024)+'K · '+p.id;
+export const profileLabel=(p:ModelProvider)=>p.name+' · '+p.model+' · '+Math.round(p.contextLength/1024)+'K · '+p.id;
 const routeErrors: Record<string, string> = {
   AGENT_HISTORY_NOT_TERMINAL:'该任务仍在结束中，请稍后再删除。',
   AGENT_DEFAULT_GROUP_REQUIRED:'请在模型分组中设置默认组，或为本次任务指定模型组。',
   AGENT_GROUP_NEEDS_MULTIPLE_MODELS:'协作需要默认组中至少有两个不同的模型配置。',
-  AGENT_DEFAULT_WORKER_UNAVAILABLE:'默认单模型不可用。请在工作台选择一个已启用的 Worker。',
+  AGENT_DEFAULT_WORKER_UNAVAILABLE:'默认单模型不可用。请在模型提供商页面选择一个已启用的 Worker。',
   AGENT_MODEL_UNAVAILABLE:'所选模型或组内成员不可用，请检查模型配置。',
 };
 function memberIds(group:AgentGroup,groups:AgentGroup[],seen=new Set<string>()):string[]{
@@ -95,7 +95,7 @@ type HistoryAction = { task?: AgentTask };
 type EventView = { taskId: string; cards: FlowCard[]; loading: boolean };
 type ControlAction = 'pause' | 'resume' | 'accept' | 'cancel';
 const runtimeError = (error: unknown) => errorText(error).replace(/^Error invoking remote method 'ds:agentRuntime': (?:Error: )?/, '');
-const agentError = (error: unknown) => {
+export const agentError = (error: unknown) => {
   const message = runtimeError(error);
   return routeErrors[message] || message.replace(/^AGENT_RUNTIME_UNAVAILABLE: /, '');
 };
@@ -141,7 +141,6 @@ export function AgentRuntimePage() {
   const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [profiles, setProfiles] = useState<ModelProvider[]>([]);
   const [routing, setRouting] = useState<AgentRoutingSettings>();
-  const [savingRouting, setSavingRouting] = useState(false);
   const [tasks, setTasks] = useState<AgentTask[]>([]);
   const [tabPreference, setTabPreference] = useState<TaskFilter>();
   const [selectedId, setSelectedId] = useState<string>();
@@ -173,8 +172,7 @@ export function AgentRuntimePage() {
   const flow = eventView?.taskId === currentId ? eventView : undefined;
   const lanes = useMemo(() => task ? taskLanes(task, profiles) : [], [task, profiles]);
   const callableProfiles = profiles.filter(profile => profile.api === 'chat' && profile.allowCalls);
-  const workers = callableProfiles.filter(profile => profile.role === 'worker');
-  const automaticTask = target === 'auto' || (!target && routing?.mode === 'auto');
+  const automaticTask = target === 'auto' || (!target && (!routing || routing.mode === 'auto'));
 
   useEffect(() => {
     let alive = true;
@@ -215,22 +213,13 @@ export function AgentRuntimePage() {
   }, [refresh]);
 
   useEffect(() => {
-    if (!connected) return;
+    if (!connected || !createOpen) return;
     let alive = true;
     void window.devspace.agentRuntime('routing-settings').then(value => {
       if (alive) setRouting(value as AgentRoutingSettings);
     }).catch(error => { if (alive) setError(agentError(error)); });
     return () => { alive = false; };
-  }, [connected]);
-
-  async function saveRouting(input: AgentRoutingSettings) {
-    setSavingRouting(true);
-    try {
-      setRouting(await window.devspace.agentRuntime('set-routing-settings', { input }) as AgentRoutingSettings);
-      setError('');
-    } catch (error) { setError(agentError(error)); }
-    finally { setSavingRouting(false); }
-  }
+  }, [connected, createOpen]);
 
   useEffect(() => {
     if (!currentId) return;
@@ -343,19 +332,6 @@ export function AgentRuntimePage() {
     {notice && <div className="op-message op-success" role="status">{notice}</div>}
     {serviceIssue && <div className="op-message op-error" role="status">{serviceIssue}</div>}
     {!connected && !serviceIssue && <div className="agent-empty">正在连接 Agent Runtime</div>}
-    {connected && routing && <div className="models-two" aria-label="全局模型调度">
-      <Field label="全局模型调度"><select className="op-select" value={routing.mode} disabled={savingRouting}
-        onChange={e => void saveRouting({ ...routing, mode: e.target.value as AgentRouteMode })}>
-        {Object.entries(routeModes).map(([mode, label]) => <option value={mode} key={mode}>{label}</option>)}
-      </select></Field>
-      <Field label="默认单模型"><select className="op-select" value={routing.defaultWorkerId || ''} disabled={savingRouting}
-        onChange={e => void saveRouting({ ...routing, defaultWorkerId: e.target.value || null })}>
-        <option value="">自动选择可用 Worker</option>
-        {routing.defaultWorkerId && !workers.some(profile => profile.id === routing.defaultWorkerId) &&
-          <option value={routing.defaultWorkerId}>已保存的模型不可用</option>}
-        {workers.map(profile => <option value={profile.id} key={profile.id}>{profileLabel(profile)}</option>)}
-      </select></Field>
-    </div>}
     {connected && <section className="agent-task-library" aria-label="任务列表">
       <div className="agent-library-bar">
         <div className="agent-task-tabs" aria-label="任务范围">
