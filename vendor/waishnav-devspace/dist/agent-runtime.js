@@ -265,7 +265,6 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                 return [...baseTools.filter(x=>enabled(t,x.function.name,a)),...control.map(x=>({type:"function",function:x}))];
             }
             while(t.status==="running"&&!signal.aborted){
-                if(t.steps>=t.maxSteps)throw Error("AGENT_STEP_BUDGET_EXHAUSTED");
                 if(Date.now()>=t.deadline)throw Error("AGENT_TIME_BUDGET_EXHAUSTED");
                 advanceTeam(t);
                 let batch;
@@ -275,7 +274,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                         team.phase==="planning"?a.id===team.leader:
                         team.phase==="reviewing"?team.reviewers.includes(a.id):
                         team.phase==="working"?(a.id===team.leader?(a.inbox.length>0||Object.values(team.assignments).every(w=>w.status==="reported")):team.assignments[a.id]?.status==="active"):false));
-                    batch=batch.slice(0,Math.min(t.parallelism||4,t.maxSteps-t.steps));
+                    batch=batch.slice(0,t.parallelism||4);
                 }else{
                     const a=t.agents.find((x,i)=>i>=t.cursor&&x.state==="ready")||t.agents.find(x=>x.state==="ready");
                     batch=a?[a]:[];
@@ -378,11 +377,11 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         if(!ids.length||ids.length>groupTree.MAX_MEMBERS)throw Error("AGENT_GROUP_REQUIRED");
         const all=profiles();const members=ids.map(id=>{const p=all.find(x=>x.id===id&&x.allowCalls!==false&&x.api==="chat");if(!p)throw Error("AGENT_MODEL_UNAVAILABLE");return p;});
         const instruction=String(input.instruction??"").trim();if(!instruction||instruction.length>16000)throw Error("INVALID_AGENT_INSTRUCTION");
-        const maxSteps=input.maxSteps??1000,timeoutSeconds=input.timeoutSeconds??86400;
-        if(!Number.isInteger(maxSteps)||maxSteps<1||maxSteps>100000||!Number.isInteger(timeoutSeconds)||timeoutSeconds<30||timeoutSeconds>2592000)throw Error("INVALID_AGENT_BUDGET");
+        const timeoutSeconds=input.timeoutSeconds??86400;
+        if(!Number.isInteger(timeoutSeconds)||timeoutSeconds<30||timeoutSeconds>2592000)throw Error("INVALID_AGENT_BUDGET");
         const permissions={write:input.allowWrites===true,shell:input.allowShell===true,computer:input.allowComputer===true,memory:input.allowMemory===true,plugins:input.allowPlugins===true};
         const t={id:"agent_"+randomUUID(),workspaceId:input.workspaceId,groupId:group?.id??null,instruction,permissions,writer:permissions.write||permissions.shell||permissions.computer||permissions.plugins,
-            status:"paused",cursor:0,steps:0,maxSteps,deadline:Date.now()+timeoutSeconds*1000,
+            status:"paused",cursor:0,steps:0,deadline:Date.now()+timeoutSeconds*1000,
             requiredReviews:Math.max(1,Math.min(members.length-1,group?.requiredReviews??1)),approvals:[],submission:null,pending:null,createdAt:new Date().toISOString()};
         if(members.length>1){
             const pick=(id)=>members.findIndex(p=>p.id===id);

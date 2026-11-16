@@ -97,7 +97,7 @@ test("nested groups resolve once, parallel inference, dependency ordering and ex
         assert.ok(!tools.some(x=>x.function.name==="apply_patch"));
         return reply(call("apply_patch",{patch:"unauthorized mutation"}),call("agent_report",{summary:"Read-only evidence"}));
     },callTool:async(name,args)=>{assert.equal(name,"apply_patch");assert.equal(args.patch,"approved mutation");writerDone=true;return {content:[{type:"text",text:"verified"}]};}});
-    const task=f.runtime.start({workspaceId:"ws",instruction:"team task",allowWrites:true});
+    const task=f.runtime.start({workspaceId:"ws",instruction:"team task",allowWrites:true,maxSteps:1});
     const done=await until(f.runtime,task.id,["completed","paused"]);
     assert.equal(done.status,"completed",done.error);assert.equal(done.agents.length,4);assert.equal(peak,2);
     assert.equal(done.agents[2].groupPaths.length,2);assert.ok(f.runtime.events(task.id).some(e=>e.kind==="parallel-dispatch"));
@@ -122,6 +122,10 @@ test("restart does not replay uncertain side effects and requires acknowledgment
     const t=f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"task",allowWrites:true});
     const paused=await until(f.runtime,t.id,["paused"]);assert.ok(paused.pending);
     await f.runtime.close();
+    const saved=JSON.parse(f.sqlite.prepare("select data from devspace_agent_tasks where id=?").get(t.id).data);
+    saved.maxSteps=1;
+    f.sqlite.prepare("update devspace_agent_tasks set data=? where id=?").run(JSON.stringify(saved),t.id);
+    assert.equal(saved.steps,saved.maxSteps);
     const restored=fixture({sqlite:f.sqlite,request:async()=>reply(call("agent_finish",{decision:"submit",summary:"inspected existing state"}))});
     assert.throws(()=>restored.runtime.resume(t.id),/ACK_REQUIRED/);
     restored.runtime.resume(t.id,true);

@@ -14,8 +14,9 @@ const {createModelUsageStore}=createRequire(import.meta.url)(resolve(repo,"setup
 const reports = resolve(repo, "reports");
 mkdirSync(reports,{recursive:true});
 
-async function eventually(get) {
-    for (let i=0;i<80;i++){
+async function eventually(get,timeoutMs=1600) {
+    const deadline=Date.now()+timeoutMs;
+    while(Date.now()<deadline){
         const result=get();
         if(["completed","failed","cancelled"].includes(result.status))return result;
         await new Promise(r=>setTimeout(r,20));
@@ -171,21 +172,19 @@ test("default read-only worker calls a real workspace read and produces evidence
         assert.ok(stats.lastCallAt);
     }finally{f.dispose();}
 });
-test("Worker supports more than 20 steps and 24 tools with bounded history",async()=>{
-    const f=prepare({repeatToolRounds:80});
+test("Worker completes past the old step and tool-call limits even with a cached maxSteps value",async()=>{
+    const rounds=1005;
+    const f=prepare({repeatToolRounds:rounds});
     try{
         const started=f.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",
-            instruction:"Repeated safe reads",maxSteps:1000,timeoutSeconds:7200});
-        const done=await eventually(()=>f.runtime.result(started.taskId));
+            instruction:"Repeated safe reads",maxSteps:1});
+        const done=await eventually(()=>f.runtime.result(started.taskId),30000);
         assert.equal(done.status,"completed",JSON.stringify(done));
-        assert.equal(done.steps,80);
-        assert.equal(done.toolCalls,80);
+        assert.equal(done.steps,rounds);
+        assert.equal(done.toolCalls,rounds);
         assert.ok(done.evidence.length<=25,
             "public evidence must remain bounded for long-running tasks");
-        assert.equal(f.counts().count,81);
-        assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",
-            modelId:"qwen_worker",instruction:"Invalid",maxSteps:100001}),
-            /INVALID_TASK_STEPS/);
+        assert.equal(f.counts().count,rounds+1);
         assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",
             modelId:"qwen_worker",instruction:"Invalid",timeoutSeconds:86401}),
             /INVALID_TASK_TIMEOUT/);

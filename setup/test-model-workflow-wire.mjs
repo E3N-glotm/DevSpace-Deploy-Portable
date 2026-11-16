@@ -129,6 +129,9 @@ try{
         "model_delegate_task","model_task_result"]){
         assert.ok(tools.some(x=>x.name===required),required);
     }
+    for(const tool of tools.filter(x=>["model_delegate_task","agent_task_start"].includes(x.name))){
+        assert.equal(Object.hasOwn(tool.inputSchema.properties,"maxSteps"),false,tool.name);
+    }
     const readTool=tools.find(x=>["read","read_file"].includes(x.name));
     assert.ok(readTool,"Missing read tool");
     assert.match(readTool.description,/CONVERSATION-CARD PRECONDITION/);
@@ -168,7 +171,7 @@ try{
     const remoteArgs={workspaceId:remoteId,path:"remote.txt"};
     assert.match(contentText(await client.callTool({name:readTool.name,arguments:remoteArgs})),/MODEL_WORKFLOW_DELEGATION_REQUIRED/);
     const remoteStarted=await client.callTool({name:"model_delegate_task",arguments:{
-        workspaceId:remoteId,modelId:"worker-one",instruction:"Read the remote workspace fixture",maxSteps:3}});
+        workspaceId:remoteId,modelId:"worker-one",instruction:"Read the remote workspace fixture",maxSteps:1}});
     assert.ok(!remoteStarted.isError,contentText(remoteStarted));
     const remoteTask=remoteStarted.structuredContent.data.taskId;
     const approvedRemote=await client.callTool({name:readTool.name,arguments:remoteArgs});
@@ -183,7 +186,7 @@ try{
     assert.equal(remoteResult.evidence[0].path,"remote.txt");
     assert.equal(remoteResult.evidence[0].ok,true);
     if(process.env.DEVSPACE_TEST_WORKFLOW_TOOL_MODE!=="full"){
-        const starter=await client.callTool({name:"agent_task_start",arguments:{workspaceId,modelId:"worker-one",instruction:"Agent Runtime integration test",allowShell:true,maxSteps:8}});
+        const starter=await client.callTool({name:"agent_task_start",arguments:{workspaceId,modelId:"worker-one",instruction:"Agent Runtime integration test",allowShell:true,maxSteps:1}});
         assert.ok(!starter.isError,contentText(starter));
         const id=starter.structuredContent?.data?.id;assert.ok(id);
         const hostRead=await client.callTool({name:readTool.name,arguments:{workspaceId,path:"safe.txt"}});
@@ -196,6 +199,7 @@ try{
             if(state.status!=="running")break;await sleep(30);
         }
         assert.equal(state.status,"awaiting-review",JSON.stringify(state));
+        assert.equal(state.steps,3);
         const inspected=await client.callTool({name:hostCommandTool.name,arguments:{workspaceId,argv:["node","--version"],yieldTimeMs:1000}});
         assert.notEqual(inspected.isError,true,contentText(inspected));
         const events=(await client.callTool({name:"agent_task_events",arguments:{taskId:id}})).structuredContent.data;

@@ -399,7 +399,7 @@ export function createModelWorkerRuntime({
         try{
             const messages=[
                 {role:"system",content:
-                    "You are a bounded DevSpace Worker, not the ChatGPT supervisor. "+
+                    "You are a DevSpace Worker working under the ChatGPT supervisor. "+
                     "Only use the available workspace tools; never invent test outcomes. "+
                     "No shell, network, privilege changes or secret access. "+
                     "Read the relevant files first and return a concise verifiable report. "+
@@ -409,20 +409,19 @@ export function createModelWorkerRuntime({
             ];
             const allowedTools=TOOL_DEFINITIONS.filter(t=>job.allowWrites||
                 t.function.name!=="edit_file");
-            for(let index=0;index<job.maxSteps;index++){
+            while(true){
                 getProfile(job.modelId);
                 if(job.cancelled)throw new Error("MODEL_TASK_CANCELLED");
                 if(Date.now()>job.deadline)throw new Error("MODEL_TASK_TIMEOUT");
                 const result=await withBackend(model,null,()=>infer(job,model,messages,allowedTools));
                 getProfile(job.modelId);
+                if(job.cancelled)throw new Error("MODEL_TASK_CANCELLED");
                 if(!result)throw new Error("MODEL_NO_MESSAGE");
                 const calls=Array.isArray(result.tool_calls)?result.tool_calls:[];
                 if(!calls.length){
                     job.answer=restricted(result.content,12000);
                     job.status="completed";return;
                 }
-                if(job.toolCalls+calls.length>Math.max(1000,job.maxSteps*8))
-                    throw new Error("MODEL_TOOL_CALL_LIMIT_REACHED");
                 messages.push({role:"assistant",content:result.content||null,tool_calls:calls});
                 for(const call of calls){
                     if(job.cancelled)throw new Error("MODEL_TASK_CANCELLED");
@@ -461,7 +460,6 @@ export function createModelWorkerRuntime({
                     }
                 }
             }
-            throw new Error("MODEL_TASK_STEP_LIMIT_REACHED");
         }catch(error){
             job.status=job.cancelled?"cancelled":"failed";
             job.error=String(error?.message||"MODEL_RUNTIME_FAILURE").slice(0,300);
@@ -513,7 +511,7 @@ export function createModelWorkerRuntime({
             if(count<=1)activeHostMutations.delete(workspaceId);
             else activeHostMutations.set(workspaceId,count-1);
         },
-        delegate({workspaceId,modelId,instruction,allowWrites=false,maxSteps=1000,timeoutSeconds=3600}){
+        delegate({workspaceId,modelId,instruction,allowWrites=false,timeoutSeconds=3600}){
             const workspace=workspaces.getWorkspace(workspaceId);
             if(workspace.backend!=="local"&&(workspace.backend!=="remote-agent"||!openRemoteWorkerTool))
                 throw new Error("MODEL_WORKER_WORKSPACE_BACKEND_UNAVAILABLE");
@@ -528,13 +526,12 @@ export function createModelWorkerRuntime({
             if(allowWrites!==true && allowWrites!==false)throw new Error("INVALID_WRITE_AUTHORIZATION");
             if(allowWrites && !config.permissions.allowShellMutation
                 && !config.permissions.allowArbitraryCommands)throw new Error("WRITE_PERMISSION_DENIED");
-            if(!Number.isInteger(maxSteps)||maxSteps<1||maxSteps>100000)throw new Error("INVALID_TASK_STEPS");
             if(!Number.isInteger(timeoutSeconds)||timeoutSeconds<30||timeoutSeconds>86400)
                 throw new Error("INVALID_TASK_TIMEOUT");
             const model=getProfile(modelId);
             const taskId="mworker_"+randomUUID();
             const job={taskId,workspaceId,modelId,status:"queued",instruction,
-                allowWrites,steps:0,maxSteps,toolCalls:0,inputTokens:0,outputTokens:0,
+                allowWrites,steps:0,toolCalls:0,inputTokens:0,outputTokens:0,
                 estimatedUSD:0,maxTaskUSD:model.maxTaskUSD||1,evidence:[],answer:"",
                 error:null,controller:null,cancelled:false,
                 startedAt:new Date().toISOString(),deadline:Date.now()+timeoutSeconds*1000};

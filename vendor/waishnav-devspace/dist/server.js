@@ -3169,13 +3169,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_delegate_task",{
         title:"Delegate to configured model Worker",
-        description:"Explicitly delegate a local or remote workspace task to a configured Worker. For a model group use agent_task_start. Default is read-only. First open the workspace.",
+        description:"Explicitly delegate a local or remote workspace task to a configured Worker. Worker steps and tool calls are counted without a fixed execution cap. For a model group use agent_task_start. Default is read-only. First open the workspace.",
         inputSchema:{
             workspaceId:z.string(),
             modelId:z.string().describe("ID from model_worker_list, not the model's display name."),
             instruction:z.string().min(1).max(8000),
             allowWrites:z.boolean().optional().describe("Default false. True explicitly delegates file edits."),
-            maxSteps:z.number().int().min(1).max(100000).optional(),
             timeoutSeconds:z.number().int().min(30).max(86400).optional(),
         },
         outputSchema:resultOutputSchema({data:z.unknown()}),
@@ -3211,13 +3210,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         instruction:z.string().min(1).max(16000),allowWrites:z.boolean().optional(),
         allowShell:z.boolean().optional(),allowComputer:z.boolean().optional(),
         allowMemory:z.boolean().optional(),allowPlugins:z.boolean().optional(),
-        maxSteps:z.number().int().min(1).max(100000).optional(),
         timeoutSeconds:z.number().int().min(30).max(2592000).optional(),
     };
     if(runtimeServices.agentRuntime){
         registerAppTool(server,"agent_task_start",{
             title:"Start persistent DevSpace Agent task",
-            description:"Delegate an independent long-running task to the default or named model group, or a single agent profile. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and acceptance independently.",
+            description:"Delegate an independent long-running task to the default or named model group, or a single agent profile. Steps are counted without a fixed execution cap. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and acceptance independently.",
             inputSchema:agentInput,outputSchema:resultOutputSchema({data:z.unknown()}),
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:SHELL_TOOL_ANNOTATIONS,
