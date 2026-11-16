@@ -470,8 +470,10 @@ export function createModelWorkerRuntime({
         models:()=>readProfiles(portableRoot).filter(m=>m.role==="worker"&&m.allowCalls!==false),
         agentProfiles:()=>readProfiles(portableRoot).filter(m=>m.allowCalls!==false&&m.api==="chat"),
         async agentRequest(task,agent,model,messages,tools,signal,onDelta){
+            const priorUSD=(task.previousAgents??[]).filter(a=>a.profileId===agent.profileId)
+                .reduce((sum,a)=>sum+a.estimatedUSD,0);
             const job={modelId:agent.profileId,deadline:task.deadline,maxTaskUSD:model.maxTaskUSD||1,
-                inputTokens:agent.inputTokens,outputTokens:agent.outputTokens,estimatedUSD:agent.estimatedUSD};
+                inputTokens:agent.inputTokens,outputTokens:agent.outputTokens,estimatedUSD:agent.estimatedUSD+priorUSD};
             const deadlineController=new AbortController();
             const requestSignal=signal?AbortSignal.any([signal,deadlineController.signal]):deadlineController.signal;
             let timer;
@@ -487,7 +489,7 @@ export function createModelWorkerRuntime({
                 if(!signal?.aborted&&(deadlineController.signal.aborted||Date.now()>=task.deadline))throw Error("AGENT_TIME_BUDGET_EXHAUSTED");
                 throw error;
             }
-            finally{clearTimeout(timer);agent.inputTokens=job.inputTokens;agent.outputTokens=job.outputTokens;agent.estimatedUSD=job.estimatedUSD;if(job.reasoning)agent.reasoning=job.reasoning;}
+            finally{clearTimeout(timer);agent.inputTokens=job.inputTokens;agent.outputTokens=job.outputTokens;agent.estimatedUSD=Math.max(0,job.estimatedUSD-priorUSD);if(job.reasoning)agent.reasoning=job.reasoning;}
         },
         beginAgentWriter(workspaceId,id){
             if(this.hasActiveWriter(workspaceId)||(activeHostMutations.get(workspaceId)||0)>0)

@@ -3074,7 +3074,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     // Do not freeze the current on/off value in MCP session instructions:
     // Portable can change the policy without restarting a client session.
     // The gate reads the authoritative user setting for every tool call.
-    const mandatoryModelInstruction=" Model workflow is a live Portable setting. Check model_worker_list.mandatoryModelWorkflow for its current value. When enabled, local and remote workspace tasks require an explicit Worker or Agent task dispatch for the same workspace. The Host can read in parallel. Inspect model_task_result or the finished agent_task_status before Host writes after a write-capable delegation.";
+    const mandatoryModelInstruction=" Use agent_task_start for model delegation on local and remote workspaces; omit routeMode and target IDs to honor the owner's current global model routing. Pass independentReview when the work needs separate verification, and parallelWorkstreams when it has distinct work that can run in parallel. Only pass a specific routeMode or target ID when the user requests that override. Check model_worker_list for routing and mandatoryModelWorkflow. When mandatory workflow is enabled, dispatch a task for the same workspace before using protected tools. The Host can read in parallel. Inspect the finished agent_task_status or legacy model_task_result before Host writes after a write-capable delegation.";
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
@@ -3153,7 +3153,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_worker_list",{
         title:"List configured DevSpace Workers",
-        description:"List enabled legacy Worker profiles, independent Agent profiles and saved model groups without API keys. Prefer agent_task_start with the default group if one is configured, unless the user explicitly asks for one model or the legacy Worker. Otherwise use model_delegate_task as before. Inspect Agent task events and independently verify results. Mandatory workflow remains a live setting.",
+        description:"List enabled Worker and Agent profiles, model groups and the global model routing choice without API keys. Use agent_task_start for model delegation. Omit a target ID to honor the global choice, and describe independent review and parallel work through the task inputs.",
         inputSchema:{},
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
@@ -3165,11 +3165,12 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         return workerResult({models:runtimeServices.modelWorker.models(),
             agentGroups:runtimeServices.agentRuntime?.groups()??[],
             agentProfiles:runtimeServices.modelWorker.agentProfiles(),
+            modelRouting:runtimeServices.agentRuntime?.routingSettings(),
             mandatoryModelWorkflow:mandatoryEnabled});
     });
     registerAppTool(server,"model_delegate_task",{
         title:"Delegate to configured model Worker",
-        description:"Explicitly delegate a local or remote workspace task to a configured Worker. Worker steps and tool calls are counted without a fixed execution cap. For a model group use agent_task_start. Default is read-only. First open the workspace.",
+        description:"Legacy explicit single-Worker delegation for a specified model ID. Prefer agent_task_start for shared global routing and durable tasks. Worker steps and tool calls are counted without a fixed execution cap. Default is read-only. First open the workspace.",
         inputSchema:{
             workspaceId:z.string(),
             modelId:z.string().describe("ID from model_worker_list, not the model's display name."),
@@ -3207,6 +3208,9 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     }
     const agentInput={
         workspaceId:z.string(),groupId:z.string().optional(),modelId:z.string().optional(),
+        routeMode:z.enum(["auto","single","group"]).optional().describe("Task override. Omit to use the owner's global choice."),
+        independentReview:z.boolean().optional().describe("Set true when independent review is needed in automatic mode."),
+        parallelWorkstreams:z.number().int().min(0).optional().describe("Number of distinct subtasks that can genuinely run in parallel. Automatic mode can use a group for two or more."),
         instruction:z.string().min(1).max(16000),allowWrites:z.boolean().optional(),
         allowShell:z.boolean().optional(),allowComputer:z.boolean().optional(),
         allowMemory:z.boolean().optional(),allowPlugins:z.boolean().optional(),
@@ -3215,7 +3219,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     if(runtimeServices.agentRuntime){
         registerAppTool(server,"agent_task_start",{
             title:"Start persistent DevSpace Agent task",
-            description:"Delegate an independent long-running task to the default or named model group, or a single agent profile. Steps are counted without a fixed execution cap. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and acceptance independently.",
+            description:"Delegate a durable task using DevSpace's global automatic, single-model or group routing. In automatic mode, pass independentReview or parallelWorkstreams when warranted. A task uses no fixed step cap. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and verify the result independently.",
             inputSchema:agentInput,outputSchema:resultOutputSchema({data:z.unknown()}),
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:SHELL_TOOL_ANNOTATIONS,
@@ -3228,10 +3232,11 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             title:"List Agent Runtime tasks",description:"List persisted agent tasks and member status.",
             inputSchema:{},outputSchema:resultOutputSchema({data:z.unknown()}),...toolWidgetDescriptorMeta(config,"workspace"),annotations:READ_ONLY_TOOL_ANNOTATIONS,
         },async()=>workerResult(runtimeServices.agentRuntime.list()));
-        for(const action of ["status","events","pause","resume","cancel"]){
+        for(const action of ["status","events","pause","resume","cancel","accept"]){
             registerAppTool(server,"agent_task_"+action,{
                 title:"Agent task "+action,description:action==="status"
                     ?"Inspect a durable Agent task and any final result. In mandatory workflow, inspecting the finished result from the dispatching conversation releases the review requirement for Host writes."
+                    :action==="accept"?"Mark the single-model result complete after independently verifying it and inspecting task status."
                     :"Inspect or control a durable Agent Runtime task. Resume requires explicit acknowledgment if a tool outcome was uncertain.",
                 inputSchema:{taskId:z.string(),...(action==="events"?{after:z.number().int().min(0).optional(),limit:z.number().int().min(1).max(500).optional()}:action==="resume"?{acknowledge:z.boolean().optional()}: {})},
                 outputSchema:resultOutputSchema({data:z.unknown()}),
@@ -3240,7 +3245,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             },async(input,context)=>{
                 const result=action==="events"?runtimeServices.agentRuntime.events(input.taskId,input.after,input.limit)
                     :runtimeServices.agentRuntime[action](input.taskId,input.acknowledge);
-                if(action==="status")runtimeServices.modelWorkflowGate?.onAgentStatus(result,modelWorkflowScope(context));
+                if(action==="status"||action==="accept")runtimeServices.modelWorkflowGate?.onAgentStatus(result,modelWorkflowScope(context));
                 return workerResult(result);
             });
         }
@@ -4795,6 +4800,8 @@ export function createServer(config = loadConfig(), options = {}) {
         try{
             const {action,taskId,after,acknowledge}=req.body||{};
             if(action==="list")return res.json(agentRuntime.list());
+            if(action==="routing-settings")return res.json(agentRuntime.routingSettings());
+            if(action==="set-routing-settings")return res.json(agentRuntime.setRoutingSettings(req.body.input));
             if(action==="events")return res.json(agentRuntime.events(taskId,after,200));
             if(action==="delete-history"){
                 if(typeof taskId!=="string"||!taskId.trim())throw Error("AGENT_TASK_ID_REQUIRED");

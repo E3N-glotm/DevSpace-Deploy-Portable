@@ -1,17 +1,25 @@
 import { useMemo, useState } from 'react';
 import { Button, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle } from '@fluentui/react-components';
 import { ArrowUpRightRegular } from '@fluentui/react-icons';
-import type { AgentEvent } from './api';
+import type { AgentEvent, AgentRouteMode } from './api';
+
+export const routeModes: Record<AgentRouteMode, string> = {auto:'自动',single:'单模型',group:'分组'};
+export const routeReasons: Record<string, string> = {
+  'focused-task':'任务适合单模型执行', 'global-single':'全局单模型', 'global-group':'全局分组',
+  'selected-single':'本次指定单模型', 'selected-group':'本次指定模型组',
+  'parallel-work':'有可并行的子任务', 'independent-review':'需要独立复核',
+  'no-default-group':'未设置默认模型组', 'escalated':'从单模型升级到分组',
+};
 
 export const agentStatuses: Record<string, string> = {
   running: '运行中', paused: '已暂停', 'awaiting-review': '等待验收', completed: '已完成',
   failed: '失败', cancelled: '已取消', ready: '就绪', waiting: '等待',
-  submitted: '已提交', approved: '已审查', planning: '制定计划', working: '分工执行',
+  submitted: '已提交', approved: '已审查', planning: '制定计划', working: '分工执行', 'handed-off':'已交接',
   reviewing: '独立审查', queued: '等待依赖', active: '执行中', reported: '已交付',
 };
 
 const eventTitles: Record<string, string> = {
-  created: '任务创建', state: '任务状态', recovered: '任务恢复', 'inference-start': '模型推理',
+  created: '任务创建', state: '任务状态', routing: '模型调度', recovered: '任务恢复', 'inference-start': '模型推理',
   'inference-stream': '模型推理', output: '模型推理', message: '协作消息', review: '审查',
   'tool-start': '工具操作', 'tool-result': '工具操作', 'tool-error': '工具操作',
   compaction: '上下文压缩', plan: '任务分配', 'plan-fallback': '备用计划',
@@ -91,6 +99,9 @@ function describe(card: FlowCard, names: Map<string, string>) {
     title = '发送给 ' + (names.get(get('to')) ?? get('to'));
   } else if (first.kind === 'state') {
     preview ||= agentStatuses[get('status')] || get('status');
+  } else if (first.kind === 'routing') {
+    const mode = get('mode') as AgentRouteMode;
+    preview = [routeModes[mode], routeReasons[get('reason')], get('detail')].filter(Boolean).join(' · ');
   } else if (first.kind === 'plan' && first.assignments && typeof first.assignments === 'object') {
     preview ||= '已分配 ' + Object.keys(first.assignments).length + ' 项工作';
   } else if (first.kind === 'parallel-dispatch' && Array.isArray(first.members)) {

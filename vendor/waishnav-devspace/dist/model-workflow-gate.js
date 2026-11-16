@@ -18,7 +18,7 @@ const sharedWorkerGrants = new WeakMap();
 const EXEMPT = new Set([
     "model_worker_list", "model_delegate_task", "model_task_status",
     "model_task_result", "model_task_cancel",
-    "agent_task_start","agent_task_list","agent_task_status","agent_task_events",
+    "agent_task_start","agent_task_list","agent_task_status","agent_task_events","agent_task_accept",
     "agent_task_pause","agent_task_resume","agent_task_cancel",
     "continuation_task", "continuation_anchor", "continuation_sender",
     "doctor", "doctor_history", "capabilities", "health", "plugin_list", "plugin_read", "permission_rules_list", "process_list", "audit_log_list", "session_list", "memory_list", "hook_list",
@@ -76,6 +76,9 @@ export function createModelWorkflowGate({
     function profilesMatch(refs,active){
         return refs.length>0&&refs.every(ref=>active.some(m=>m.id===ref.id&&(m.callPolicyRevision||"")===ref.revision));
     }
+    const agentRefs=task=>task.agents.map(a=>({id:a.profileId,revision:a.revision||""}));
+    const promotedProfilesMatch=(task,active)=>task.routing?.reason!=="escalated"||
+        profilesMatch(agentRefs(task),active);
     function recordGrant(taskId,workspaceId,kind,via,refs,allowWrites,conversationScopeId){
         if(typeof taskId!=="string"||typeof workspaceId!=="string")return;
         let policy,active;
@@ -106,6 +109,7 @@ export function createModelWorkflowGate({
             owner.workspaceId!==result.workspaceId||owner.policyVersion!==policy.updatedAt||
             !policy.enabled||!profilesMatch(owner.refs,active))return {granted:false};
         if(kind==="worker"&&owner.via!==result.modelId)return {granted:false};
+        if(kind==="agent"&&!promotedProfilesMatch(result,active))return {granted:false};
         const finished=["completed","failed","cancelled"].includes(result.status);
         const awaiting=kind==="agent"&&result.status==="awaiting-review"&&typeof result.result==="string"&&
             result.result.trim()&&result.pending==null;
@@ -122,7 +126,7 @@ export function createModelWorkflowGate({
     }
     function blocked(code,reason){
         return {allowed:false,code,
-            message:reason+" List profiles with model_worker_list. Dispatch model_delegate_task or agent_task_start for the opened workspace, including remote workspaces. Read in parallel. For write-capable work, inspect model_task_result or the finished agent_task_status before Host mutations."};
+            message:reason+" List profiles with model_worker_list. Dispatch agent_task_start for the opened workspace to honor global routing, including remote workspaces. Read in parallel. For write-capable work, inspect the finished agent_task_status or legacy model_task_result before Host mutations."};
     }
     return {
         policy:readPolicy,
@@ -180,6 +184,9 @@ export function createModelWorkflowGate({
             try{snapshot=(approval.kind==="agent"?agentRuntime:modelWorker).status(approval.taskId);}
             catch{return blocked("MODEL_WORKFLOW_TASK_MISSING",
                 "The delegated Worker task is no longer available; dispatch a new one.");}
+            if(approval.kind==="agent"&&!promotedProfilesMatch(snapshot,active))
+                return blocked("MODEL_WORKFLOW_WORKER_DISABLED",
+                    "A model used in the promoted workflow has been disabled, removed or reconfigured.");
             const workerStatus=snapshot.status;
             const running=["queued","running"].includes(workerStatus);
             if(now()>=approval.createdAt+maxGrantAgeMs)return blocked(
@@ -213,7 +220,7 @@ export function createModelWorkflowGate({
         },
         onAgentStart(task,conversationScopeId){
             recordGrant(task.id,task.workspaceId,"agent",task.groupId||task.agents[0]?.profileId,
-                task.agents.map(a=>({id:a.profileId,revision:a.revision||""})),task.writer===true,conversationScopeId);
+                agentRefs(task),task.writer===true,conversationScopeId);
         },
         onAgentStatus(task,conversationScopeId){
             return recordInspection(task.id,"agent",task,conversationScopeId);

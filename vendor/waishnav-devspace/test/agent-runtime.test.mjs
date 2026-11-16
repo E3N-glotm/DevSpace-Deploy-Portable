@@ -46,11 +46,12 @@ function fixture(overrides={}){
     return {runtime,sqlite,calls,memories,writers};
 }
 test("default group independently reviews, records events and workspace memory",async()=>{
-    const f=fixture();const t=f.runtime.start({workspaceId:"ws",instruction:"task",allowMemory:true});
+    const f=fixture();const t=f.runtime.start({workspaceId:"ws",instruction:"task",allowMemory:true,independentReview:true});
     const done=await until(f.runtime,t.id,["completed","paused"]);
     assert.equal(done.status,"completed",done.error);assert.equal(done.result,"verified");
     assert.equal(f.calls[0].args.workspaceId,"ws");assert.equal(f.memories.length,1);
     assert.equal(done.agents.length,2);
+    assert.equal(done.routing.reason,"independent-review");
     assert.ok(f.runtime.events(t.id).some(e=>e.kind==="message"));
     assert.ok(f.runtime.events(t.id).some(e=>e.kind==="review"&&e.decision==="approve"));
     await f.runtime.close();f.sqlite.close();
@@ -63,10 +64,11 @@ test("review threshold cannot complete a group before all configured members par
         if(_t.team.phase==="reviewing")return reply(call("agent_finish",{decision:"approve",summary:"reviewed"}));
         return reply(call("agent_report",{summary:"Independently participated"}));
     }});
-    const t=f.runtime.start({workspaceId:"ws",instruction:"task"});
+    const t=f.runtime.start({workspaceId:"ws",instruction:"task",parallelWorkstreams:2});
     const done=await until(f.runtime,t.id,["completed","paused"]);
     assert.equal(done.status,"completed",done.error);
     assert.deepEqual(done.agents.map(a=>a.steps),[2,1,2]);
+    assert.equal(done.routing.reason,"parallel-work");
     await f.runtime.close();f.sqlite.close();
 });
 test("nested groups resolve once, parallel inference, dependency ordering and exclusive mutation",async()=>{
@@ -97,11 +99,83 @@ test("nested groups resolve once, parallel inference, dependency ordering and ex
         assert.ok(!tools.some(x=>x.function.name==="apply_patch"));
         return reply(call("apply_patch",{patch:"unauthorized mutation"}),call("agent_report",{summary:"Read-only evidence"}));
     },callTool:async(name,args)=>{assert.equal(name,"apply_patch");assert.equal(args.patch,"approved mutation");writerDone=true;return {content:[{type:"text",text:"verified"}]};}});
-    const task=f.runtime.start({workspaceId:"ws",instruction:"team task",allowWrites:true,maxSteps:1});
+    const task=f.runtime.start({workspaceId:"ws",instruction:"team task",allowWrites:true,maxSteps:1,routeMode:"group"});
     const done=await until(f.runtime,task.id,["completed","paused"]);
     assert.equal(done.status,"completed",done.error);assert.equal(done.agents.length,4);assert.equal(peak,2);
     assert.equal(done.agents[2].groupPaths.length,2);assert.ok(f.runtime.events(task.id).some(e=>e.kind==="parallel-dispatch"));
     assert.ok(f.runtime.events(task.id).some(e=>e.kind==="tool-error"&&e.error==="AGENT_TOOL_NOT_AUTHORIZED"));
+    await f.runtime.close();f.sqlite.close();
+});
+test("global routing persists, honors explicit targets, and uses single-model mode for focused automatic work",async()=>{
+    const f=fixture({request:async()=>({content:"Completed focused check"})});
+    const start=options=>f.runtime.start({workspaceId:"ws",instruction:"Check a known file",...options});
+    assert.deepEqual(f.runtime.routingSettings(),{mode:"auto",defaultWorkerId:null});
+    const simple=start({});
+    assert.equal(simple.routing.reason,"focused-task");
+    assert.equal(simple.agents.length,1);
+    await until(f.runtime,simple.id,["awaiting-review"]);
+    assert.throws(()=>f.runtime.setRoutingSettings({mode:"group",defaultWorkerId:"p2"}),/AGENT_DEFAULT_WORKER_UNAVAILABLE/);
+    f.runtime.setRoutingSettings({mode:"single",defaultWorkerId:"p1"});
+    const forcedSingle=start({independentReview:true,parallelWorkstreams:3});
+    assert.equal(forcedSingle.routing.reason,"global-single");
+    await until(f.runtime,forcedSingle.id,["awaiting-review"]);
+    const override=start({groupId:"g"});
+    assert.equal(override.routing.reason,"selected-group");
+    assert.equal(override.agents.length,2);
+    f.runtime.setRoutingSettings({mode:"group",defaultWorkerId:"p1"});
+    await f.runtime.close();
+    const restored=fixture({sqlite:f.sqlite});
+    assert.deepEqual(restored.runtime.routingSettings(),{mode:"group",defaultWorkerId:"p1"});
+    const group=restored.runtime.start({workspaceId:"ws",instruction:"Globally grouped"});
+    assert.equal(group.routing.reason,"global-group");
+    await until(restored.runtime,group.id,["completed"]);
+    const chosen=restored.runtime.start({workspaceId:"ws",instruction:"Explicit model",modelId:"p2"});
+    assert.equal(chosen.routing.reason,"selected-single");
+    assert.equal(chosen.agents[0].profileId,"p2");
+    await restored.runtime.close();f.sqlite.close();
+});
+test("automatic routing retains a single model for optional parallel work without a default team",async()=>{
+    const f=fixture({groups:()=>[],request:async()=>({content:"Finished"})});
+    const start=options=>f.runtime.start({workspaceId:"ws",instruction:"Check a known file",...options});
+    const single=start({parallelWorkstreams:2});
+    assert.equal(single.routing.reason,"no-default-group");
+    await until(f.runtime,single.id,["awaiting-review"]);
+    assert.throws(()=>start({independentReview:true}),/AGENT_DEFAULT_GROUP_REQUIRED/);
+    f.runtime.setRoutingSettings({mode:"group"});
+    assert.throws(()=>start({}),/AGENT_DEFAULT_GROUP_REQUIRED/);
+    await f.runtime.close();f.sqlite.close();
+});
+test("an automatic single model promotes in place, keeping evidence and exclusive writes",async()=>{
+    let originalId;
+    const f=fixture({request:async(t,a,_p,messages,tools)=>{
+        originalId??=t.id;
+        assert.equal(t.id,originalId);
+        if(!t.team){
+            assert.ok(tools.some(x=>x.function.name==="agent_escalate"));
+            if(!a.steps)return reply(call("read",{path:"first.txt"}));
+            return reply(call("agent_escalate",{reason:"Independent check required",handoff:"Read first.txt. Check the one remaining change."}),
+                call("read",{path:"must-not-run.txt"}));
+        }
+        assert.deepEqual([...f.writers],["ws"]);
+        assert.ok(messages.some(m=>typeof m.content==="string"&&m.content.includes("Read first.txt.")));
+        assert.ok(!tools.some(x=>x.function.name==="agent_escalate"));
+        const reviewer=t.team.reviewers[0];
+        if(t.team.phase==="planning")return reply(call("agent_plan",{assignments:[{to:reviewer,goal:"Check evidence"}]}));
+        if(t.team.phase==="reviewing")return reply(call("agent_finish",{decision:"approve",summary:"Independent verification"}));
+        if(a.id===reviewer)return reply(call("agent_report",{summary:"Confirmed original evidence"}));
+        return reply(call("apply_patch",{patch:"remaining change"}),call("agent_finish",{decision:"submit",summary:"Finished remaining work"}));
+    }});
+    const t=f.runtime.start({workspaceId:"ws",instruction:"Check and finish the task",allowWrites:true});
+    const done=await until(f.runtime,t.id,["completed","paused"]);
+    assert.equal(done.status,"completed",done.error);
+    assert.equal(done.id,originalId);
+    assert.equal(done.routing.reason,"escalated");
+    assert.equal(done.routing.detail,"Independent check required");
+    assert.deepEqual(done.agents.map(a=>a.id),["a1","a2","a3"]);
+    assert.equal(done.agents[0].state,"handed-off");
+    assert.equal(done.agents[0].steps,2);
+    assert.deepEqual(f.calls.map(x=>x.name),["read","apply_patch"]);
+    assert.deepEqual(f.runtime.events(t.id).filter(e=>e.kind==="routing").map(e=>e.mode),["single","group"]);
     await f.runtime.close();f.sqlite.close();
 });
 test("scope, explicit grants, sensitive memory and single agent acceptance",async()=>{

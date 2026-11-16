@@ -186,9 +186,23 @@ try{
     assert.equal(remoteResult.evidence[0].path,"remote.txt");
     assert.equal(remoteResult.evidence[0].ok,true);
     if(process.env.DEVSPACE_TEST_WORKFLOW_TOOL_MODE!=="full"){
-        const starter=await client.callTool({name:"agent_task_start",arguments:{workspaceId,modelId:"worker-one",instruction:"Agent Runtime integration test",allowShell:true,maxSteps:1}});
+        const localUrl="http://127.0.0.1:"+modelListener.address().port+"/agent-runtime/local";
+        const uiToken=readFileSync(join(stateDir,"agent-runtime-ui.token"),"utf8");
+        const requestOptions={method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"list"})};
+        const localAction=(action,input,token=uiToken)=>fetch(localUrl,{...requestOptions,
+            headers:{...requestOptions.headers,"x-devspace-agent-token":token},body:JSON.stringify({action,input})});
+        assert.deepEqual(await (await localAction("routing-settings")).json(),{mode:"auto",defaultWorkerId:null});
+        assert.equal((await localAction("set-routing-settings",{mode:"group"},"invalid")).status,403);
+        assert.equal((await localAction("set-routing-settings",{mode:"group"})).status,200);
+        const unavailableGroup=await client.callTool({name:"agent_task_start",arguments:{workspaceId,instruction:"Needs default group"}});
+        assert.match(contentText(unavailableGroup),/AGENT_DEFAULT_GROUP_REQUIRED/);
+        assert.equal((await localAction("set-routing-settings",{mode:"single",defaultWorkerId:"worker-one"})).status,200);
+        const routingList=await client.callTool({name:"model_worker_list",arguments:{}});
+        assert.deepEqual(routingList.structuredContent.data.modelRouting,{mode:"single",defaultWorkerId:"worker-one"});
+        const starter=await client.callTool({name:"agent_task_start",arguments:{workspaceId,instruction:"Agent Runtime integration test",allowShell:true,maxSteps:1}});
         assert.ok(!starter.isError,contentText(starter));
         const id=starter.structuredContent?.data?.id;assert.ok(id);
+        assert.equal(starter.structuredContent.data.routing.reason,"global-single");
         const hostRead=await client.callTool({name:readTool.name,arguments:{workspaceId,path:"safe.txt"}});
         assert.notEqual(hostRead.isError,true,contentText(hostRead));
         const uninspected=await client.callTool({name:hostCommandTool.name,arguments:{workspaceId,argv:["node","--version"],yieldTimeMs:1000}});
@@ -205,10 +219,7 @@ try{
         const events=(await client.callTool({name:"agent_task_events",arguments:{taskId:id}})).structuredContent.data;
         assert.ok(events.some(e=>e.kind==="tool-result"&&e.name==="read"&&e.ok&&e.text.includes("source code content")));
         assert.ok(events.some(e=>e.kind==="tool-result"&&e.name==="exec_command"&&e.ok&&/v\d+\./.test(e.text)));
-        const localUrl="http://127.0.0.1:"+modelListener.address().port+"/agent-runtime/local";
-        const requestOptions={method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"list"})};
         assert.equal((await fetch(localUrl,requestOptions)).status,403);
-        const uiToken=readFileSync(join(stateDir,"agent-runtime-ui.token"),"utf8");
         const authorized=await fetch(localUrl,{...requestOptions,headers:{...requestOptions.headers,"x-devspace-agent-token":uiToken}});
         assert.equal(authorized.status,200);assert.ok((await authorized.json()).some(t=>t.id===id));
         const localHistory=(action,token=uiToken)=>fetch(localUrl,{...requestOptions,
@@ -216,7 +227,10 @@ try{
         assert.equal((await localHistory("clear-history","invalid")).status,403);
         assert.equal((await localHistory("delete-history")).status,400);
         assert.deepEqual(await (await localHistory("clear-history")).json(),{deletedIds:[]});
-        assert.equal((await localHistory("accept")).status,200);
+        const accepted=await client.callTool({name:"agent_task_accept",arguments:{taskId:id}});
+        assert.equal(accepted.structuredContent?.data?.status,"completed",contentText(accepted));
+        const afterAccept=await client.callTool({name:hostCommandTool.name,arguments:{workspaceId,argv:["node","--version"],yieldTimeMs:1000}});
+        assert.notEqual(afterAccept.isError,true,contentText(afterAccept));
         assert.deepEqual(await (await localHistory("delete-history")).json(),{deletedIds:[id]});
         assert.equal((await localHistory("events")).status,400);
         setPolicy(true,"worker-policy");

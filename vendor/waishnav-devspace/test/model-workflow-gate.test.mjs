@@ -116,6 +116,25 @@ test("a write-capable model group grants remote reads, and only its current insp
     profiles=[profiles[0],{id:"b",callPolicyRevision:"3"}];
     assert.equal(gate.authorize("read",args,"group-owner").code,"MODEL_WORKFLOW_WORKER_DISABLED");
 });
+test("automatic group promotion keeps the original grant scope and validates every participant",()=>{
+    const f=fixture();
+    const profiles=[{id:"worker",callPolicyRevision:"1"},{id:"reviewer",callPolicyRevision:"2"}];
+    f.worker.agentProfiles=()=>profiles;
+    const solo={profileId:"worker",revision:"1"};
+    let job={id:"agent-promoted",workspaceId:"ws1",writer:true,status:"running",updatedAt:"start",agents:[solo]};
+    const gate=createModelWorkflowGate({modelWorker:f.worker,readPolicy:()=>({enabled:true,updatedAt:"promotion-policy"}),
+        agentRuntime:{status:()=>job}});
+    gate.onAgentStart(job,"promoting-chat");
+    job={...job,status:"completed",updatedAt:"finished",groupId:"g",routing:{reason:"escalated"},
+        agents:[solo,{profileId:"reviewer",revision:"2"}]};
+    const args={workspaceId:job.workspaceId};
+    assert.equal(gate.onAgentStatus(job,"other-chat").granted,false);
+    assert.equal(gate.onAgentStatus(job,"promoting-chat").granted,true);
+    assert.equal(gate.authorize("apply_patch",args,"promoting-chat").allowed,true);
+    profiles[1].callPolicyRevision="3";
+    assert.equal(gate.authorize("read",args,"promoting-chat").code,"MODEL_WORKFLOW_WORKER_DISABLED");
+    assert.equal(gate.onAgentStatus({...job,updatedAt:"later"},"promoting-chat").granted,false);
+});
 test("dispatch immediately unlocks Host inspection without waiting for Worker completion",()=>{
     const f=fixture();f.enable();
     f.delegate("task1","ws1","chat-one");
