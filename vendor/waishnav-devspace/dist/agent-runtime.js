@@ -61,6 +61,22 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
     let desktopOwner=null;
     const put=sqlite.prepare("insert into devspace_agent_tasks(id,data) values(?,?) on conflict(id) do update set data=excluded.data");
     const eventInsert=sqlite.prepare("insert into devspace_agent_events(task_id,data) values(?,?)");
+    const deleteEvents=sqlite.prepare("delete from devspace_agent_events where task_id=?");
+    const deleteTask=sqlite.prepare("delete from devspace_agent_tasks where id=?");
+    const deleteHistoryRows=sqlite.transaction(ids=>{
+        for(const id of ids){deleteEvents.run(id);deleteTask.run(id);}
+    });
+    const canDelete=t=>terminal.has(t.status)&&!running.has(t.id);
+    function deleteHistory(taskId){
+        const task=taskId===undefined?undefined:tasks.get(taskId);
+        if(task&&!canDelete(task))throw Error("AGENT_HISTORY_NOT_TERMINAL");
+        const deletedIds=taskId===undefined?[...tasks.values()].filter(canDelete).map(t=>t.id):task?[task.id]:[];
+        if(deletedIds.length){
+            deleteHistoryRows(deletedIds);
+            for(const id of deletedIds)tasks.delete(id);
+        }
+        return {deletedIds};
+    }
     const save=t=>{t.updatedAt=new Date().toISOString();put.run(t.id,JSON.stringify(t));};
     const event=(t,kind,agent,data={})=>eventInsert.run(t.id,JSON.stringify({at:new Date().toISOString(),kind,agent:agent?.id??null,...data}));
     const find=id=>{const t=tasks.get(id);if(!t)throw Error("UNKNOWN_AGENT_TASK");return t;};
@@ -225,11 +241,11 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         // The pending marker is committed BEFORE an external side effect. On a
         // crash no uncertain tool call is automatically replayed.
         t.pending={agent:a.id,name,id:call.id};save(t);
-        event(t,"tool-start",a,{name,args:safeText(JSON.stringify(scoped),8000)});
+        event(t,"tool-start",a,{name,callId:call.id,args:safeText(JSON.stringify(scoped),8000)});
         const result=await callTool(name,scoped);
         const text=safeText(result?.content?.filter(x=>x.type==="text").map(x=>x.text).join("\n")||JSON.stringify(result?.structuredContent||{}),24000);
         const images=(result?.content||[]).filter(x=>x.type==="image"&&x.data&&x.mimeType);
-        event(t,"tool-result",a,{name,ok:!result?.isError,text,images:images.length});
+        event(t,"tool-result",a,{name,callId:call.id,ok:!result?.isError,text,images:images.length});
         t.pending=null;
         return {text:(result?.isError?"TOOL_ERROR: ":"")+text,images};
     }
@@ -285,7 +301,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                     event(t,"compaction",a,{estimatedTokens:estimate(a.messages),checkpoint});
                 }
                 if(estimate(a.messages)>budget)throw Error("AGENT_CONTEXT_TOO_SMALL");
-                event(t,"inference-start",a,{profileId:a.profileId,estimatedTokens:estimate(a.messages),reasoningConfig:reasoningAdapter.resolveReasoning(p)});
+                event(t,"inference-start",a,{step:a.steps+1,profileId:a.profileId,estimatedTokens:estimate(a.messages),reasoningConfig:reasoningAdapter.resolveReasoning(p)});
                 return {a,p,toolset};
                 });
                 save(t);
@@ -309,7 +325,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                     let result;
                     if(signal.aborted||t.status!=="running")result="Tool skipped: task paused or finished.";
                     else try{if(!toolset.some(x=>x.function.name===call.function?.name))throw Error("AGENT_TOOL_NOT_AUTHORIZED");result=await execute(t,a,call);}
-                    catch(e){event(t,"tool-error",a,{name:call.function?.name,error:safeText(e.message)});if(t.pending){t.status="paused";t.error="TOOL_OUTCOME_UNCERTAIN";}result="TOOL_ERROR: "+safeText(e.message);}
+                    catch(e){event(t,"tool-error",a,{name:call.function?.name,callId:call.id,error:safeText(e.message)});if(t.pending){t.status="paused";t.error="TOOL_OUTCOME_UNCERTAIN";}result="TOOL_ERROR: "+safeText(e.message);}
                     a.messages.push({role:"tool",tool_call_id:call.id,content:typeof result==="string"?result:result.text});
                     if(result?.images?.length){
                         // Chat-completions multimodal input is opt-in per profile.
@@ -390,6 +406,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         tasks.set(t.id,t);save(t);event(t,"created",null,{groupId:t.groupId,permissions});return launch(t);
     }
     return {start,groups,list:()=>[...tasks.values()].map(view).reverse(),status:id=>view(find(id)),
+        deleteHistory,
         recover(){for(const t of tasks.values())if(t.resumeOnBoot&&!t.pending){try{launch(t);}catch(e){t.resumeOnBoot=false;t.error=safeText(e.message);save(t);}}},
         events:(id,after=0,limit=100)=>{find(id);return sqlite.prepare("select seq,data from devspace_agent_events where task_id=? and seq>? order by seq limit ?").all(id,after,Math.min(500,Math.max(1,limit))).map(r=>({seq:r.seq,...JSON.parse(r.data)}));},
         pause(id){const t=find(id);if(t.status==="running"){t.status="paused";t.resumeOnBoot=false;save(t);running.get(id)?.abort();}return view(t);},

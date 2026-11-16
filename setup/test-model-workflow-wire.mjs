@@ -149,6 +149,14 @@ try{
         const uiToken=readFileSync(join(stateDir,"agent-runtime-ui.token"),"utf8");
         const authorized=await fetch(localUrl,{...requestOptions,headers:{...requestOptions.headers,"x-devspace-agent-token":uiToken}});
         assert.equal(authorized.status,200);assert.ok((await authorized.json()).some(t=>t.id===id));
+        const localHistory=(action,token=uiToken)=>fetch(localUrl,{...requestOptions,
+            headers:{...requestOptions.headers,"x-devspace-agent-token":token},body:JSON.stringify({action,taskId:id})});
+        assert.equal((await localHistory("clear-history","invalid")).status,403);
+        assert.equal((await localHistory("delete-history")).status,400);
+        assert.deepEqual(await (await localHistory("clear-history")).json(),{deletedIds:[]});
+        assert.equal((await localHistory("accept")).status,200);
+        assert.deepEqual(await (await localHistory("delete-history")).json(),{deletedIds:[id]});
+        assert.equal((await localHistory("events")).status,400);
     }
     const argumentsRead={workspaceId,path:"safe.txt"};
     const hostCommandArguments=hostCommandTool.name==="bash"

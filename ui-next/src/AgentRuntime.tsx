@@ -1,6 +1,8 @@
-import {useCallback,useEffect,useRef,useState} from 'react';
-import {Button,Dialog,DialogSurface,DialogBody,DialogTitle,DialogContent,Field,Input,Switch,Textarea} from '@fluentui/react-components';
+import {useCallback,useEffect,useMemo,useRef,useState} from 'react';
+import {Button,Dialog,DialogActions,DialogSurface,DialogBody,DialogTitle,DialogContent,Field,Input,Switch,Textarea} from '@fluentui/react-components';
+import {DeleteRegular} from '@fluentui/react-icons';
 import type {AgentEvent,AgentGroup,AgentTask,ModelProvider} from './api';
+import {AgentFlow,appendFlowCards,agentStatuses,type FlowCard,type FlowLane} from './AgentFlow';
 
 const empty=():AgentGroup=>({id:'',name:'',members:[],childGroups:[],isDefault:false,requiredReviews:1,parallelism:4,backendParallelism:1,leaderId:'',writerId:''});
 const errorText=(e:unknown)=>e instanceof Error?e.message:String(e);
@@ -75,90 +77,304 @@ export function AgentGroupsPanel({profiles,open,onClose}:{profiles:ModelProvider
   </Dialog>;
 }
 
-const statusNames:Record<string,string>={running:'运行中',paused:'已暂停','awaiting-review':'等待验收',completed:'已完成',failed:'失败',cancelled:'已取消',ready:'就绪',waiting:'等待',submitted:'已提交',approved:'已审查',planning:'制定计划',working:'分工执行',reviewing:'独立审查',queued:'等待依赖',active:'执行中',reported:'已交付'};
-const eventNames:Record<string,string>={created:'任务开始',state:'状态变更',recovered:'任务恢复','inference-start':'开始推理','inference-stream':'正在生成',output:'模型输出',message:'协作消息',review:'审查','tool-start':'调用工具','tool-result':'工具结果',compaction:'上下文压缩',plan:'任务分配','plan-fallback':'自动备用计划',assignment:'子任务开始',report:'子任务交付','parallel-dispatch':'并行推理调度'};
-type TimelineEvent=AgentEvent&{taskId:string};
-const active=(t:AgentTask)=>['running','paused','awaiting-review'].includes(t.status);
-function mergeEvents(old:TimelineEvent[],incoming:TimelineEvent[]){
-  const result=[...old];
-  for(const event of incoming){
-    const previous=result[result.length-1];
-    if(previous?.kind==='inference-stream'&&previous.taskId===event.taskId&&previous.agent===event.agent&&['inference-stream','output'].includes(event.kind)&&(previous.step===undefined||event.step===undefined||previous.step===event.step))result.pop();
-    result.push(event);
-  }
-  return result.slice(-500);
+const isHistory = (task: AgentTask) => ['completed', 'failed', 'cancelled'].includes(task.status);
+const historyDate = new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+const dateLabel = (value: string) => {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : historyDate.format(date);
+};
+type TaskFilter = 'active' | 'history';
+type HistoryAction = { task?: AgentTask };
+type EventView = { taskId: string; cards: FlowCard[]; loading: boolean };
+type ControlAction = 'pause' | 'resume' | 'accept' | 'cancel';
+const agentError = (error: unknown) => errorText(error) === 'AGENT_HISTORY_NOT_TERMINAL'
+  ? '该任务仍在结束中，请稍后再删除。' : errorText(error);
+
+function rolesFor(task: AgentTask, id: string) {
+  const roles = [];
+  if (task.team?.leader === id) roles.push('协调者');
+  if (task.team?.writer === id) roles.push('执行者');
+  if (task.team?.reviewers.includes(id)) roles.push('审查者');
+  return roles.join(' · ') || '协作成员';
 }
-export function AgentRuntimePage(){
-  const [groups,setGroups]=useState<AgentGroup[]>([]);
-  const [profiles,setProfiles]=useState<ModelProvider[]>([]);
-  const [tasks,setTasks]=useState<AgentTask[]>([]);
-  const [filter,setFilter]=useState('');
-  const [events,setEvents]=useState<Record<string,TimelineEvent[]>>({});
-  const cursors=useRef<Record<string,number>>({});
-  const [createOpen,setCreateOpen]=useState(false);
-  const [path,setPath]=useState('');
-  const [instruction,setInstruction]=useState('');
-  const [target,setTarget]=useState('');
-  const [advanced,setAdvanced]=useState(false);
-  const [permissions,setPermissions]=useState({allowWrites:false,allowShell:false,allowComputer:false,allowMemory:true,allowPlugins:false});
-  const [error,setError]=useState('');
-  const [busy,setBusy]=useState(false);
-  const [ack,setAck]=useState<Record<string,boolean>>({});
-  useEffect(()=>{void Promise.all([window.devspace.agentGroupsList(),window.devspace.modelProvidersList()]).then(([g,p])=>{setGroups(g);setProfiles(p);}).catch(e=>setError(errorText(e)));},[]);
-  const refresh=useCallback(async()=>{const next=await window.devspace.agentRuntime('list') as AgentTask[];setTasks(next);return next;},[]);
-  useEffect(()=>{let alive=true;let inflight=false;const tick=async()=>{if(inflight)return;inflight=true;try{
-    const next=await refresh();if(!alive)return;
-    const watched=filter?next.filter(t=>t.id===filter):[...next.filter(active),...next.filter(t=>!active(t)).slice(0,5)];
-    const updates=await Promise.all(watched.map(async t=>{const batch=await window.devspace.agentRuntime('events',{taskId:t.id,after:cursors.current[t.id]||0}) as AgentEvent[];return {id:t.id,batch};}));
-    if(!alive)return;
-    for(const {id,batch} of updates)if(batch.length){cursors.current[id]=batch[batch.length-1].seq;setEvents(old=>({...old,[id]:mergeEvents(old[id]||[],batch.map(e=>({...e,taskId:id})))}));}
-  }catch(e){if(alive)setError(errorText(e));}finally{inflight=false;}};void tick();const timer=setInterval(()=>void tick(),1500);return()=>{alive=false;clearInterval(timer);};},[refresh,filter]);
-  async function start(){setBusy(true);try{
-    const chosen=target.startsWith('model:')?{modelId:target.slice(6)}:target?{groupId:target}:{};
-    await window.devspace.agentRuntime('start',{input:{path,instruction,...chosen,...permissions}});
-    await refresh();setFilter('');setCreateOpen(false);setInstruction('');setError('');
-  }catch(e){setError(errorText(e));}finally{setBusy(false);}}
-  async function control(action:string,t:AgentTask){setBusy(true);try{await window.devspace.agentRuntime(action,{taskId:t.id,acknowledge:ack[t.id]===true});await refresh();setError('');}catch(e){setError(errorText(e));}finally{setBusy(false);}}
-  const shown=filter?tasks.filter(t=>t.id===filter):[...tasks.filter(active),...tasks.filter(t=>!active(t)).slice(0,5)];
-  const timeline=shown.flatMap(t=>events[t.id]||[]).sort((a,b)=>a.seq-b.seq).slice(-250);
-  const groupName=(t:AgentTask|undefined)=>groups.find(g=>g.id===t?.groupId)?.name||'单 Agent';
-  const agentLabel=(t:AgentTask|undefined,id:string|null)=>{const a=t?.agents.find(a=>a.id===id);const p=profiles.find(p=>p.id===a?.profileId);return id?(p?p.name+' · '+Math.round(p.contextLength/1024)+'K · '+id:id):'Runtime';};
+
+function taskLanes(task: AgentTask, profiles: ModelProvider[]): FlowLane[] {
+  return [{ id: '', name: 'Runtime', role: '运行时', tone: 'runtime' }, ...task.agents.map((agent): FlowLane => {
+    const profile = profiles.find(item => item.id === agent.profileId);
+    const name = profile ? profile.name + ' · ' + Math.round(profile.contextLength / 1024) + 'K · ' + agent.id : agent.id;
+    const tone = task.team?.leader === agent.id ? 'lead' : task.team?.writer === agent.id
+      ? 'execution' : task.team?.reviewers.includes(agent.id) ? 'review' : 'member';
+    return { id: agent.id, name, role: rolesFor(task, agent.id), tone };
+  })];
+}
+
+function TaskCard({ task, group, selected, busy, onSelect, onDelete }: {
+  task: AgentTask; group: string; selected: boolean; busy: boolean; onSelect: () => void; onDelete: () => void;
+}) {
+  return <article className={'agent-task-card' + (selected ? ' is-selected' : '')} data-task-status={task.status}>
+    <button type="button" className="agent-task-open" aria-pressed={selected} onClick={onSelect}>
+      <span className="agent-task-label">
+        <span className={'agent-task-badge is-' + task.status}>{agentStatuses[task.status] || task.status}</span>
+        <span className="agent-task-group">{group}</span>
+      </span>
+      <strong className="agent-task-title" title={task.instruction}>{task.instruction}</strong>
+      <span className="agent-task-meta"><time>{dateLabel(task.updatedAt || task.createdAt)}</time><span>{task.steps} 步</span></span>
+    </button>
+    {isHistory(task) && <Button size="small" appearance="subtle" className="agent-task-remove" disabled={busy}
+      icon={<DeleteRegular />} aria-label={'删除历史任务 ' + task.instruction} title="删除历史任务" onClick={onDelete} />}
+  </article>;
+}
+
+export function AgentRuntimePage() {
+  const [groups, setGroups] = useState<AgentGroup[]>([]);
+  const [profiles, setProfiles] = useState<ModelProvider[]>([]);
+  const [tasks, setTasks] = useState<AgentTask[]>([]);
+  const [tabPreference, setTabPreference] = useState<TaskFilter>();
+  const [selectedId, setSelectedId] = useState<string>();
+  const [eventView, setEventView] = useState<EventView>();
+  const [historyAction, setHistoryAction] = useState<HistoryAction>();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [path, setPath] = useState('');
+  const [instruction, setInstruction] = useState('');
+  const [target, setTarget] = useState('');
+  const [advanced, setAdvanced] = useState(false);
+  const [permissions, setPermissions] = useState({ allowWrites: false, allowShell: false, allowComputer: false, allowMemory: true, allowPlugins: false });
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [ack, setAck] = useState<Record<string, boolean>>({});
+  const listRevision = useRef(0);
+
+  const live = tasks.filter(task => !isHistory(task));
+  const history = tasks.filter(isHistory);
+  const pinned = tasks.find(task => task.id === selectedId);
+  const tab = pinned ? (isHistory(pinned) ? 'history' : 'active') : tabPreference ?? (live.length ? 'active' : 'history');
+  const items = tab === 'history' ? history : live;
+  const task = pinned ?? (tab === 'active' ? items.find(item => item.status === 'running') : undefined) ?? items[0];
+  const currentId = task?.id;
+  const flow = eventView?.taskId === currentId ? eventView : undefined;
+  const lanes = useMemo(() => task ? taskLanes(task, profiles) : [], [task, profiles]);
+
+  useEffect(() => {
+    let alive = true;
+    void Promise.all([window.devspace.agentGroupsList(), window.devspace.modelProvidersList()])
+      .then(([savedGroups, savedProfiles]) => {
+        if (alive) { setGroups(savedGroups); setProfiles(savedProfiles); }
+      }).catch(error => { if (alive) setError(agentError(error)); });
+    return () => { alive = false; };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    const revision = ++listRevision.current;
+    const next = await window.devspace.agentRuntime('list') as AgentTask[];
+    if (revision === listRevision.current) setTasks(next);
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    let inFlight = false;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try { await refresh(); }
+      catch (error) { if (alive) setError(agentError(error)); }
+      finally { inFlight = false; }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), 1500);
+    return () => { alive = false; ++listRevision.current; window.clearInterval(timer); };
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!currentId) return;
+    let alive = true;
+    let inFlight = false;
+    let after = 0;
+    const tick = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        let batch: AgentEvent[];
+        do {
+          batch = await window.devspace.agentRuntime('events', { taskId: currentId, after }) as AgentEvent[];
+          if (!alive) return;
+          if (batch.length) after = batch[batch.length - 1].seq;
+          const events = batch;
+          setEventView(previous => {
+            if (!events.length && previous?.taskId === currentId && !previous.loading) return previous;
+            return {
+              taskId: currentId,
+              cards: appendFlowCards(previous?.taskId === currentId ? previous.cards : [], events),
+              loading: events.length === 200,
+            };
+          });
+        } while (batch.length === 200);
+      } catch (error) {
+        if (alive && errorText(error) !== 'UNKNOWN_AGENT_TASK') setError(agentError(error));
+      } finally { inFlight = false; }
+    };
+    setEventView({ taskId: currentId, cards: [], loading: true });
+    void tick();
+    const timer = window.setInterval(() => void tick(), 1500);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [currentId]);
+
+  async function start() {
+    setBusy(true);
+    try {
+      const chosen = target.startsWith('model:') ? { modelId: target.slice(6) } : target ? { groupId: target } : {};
+      const created = await window.devspace.agentRuntime('start', { input: { path, instruction, ...chosen, ...permissions } }) as AgentTask;
+      setSelectedId(created.id);
+      setTabPreference('active');
+      setCreateOpen(false);
+      setInstruction('');
+      setNotice('');
+      setError('');
+      await refresh();
+    } catch (error) { setError(agentError(error)); }
+    finally { setBusy(false); }
+  }
+
+  async function control(action: ControlAction, targetTask: AgentTask) {
+    setBusy(true);
+    try {
+      const updated = await window.devspace.agentRuntime(action, { taskId: targetTask.id, acknowledge: ack[targetTask.id] === true }) as AgentTask;
+      setSelectedId(updated.id);
+      setTasks(items => items.map(item => item.id === updated.id ? updated : item));
+      setError('');
+      await refresh();
+    } catch (error) { setError(agentError(error)); }
+    finally { setBusy(false); }
+  }
+
+  async function removeHistory(selection: HistoryAction) {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const { deletedIds } = await window.devspace.agentRuntime(
+        selection.task ? 'delete-history' : 'clear-history', selection.task ? { taskId: selection.task.id } : {}
+      ) as { deletedIds: string[] };
+      ++listRevision.current;
+      const removed = new Set(deletedIds);
+      setTasks(items => items.filter(item => !removed.has(item.id)));
+      setSelectedId(id => id && removed.has(id) ? undefined : id);
+      setEventView(state => state && removed.has(state.taskId) ? undefined : state);
+      setTabPreference('history');
+      setHistoryAction(undefined);
+      if (deletedIds.length) setNotice('已删除 ' + deletedIds.length + ' 条历史流程');
+      await refresh();
+    } catch (error) {
+      setHistoryAction(undefined);
+      setError(agentError(error));
+    } finally { setBusy(false); }
+  }
+
+  const groupName = (item: AgentTask) => groups.find(group => group.id === item.groupId)?.name
+    || (item.groupId ? '模型组' : '单 Agent');
+  function selectTab(next: TaskFilter) {
+    setSelectedId(undefined);
+    setTabPreference(next);
+    setNotice('');
+  }
+
   return <div className="panel models-page agent-workbench">
-    <div className="section-heading"><div><h2>Agent 协作动态</h2><p>上游委派和本地启动的 Agent 均在这里显示，无需手动选择任务。关闭页面不会停止运行。</p></div><Button appearance="primary" onClick={()=>setCreateOpen(true)}>新建任务</Button></div>
-    {error&&<div className="op-message op-error" role="alert">{error}</div>}
-    <div className="agent-summary"><strong>{tasks.filter(t=>t.status==='running').length} 个运行中</strong><span>{tasks.filter(active).length} 个未结束</span><span>{tasks.filter(t=>t.status==='completed').length} 个已完成</span><select aria-label="协作动态范围" className="op-select" value={filter} onChange={e=>setFilter(e.target.value)}><option value="">全部协作动态（默认）</option>{tasks.map(t=><option key={t.id} value={t.id}>{groupName(t)} · {statusNames[t.status]||t.status} · {t.instruction.slice(0,45)}</option>)}</select></div>
-    {shown.filter(t=>active(t)||filter).map(t=><section className="models-usage" key={t.id}>
-      <div className="models-usage-header"><strong>{groupName(t)} · {statusNames[t.status]||t.status} · {t.steps} 步</strong><small>{t.id.slice(-8)}</small></div>
-      <div>{t.instruction}</div>{t.error&&<div className="op-message op-error">{t.error}</div>}
-      {t.team&&<div className="agent-summary"><strong>{statusNames[t.team.phase]||t.team.phase}</strong><span>协调者 {t.team.leader} · 唯一执行者 {t.team.writer}</span><span>审查 {t.team.reviewers.join(', ')} · 最大并行 {t.parallelism} / 同后端 {t.backendParallelism}</span></div>}
-      <div className="agent-roster">{t.agents.map(a=><div key={a.id}><strong>{agentLabel(t,a.id)}</strong>
-        {t.team&&<small>{[a.id===t.team.leader?'协调者':'',a.id===t.team.writer?'唯一执行者':'',t.team.reviewers.includes(a.id)?'审查者':''].filter(Boolean).join(' · ')||'协作成员'}</small>}
-        {a.groupPaths?.length?<small>{a.groupPaths.map(p=>p.join(' / ')).join('；')}</small>:null}
-        <small>{statusNames[a.state]||a.state} · {a.steps} 步 · 上下文约 {a.contextEstimate.toLocaleString()}</small><small>{a.inputTokens||a.outputTokens?'输入 '+a.inputTokens.toLocaleString()+' / 输出 '+a.outputTokens.toLocaleString():'暂无服务端用量'}</small>
-        {t.team?.assignments[a.id]&&<><small>{statusNames[t.team.assignments[a.id].status]} · {t.team.assignments[a.id].dependsOn.length?'依赖 '+t.team.assignments[a.id].dependsOn.join(', '):'无依赖'}</small><p>{t.team.assignments[a.id].goal}</p>{t.team.assignments[a.id].summary&&<details><summary>交付证据</summary><pre>{t.team.assignments[a.id].summary}</pre></details>}</>}
-      </div>)}</div>
-      {t.pending!=null&&<Switch label="我已核对中断工具是否执行，允许恢复（不自动重放）" checked={ack[t.id]===true} onChange={(_,d)=>setAck(x=>({...x,[t.id]:d.checked}))}/>}
-      <div className="models-actions"><Button disabled={busy||t.status!=='running'} onClick={()=>void control('pause',t)}>暂停</Button><Button disabled={busy||!['paused','awaiting-review'].includes(t.status)||(t.pending!=null&&!ack[t.id])} onClick={()=>void control('resume',t)}>恢复</Button><Button disabled={busy||t.status!=='awaiting-review'} onClick={()=>void control('accept',t)}>人工验收</Button><Button disabled={busy||!active(t)} onClick={()=>void control('cancel',t)}>取消任务</Button></div>
-      {t.result&&<details><summary>提交结果</summary><pre>{t.result}</pre></details>}
-    </section>)}
-    <div className="agent-feed"><h3>实时协作流</h3>{!timeline.length&&<div className="agent-empty">尚无协作记录。上游调用默认模型组后，记录会自动出现；也可通过上方按钮手动发起任务。</div>}
-      {timeline.map(e=>{const t=tasks.find(t=>t.id===e.taskId);return <article className={'agent-event '+(e.kind==='message'||e.kind==='review'?'agent-event-emphasis':'')} key={e.taskId+':'+e.seq}>
-        <div className="agent-event-head"><strong>{agentLabel(t,e.agent)}</strong><span>{eventNames[e.kind]||e.kind}</span><small>{groupName(t)} · {e.taskId.slice(-8)} · {new Date(e.at).toLocaleTimeString()}</small></div>
-        {typeof e.message==='string'&&<p>{e.to?'发送给 '+agentLabel(t,String(e.to))+'：':''}{e.message}</p>}
-        {typeof e.content==='string'&&e.content&&<pre>{e.content}</pre>}
-        {typeof e.reasoning==='string'&&e.reasoning&&<details open={e.kind==='inference-stream'}><summary>模型返回的思考内容</summary><pre>{e.reasoning}</pre></details>}
-        {Object.entries(e).filter(([k,v])=>!['seq','at','agent','kind','taskId','step','content','reasoning','message','to'].includes(k)&&v!==null&&v!==undefined&&v!=='').map(([k,v])=><details key={k} open={['name','decision','summary','status','reasoningConfig','reasoningEvidence'].includes(k)}><summary>{({name:'工具',decision:'审查决定',summary:'摘要',reasoningConfig:'实际发送的思考参数',reasoningEvidence:'响应证据'} as Record<string,string>)[k]||k}</summary><pre>{typeof v==='string'?v:JSON.stringify(v,null,2)}</pre></details>)}
-      </article>;})}
+    <div className="section-heading"><div><h2>Agent 协作</h2></div>
+      <Button appearance="primary" onClick={() => setCreateOpen(true)}>新建任务</Button>
     </div>
-    {createOpen&&<Dialog open={createOpen} onOpenChange={(_,d)=>setCreateOpen(d.open)}><DialogSurface className="agent-dialog"><DialogBody><DialogTitle>新建 Agent 任务（可选）</DialogTitle><DialogContent>
-      <div className="models-editor">
-        <Field label="工作区路径"><Input value={path} onChange={(_,d)=>setPath(d.value)} contentAfter={<Button size="small" onClick={async()=>{const p=await window.devspace.chooseFolder();if(p)setPath(p);}}>浏览</Button>}/></Field>
-        <Field label="模型或模型组"><select className="op-select" value={target} onChange={e=>setTarget(e.target.value)}><option value="">默认模型组</option>{groups.map(g=><option key={g.id} value={g.id}>{g.name}</option>)}{profiles.filter(p=>p.api==='chat'&&p.allowCalls).map(p=><option key={p.id} value={'model:'+p.id}>{profileLabel(p)}</option>)}</select></Field>
-        <Field label="任务目标与验收条件"><Textarea value={instruction} rows={4} onChange={(_,d)=>setInstruction(d.value)}/></Field>
-        <Button onClick={()=>setAdvanced(x=>!x)}>{advanced?'收起':'展开'}权限设置</Button>
-        {advanced&&([['allowWrites','允许编辑文件'],['allowShell','允许 Shell（继承现有权限）'],['allowComputer','允许 Computer Use（需要桌面开关）'],['allowMemory','允许工作区记忆写入'],['allowPlugins','允许已授权插件调用']] as const).map(([id,label])=><Switch key={id} label={label} checked={permissions[id]} onChange={(_,d)=>setPermissions(x=>({...x,[id]:d.checked}))}/>)}
-        <div className="models-actions"><Button appearance="primary" disabled={busy||!path.trim()||!instruction.trim()} onClick={()=>void start()}>启动任务</Button><Button onClick={()=>setCreateOpen(false)}>取消</Button></div>
+    {error && <div className="op-message op-error" role="alert">{error}</div>}
+    {notice && <div className="op-message op-success" role="status">{notice}</div>}
+    <section className="agent-task-library" aria-label="任务列表">
+      <div className="agent-library-bar">
+        <div className="agent-task-tabs" aria-label="任务范围">
+          <button type="button" aria-pressed={tab === 'active'} onClick={() => selectTab('active')}>进行中 <span>{live.length}</span></button>
+          <button type="button" aria-pressed={tab === 'history'} onClick={() => selectTab('history')}>历史任务 <span>{history.length}</span></button>
+        </div>
+        {tab === 'history' && history.length > 0 && <Button appearance="subtle" size="small" icon={<DeleteRegular />}
+          disabled={busy} onClick={() => setHistoryAction({})}>清空历史</Button>}
       </div>
-    </DialogContent></DialogBody></DialogSurface></Dialog>}
+      {items.length ? <div className="agent-task-grid">
+        {items.map(item => <TaskCard key={item.id} task={item} group={groupName(item)} selected={item.id === currentId}
+          busy={busy} onSelect={() => setSelectedId(item.id)} onDelete={() => setHistoryAction({ task: item })} />)}
+      </div> : <div className="agent-empty">{tab === 'history' ? '暂无历史任务' : '暂无进行中的任务'}</div>}
+    </section>
+    {task && <>
+      <section className="agent-task-detail" aria-label="所选任务">
+        <div className="agent-work-title">
+          <div><h3>{task.instruction}</h3>
+            <div className="agent-work-meta">{groupName(task)} · {agentStatuses[task.status] || task.status}
+              {task.team && ' · ' + (agentStatuses[task.team.phase] || task.team.phase)}
+              {' · ' + task.steps + ' 步'}</div>
+          </div>
+          {!isHistory(task) && <div className="agent-work-actions">
+            {task.status === 'running' && <Button size="small" disabled={busy} onClick={() => void control('pause', task)}>暂停</Button>}
+            {['paused', 'awaiting-review'].includes(task.status) && <Button size="small" disabled={busy || (task.pending != null && !ack[task.id])}
+              onClick={() => void control('resume', task)}>恢复</Button>}
+            {task.status === 'awaiting-review' && <Button size="small" disabled={busy} onClick={() => void control('accept', task)}>人工验收</Button>}
+            <Button size="small" disabled={busy} onClick={() => void control('cancel', task)}>取消任务</Button>
+          </div>}
+        </div>
+        {task.error && <div className="op-message op-error">{task.error}</div>}
+        {task.pending != null && !isHistory(task) && <Switch label="已核对中断工具是否执行，允许恢复"
+          checked={ack[task.id] === true} onChange={(_, data) => setAck(state => ({ ...state, [task.id]: data.checked }))} />}
+        <details className="agent-task-extra">
+          <summary>成员用量与分工</summary>
+          <div className="agent-roster">{task.agents.map(agent => {
+            const lane = lanes.find(item => item.id === agent.id);
+            const work = task.team?.assignments[agent.id];
+            return <div key={agent.id}>
+              <strong>{lane?.name || agent.id}</strong><small>{lane?.role} · {agentStatuses[agent.state] || agent.state}</small>
+              {agent.groupPaths?.length ? <small>{agent.groupPaths.map(parts => parts.join(' / ')).join('；')}</small> : null}
+              <small>{agent.steps} 步 · 上下文约 {agent.contextEstimate.toLocaleString()}</small>
+              <small>{agent.inputTokens || agent.outputTokens ? '输入 ' + agent.inputTokens.toLocaleString() +
+                ' / 输出 ' + agent.outputTokens.toLocaleString() : '暂无服务端用量'}</small>
+              {work && <><small>{agentStatuses[work.status] || work.status}{work.dependsOn.length ? ' · 依赖 ' + work.dependsOn.join(', ') : ''}</small>
+                <p>{work.goal}</p>{work.summary && <details><summary>交付证据</summary><pre>{work.summary}</pre></details>}</>}
+            </div>;
+          })}</div>
+        </details>
+        {task.result && <details className="agent-task-extra"><summary>任务结果</summary><pre>{task.result}</pre></details>}
+      </section>
+      <section className="agent-feed" aria-label="协作流程">
+        <div className="agent-feed-heading"><h3>协作流程</h3><span>{flow?.loading ? '正在加载记录' : (flow?.cards.length ?? 0) + ' 个节点'}</span></div>
+        {flow?.cards.length ? <AgentFlow key={task.id} lanes={lanes} cards={flow.cards} />
+          : <div className="agent-empty">{!flow || flow.loading ? '正在读取流程' : '暂无流程记录'}</div>}
+      </section>
+    </>}
+    {historyAction && <Dialog open onOpenChange={(_, data) => { if (!data.open && !busy) setHistoryAction(undefined); }}>
+      <DialogSurface className="agent-history-dialog"><DialogBody>
+        <DialogTitle>{historyAction.task ? '删除这条历史流程？' : '清空历史流程？'}</DialogTitle>
+        <DialogContent>
+          {historyAction.task && <p className="agent-history-task">{historyAction.task.instruction}</p>}
+          <p>将永久删除{historyAction.task ? '这条任务的' : '已结束任务的'}记录和流程详情。</p>
+          {!historyAction.task && <p>进行中、已暂停与等待验收的任务会保留。</p>}
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={busy} onClick={() => setHistoryAction(undefined)}>返回</Button>
+          <Button appearance="primary" className="agent-confirm-remove" disabled={busy} onClick={() => void removeHistory(historyAction)}>
+            {historyAction.task ? '删除历史' : '清空历史'}
+          </Button>
+        </DialogActions>
+      </DialogBody></DialogSurface>
+    </Dialog>}
+    {createOpen && <Dialog open={createOpen} onOpenChange={(_, data) => setCreateOpen(data.open)}>
+      <DialogSurface className="agent-dialog"><DialogBody><DialogTitle>新建 Agent 任务</DialogTitle><DialogContent>
+        <div className="models-editor">
+          <Field label="工作区路径"><Input value={path} onChange={(_, data) => setPath(data.value)}
+            contentAfter={<Button size="small" onClick={async () => { const chosen = await window.devspace.chooseFolder(); if (chosen) setPath(chosen); }}>浏览</Button>} /></Field>
+          <Field label="模型或模型组"><select className="op-select" value={target} onChange={e => setTarget(e.target.value)}>
+            <option value="">默认模型组</option>{groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
+            {profiles.filter(profile => profile.api === 'chat' && profile.allowCalls).map(profile =>
+              <option key={profile.id} value={'model:' + profile.id}>{profileLabel(profile)}</option>)}</select></Field>
+          <Field label="任务目标与验收条件"><Textarea value={instruction} rows={4} onChange={(_, data) => setInstruction(data.value)} /></Field>
+          <Button onClick={() => setAdvanced(value => !value)}>{advanced ? '收起' : '展开'}权限设置</Button>
+          {advanced && ([['allowWrites', '允许编辑文件'], ['allowShell', '允许 Shell（继承现有权限）'],
+            ['allowComputer', '允许 Computer Use（需要桌面开关）'], ['allowMemory', '允许工作区记忆写入'],
+            ['allowPlugins', '允许已授权插件调用']] as const).map(([id, label]) => <Switch key={id} label={label} checked={permissions[id]}
+              onChange={(_, data) => setPermissions(state => ({ ...state, [id]: data.checked }))} />)}
+          <div className="models-actions"><Button appearance="primary" disabled={busy || !path.trim() || !instruction.trim()}
+            onClick={() => void start()}>启动任务</Button><Button onClick={() => setCreateOpen(false)}>取消</Button></div>
+        </div>
+      </DialogContent></DialogBody></DialogSurface>
+    </Dialog>}
   </div>;
 }

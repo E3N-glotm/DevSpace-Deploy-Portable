@@ -134,6 +134,47 @@ test("compaction preserves goal and complete assistant/tool turns",()=>{
     assert.equal(next[1].content,"goal");assert.ok(next.some(x=>x.content.includes("durable checkpoint")));
     assert.ok(!next.some(x=>x.role==="tool"));assert.ok(next.some(x=>x.content==="recent"));
 });
+test("history deletion is transactional, survives restart and protects unfinished tasks",async()=>{
+    const f=fixture({request:async()=>reply(call("agent_finish",{decision:"submit",summary:"ready"}))});
+    const start=()=>f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"history test"});
+    const first=start(), second=start(), waiting=start();
+    for(const t of [first,second,waiting])await until(f.runtime,t.id,["awaiting-review"]);
+    for(const t of [first,second])f.runtime.accept(t.id);
+    assert.throws(()=>f.runtime.deleteHistory(waiting.id),/AGENT_HISTORY_NOT_TERMINAL/);
+    f.sqlite.exec("create trigger fail_history_delete before delete on devspace_agent_tasks begin select raise(abort,'delete blocked'); end");
+    assert.throws(()=>f.runtime.deleteHistory(first.id),/delete blocked/);
+    assert.ok(f.runtime.events(first.id).length);
+    assert.equal(f.runtime.status(first.id).status,"completed");
+    f.sqlite.exec("drop trigger fail_history_delete");
+    assert.deepEqual(f.runtime.deleteHistory(first.id),{deletedIds:[first.id]});
+    assert.deepEqual(f.runtime.deleteHistory(first.id),{deletedIds:[]});
+    assert.deepEqual(f.runtime.deleteHistory(),{deletedIds:[second.id]});
+    const count=f.sqlite.prepare("select count(*) as n from devspace_agent_events where task_id=?");
+    assert.equal(count.get(first.id).n,0);
+    assert.equal(count.get(second.id).n,0);
+    assert.ok(count.get(waiting.id).n>0);
+    await f.runtime.close();
+    const restarted=fixture({sqlite:f.sqlite});
+    assert.deepEqual(restarted.runtime.list().map(task=>task.id),[waiting.id]);
+    await restarted.runtime.close();
+    f.sqlite.close();
+});
+test("cancelled task remains protected until in-flight work unwinds",async()=>{
+    let release, started;
+    const pending=new Promise(resolve=>{release=resolve;});
+    const admitted=new Promise(resolve=>{started=resolve;});
+    const f=fixture({request:async()=>{started();await pending;return reply();}});
+    const t=f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"cancellation race"});
+    await admitted;
+    f.runtime.cancel(t.id);
+    assert.throws(()=>f.runtime.deleteHistory(t.id),/AGENT_HISTORY_NOT_TERMINAL/);
+    assert.deepEqual(f.runtime.deleteHistory(),{deletedIds:[]});
+    release();
+    await delay();
+    assert.deepEqual(f.runtime.deleteHistory(t.id),{deletedIds:[t.id]});
+    await f.runtime.close();
+    f.sqlite.close();
+});
 test("streaming joins real reasoning, content and tool deltas, rejects interrupted streams",async()=>{
     const chunk=data=>"data: "+JSON.stringify(data)+"\n\n";
     const parts=[

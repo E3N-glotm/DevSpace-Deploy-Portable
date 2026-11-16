@@ -4729,6 +4729,11 @@ export function createServer(config = loadConfig(), options = {}) {
             const {action,taskId,after,acknowledge}=req.body||{};
             if(action==="list")return res.json(agentRuntime.list());
             if(action==="events")return res.json(agentRuntime.events(taskId,after,200));
+            if(action==="delete-history"){
+                if(typeof taskId!=="string"||!taskId.trim())throw Error("AGENT_TASK_ID_REQUIRED");
+                return res.json(agentRuntime.deleteHistory(taskId));
+            }
+            if(action==="clear-history")return res.json(agentRuntime.deleteHistory());
             if(action==="start"){
                 const input=req.body.input;
                 if(!input||typeof input.path!=="string")throw Error("WORKSPACE_PATH_REQUIRED");
