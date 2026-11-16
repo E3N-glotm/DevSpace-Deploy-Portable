@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.68",
-  "builtAt": "2026-11-16T16:40:18+08:00",
+  "builtAt": "2026-11-16T17:01:15+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -813,7 +813,7 @@
     "setup/test-upstream-workspace-reuse.mjs.sha256": "87a4d35a9eb1ddfb154cecf625adc410d2db414e9716e0e8426cb0b76d59ba12",
     "setup/test-windows-app-icon.mjs.sha256": "2f48e3da2331fa5ed67a19799c61179c1527e0c9a888de08147529fd1497fd20",
     "setup/tunnel-launcher.cjs.sha256": "7bba0ada07e0d2685885159287462726ee16018bebf82919c5ab6cd6136aad66",
-    "ui-next/dist/index.html.sha256": "3911d4f36e834012f6d36397e8126b9e6147a9d5652c387d23e5062956651a7a",
+    "ui-next/dist/index.html.sha256": "62d6023aa3c3953cd1f62d70d1e2760b973062ed635727ed6bd1b618c1494573",
     "ui-next/electron/main.cjs.sha256": "bf959ad7894aa6d4a2ae5c82a43057e45ebaaba0b4cbf479c5664fc50091e02d",
     "ui-next/electron/model-providers.cjs.sha256": "8b9378b37639b9ac08cd52eda9607ff482ddf348df18e9d1632e46d2c9de6225",
     "ui-next/electron/preload.cjs.sha256": "f2d316f4e65020084a5e102c42721279dc0300b97fe90bd512e755d1916d9508",
