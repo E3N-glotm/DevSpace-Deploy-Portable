@@ -136,6 +136,7 @@ $Tests = @(
     "setup/test-model-workflow-wire.mjs",
     "vendor/waishnav-devspace/test/model-workflow-gate.test.mjs",
     "vendor/waishnav-devspace/test/model-worker-runtime.test.mjs",
+    "vendor/waishnav-devspace/test/agent-runtime.test.mjs",
     "setup/test-runtime-log-ui.mjs",
     "setup/test-portable-ui-workflows.mjs",
     "setup/test-oauth-client-compatibility.mjs",

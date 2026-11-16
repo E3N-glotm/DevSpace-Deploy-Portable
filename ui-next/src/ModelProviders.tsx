@@ -2,6 +2,7 @@ import {useCallback,useEffect,useRef,useState} from 'react';
 import {Button,Field,Input,Radio,RadioGroup,Spinner,Switch} from '@fluentui/react-components';
 import {ArrowClockwiseRegular,DeleteRegular,SaveRegular,ShieldCheckmarkRegular} from '@fluentui/react-icons';
 import type {ModelProvider,ModelProviderDraft,ModelDiscovery,ModelProbe,ModelUsageStats} from './api';
+import {AgentGroupsPanel} from './AgentRuntime';
 
 type ProviderType=ModelProviderDraft['type'];
 type Role=ModelProviderDraft['role'];
@@ -260,6 +261,15 @@ export function ModelProvidersPage(){
               onChange={(_,v)=>number('maxOutputTokens')(v.value)}/>
           </Field>
         </div>
+        <div className="models-two">
+          <Field label="Agent 思考程度"><select className="op-select" value={form.reasoningEffort||'auto'} onChange={e=>update({reasoningEffort:e.target.value as ModelProviderDraft['reasoningEffort']})}>
+            <option value="auto">Auto</option><option value="off">关闭</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="extra-high">Extra High</option>
+          </select></Field>
+          <Field label="推理参数适配"><select className="op-select" value={form.reasoningAdapter||'native'} onChange={e=>update({reasoningAdapter:e.target.value as ModelProviderDraft['reasoningAdapter']})}>
+            <option value="native">供应商原生 / 默认</option><option value="openai">OpenAI reasoning_effort</option>
+          </select></Field>
+        </div>
+        <Switch label="视觉模型（允许向此模型发送 Computer Use 截图）" checked={form.vision===true} onChange={(_,d)=>update({vision:d.checked})}/>
         <div className="models-three">
           <Field label="每任务费用上限（USD）">
             <Input type="number" min={0.01} step={0.01} value={String(form.maxTaskUSD)}
@@ -316,5 +326,6 @@ export function ModelProvidersPage(){
         </div>}
       </div>
     </div>
+    <AgentGroupsPanel profiles={items}/>
   </div>;
 }

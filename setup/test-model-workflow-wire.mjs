@@ -34,8 +34,18 @@ try{
         let body="";
         for await(const chunk of req)body+=chunk.toString();
         if(req.url==="/v1/chat/completions"){
-            assert.equal(JSON.parse(body).model,"fake-enabled-worker");
-            if(JSON.parse(body).messages.some(m=>m.role==="user" &&
+            const request=JSON.parse(body);
+            assert.equal(request.model,"fake-enabled-worker");
+            if(request.messages.some(m=>m.role==="user"&&m.content==="Agent Runtime integration test")){
+                const calls=request.messages.filter(m=>m.role==="tool");
+                const next=calls.length===0?{name:"read",arguments:JSON.stringify({path:"safe.txt"})}:
+                    calls.length===1?{name:"exec_command",arguments:JSON.stringify({argv:["node","--version"],yieldTimeMs:1000})}:
+                    {name:"agent_finish",arguments:JSON.stringify({decision:"submit",summary:"Verified source and command"})};
+                res.writeHead(200,{"Content-Type":"application/json"});
+                res.end(JSON.stringify({choices:[{message:{content:null,tool_calls:[{id:"agent-test-"+calls.length,type:"function",function:next}]}}],usage:{prompt_tokens:20,completion_tokens:12}}));
+                return;
+            }
+            if(request.messages.some(m=>m.role==="user" &&
                 m.content==="Hold a write-capable Worker lease"))
                 await sleep(400);
             res.writeHead(200,{"Content-Type":"application/json"});
@@ -115,6 +125,26 @@ try{
     const workspaceId=opened.structuredContent?.workspaceId
         ||opened.structuredContent?.workspace?.workspaceId;
     assert.ok(workspaceId,"open_workspace should return workspaceId");
+    if(process.env.DEVSPACE_TEST_WORKFLOW_TOOL_MODE!=="full"){
+        const starter=await client.callTool({name:"agent_task_start",arguments:{workspaceId,modelId:"worker-one",instruction:"Agent Runtime integration test",allowShell:true,maxSteps:8}});
+        assert.ok(!starter.isError,contentText(starter));
+        const id=starter.structuredContent?.data?.id;assert.ok(id);
+        let state;
+        for(let i=0;i<100;i++){
+            state=(await client.callTool({name:"agent_task_status",arguments:{taskId:id}})).structuredContent.data;
+            if(state.status!=="running")break;await sleep(30);
+        }
+        assert.equal(state.status,"awaiting-review",JSON.stringify(state));
+        const events=(await client.callTool({name:"agent_task_events",arguments:{taskId:id}})).structuredContent.data;
+        assert.ok(events.some(e=>e.kind==="tool-result"&&e.name==="read"&&e.ok&&e.text.includes("source code content")));
+        assert.ok(events.some(e=>e.kind==="tool-result"&&e.name==="exec_command"&&e.ok&&/v\d+\./.test(e.text)));
+        const localUrl="http://127.0.0.1:"+modelListener.address().port+"/agent-runtime/local";
+        const requestOptions={method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"list"})};
+        assert.equal((await fetch(localUrl,requestOptions)).status,403);
+        const uiToken=readFileSync(join(stateDir,"agent-runtime-ui.token"),"utf8");
+        const authorized=await fetch(localUrl,{...requestOptions,headers:{...requestOptions.headers,"x-devspace-agent-token":uiToken}});
+        assert.equal(authorized.status,200);assert.ok((await authorized.json()).some(t=>t.id===id));
+    }
     const argumentsRead={workspaceId,path:"safe.txt"};
     const hostCommandArguments=hostCommandTool.name==="bash"
         ?{workspaceId,command:"node --version"}

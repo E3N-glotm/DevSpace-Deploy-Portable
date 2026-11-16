@@ -14,6 +14,49 @@ const MAX_TASKS = 32;
 const MAX_TASK_TEXT = 8000;
 const MAX_MODEL_RESPONSE = 512 * 1024;
 const MAX_TOOL_REPLY = 14000;
+// OpenAI-compatible providers may stream real deltas, or reply with a
+// conventional JSON body. Both paths preserve the actual returned content.
+export async function collectAgentStream(response,limit,onDelta){
+    const decoder=new TextDecoder();let buffer="",bytes=0,usage=null,lastEmit=0,finished=false,finishReason=null;
+    const message={role:"assistant",content:"",reasoning_content:"",tool_calls:[]};
+    const consume=line=>{
+        if(!line.startsWith("data:"))return;
+        const value=line.slice(5).trim();if(!value)return;if(value==="[DONE]"){finished=true;return;}
+        const packet=JSON.parse(value);
+        if(packet.error)throw Error("MODEL_STREAM_ERROR");
+        if(packet.usage)usage=packet.usage;
+        const delta=packet.choices?.[0]?.delta||{};
+        if(packet.choices?.[0]?.finish_reason){finishReason=packet.choices[0].finish_reason;finished=true;}
+        if(typeof delta.content==="string")message.content+=delta.content;
+        if(typeof delta.reasoning_content==="string")message.reasoning_content+=delta.reasoning_content;
+        else if(typeof delta.reasoning==="string")message.reasoning_content+=delta.reasoning;
+        for(const c of delta.tool_calls||[]){
+            const index=Number(c.index??0);
+            if(!Number.isInteger(index)||index<0||index>128)throw Error("INVALID_STREAM_TOOL_INDEX");
+            const entry=message.tool_calls[index]??={type:"function",id:"",function:{name:"",arguments:""}};
+            if(c.id)entry.id+=c.id;
+            if(c.function?.name)entry.function.name+=c.function.name;
+            if(c.function?.arguments)entry.function.arguments+=c.function.arguments;
+        }
+        if(Date.now()-lastEmit>=1000&&(message.content||message.reasoning_content)){
+            lastEmit=Date.now();onDelta?.(message);
+        }
+    };
+    for await(const chunk of response.body){
+        bytes+=chunk.length;if(bytes>limit)throw Error("MODEL_REPLY_TOO_LARGE");
+        buffer+=decoder.decode(chunk,{stream:true});
+        const lines=buffer.split(/\r?\n/);buffer=lines.pop()||"";
+        for(const line of lines)consume(line);
+    }
+    buffer+=decoder.decode();if(buffer)consume(buffer);
+    if(!finished||finishReason==="length"&&message.tool_calls.length)throw Error("MODEL_STREAM_INCOMPLETE");
+    if(!message.content&&!message.reasoning_content&&!message.tool_calls.length)throw Error("MODEL_NO_MESSAGE");
+    message.tool_calls=message.tool_calls.filter(Boolean);
+    if(!message.tool_calls.length)delete message.tool_calls;
+    if(!message.reasoning_content)delete message.reasoning_content;
+    onDelta?.(message);
+    return {choices:[{message}],usage};
+}
 // Long-running Workers are bounded by their explicit step/time/cost budgets,
 // not by a hidden 24-tool-call quota. Memory usage is bounded separately.
 const WORKER_HISTORY_MESSAGES = 120;
@@ -103,6 +146,19 @@ export function createModelWorkerRuntime({
         ?createRequire(import.meta.url)(vaultModule).createModelDpapiVault():null);
     const jobs = new Map();
     const activeHostMutations = new Map();
+    const agentWriters = new Map();
+    const backendQueues = new Map();
+    async function withBackend(model,signal,fn){
+        // Profiles that point at a single router/backend share a conservative
+        // physical slot. Independent endpoints may run concurrently.
+        const key=new URL(model.baseUrl).origin;
+        const previous=backendQueues.get(key)||Promise.resolve();
+        let release;
+        const next=new Promise(r=>{release=r;});
+        backendQueues.set(key,next);
+        try{await previous;if(signal?.aborted)throw Error("AGENT_REQUEST_ABORTED");return await fn();}
+        finally{release();if(backendQueues.get(key)===next)backendQueues.delete(key);}
+    }
     const restricted = (text, n = MAX_TOOL_REPLY) => String(text || "").slice(0, n);
     function snapshot(job, includeAnswer = false) {
         return {
@@ -123,10 +179,10 @@ export function createModelWorkerRuntime({
         if (!job) throw new Error("UNKNOWN_MODEL_TASK");
         return job;
     }
-    function getProfile(id) {
+    function getProfile(id, agent=false) {
         const models = readProfiles(portableRoot);
         const model = models.find(p => p.id === id);
-        if (!model || model.role !== "worker") throw new Error("WORKER_PROFILE_NOT_FOUND");
+        if (!model || (!agent && model.role !== "worker")) throw new Error("WORKER_PROFILE_NOT_FOUND");
         if (model.allowCalls === false) throw new Error("WORKER_PROFILE_DISABLED");
         if (model.hasKey && !model.hasWorkerKey)
             throw new Error("MODEL_API_KEY_NEEDS_SECURE_NATIVE_VAULT_BRIDGE");
@@ -141,7 +197,7 @@ export function createModelWorkerRuntime({
             throw new Error("UNSAFE_HTTP_MODEL_URL");
         return model;
     }
-    function workerAuthorization(model){
+    function workerAuthorization(model,agent=false){
         if(!model.hasKey)return {};
         if(!vault)throw new Error("MODEL_WORKER_VAULT_UNAVAILABLE");
         // Public model listings intentionally omit both encrypted key fields.
@@ -155,7 +211,7 @@ export function createModelWorkerRuntime({
         }catch{throw new Error("MODEL_WORKER_VAULT_UNAVAILABLE");}
         if(!saved?.workerEncryptedKey||!saved?.encryptedKey||
             saved.callPolicyRevision!==model.callPolicyRevision||
-            saved.allowCalls===false||saved.role!=="worker")
+            saved.allowCalls===false||(!agent&&saved.role!=="worker"))
             throw new Error("MODEL_WORKER_VAULT_PROFILE_CHANGED");
         let secret;
         try{secret=vault.decryptString(saved.workerEncryptedKey);}
@@ -224,19 +280,24 @@ export function createModelWorkerRuntime({
         job.evidence.push({tool:name,path:location.rel,ok:!result?.isError});
         return restricted((result?.content||[]).map(c=>c.text||"").join("\n"));
     }
-    async function infer(job, model, messages, tools) {
-        getProfile(job.modelId);
+    async function infer(job, model, messages, tools, agent=false, signal, onDelta) {
+        const current=getProfile(job.modelId,agent);
+        if(agent&&current.callPolicyRevision!==model.callPolicyRevision)throw Error("AGENT_PROFILE_CHANGED_OR_DISABLED");
         const remaining = job.maxTaskUSD - job.estimatedUSD;
         // Refuse a new paid request if remaining budget cannot cover even
         // the configured maximum output tokens. True billing varies by provider.
-        const outputReserve=(model.maxOutputTokens||4096)*(model.outputPerMillionUSD||0)/1e6;
+        const outputReserve=(model.maxOutputTokens||4096)*(model.outputPerMillionUSD||0)/1e6+
+            (agent?Math.ceil(JSON.stringify([messages,tools]).length/2)*(model.inputPerMillionUSD||0)/1e6:0);
         if (remaining < outputReserve) throw new Error("MODEL_TASK_BUDGET_EXHAUSTED");
-        const maxTokens=Math.min(2048,Math.max(16,model.maxOutputTokens||2048));
+        const maxTokens=agent?Math.max(16,model.maxOutputTokens||4096):Math.min(2048,Math.max(16,model.maxOutputTokens||2048));
         const controller=new AbortController();job.controller=controller;
+        const abort=()=>controller.abort();
+        signal?.addEventListener("abort",abort,{once:true});
+        if(signal?.aborted)abort();
         // Disabling a profile is a hard stop even for a request which is
         // already waiting on the model HTTP endpoint.
         const disabledCheck=setInterval(()=>{
-            try{getProfile(job.modelId);}
+            try{const current=getProfile(job.modelId,agent);if(agent&&current.callPolicyRevision!==model.callPolicyRevision)controller.abort();}
             catch{controller.abort();}
         },500);
         disabledCheck.unref?.();
@@ -244,25 +305,35 @@ export function createModelWorkerRuntime({
         const startedNs=process.hrtime.bigint();
         let succeeded=false;
         let actualUsage=null;
-        const timeout=setTimeout(()=>controller.abort(),Math.max(1,Math.min(180000,job.deadline-Date.now())));
+        const timeout=setTimeout(()=>controller.abort(),Math.max(1,Math.min(agent?1800000:180000,job.deadline-Date.now())));
         try {
             const url=model.baseUrl.replace(/\/$/,"")+"/chat/completions";
-            const authorization=workerAuthorization(model);
+            const authorization=workerAuthorization(model,agent);
+            const effort=model.reasoningEffort||"auto";
+            const thinking=model.type==="deepseek"
+                ?{thinking:{type:agent&&effort!=="off"&&effort!=="auto"?"enabled":"disabled"}}
+                :agent&&model.reasoningAdapter==="openai"&&effort!=="auto"&&effort!=="off"?{reasoning_effort:effort==="extra-high"?"xhigh":effort}:{temperature:0};
             const response=await fetchImpl(url,{
                 method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json",
                     ...authorization},
                 redirect:"error",signal:controller.signal,
-                body:JSON.stringify({model:model.model,messages,tools,tool_choice:"auto",stream:false,
+                body:JSON.stringify({model:model.model,messages,tools,tool_choice:"auto",stream:agent,
+                    ...(agent&&model.type==="deepseek"?{stream_options:{include_usage:true}}:{}),
                     max_tokens:maxTokens,
-                    ...(model.type==="deepseek"?{thinking:{type:"disabled"}}:{temperature:0})}),
+                    ...thinking}),
             });
             if(!response.ok)throw new Error("MODEL_HTTP_"+response.status);
             const length=Number(response.headers?.get?.("content-length")||0);
-            if (length>MAX_MODEL_RESPONSE)throw new Error("MODEL_REPLY_TOO_LARGE");
-            const raw=await response.text();
-            if (Buffer.byteLength(raw,"utf8")>MAX_MODEL_RESPONSE)throw new Error("MODEL_REPLY_TOO_LARGE");
+            const replyLimit=agent?Math.max(MAX_MODEL_RESPONSE,Math.min(32*1024*1024,maxTokens*24)):MAX_MODEL_RESPONSE;
+            if (length>replyLimit)throw new Error("MODEL_REPLY_TOO_LARGE");
             let json;
-            try {json=JSON.parse(raw);}catch {throw new Error("MODEL_INVALID_JSON");}
+            if(agent&&String(response.headers?.get?.("content-type")||"").includes("text/event-stream"))
+                json=await collectAgentStream(response,replyLimit,onDelta);
+            else{
+                const raw=await response.text();
+                if (Buffer.byteLength(raw,"utf8")>replyLimit)throw new Error("MODEL_REPLY_TOO_LARGE");
+                try {json=JSON.parse(raw);}catch {throw new Error("MODEL_INVALID_JSON");}
+            }
             const usage=json.usage||{};
             actualUsage=json.usage||null;
             const reply=json.choices?.[0]?.message;
@@ -277,7 +348,7 @@ export function createModelWorkerRuntime({
             return reply;
         } finally {
             clearInterval(disabledCheck);
-            clearTimeout(timeout);job.controller=null;
+            clearTimeout(timeout);job.controller=null;signal?.removeEventListener("abort",abort);
             try{
                 accounting.record({
                     profileId:job.modelId,model:model.model,source:"worker",
@@ -315,7 +386,7 @@ export function createModelWorkerRuntime({
                 getProfile(job.modelId);
                 if(job.cancelled)throw new Error("MODEL_TASK_CANCELLED");
                 if(Date.now()>job.deadline)throw new Error("MODEL_TASK_TIMEOUT");
-                const result=await infer(job,model,messages,allowedTools);
+                const result=await withBackend(model,null,()=>infer(job,model,messages,allowedTools));
                 getProfile(job.modelId);
                 if(!result)throw new Error("MODEL_NO_MESSAGE");
                 const calls=Array.isArray(result.tool_calls)?result.tool_calls:[];
@@ -372,9 +443,22 @@ export function createModelWorkerRuntime({
     }
     return {
         models:()=>readProfiles(portableRoot).filter(m=>m.role==="worker"&&m.allowCalls!==false),
+        agentProfiles:()=>readProfiles(portableRoot).filter(m=>m.allowCalls!==false&&m.api==="chat"),
+        async agentRequest(task,agent,model,messages,tools,signal,onDelta){
+            const job={modelId:agent.profileId,deadline:task.deadline,maxTaskUSD:model.maxTaskUSD||1,
+                inputTokens:agent.inputTokens,outputTokens:agent.outputTokens,estimatedUSD:agent.estimatedUSD};
+            try{return await withBackend(model,signal,()=>infer(job,model,messages,tools,true,signal,onDelta));}
+            finally{agent.inputTokens=job.inputTokens;agent.outputTokens=job.outputTokens;agent.estimatedUSD=job.estimatedUSD;}
+        },
+        beginAgentWriter(workspaceId,id){
+            if(this.hasActiveWriter(workspaceId)||(activeHostMutations.get(workspaceId)||0)>0)
+                throw Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");
+            agentWriters.set(workspaceId,id);
+        },
+        endAgentWriter(workspaceId,id){if(agentWriters.get(workspaceId)===id)agentWriters.delete(workspaceId);},
         // Exposed to the MCP admission gate to prevent concurrent Host/Worker
         // mutations of the same workspace, including across conversations.
-        hasActiveWriter:workspaceId=>[...jobs.values()].some(j=>
+        hasActiveWriter:workspaceId=>agentWriters.has(workspaceId)||[...jobs.values()].some(j=>
             j.workspaceId===workspaceId && j.allowWrites &&
             ["queued","running"].includes(j.status)),
         beginHostMutation(workspaceId){
@@ -393,6 +477,7 @@ export function createModelWorkerRuntime({
             if(workspace.backend!=="local")throw new Error("MODEL_WORKER_LOCAL_WORKSPACE_ONLY");
             if(allowWrites && (activeHostMutations.get(workspaceId)||0)>0)
                 throw new Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");
+            if(allowWrites && agentWriters.has(workspaceId))throw Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");
             if(allowWrites && [...jobs.values()].some(j=>j.workspaceId===workspaceId &&
                 j.allowWrites && ["queued","running"].includes(j.status)))
                 throw new Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");

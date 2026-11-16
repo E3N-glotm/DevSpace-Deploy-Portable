@@ -24,6 +24,8 @@ function hooks({ownedTaskXml}={}){
          ? require('../electron/computer-use-indicator.cjs')
        :n==='./model-providers.cjs'
          ? require('../electron/model-providers.cjs')
+       :n==='./agent-groups.cjs'
+         ? require('../electron/agent-groups.cjs')
       :n==='./update-status.cjs'
         ? require('../electron/update-status.cjs')
       :n==='node:child_process'&&ownedTaskXml!==undefined

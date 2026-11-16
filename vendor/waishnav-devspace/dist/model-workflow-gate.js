@@ -18,6 +18,8 @@ const sharedWorkerGrants = new WeakMap();
 const EXEMPT = new Set([
     "model_worker_list", "model_delegate_task", "model_task_status",
     "model_task_result", "model_task_cancel",
+    "agent_task_start","agent_task_list","agent_task_status","agent_task_events",
+    "agent_task_pause","agent_task_resume","agent_task_cancel",
     "continuation_task", "continuation_anchor", "continuation_sender",
     "doctor", "doctor_history", "capabilities", "health", "plugin_list", "plugin_read", "permission_rules_list", "process_list", "audit_log_list", "session_list", "memory_list", "hook_list",
 ]);

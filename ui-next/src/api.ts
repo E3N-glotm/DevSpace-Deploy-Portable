@@ -41,11 +41,17 @@ export type ModelProvider = {
   inputPerMillionUSD:number;outputPerMillionUSD:number;
   hasKey:boolean;keyEncrypted:boolean;
   workerCredentialReady?:boolean;
+  reasoningEffort?:'auto'|'off'|'low'|'medium'|'high'|'extra-high';
+  reasoningAdapter?:'native'|'openai';
+  vision?:boolean;
   allowCalls:boolean;
 };
 export type ModelProviderDraft = Omit<ModelProvider,'hasKey'|'keyEncrypted'|'workerCredentialReady'> & {
   apiKey?:string;clearKey?:boolean;
 };
+export type AgentGroup={id:string;name:string;members:string[];isDefault:boolean;requiredReviews:number};
+export type AgentTask={id:string;instruction:string;workspaceId:string;groupId:string|null;status:string;steps:number;error?:string;result?:string;pending?:unknown;agents:{id:string;profileId:string;state:string;steps:number;inputTokens:number;outputTokens:number;estimatedUSD:number;contextEstimate:number}[]};
+export type AgentEvent={seq:number;at:string;kind:string;agent:string|null;[key:string]:unknown};
 export type ModelDiscovery = {reachable:boolean;httpStatus:number;models:string[];reason?:string};
 export type ModelProbe = {connected:boolean;httpStatus:number;
   functionCalling:'supported'|'unsupported'|'not-tested';returnedToolCall?:boolean;
@@ -78,6 +84,10 @@ export type Backend = {
   modelProvidersDiscover(id:string):Promise<ModelDiscovery>;
   modelProvidersProbe(id:string,tools?:boolean):Promise<ModelProbe>;
   modelProvidersStats(id:string):Promise<ModelUsageStats>;
+  agentGroupsList():Promise<AgentGroup[]>;
+  agentGroupsSave(input:AgentGroup):Promise<AgentGroup>;
+  agentGroupsDelete(id:string):Promise<{removed:boolean}>;
+  agentRuntime(action:string,payload?:Record<string,unknown>):Promise<any>;
   copyUrl(kind: 'local' | 'public'): Promise<{copied: boolean}>;
   chooseFolder(): Promise<string | null>;
   runAction(action: 'diagnose' | 'restart-local' | 'restart-tunnel' | 'plugin-list' | 'continuation-list' | 'memory-list' | 'review-list' | 'oauth-client-list' | 'update-check'): Promise<unknown>;

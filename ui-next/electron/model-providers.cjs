@@ -74,9 +74,13 @@ function validate(input,{hasKey=false}={}){
   const outputPerMillionUSD=n('outputPerMillionUSD',0,10000,0);
   if(input.allowCalls!==undefined&&typeof input.allowCalls!=='boolean')
     throw Error('允许调用必须是布尔值');
+  const reasoningEffort=String(input.reasoningEffort||'auto');
+  const reasoningAdapter=String(input.reasoningAdapter||'native');
+  if(!['auto','off','low','medium','high','extra-high'].includes(reasoningEffort)
+    ||!['native','openai'].includes(reasoningAdapter))throw Error('推理配置不合法');
   return {id,type,name,baseUrl:normalizeUrl(input.baseUrl,type,hasKey),model,api,role,
     contextLength,maxOutputTokens,maxTaskUSD,inputPerMillionUSD,outputPerMillionUSD,
-    allowCalls:input.allowCalls!==false};
+    allowCalls:input.allowCalls!==false,reasoningEffort,reasoningAdapter,vision:input.vision===true};
 }
 
 function estimateCost(usage,model) {

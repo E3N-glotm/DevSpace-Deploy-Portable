@@ -1,11 +1,14 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createAgentRuntime } from "./agent-runtime.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
@@ -3088,7 +3091,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_worker_list",{
         title:"List configured DevSpace Workers",
-        description:"List enabled callable Worker profiles without disclosing API keys. Mandatory workflow is a live setting for local workspaces only: dispatch an explicit Worker first, then Host inspection can proceed while it runs. Remote-agent workspaces remain accessible without local Worker delegation; write-capable Worker and Host mutations stay serialized.",
+        description:"List enabled legacy Worker profiles, independent Agent profiles and saved model groups without API keys. Prefer agent_task_start with the default group if one is configured, unless the user explicitly asks for one model or the legacy Worker. Otherwise use model_delegate_task as before. Inspect Agent task events and independently verify results. Mandatory workflow remains a live setting.",
         inputSchema:{},
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
@@ -3098,11 +3101,13 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         try{mandatoryEnabled=runtimeServices.modelWorkflowGate?.policy().enabled===true;}
         catch{mandatoryEnabled=true;}
         return workerResult({models:runtimeServices.modelWorker.models(),
+            agentGroups:runtimeServices.agentRuntime?.groups()??[],
+            agentProfiles:runtimeServices.modelWorker.agentProfiles(),
             mandatoryModelWorkflow:mandatoryEnabled});
     });
     registerAppTool(server,"model_delegate_task",{
         title:"Delegate to configured model Worker",
-        description:"Explicitly delegate a bounded task to a user-configured model (e.g. local Ollama Qwen). ChatGPT remains supervisor/reviewer. Default is read-only; allowWrites=true explicitly authorizes bounded edits in the opened local workspace. Worker cannot run shell commands or access credentials. First open the workspace and obtain its workspaceId.",
+        description:"Explicitly delegate to a configured Worker. For a model group use agent_task_start (default group if groupId omitted); explicit modelId retains the legacy bounded Worker interface. Default is read-only. First open the workspace.",
         inputSchema:{
             workspaceId:z.string(),
             modelId:z.string().describe("ID from model_worker_list, not the model's display name."),
@@ -3138,6 +3143,36 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                     result,modelWorkflowScope(context));
             return workerResult(result);
         });
+    }
+    const agentInput={
+        workspaceId:z.string(),groupId:z.string().optional(),modelId:z.string().optional(),
+        instruction:z.string().min(1).max(16000),allowWrites:z.boolean().optional(),
+        allowShell:z.boolean().optional(),allowComputer:z.boolean().optional(),
+        allowMemory:z.boolean().optional(),allowPlugins:z.boolean().optional(),
+        maxSteps:z.number().int().min(1).max(100000).optional(),
+        timeoutSeconds:z.number().int().min(30).max(2592000).optional(),
+    };
+    if(runtimeServices.agentRuntime){
+        registerAppTool(server,"agent_task_start",{
+            title:"Start persistent DevSpace Agent task",
+            description:"Delegate an independent long-running task to the default or named model group, or a single agent profile. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and acceptance independently.",
+            inputSchema:agentInput,outputSchema:resultOutputSchema({data:z.unknown()}),
+            ...toolWidgetDescriptorMeta(config,"workspace"),
+            annotations:SHELL_TOOL_ANNOTATIONS,
+        },async input=>workerResult(runtimeServices.agentRuntime.start(input)));
+        registerAppTool(server,"agent_task_list",{
+            title:"List Agent Runtime tasks",description:"List persisted agent tasks and member status.",
+            inputSchema:{},outputSchema:resultOutputSchema({data:z.unknown()}),...toolWidgetDescriptorMeta(config,"workspace"),annotations:READ_ONLY_TOOL_ANNOTATIONS,
+        },async()=>workerResult(runtimeServices.agentRuntime.list()));
+        for(const action of ["status","events","pause","resume","cancel"]){
+            registerAppTool(server,"agent_task_"+action,{
+                title:"Agent task "+action,description:"Inspect or control a durable Agent Runtime task. Resume requires explicit acknowledgment if a tool outcome was uncertain.",
+                inputSchema:{taskId:z.string(),...(action==="events"?{after:z.number().int().min(0).optional(),limit:z.number().int().min(1).max(500).optional()}:action==="resume"?{acknowledge:z.boolean().optional()}: {})},
+                outputSchema:resultOutputSchema({data:z.unknown()}),
+                ...toolWidgetDescriptorMeta(config,"workspace"),
+                annotations:["status","events"].includes(action)?READ_ONLY_TOOL_ANNOTATIONS:SHELL_TOOL_ANNOTATIONS,
+            },async input=>workerResult(action==="events"?runtimeServices.agentRuntime.events(input.taskId,input.after,input.limit):runtimeServices.agentRuntime[action](input.taskId,input.acknowledge)));
+        }
     }
     if (process.env.DEVSPACE_DYNAMIC_PLUGIN_ALIASES !== "0")
         registerDynamicPluginTools(server, config, workspaces, processSessions, runtimeServices.permissionRules, runtimeServices.pluginManager, runtimeServices.runtimeState);
@@ -4419,6 +4454,36 @@ export function createServer(config = loadConfig(), options = {}) {
     const localAgentProviders = config.subagents
         ? getLocalAgentProviderAvailabilitySnapshot()
         : [];
+    // In-process MCP client invokes the same registered handlers, validation,
+    // permission engine and audit hooks as an ordinary authenticated client.
+    // AgentRuntime restricts the exposed catalog and fixes the workspace ID;
+    // no OAuth tokens, loopback credentials or raw tool registry are exposed.
+    let agentToolClient,agentToolServer,agentToolConnect;
+    const agentRuntime=createAgentRuntime({
+        sqlite:runtimeState.database.sqlite,portableRoot:process.env.DEVSPACE_PORTABLE_ROOT||resolve(config.stateDir,"..",".."),
+        config,workspaces,worker:modelWorker,memoryStore,
+        profiles:()=>modelWorker.agentProfiles(),
+        request:(...args)=>modelWorker.agentRequest(...args),
+        getTools:async()=>{const client=await agentTools();return (await client.listTools()).tools;},
+        callTool:async(name,args)=>{const client=await agentTools();return client.callTool({name,arguments:args},undefined,{timeout:310000});},
+    });
+    function agentTools(){
+        agentToolConnect??=(async()=>{
+            const [clientTransport,serverTransport]=InMemoryTransport.createLinkedPair();
+            agentToolServer=createMcpServer(config,workspaces,reviewCheckpoints,processSessions,localAgentProviders,incomingArtifactAdapters,{
+                runtimeState,fileWatches,permissionRules,pluginManager,uiLease,memoryStore,hookManager,remoteAgents,continuationSupervisor,modelWorker,
+            });
+            agentToolClient=new Client({name:"devspace-agent-runtime",version:"1.0.0"});
+            await agentToolServer.connect(serverTransport);await agentToolClient.connect(clientTransport);
+            return agentToolClient;
+        })();
+        return agentToolConnect;
+    }
+    // Native UI control uses an instance-specific secret stored only in the
+    // local state directory. Loopback alone is not trusted (reverse tunnels).
+    const agentUiToken=randomUUID()+randomUUID();
+    mkdirSync(config.stateDir,{recursive:true});
+    writeFileSync(resolve(config.stateDir,"agent-runtime-ui.token"),agentUiToken,{mode:0o600});
     const logSessionCloseResults = (reason, results) => {
         for (const result of results) {
             if (result.error) {
@@ -4650,6 +4715,33 @@ export function createServer(config = loadConfig(), options = {}) {
     app.get("/healthz", (_req, res) => {
         res.json({ ok: true, name: "devspace" });
     });
+    app.post("/agent-runtime/local",express.json({limit:"64kb"}),(req,res)=>{
+        const local=["127.0.0.1","::1","::ffff:127.0.0.1"].includes(req.socket.remoteAddress);
+        const supplied=Buffer.from(String(req.header("x-devspace-agent-token")||""));
+        const expected=Buffer.from(agentUiToken);
+        if(!local||supplied.length!==expected.length||!timingSafeEqual(supplied,expected)){res.sendStatus(403);return;}
+        try{
+            const {action,taskId,after,acknowledge}=req.body||{};
+            if(action==="list")return res.json(agentRuntime.list());
+            if(action==="events")return res.json(agentRuntime.events(taskId,after,200));
+            if(action==="start"){
+                const input=req.body.input;
+                if(!input||typeof input.path!=="string")throw Error("WORKSPACE_PATH_REQUIRED");
+                // Native start uses the ordinary workspace MCP handler rather
+                // than manufacturing a registry entry or bypassing validation.
+                return (async()=>{try{
+                    const client=await agentTools();
+                    const opened=await client.callTool({name:"open_workspace",arguments:{path:input.path}});
+                    if(opened.isError)throw Error(opened.content?.[0]?.text||"WORKSPACE_OPEN_FAILED");
+                    const workspaceId=opened.structuredContent?.workspaceId;
+                    if(!workspaceId)throw Error("WORKSPACE_OPEN_FAILED");
+                    res.json(agentRuntime.start({...input,workspaceId}));
+                }catch(error){res.status(400).json({error:String(error.message)});}})();
+            }
+            if(["status","pause","resume","cancel","accept"].includes(action))return res.json(agentRuntime[action](taskId,acknowledge===true));
+            res.status(400).json({error:"INVALID_AGENT_ACTION"});
+        }catch(error){res.status(400).json({error:String(error.message)});}
+    });
     app.all("/mcp", async (req, res) => {
         const requestId = res.locals.requestId;
         const sessionId = req.header("mcp-session-id");
@@ -4733,6 +4825,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     remoteAgents,
                     continuationSupervisor,
                     modelWorker,
+                    agentRuntime,
                     modelWorkflowGate:(()=>{
                         const gate=createModelWorkflowGate({
                             portableRoot:process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..",".."),
@@ -4876,6 +4969,7 @@ export function createServer(config = loadConfig(), options = {}) {
         }
     });
     let closePromise;
+    agentRuntime.recover();
     return {
         app,
         config,
@@ -4892,6 +4986,9 @@ export function createServer(config = loadConfig(), options = {}) {
                 clearInterval(sessionCleanupTimer);
                 clearInterval(continuationProcessGuardTimer);
                 continuationSupervisor.stop();
+                await agentRuntime.close();
+                await agentToolClient?.close();
+                await agentToolServer?.close();
                 clearInterval(continuationWakeHeartbeatTimer);
                 for (const res of continuationWakeClients) {
                     try {
