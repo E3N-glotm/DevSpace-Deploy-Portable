@@ -7,7 +7,7 @@ const {spawnSync}=require('node:child_process');
 const reports=path.resolve(__dirname,'../reports');
 fs.mkdirSync(reports,{recursive:true});
 
-test('manager force-mode toggle only activates for a callable enabled Worker',()=>{
+test('manager force-mode toggle only activates for a callable Worker or Agent',()=>{
   const dir=fs.mkdtempSync(path.join(reports,'.tmp-mandatory-model-'));
   const manager=path.resolve(__dirname,'portable-manager.cjs');
   const env={...process.env,DEVSPACE_PORTABLE_CONFIG_DIR:dir};
@@ -31,6 +31,13 @@ test('manager force-mode toggle only activates for a callable enabled Worker',()
     assert.equal(JSON.parse(enabled.stdout).enabled,true);
     const saved=JSON.parse(fs.readFileSync(path.join(dir,'model-workflow.json'),'utf8'));
     assert.equal(saved.enabled,true);
+    profiles.models[0].role='planner';
+    profiles.models[0].encryptedKey='fixture';
+    fs.writeFileSync(path.join(dir,'model-providers.json'),JSON.stringify(profiles));
+    assert.notEqual(run(true).status,0);
+    profiles.models[0].workerEncryptedKey='fixture-vault-bridge';
+    fs.writeFileSync(path.join(dir,'model-providers.json'),JSON.stringify(profiles));
+    assert.equal(run(true).status,0);
     const disabled=run(false);
     assert.equal(disabled.status,0,disabled.stderr);
     assert.equal(JSON.parse(disabled.stdout).enabled,false);

@@ -84,7 +84,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.68";
-const PORTABLE_DEV_ITERATION = "dev19";
+const PORTABLE_DEV_ITERATION = "dev20";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -717,11 +717,11 @@ function setModelWorkflow(input){
     if(profiles.version!==1||!Array.isArray(profiles.models))
       throw new Error("Model provider configuration is invalid.");
     const available=profiles.models.some(model=>
-      model.allowCalls!==false && model.role==='worker' && model.api==='chat'
+      model.allowCalls!==false && ['worker','planner','reviewer'].includes(model.role) && model.api==='chat'
       && typeof model.model==='string' && model.model.trim()
-      && !model.encryptedKey && typeof model.baseUrl==='string');
+      && (!model.encryptedKey||model.workerEncryptedKey) && typeof model.baseUrl==='string');
     if(!available)
-      throw new Error("无法开启强制模型工作流：没有允许调用、无需解密密钥的 Chat Completions Worker。请在模型提供商中启用至少一个兼容 Worker。");
+      throw new Error("无法开启强制模型工作流：请在模型提供商中启用至少一个可调用的 Chat Completions Worker 或 Agent。");
   }
   writeJson(MODEL_WORKFLOW_FILE,{
     formatVersion:1,enabled:input.enabled,updatedAt:new Date().toISOString(),

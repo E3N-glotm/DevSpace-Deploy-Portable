@@ -50,7 +50,7 @@ import { formatLocalAgentProviderAvailabilitySummary, getLocalAgentProviderAvail
 import { linuxAgentAsset, RemoteAgentManager } from "./remote-agent-manager.js";
 import { startAgentLanGateway } from "./agent-lan-gateway.js";
 import { createContinuationSupervisorScheduler } from "./continuation-supervisor.js";
-import { createModelWorkerRuntime } from "./model-worker-runtime.js";
+import { createModelWorkerRuntime, safeWorkerPath } from "./model-worker-runtime.js";
 import { createModelWorkflowGate } from "./model-workflow-gate.js";
 // A single MCP logical tool call may cross the HTTP/SDK handler boundary.
 // Bind its *authenticated transport* and optional ChatGPT conversation scope
@@ -1329,6 +1329,60 @@ function remoteGlobText(result) {
 }
 function remoteListText(result) {
     return (result.entries ?? []).map((entry) => `${entry.type === "directory" ? "d" : entry.type === "symlink" ? "l" : "-"}\t${entry.size}\t${entry.name}`).join("\n");
+}
+export function createRemoteWorkerToolOpener(remoteAgents) {
+    function permittedPath(workspace, path) {
+        try{return safeWorkerPath(workspace.root,path,true).rel;}
+        catch{return null;}
+    }
+    return async function openRemoteWorkerTool(workspace, name, input) {
+        const {path}=input;
+        let meta;
+        const prefixes=path.split("/").map((_,i,parts)=>parts.slice(0,i+1).join("/"));
+        // The Linux agent already fences paths to the workspace. Reject
+        // unresolved aliases here as well, so a Worker cannot use an alias
+        // to read one of its own protected workspace locations.
+        for (const prefix of prefixes) {
+            meta=await remoteAgents.rpcWorkspace(workspace,"fs.stat",{path:prefix});
+            if(meta.type==="symlink")throw Error("WORKER_SYMLINK_PATH_DENIED");
+        }
+        if(name==="read_file")return async()=>{
+            if(meta.type!=="file")throw Error("WORKER_REMOTE_FILE_REQUIRED");
+            const result=await remoteAgents.read(workspace,path,{limit:180});
+            return remoteTextToolResponse(result.kind==="text"?result.text:`[remote binary file: ${path}; ${result.size} bytes]`);
+        };
+        if(name==="list_directory")return async()=>{
+            if(meta.type!=="directory")throw Error("WORKER_REMOTE_DIRECTORY_REQUIRED");
+            const result=await remoteAgents.rpcWorkspace(workspace,"fs.list",{path},60_000);
+            return remoteTextToolResponse(remoteListText({...result,
+                entries:result.entries.filter(entry=>permittedPath(workspace,path+"/"+entry.name))}));
+        };
+        if(name==="grep_files")return async()=>{
+            if(!["file","directory"].includes(meta.type))throw Error("WORKER_REMOTE_SEARCH_PATH_REQUIRED");
+            const result=await remoteAgents.rpcWorkspace(workspace,"search.grep",{path,pattern:input.pattern},60_000);
+            // The remote search walker does not traverse directory symlinks.
+            // Recheck each matched file before exposing its text to the model.
+            const candidates=[...new Set(result.matches.map(match=>permittedPath(workspace,match.path)).filter(Boolean))];
+            const accepted=new Set();
+            for(let i=0;i<candidates.length;i+=8){
+                await Promise.all(candidates.slice(i,i+8).map(async candidate=>{
+                    const found=await remoteAgents.rpcWorkspace(workspace,"fs.stat",{path:candidate});
+                    if(found.type==="file")accepted.add(candidate);
+                }));
+            }
+            return remoteTextToolResponse(remoteGrepText({...result,matches:result.matches.filter(
+                match=>accepted.has(permittedPath(workspace,match.path)))}));
+        };
+        if(name!=="edit_file"||meta.type!=="file")throw Error("WORKER_REMOTE_EDIT_TARGET_REQUIRED");
+        return async()=>{
+            const beforeBytes=await remoteAgents.readWhole(workspace,path);
+            if(beforeBytes===null)throw Error("WORKER_REMOTE_EDIT_TARGET_MISSING");
+            const before=decodeRemoteUtf8(beforeBytes,path);
+            const after=applyRemoteStructuredEdits(path,before,input.edits);
+            await remoteAgents.writeBuffer(workspace,path,Buffer.from(after,"utf8"),{mode:meta.mode});
+            return remoteTextToolResponse(`Edited ${path}.`);
+        };
+    };
 }
 function assetBaseUrl(config) {
     return `${config.publicBaseUrl.replace(/\/+$/, "")}/mcp-app-assets`;
@@ -3017,7 +3071,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     // Do not freeze the current on/off value in MCP session instructions:
     // Portable can change the policy without restarting a client session.
     // The gate reads the authoritative user setting for every tool call.
-    const mandatoryModelInstruction=" Model workflow is a live Portable setting. Check model_worker_list.mandatoryModelWorkflow for its current value. When enabled, local workspace tasks require an explicit Worker dispatch, but the Host may continue read-only inspection while the Worker runs. Remote-agent workspaces are exempt until remote Worker delegation exists. Never infer the current toggle state from session initialization instructions.";
+    const mandatoryModelInstruction=" Model workflow is a live Portable setting. Check model_worker_list.mandatoryModelWorkflow for its current value. When enabled, local and remote workspace tasks require an explicit Worker or Agent task dispatch for the same workspace. The Host can read in parallel. Inspect model_task_result or the finished agent_task_status before Host writes after a write-capable delegation.";
     const server = new McpServer({
         name: "devspace",
         title: "DevSpace",
@@ -3112,7 +3166,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_delegate_task",{
         title:"Delegate to configured model Worker",
-        description:"Explicitly delegate to a configured Worker. For a model group use agent_task_start (default group if groupId omitted); explicit modelId retains the legacy bounded Worker interface. Default is read-only. First open the workspace.",
+        description:"Explicitly delegate a local or remote workspace task to a configured Worker. For a model group use agent_task_start. Default is read-only. First open the workspace.",
         inputSchema:{
             workspaceId:z.string(),
             modelId:z.string().describe("ID from model_worker_list, not the model's display name."),
@@ -3164,19 +3218,30 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             inputSchema:agentInput,outputSchema:resultOutputSchema({data:z.unknown()}),
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:SHELL_TOOL_ANNOTATIONS,
-        },async input=>workerResult(runtimeServices.agentRuntime.start(input)));
+        },async(input,context)=>{
+            const task=runtimeServices.agentRuntime.start(input);
+            runtimeServices.modelWorkflowGate?.onAgentStart(task,modelWorkflowScope(context));
+            return workerResult(task);
+        });
         registerAppTool(server,"agent_task_list",{
             title:"List Agent Runtime tasks",description:"List persisted agent tasks and member status.",
             inputSchema:{},outputSchema:resultOutputSchema({data:z.unknown()}),...toolWidgetDescriptorMeta(config,"workspace"),annotations:READ_ONLY_TOOL_ANNOTATIONS,
         },async()=>workerResult(runtimeServices.agentRuntime.list()));
         for(const action of ["status","events","pause","resume","cancel"]){
             registerAppTool(server,"agent_task_"+action,{
-                title:"Agent task "+action,description:"Inspect or control a durable Agent Runtime task. Resume requires explicit acknowledgment if a tool outcome was uncertain.",
+                title:"Agent task "+action,description:action==="status"
+                    ?"Inspect a durable Agent task and any final result. In mandatory workflow, inspecting the finished result from the dispatching conversation releases the review requirement for Host writes."
+                    :"Inspect or control a durable Agent Runtime task. Resume requires explicit acknowledgment if a tool outcome was uncertain.",
                 inputSchema:{taskId:z.string(),...(action==="events"?{after:z.number().int().min(0).optional(),limit:z.number().int().min(1).max(500).optional()}:action==="resume"?{acknowledge:z.boolean().optional()}: {})},
                 outputSchema:resultOutputSchema({data:z.unknown()}),
                 ...toolWidgetDescriptorMeta(config,"workspace"),
                 annotations:["status","events"].includes(action)?READ_ONLY_TOOL_ANNOTATIONS:SHELL_TOOL_ANNOTATIONS,
-            },async input=>workerResult(action==="events"?runtimeServices.agentRuntime.events(input.taskId,input.after,input.limit):runtimeServices.agentRuntime[action](input.taskId,input.acknowledge)));
+            },async(input,context)=>{
+                const result=action==="events"?runtimeServices.agentRuntime.events(input.taskId,input.after,input.limit)
+                    :runtimeServices.agentRuntime[action](input.taskId,input.acknowledge);
+                if(action==="status")runtimeServices.modelWorkflowGate?.onAgentStatus(result,modelWorkflowScope(context));
+                return workerResult(result);
+            });
         }
     }
     if (process.env.DEVSPACE_DYNAMIC_PLUGIN_ALIASES !== "0")
@@ -4445,6 +4510,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const modelWorker = createModelWorkerRuntime({
         portableRoot:process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..",".."),
         config,workspaces,reviewCheckpoints,hookManager,
+        openRemoteWorkerTool:createRemoteWorkerToolOpener(remoteAgents),
         prepareWrite:(workspaceId,workspace,rel)=>prepareMutation(reviewCheckpoints,hookManager,{
             workspaceId,workspaceRoot:workspace.root,paths:[rel],toolName:"model_worker_edit",
         }),
@@ -4839,9 +4905,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     modelWorkflowGate:(()=>{
                         const gate=createModelWorkflowGate({
                             portableRoot:process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..",".."),
-                            modelWorker,
-                            isRemoteWorkspaceId:workspaceId=>
-                                isRemoteWorkspace(workspaces.getWorkspace(workspaceId)),
+                            modelWorker,agentRuntime,
                         });
                         modelWorkflowGates.set(transport,gate);
                         return gate;

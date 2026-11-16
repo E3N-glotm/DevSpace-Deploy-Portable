@@ -87,8 +87,9 @@ type TaskFilter = 'active' | 'history';
 type HistoryAction = { task?: AgentTask };
 type EventView = { taskId: string; cards: FlowCard[]; loading: boolean };
 type ControlAction = 'pause' | 'resume' | 'accept' | 'cancel';
-const agentError = (error: unknown) => errorText(error) === 'AGENT_HISTORY_NOT_TERMINAL'
-  ? '该任务仍在结束中，请稍后再删除。' : errorText(error);
+const runtimeError = (error: unknown) => errorText(error).replace(/^Error invoking remote method 'ds:agentRuntime': (?:Error: )?/, '');
+const agentError = (error: unknown) => runtimeError(error) === 'AGENT_HISTORY_NOT_TERMINAL'
+  ? '该任务仍在结束中，请稍后再删除。' : runtimeError(error).replace(/^AGENT_RUNTIME_UNAVAILABLE: /, '');
 
 function rolesFor(task: AgentTask, id: string) {
   const roles = [];
@@ -141,6 +142,8 @@ export function AgentRuntimePage() {
   const [permissions, setPermissions] = useState({ allowWrites: false, allowShell: false, allowComputer: false, allowMemory: true, allowPlugins: false });
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [serviceIssue, setServiceIssue] = useState('');
+  const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
   const [ack, setAck] = useState<Record<string, boolean>>({});
   const listRevision = useRef(0);
@@ -167,7 +170,11 @@ export function AgentRuntimePage() {
   const refresh = useCallback(async () => {
     const revision = ++listRevision.current;
     const next = await window.devspace.agentRuntime('list') as AgentTask[];
-    if (revision === listRevision.current) setTasks(next);
+    if (revision === listRevision.current) {
+      setTasks(next);
+      setConnected(true);
+      setServiceIssue('');
+    }
   }, []);
   useEffect(() => {
     let alive = true;
@@ -176,7 +183,12 @@ export function AgentRuntimePage() {
       if (inFlight) return;
       inFlight = true;
       try { await refresh(); }
-      catch (error) { if (alive) setError(agentError(error)); }
+      catch (error) {
+        if (alive) {
+          setConnected(false);
+          setServiceIssue(agentError(error));
+        }
+      }
       finally { inFlight = false; }
     };
     void tick();
@@ -209,7 +221,8 @@ export function AgentRuntimePage() {
           });
         } while (batch.length === 200);
       } catch (error) {
-        if (alive && errorText(error) !== 'UNKNOWN_AGENT_TASK') setError(agentError(error));
+        const message = runtimeError(error);
+        if (alive && message !== 'UNKNOWN_AGENT_TASK' && !message.startsWith('AGENT_RUNTIME_UNAVAILABLE:')) setError(agentError(error));
       } finally { inFlight = false; }
     };
     setEventView({ taskId: currentId, cards: [], loading: true });
@@ -279,11 +292,13 @@ export function AgentRuntimePage() {
 
   return <div className="panel models-page agent-workbench">
     <div className="section-heading"><div><h2>Agent 协作</h2></div>
-      <Button appearance="primary" onClick={() => setCreateOpen(true)}>新建任务</Button>
+      <Button appearance="primary" disabled={!connected} onClick={() => setCreateOpen(true)}>新建任务</Button>
     </div>
     {error && <div className="op-message op-error" role="alert">{error}</div>}
     {notice && <div className="op-message op-success" role="status">{notice}</div>}
-    <section className="agent-task-library" aria-label="任务列表">
+    {serviceIssue && <div className="op-message op-error" role="status">{serviceIssue}</div>}
+    {!connected && !serviceIssue && <div className="agent-empty">正在连接 Agent Runtime</div>}
+    {connected && <section className="agent-task-library" aria-label="任务列表">
       <div className="agent-library-bar">
         <div className="agent-task-tabs" aria-label="任务范围">
           <button type="button" aria-pressed={tab === 'active'} onClick={() => selectTab('active')}>进行中 <span>{live.length}</span></button>
@@ -296,8 +311,8 @@ export function AgentRuntimePage() {
         {items.map(item => <TaskCard key={item.id} task={item} group={groupName(item)} selected={item.id === currentId}
           busy={busy} onSelect={() => setSelectedId(item.id)} onDelete={() => setHistoryAction({ task: item })} />)}
       </div> : <div className="agent-empty">{tab === 'history' ? '暂无历史任务' : '暂无进行中的任务'}</div>}
-    </section>
-    {task && <>
+    </section>}
+    {connected && task && <>
       <section className="agent-task-detail" aria-label="所选任务">
         <div className="agent-work-title">
           <div><h3>{task.instruction}</h3>

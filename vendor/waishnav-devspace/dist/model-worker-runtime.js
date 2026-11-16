@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { resolve, relative, isAbsolute, sep, dirname } from "node:path";
+import { resolve, relative, isAbsolute, sep, dirname, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import reasoningAdapter from "./reasoning-adapter.cjs";
 import {
@@ -86,14 +86,16 @@ const TOOL_DEFINITIONS = [
     } },
 ];
 
-export function safeWorkerPath(root, raw) {
+export function safeWorkerPath(root, raw, remote=false) {
     if (typeof raw !== "string" || !raw || raw.length > 500 || raw.includes("\0"))
         throw new Error("INVALID_WORKER_PATH");
-    if (isAbsolute(raw) || /^[a-z]:/i.test(raw) || /^\\\\/.test(raw))
+    if (remote) raw=raw.replace(/\\/g,"/");
+    const paths=remote?posix:{resolve,relative,isAbsolute,sep};
+    if (paths.isAbsolute(raw) || /^[a-z]:/i.test(raw) || /^\\\\/.test(raw))
         throw new Error("WORKER_ABSOLUTE_PATH_DENIED");
-    const full = resolve(root, raw);
-    const rel = relative(root, full);
-    if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel))
+    const full = paths.resolve(root, raw);
+    const rel = paths.relative(root, full);
+    if (rel === ".." || rel.startsWith(".." + paths.sep) || paths.isAbsolute(rel))
         throw new Error("WORKER_PATH_OUTSIDE_WORKSPACE");
     const parts = rel.split(/[\\/]+/);
     if (parts.some(p => /^(?:\.git|\.ssh|\.env|node_modules|data|secrets|credentials)$/i.test(p))
@@ -119,7 +121,7 @@ export function createModelWorkerRuntime({
     portableRoot, config, workspaces, reviewCheckpoints, hookManager,
     fetchImpl = globalThis.fetch, readProfiles = publicModelProfiles,
     prepareWrite = async () => {}, finishWrite = async () => {},
-    usageStore,credentialVault,
+    usageStore,credentialVault,openRemoteWorkerTool,
 }) {
     // The MCP server and Electron UI are distinct processes. Both write
     // independent, atomic model-request events into the same Portable data
@@ -250,7 +252,35 @@ export function createModelWorkerRuntime({
         try { args = JSON.parse(call.function.arguments || "{}"); }
         catch { throw new Error("INVALID_TOOL_ARGUMENTS"); }
         const pathname = typeof args.path === "string" ? args.path : ".";
-        const location = safeWorkerPath(workspace.root, pathname);
+        const remote=workspace.backend==="remote-agent";
+        const location = safeWorkerPath(workspace.root, pathname, remote);
+        if (name === "grep_files" && (typeof args.pattern !== "string" || args.pattern.length > 160))
+            throw new Error("INVALID_GREP_PATTERN");
+        if (name === "edit_file") {
+            if (!config.permissions.allowShellMutation && !config.permissions.allowArbitraryCommands)
+                throw new Error("WRITE_PERMISSION_DENIED");
+            if (!Array.isArray(args.edits) || args.edits.length < 1 || args.edits.length > 12
+                || args.edits.some(e=>typeof e?.oldText !== "string" || !e.oldText
+                    || typeof e.newText !== "string" || e.newText.length>10000))
+                throw new Error("INVALID_EDIT_ARGUMENTS");
+        }
+        const run=remote
+            ? await openRemoteWorkerTool(workspace,name,{...args,path:location.rel})
+            : await openLocalWorkerTool(workspace,name,location,args);
+        let result;
+        if (name === "edit_file") {
+            await prepareWrite(job.workspaceId,workspace,location.rel);
+            try{result=await run();}
+            catch(error){
+                await finishWrite(job.workspaceId,workspace,location.rel,false);
+                throw error;
+            }
+            await finishWrite(job.workspaceId,workspace,location.rel,!result?.isError);
+        }else result=await run();
+        job.evidence.push({tool:name,path:location.rel,ok:!result?.isError});
+        return restricted((result?.content||[]).map(c=>c.text||"").join("\n"));
+    }
+    async function openLocalWorkerTool(workspace,name,location,args){
         // Resolve existing parents, to stop a symlink from escaping the
         // workspace even if the relative path passes a lexical check.
         const fs = await import("node:fs/promises");
@@ -271,34 +301,12 @@ export function createModelWorkerRuntime({
             }
         }
         const context = { cwd: workspace.root, root: workspace.root, allowExternalPaths: false };
-        let result;
-        if (name === "read_file") result = await readFileTool({
+        if (name === "read_file") return ()=>readFileTool({
             path: location.rel,limit:180,
         }, context);
-        if (name === "list_directory") result = await listDirectoryTool({path:location.rel},context);
-        if (name === "grep_files") {
-            if (typeof args.pattern !== "string" || args.pattern.length > 160)
-                throw new Error("INVALID_GREP_PATTERN");
-            result = await grepFilesTool({path:location.rel,pattern:args.pattern},context);
-        }
-        if (name === "edit_file") {
-            if (!config.permissions.allowShellMutation && !config.permissions.allowArbitraryCommands)
-                throw new Error("WRITE_PERMISSION_DENIED");
-            if (!Array.isArray(args.edits) || args.edits.length < 1 || args.edits.length > 12
-                || args.edits.some(e=>typeof e.oldText !== "string" || !e.oldText
-                    || typeof e.newText !== "string" || e.newText.length>10000))
-                throw new Error("INVALID_EDIT_ARGUMENTS");
-            await prepareWrite(job.workspaceId,workspace,location.rel);
-            try{
-                result = await editFileTool({path:location.rel,edits:args.edits},context);
-            }catch(error){
-                await finishWrite(job.workspaceId,workspace,location.rel,false);
-                throw error;
-            }
-            await finishWrite(job.workspaceId,workspace,location.rel,!result?.isError);
-        }
-        job.evidence.push({tool:name,path:location.rel,ok:!result?.isError});
-        return restricted((result?.content||[]).map(c=>c.text||"").join("\n"));
+        if (name === "list_directory") return ()=>listDirectoryTool({path:location.rel},context);
+        if (name === "grep_files") return ()=>grepFilesTool({path:location.rel,pattern:args.pattern},context);
+        return ()=>editFileTool({path:location.rel,edits:args.edits},context);
     }
     async function infer(job, model, messages, tools, agent=false, signal, onDelta) {
         const current=getProfile(job.modelId,agent);
@@ -507,7 +515,8 @@ export function createModelWorkerRuntime({
         },
         delegate({workspaceId,modelId,instruction,allowWrites=false,maxSteps=1000,timeoutSeconds=3600}){
             const workspace=workspaces.getWorkspace(workspaceId);
-            if(workspace.backend!=="local")throw new Error("MODEL_WORKER_LOCAL_WORKSPACE_ONLY");
+            if(workspace.backend!=="local"&&(workspace.backend!=="remote-agent"||!openRemoteWorkerTool))
+                throw new Error("MODEL_WORKER_WORKSPACE_BACKEND_UNAVAILABLE");
             if(allowWrites && (activeHostMutations.get(workspaceId)||0)>0)
                 throw new Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");
             if(allowWrites && agentWriters.has(workspaceId))throw Error("WORKER_WORKSPACE_SINGLE_WRITER_BUSY");

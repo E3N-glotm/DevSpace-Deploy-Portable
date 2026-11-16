@@ -12,6 +12,7 @@ const {readUpdateState} = require('./update-status.cjs');
 const {createComputerUseIndicator} = require('./computer-use-indicator.cjs');
 const {createModelProviderService} = require('./model-providers.cjs');
 const {createAgentGroupService} = require('./agent-groups.cjs');
+const {requestAgentRuntime} = require('./agent-runtime-client.cjs');
 
 const ROOT = path.resolve(process.env.DEVSPACE_PORTABLE_ROOT || path.join(__dirname, '../..'));
 const HERE = path.resolve(__dirname, '..');
@@ -395,16 +396,7 @@ function installHandlers() {
   register('agentRuntime',async(action,payload={})=>{
     if(!['list','events','start','status','pause','resume','cancel','accept','delete-history','clear-history'].includes(action))throw Error('INVALID_AGENT_ACTION');
     const config=readJson(path.join(CONFIG,'config.json'));
-    const port=Number(config.port||7676);
-    if(!Number.isInteger(port)||port<1024||port>65535)throw Error('INVALID_AGENT_PORT');
-    const state=process.env.DEVSPACE_PORTABLE_STATE_DIR||path.join(ROOT,'data','state');
-    const token=fs.readFileSync(path.join(state,'agent-runtime-ui.token'),'utf8');
-    const response=await net.fetch('http://127.0.0.1:'+port+'/agent-runtime/local',{
-      method:'POST',headers:{'content-type':'application/json','x-devspace-agent-token':token},
-      body:JSON.stringify({...payload,action}),redirect:'error',signal:AbortSignal.timeout(action==='start'?30000:8000),
-    });
-    if(!response.ok){let detail;try{detail=(await response.json()).error;}catch{}throw Error(detail||'Agent Runtime HTTP '+response.status);}
-    return response.json();
+    return requestAgentRuntime({root:ROOT,config,fetch:(url,init)=>net.fetch(url,init),action,payload});
   });
   register('initialize', async () => ({
     config: await runManager('show-config'), status: await publishStatus(),

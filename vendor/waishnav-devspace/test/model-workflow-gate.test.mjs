@@ -78,19 +78,43 @@ test("no enabled Worker, missing workspace and no completed delegation all fail 
     assert.equal(f.gate.authorize("read",{workspaceId:"ws1"}).code,
         "MODEL_WORKFLOW_NO_ENABLED_WORKER");
 });
-test("forced mode never blocks real remote-agent workspace operations for lack of a local Worker",()=>{
-    const f=fixture();f.enable();f.noWorkers();
-    for(const name of ["read","exec_command","apply_patch","show_changes"]){
-        const decision=f.gate.authorize(name,{workspaceId:"ws-remote"},"remote-chat");
-        assert.equal(decision.allowed,true,name);
-        assert.equal(decision.scope,"remote-workspace",name);
-        assert.equal(decision.delegationRequired,false,name);
-    }
-    assert.equal(f.gate.authorize("exec_command",{workspaceId:"ws1"}).code,
-        "MODEL_WORKFLOW_NO_ENABLED_WORKER");
-    assert.equal(f.gate.authorize("exec_command",{workspaceId:"invented-remote-id"}).code,
-        "MODEL_WORKFLOW_NO_ENABLED_WORKER",
-        "Untrusted workspaceId strings must not bypass the registry-backed remote check");
+test("remote workspaces require the same scoped grant when mandatory mode is enabled",()=>{
+    const f=fixture();
+    const remote={workspaceId:"ws-remote",backend:"remote-agent"};
+    assert.equal(f.gate.authorize("read",remote,"remote-chat").allowed,true);
+    f.enable();
+    assert.equal(f.gate.authorize("read",remote,"remote-chat").code,"MODEL_WORKFLOW_DELEGATION_REQUIRED");
+    f.delegate("remote-task",remote.workspaceId,"remote-chat");
+    assert.equal(f.gate.authorize("read",remote,"remote-chat").allowed,true);
+    assert.equal(f.gate.authorize("exec_command",remote,"other-chat").allowed,false);
+    assert.equal(f.gate.authorize("read",{workspaceId:"different-remote"}, "remote-chat").allowed,false);
+    f.noWorkers();
+    assert.equal(f.gate.authorize("read",remote,"remote-chat").code,"MODEL_WORKFLOW_NO_ENABLED_WORKER");
+});
+test("a write-capable model group grants remote reads, and only its current inspected result permits Host writes",()=>{
+    const f=fixture();
+    const worker=f.worker;
+    let profiles=[{id:"a",callPolicyRevision:"1"},{id:"b",callPolicyRevision:"2"}];
+    worker.agentProfiles=()=>profiles;
+    worker.hasActiveWriter=()=>job.status==="running";
+    let job={id:"agent_group_1",groupId:"group",workspaceId:"ws-remote",writer:true,status:"running",updatedAt:"start",
+        agents:[{profileId:"a",revision:"1"},{profileId:"b",revision:"2"}]};
+    const gate=createModelWorkflowGate({modelWorker:worker,readPolicy:()=>({enabled:true,updatedAt:"group-policy"}),
+        agentRuntime:{status:()=>job}});
+    gate.onAgentStart(job,"group-owner");
+    const args={workspaceId:job.workspaceId};
+    assert.equal(gate.authorize("read",args,"group-owner").allowed,true);
+    assert.equal(gate.authorize("read",args,"other-chat").allowed,false);
+    assert.equal(gate.authorize("apply_patch",args,"group-owner").code,"MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY");
+    job={...job,status:"awaiting-review",result:"group output",updatedAt:"first-result"};
+    assert.equal(gate.authorize("apply_patch",args,"group-owner").allowed,false);
+    assert.equal(gate.onAgentStatus(job,"other-chat").granted,false);
+    assert.equal(gate.onAgentStatus(job,"group-owner").granted,true);
+    assert.equal(gate.authorize("apply_patch",args,"group-owner").allowed,true);
+    job={...job,status:"paused",updatedAt:"after-resume"};
+    assert.equal(gate.authorize("apply_patch",args,"group-owner").allowed,false);
+    profiles=[profiles[0],{id:"b",callPolicyRevision:"3"}];
+    assert.equal(gate.authorize("read",args,"group-owner").code,"MODEL_WORKFLOW_WORKER_DISABLED");
 });
 test("dispatch immediately unlocks Host inspection without waiting for Worker completion",()=>{
     const f=fixture();f.enable();
@@ -215,6 +239,7 @@ test("MCP HTTP transport handles all tools/call including plugin tools",()=>{
     assert.match(s,/Batch tools\/call requests are disabled/);
     assert.match(s,/modelWorkflowGate\?\.onDelegate/);
     assert.match(s,/modelWorkflowGate\?\.onResult/);
-    assert.match(s,/isRemoteWorkspaceId:workspaceId=>/);
+    assert.match(s,/modelWorkflowGate\?\.onAgentStart/);
+    assert.match(s,/modelWorkflowGate\?\.onAgentStatus/);
     assert.doesNotMatch(s,/wait until completed and call model_task_result before workspace/);
 });

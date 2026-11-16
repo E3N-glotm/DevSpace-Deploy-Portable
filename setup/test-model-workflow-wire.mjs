@@ -36,7 +36,18 @@ try{
         if(req.url==="/v1/chat/completions"){
             const request=JSON.parse(body);
             assert.equal(request.model,"fake-enabled-worker");
+            if(request.messages.some(m=>m.role==="user"&&m.content.includes("Read the remote workspace fixture"))){
+                const evidence=request.messages.find(m=>m.role==="tool");
+                if(evidence)assert.match(evidence.content,/remote file from enrolled Agent/);
+                const message=evidence?{content:"Verified remote file"}:{content:null,tool_calls:[{
+                    id:"remote-read",type:"function",function:{name:"read_file",arguments:JSON.stringify({path:"remote.txt"})}
+                }]};
+                res.writeHead(200,{"Content-Type":"application/json"});
+                res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:20,completion_tokens:10}}));
+                return;
+            }
             if(request.messages.some(m=>m.role==="user"&&m.content==="Agent Runtime integration test")){
+                if(!request.messages.some(m=>m.role==="tool"))await sleep(350);
                 const read=request.tools.find(tool=>tool.function.name==="read");
                 assert.ok(read?.function.description,"Agent Runtime must receive the normal read tool description");
                 assert.doesNotMatch(read.function.description,/CONVERSATION-CARD PRECONDITION|continuation_task/);
@@ -130,16 +141,63 @@ try{
     const workspaceId=opened.structuredContent?.workspaceId
         ||opened.structuredContent?.workspace?.workspaceId;
     assert.ok(workspaceId,"open_workspace should return workspaceId");
+    const remote={id:"wire-agent",name:"Wire Agent",status:"online",connected:true,
+        accessMode:"scoped",allowedRoots:["/project"],writableRoots:["/project"]};
+    mcp.remoteAgents.inspectWorkspace=async(reference,root)=>{
+        assert.equal(reference,remote.id);assert.equal(root,"/project");
+        return {root,agent:remote,agentsFiles:[],availableAgentsFiles:[]};
+    };
+    mcp.remoteAgents.resolveAgent=id=>{
+        assert.equal(id,remote.id);
+        return remote;
+    };
+    mcp.remoteAgents.rpcWorkspace=async(workspace,method,args)=>{
+        assert.equal(workspace.backendId,remote.id);
+        if(method==="system.status")return {};
+        assert.equal(method,"fs.stat");assert.equal(args.path,"remote.txt");
+        return {exists:true,type:"file",size:31};
+    };
+    mcp.remoteAgents.read=async(workspace,path)=>{
+        assert.equal(workspace.backendId,remote.id);assert.equal(path,"remote.txt");
+        return {kind:"text",text:"remote file from enrolled Agent"};
+    };
+    const remoteOpened=await client.callTool({name:"open_workspace",arguments:{path:"devspace://wire-agent/project"}});
+    assert.ok(!remoteOpened.isError,contentText(remoteOpened));
+    const remoteId=remoteOpened.structuredContent.workspaceId;
+    assert.equal(remoteOpened.structuredContent.backend,"remote-agent");
+    const remoteArgs={workspaceId:remoteId,path:"remote.txt"};
+    assert.match(contentText(await client.callTool({name:readTool.name,arguments:remoteArgs})),/MODEL_WORKFLOW_DELEGATION_REQUIRED/);
+    const remoteStarted=await client.callTool({name:"model_delegate_task",arguments:{
+        workspaceId:remoteId,modelId:"worker-one",instruction:"Read the remote workspace fixture",maxSteps:3}});
+    assert.ok(!remoteStarted.isError,contentText(remoteStarted));
+    const remoteTask=remoteStarted.structuredContent.data.taskId;
+    const approvedRemote=await client.callTool({name:readTool.name,arguments:remoteArgs});
+    assert.match(contentText(approvedRemote),/remote file from enrolled Agent/);
+    let remoteResult;
+    for(let i=0;i<80;i++){
+        remoteResult=(await client.callTool({name:"model_task_result",arguments:{taskId:remoteTask}})).structuredContent.data;
+        if(remoteResult.status!=="running")break;
+        await sleep(25);
+    }
+    assert.equal(remoteResult.status,"completed",JSON.stringify(remoteResult));
+    assert.equal(remoteResult.evidence[0].path,"remote.txt");
+    assert.equal(remoteResult.evidence[0].ok,true);
     if(process.env.DEVSPACE_TEST_WORKFLOW_TOOL_MODE!=="full"){
         const starter=await client.callTool({name:"agent_task_start",arguments:{workspaceId,modelId:"worker-one",instruction:"Agent Runtime integration test",allowShell:true,maxSteps:8}});
         assert.ok(!starter.isError,contentText(starter));
         const id=starter.structuredContent?.data?.id;assert.ok(id);
+        const hostRead=await client.callTool({name:readTool.name,arguments:{workspaceId,path:"safe.txt"}});
+        assert.notEqual(hostRead.isError,true,contentText(hostRead));
+        const uninspected=await client.callTool({name:hostCommandTool.name,arguments:{workspaceId,argv:["node","--version"],yieldTimeMs:1000}});
+        assert.match(contentText(uninspected),/MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY/);
         let state;
         for(let i=0;i<100;i++){
             state=(await client.callTool({name:"agent_task_status",arguments:{taskId:id}})).structuredContent.data;
             if(state.status!=="running")break;await sleep(30);
         }
         assert.equal(state.status,"awaiting-review",JSON.stringify(state));
+        const inspected=await client.callTool({name:hostCommandTool.name,arguments:{workspaceId,argv:["node","--version"],yieldTimeMs:1000}});
+        assert.notEqual(inspected.isError,true,contentText(inspected));
         const events=(await client.callTool({name:"agent_task_events",arguments:{taskId:id}})).structuredContent.data;
         assert.ok(events.some(e=>e.kind==="tool-result"&&e.name==="read"&&e.ok&&e.text.includes("source code content")));
         assert.ok(events.some(e=>e.kind==="tool-result"&&e.name==="exec_command"&&e.ok&&/v\d+\./.test(e.text)));
@@ -157,6 +215,7 @@ try{
         assert.equal((await localHistory("accept")).status,200);
         assert.deepEqual(await (await localHistory("delete-history")).json(),{deletedIds:[id]});
         assert.equal((await localHistory("events")).status,400);
+        setPolicy(true,"worker-policy");
     }
     const argumentsRead={workspaceId,path:"safe.txt"};
     const hostCommandArguments=hostCommandTool.name==="bash"

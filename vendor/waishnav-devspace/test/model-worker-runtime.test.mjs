@@ -7,6 +7,7 @@ import {createRequire} from "node:module";
 // Use the production-packed core so its ESM dependencies resolve the same way
 // as in the Windows Portable runtime, not a separate vendor/node_modules tree.
 import { createModelWorkerRuntime, safeWorkerPath, publicModelProfiles } from "../../../app/node_modules/@waishnav/devspace/dist/model-worker-runtime.js";
+import { createRemoteWorkerToolOpener } from "../../../app/node_modules/@waishnav/devspace/dist/server.js";
 
 const repo = resolve(import.meta.dirname, "..", "..", "..");
 const {createModelUsageStore}=createRequire(import.meta.url)(resolve(repo,"setup","model-usage.cjs"));
@@ -22,7 +23,7 @@ async function eventually(get) {
     throw new Error("TASK_NEVER_FINISHED");
 }
 function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRounds=0,
-    protectedKey=false,deepseek=false,fetchOverride }={}){
+    protectedKey=false,deepseek=false,fetchOverride,remoteWorkspace,openRemoteWorkerTool }={}){
     const root=mkdtempSync(resolve(reports,".tmp-native-model-"));
     const project=resolve(root,"project");
     mkdirSync(project);
@@ -44,8 +45,9 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRoun
         portableRoot:root,
         usageStore:createModelUsageStore(root),
         workspaces:{getWorkspace:id=>{
-            assert.equal(id,"ws_test");return {root:project,backend:"local"};
+            assert.equal(id,"ws_test");return remoteWorkspace??{root:project,backend:"local"};
         }},
+        openRemoteWorkerTool,
         config:{permissions:{allowShellMutation:true,allowArbitraryCommands:false}},
         credentialVault:{decryptString:value=>{
             assert.equal(value,"DPAPI_CIPHERTEXT");
@@ -230,7 +232,7 @@ test("workspace traversal, secrets, absolute paths and UNC are rejected",()=>{
     }
     assert.equal(safeWorkerPath(root,"src/index.js").rel.includes("src"),true);
 });
-test("requires explicit write approval, denies remote-agent backend and unknown worker",()=>{
+test("requires explicit write approval and denies unknown Worker profiles",()=>{
     const f=prepare();
     try {
         assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",
@@ -238,6 +240,56 @@ test("requires explicit write approval, denies remote-agent backend and unknown 
         assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",
             modelId:"qwen_worker",instruction:"hello",allowWrites:"yes"}),/INVALID_WRITE_AUTHORIZATION/);
     } finally {f.dispose();}
+});
+test("remote Worker uses enrolled-agent RPC, scoped paths, and the normal write checkpoint",async()=>{
+    const calls=[];
+    let saved=Buffer.from("hello\nworld\n");
+    const agent={
+        async rpcWorkspace(workspace,method,args){
+            assert.equal(workspace.backendId,"linux-test");
+            calls.push([method,args.path]);
+            if(method==="fs.stat"){
+                if(args.path==="."||args.path==="src")return {type:"directory"};
+                if(args.path==="alias"||args.path==="link.txt")return {type:"symlink"};
+                return {type:"file",mode:0o640};
+            }
+            if(method==="fs.list")return {entries:[{name:"example.txt",type:"file",size:12},{name:".env",type:"file",size:6}]};
+            if(method==="search.grep")return {matches:[
+                {path:"example.txt",line:2,text:"world"},
+                {path:".env",line:1,text:"do not expose secret"},
+                {path:"link.txt",line:1,text:"do not expose alias"},
+            ]};
+            throw Error(method);
+        },
+        async read(_w,path,{limit}){assert.equal(path,"example.txt");assert.equal(limit,180);return {kind:"text",text:saved.toString()};},
+        async readWhole(){return saved;},
+        async writeBuffer(_w,path,bytes,opts){
+            assert.equal(path,"example.txt");assert.equal(opts.mode,0o640);saved=bytes;
+        },
+    };
+    const open=createRemoteWorkerToolOpener(agent);
+    const workspace={id:"ws_test",root:"/home/ubuntu/project",backend:"remote-agent",backendId:"linux-test"};
+    assert.equal(safeWorkerPath(workspace.root,"src\\main.py",true).rel,"src/main.py");
+    assert.throws(()=>safeWorkerPath(workspace.root,"../outside",true),/WORKER_PATH_OUTSIDE_WORKSPACE/);
+    await assert.rejects(open(workspace,"read_file",{path:"alias/hidden.txt"}),/WORKER_SYMLINK_PATH_DENIED/);
+    const ls=await (await open(workspace,"list_directory",{path:"."}))();
+    assert.match(ls.content[0].text,/example\.txt/);
+    assert.doesNotMatch(ls.content[0].text,/\.env/);
+    const grep=await (await open(workspace,"grep_files",{path:".",pattern:"world"}))();
+    assert.match(grep.content[0].text,/example\.txt:2:world/);
+    assert.doesNotMatch(grep.content[0].text,/secret|alias/);
+    const read=prepare({remoteWorkspace:workspace,openRemoteWorkerTool:open});
+    const write=prepare({allowCalls:true,remoteWorkspace:workspace,openRemoteWorkerTool:open});
+    try{
+        const a=read.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",instruction:"Read the remote example."});
+        assert.equal((await eventually(()=>read.runtime.result(a.taskId))).evidence[0].tool,"read_file");
+        const b=write.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",instruction:"Edit the remote example.",allowWrites:true});
+        const done=await eventually(()=>write.runtime.result(b.taskId));
+        assert.equal(done.status,"completed",done.error);
+        assert.equal(done.evidence[0].path,"example.txt");
+        assert.equal(saved.toString(),"hello\nagent\n");
+        assert.deepEqual(write.counts(),{count:2,writeStarted:1,writeFinished:1});
+    }finally{read.dispose();write.dispose();}
 });
 test("HTTP failures are bounded and do not leak remote response bodies",async()=>{
     const f=prepare({errorStatus:401});

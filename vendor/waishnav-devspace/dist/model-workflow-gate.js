@@ -24,7 +24,8 @@ const EXEMPT = new Set([
     "doctor", "doctor_history", "capabilities", "health", "plugin_list", "plugin_read", "permission_rules_list", "process_list", "audit_log_list", "session_list", "memory_list", "hook_list",
 ]);
 const READ_ONLY = new Set([
-    "read", "read_attachment", "show_changes", "session_changes",
+    "read", "read_file", "ls", "list_directory", "grep", "grep_files", "glob", "find_files",
+    "read_attachment", "show_changes", "session_changes",
     "session_list", "audit_log_list", "event_poll", "file_watch_poll",
     "file_watch_list", "process_list", "process_attach",
     "plugin_list", "plugin_read", "plugin_query", "permission_rules_list",
@@ -48,7 +49,7 @@ export function createModelWorkflowGate({
     portableRoot,modelWorker,readPolicy=()=>modelWorkflowPolicy(portableRoot),
     now=()=>Date.now(),grantTtlMs=GRANT_TTL_MS,
     maxGrantAgeMs=MAX_GRANT_AGE_MS,
-    isRemoteWorkspaceId=()=>false,
+    agentRuntime,
 }){
     const connectionIdentity=randomUUID();
     let state=sharedWorkerGrants.get(modelWorker);
@@ -68,12 +69,60 @@ export function createModelWorkflowGate({
         approval.expiresAt=Math.min(current+grantTtlMs,deadline);
         return true;
     }
-    function enabledProfiles(){
-        return modelWorker.models().filter(m=>m.allowCalls!==false);
+    function enabledProfiles(kind){
+        const profiles=kind==="agent"?(modelWorker.agentProfiles?.()??[]):modelWorker.models();
+        return profiles.filter(m=>m.allowCalls!==false);
+    }
+    function profilesMatch(refs,active){
+        return refs.length>0&&refs.every(ref=>active.some(m=>m.id===ref.id&&(m.callPolicyRevision||"")===ref.revision));
+    }
+    function recordGrant(taskId,workspaceId,kind,via,refs,allowWrites,conversationScopeId){
+        if(typeof taskId!=="string"||typeof workspaceId!=="string")return;
+        let policy,active;
+        try{policy=readPolicy();active=enabledProfiles(kind);}
+        catch{return;}
+        if(!policy.enabled||!profilesMatch(refs,active))return;
+        const owner={scope:who(conversationScopeId),workspaceId,kind,via,refs,
+            createdAt:now(),policyVersion:policy.updatedAt,allowWrites};
+        owners.set(taskId,owner);
+        grants.set(key(owner.scope,workspaceId),{taskId,...owner,expiresAt:now()+grantTtlMs});
+        if(owners.size>128){
+            for(const [id,entry] of owners){
+                if(now()-entry.createdAt>maxGrantAgeMs)owners.delete(id);
+            }
+        }
+        if(grants.size>256){
+            for(const [id,entry] of grants){
+                if(entry.expiresAt<=now()||entry.createdAt+maxGrantAgeMs<=now())grants.delete(id);
+            }
+        }
+    }
+    function recordInspection(taskId,kind,result,conversationScopeId){
+        const owner=owners.get(taskId);
+        let policy,active;
+        try{policy=readPolicy();active=enabledProfiles(kind);}
+        catch{return {granted:false};}
+        if(!owner||owner.kind!==kind||owner.scope!==who(conversationScopeId)||
+            owner.workspaceId!==result.workspaceId||owner.policyVersion!==policy.updatedAt||
+            !policy.enabled||!profilesMatch(owner.refs,active))return {granted:false};
+        if(kind==="worker"&&owner.via!==result.modelId)return {granted:false};
+        const finished=["completed","failed","cancelled"].includes(result.status);
+        const awaiting=kind==="agent"&&result.status==="awaiting-review"&&typeof result.result==="string"&&
+            result.result.trim()&&result.pending==null;
+        if(!finished&&!awaiting)return {granted:false};
+        const grant=grants.get(key(owner.scope,owner.workspaceId));
+        const revision=kind==="agent"?result.updatedAt:"worker-final";
+        if(!grant||grant.taskId!==taskId||!revision||grant.reviewed===revision||
+            now()>=grant.createdAt+maxGrantAgeMs)return {granted:false};
+        grant.reviewed=revision;
+        grant.workerOutcome=result.status;
+        grant.expiresAt=Math.min(now()+grantTtlMs,grant.createdAt+maxGrantAgeMs);
+        if(kind==="worker")owners.delete(taskId);
+        return {granted:true,workerOutcome:result.status,expiresAt:grant.expiresAt};
     }
     function blocked(code,reason){
         return {allowed:false,code,
-            message:reason+" Required: call model_worker_list and dispatch model_delegate_task for the opened local workspace. The Host may continue reading while the Worker runs. If the Worker can write, inspect its terminal model_task_result before starting Host mutations. The owner can disable mandatory workflow in DevSpace Portable."};
+            message:reason+" List profiles with model_worker_list. Dispatch model_delegate_task or agent_task_start for the opened workspace, including remote workspaces. Read in parallel. For write-capable work, inspect model_task_result or the finished agent_task_status before Host mutations."};
     }
     return {
         policy:readPolicy,
@@ -108,41 +157,30 @@ export function createModelWorkflowGate({
                     "Mandatory model workflow permits only checkout when opening a workspace. Do not create a new worktree before delegation.");
                 return {allowed:true};
             }
-            // The built-in Worker can only open local checkout workspaces.
-            // Do not deadlock a remote-agent session behind an impossible
-            // delegation. Trust the registry, never a caller-supplied backend.
-            let remote=false;
-            if(workspaceId){
-                try{remote=isRemoteWorkspaceId(workspaceId)===true;}
-                catch{remote=false;}
+            const approval=workspaceId?grants.get(key(who(conversationScopeId),workspaceId)):undefined;
+            let active,anyProfile;
+            try{
+                const workers=enabledProfiles("worker"),agents=enabledProfiles("agent");
+                active=approval?.kind==="agent"?agents:workers;
+                anyProfile=workers.length||agents.length;
             }
-            if(remote){
-                if(writerBusy&&!READ_ONLY.has(name))return blocked(
-                    "MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY",
-                    "A write-capable Worker is already editing this workspace.");
-                return {allowed:true,scope:"remote-workspace",
-                    delegationRequired:false};
-            }
-            let active;
-            try{active=enabledProfiles();}
             catch{return blocked("MODEL_WORKFLOW_PROVIDER_CONFIG_INVALID",
                 "The model provider configuration is unreadable.");}
-            if(!active.length)return blocked("MODEL_WORKFLOW_NO_ENABLED_WORKER",
-                "Mandatory model workflow is enabled but no callable Worker is allowed.");
+            if(!anyProfile)return blocked("MODEL_WORKFLOW_NO_ENABLED_WORKER",
+                "Mandatory model workflow is enabled but no callable Worker or Agent profile is allowed.");
             if(!workspaceId)return blocked("MODEL_WORKFLOW_WORKSPACE_REQUIRED",
-                "Open a local workspace before using a task tool while mandatory model workflow is enabled.");
-            const approval=grants.get(key(who(conversationScopeId),workspaceId));
+                "Open a workspace before using a task tool while mandatory model workflow is enabled.");
             if(!approval||approval.policyVersion!==policy.updatedAt)
                 return blocked("MODEL_WORKFLOW_DELEGATION_REQUIRED",
-                    "This MCP session/conversation has not dispatched a recent enabled Worker for this workspace.");
-            if(!active.some(m=>m.id===approval.modelId &&
-                (m.callPolicyRevision||"")===approval.profileRevision))
+                    "This MCP session/conversation has not dispatched a recent enabled Worker or Agent task for this workspace.");
+            if(!profilesMatch(approval.refs,active))
                 return blocked("MODEL_WORKFLOW_WORKER_DISABLED",
                     "The Worker used for this workflow has been disabled, removed or reconfigured.");
-            let workerStatus;
-            try{workerStatus=modelWorker.status(approval.taskId).status;}
+            let snapshot;
+            try{snapshot=(approval.kind==="agent"?agentRuntime:modelWorker).status(approval.taskId);}
             catch{return blocked("MODEL_WORKFLOW_TASK_MISSING",
                 "The delegated Worker task is no longer available; dispatch a new one.");}
+            const workerStatus=snapshot.status;
             const running=["queued","running"].includes(workerStatus);
             if(now()>=approval.createdAt+maxGrantAgeMs)return blocked(
                 "MODEL_WORKFLOW_DELEGATION_EXPIRED",
@@ -152,75 +190,33 @@ export function createModelWorkflowGate({
                 "The most recent Worker delegation has expired.");
             if(READ_ONLY.has(name)){
                 renewActiveGrant(approval);
-                return {allowed:true,via:approval.modelId,
+                return {allowed:true,via:approval.via,
                     workerStatus,parallel:true};
             }
-            if(writerBusy || (approval.allowWrites&&!approval.reviewed))return blocked(
+            const inspected=approval.reviewed&&(approval.kind==="worker"||approval.reviewed===snapshot.updatedAt);
+            if(writerBusy || (approval.allowWrites&&!inspected))return blocked(
                 "MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY",
                 "A write-capable Worker has not finished and had its outcome inspected; concurrent Host writes are unsafe.");
             renewActiveGrant(approval);
-            return {allowed:true,via:approval.modelId,workerStatus};
+            return {allowed:true,via:approval.via,workerStatus};
         },
         onDelegate(result,conversationScopeId){
-            if(typeof result?.taskId!=="string")return;
-            let policy;
-            try{policy=readPolicy();}
+            let profile;
+            try{profile=enabledProfiles("worker").find(m=>m.id===result.modelId);}
             catch{return;}
-            if(!policy.enabled)return;
-            let active;
-            try{active=enabledProfiles();}
-            catch{return;}
-            const profile=active.find(m=>m.id===result.modelId);
             if(!profile)return;
-            const owner={
-                scope:who(conversationScopeId),workspaceId:result.workspaceId,
-                modelId:result.modelId,createdAt:now(),
-                policyVersion:policy.updatedAt,allowWrites:result.allowWrites===true,
-                profileRevision:profile.callPolicyRevision||"",reviewed:false,
-            };
-            owners.set(result.taskId,owner);
-            grants.set(key(owner.scope,owner.workspaceId),{
-                taskId:result.taskId,...owner,expiresAt:now()+grantTtlMs,
-            });
-            if(owners.size>128){
-                for(const [id,entry] of owners){
-                    if(now()-entry.createdAt>maxGrantAgeMs)owners.delete(id);
-                }
-            }
-            if(grants.size>256){
-                for(const [id,entry] of grants){
-                    if(entry.expiresAt<=now()||
-                        entry.createdAt+maxGrantAgeMs<=now())grants.delete(id);
-                }
-            }
+            recordGrant(result.taskId,result.workspaceId,"worker",result.modelId,
+                [{id:result.modelId,revision:profile.callPolicyRevision||""}],result.allowWrites===true,conversationScopeId);
         },
         onResult(result,conversationScopeId){
-            const owner=owners.get(result?.taskId);
-            let policy;
-            try{policy=readPolicy();}
-            catch{return {granted:false};}
-            if(!owner||owner.scope!==who(conversationScopeId)||
-                owner.workspaceId!==result.workspaceId||
-                owner.modelId!==result.modelId||
-                owner.policyVersion!==policy.updatedAt||
-                !policy.enabled||
-                !["completed","failed","cancelled"].includes(result.status))return {granted:false};
-            let active;
-            try{active=enabledProfiles();}
-            catch{return {granted:false};}
-            const profile=active.find(m=>m.id===owner.modelId);
-            if(!profile)return {granted:false};
-            const grant=grants.get(key(owner.scope,owner.workspaceId));
-            if(!grant||grant.taskId!==result.taskId||grant.reviewed||
-                (profile.callPolicyRevision||"")!==owner.profileRevision)
-                return {granted:false};
-            grant.reviewed=true;
-            grant.workerOutcome=result.status;
-            grant.expiresAt=Math.min(now()+grantTtlMs,
-                grant.createdAt+maxGrantAgeMs);
-            owners.delete(result.taskId);
-            return {granted:true,workerOutcome:result.status,
-                expiresAt:grant.expiresAt};
+            return recordInspection(result.taskId,"worker",result,conversationScopeId);
+        },
+        onAgentStart(task,conversationScopeId){
+            recordGrant(task.id,task.workspaceId,"agent",task.groupId||task.agents[0]?.profileId,
+                task.agents.map(a=>({id:a.profileId,revision:a.revision||""})),task.writer===true,conversationScopeId);
+        },
+        onAgentStatus(task,conversationScopeId){
+            return recordInspection(task.id,"agent",task,conversationScopeId);
         },
     };
 }
