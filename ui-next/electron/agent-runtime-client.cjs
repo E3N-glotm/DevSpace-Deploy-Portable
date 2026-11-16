@@ -5,6 +5,13 @@ const path = require('node:path');
 
 const unavailable = detail => new Error('AGENT_RUNTIME_UNAVAILABLE: ' + detail);
 
+// Keep the IPC client's allowed actions at the tested HTTP request boundary.
+// New local runtime actions must be added here as well as on the server.
+const AGENT_ACTIONS = new Set([
+  'list', 'events', 'start', 'status', 'pause', 'resume', 'cancel', 'accept',
+  'delete-history', 'clear-history', 'routing-settings', 'set-routing-settings',
+]);
+
 function readAgentToken(filename) {
   let token;
   try {
@@ -22,6 +29,7 @@ function readAgentToken(filename) {
 }
 
 async function requestAgentRuntime({ root, config, env = process.env, fetch, action, payload }) {
+  if (!AGENT_ACTIONS.has(action)) throw new Error('INVALID_AGENT_ACTION');
   const state = path.resolve(root,
     env.DEVSPACE_STATE_DIR || config.stateDir || env.DEVSPACE_PORTABLE_STATE_DIR || path.join('data', 'state'));
   const tokenFile = path.join(state, 'agent-runtime-ui.token');

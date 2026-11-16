@@ -394,7 +394,6 @@ function installHandlers() {
   register('agentGroupsSave',input=>operation(()=>groups.save(input)));
   register('agentGroupsDelete',id=>operation(()=>groups.remove(id)));
   register('agentRuntime',async(action,payload={})=>{
-    if(!['list','events','start','status','pause','resume','cancel','accept','delete-history','clear-history'].includes(action))throw Error('INVALID_AGENT_ACTION');
     const config=readJson(path.join(CONFIG,'config.json'));
     return requestAgentRuntime({root:ROOT,config,fetch:(url,init)=>net.fetch(url,init),action,payload});
   });

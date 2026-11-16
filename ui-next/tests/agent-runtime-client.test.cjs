@@ -17,6 +17,30 @@ function token(state, content) {
   fs.writeFileSync(path.join(state, 'agent-runtime-ui.token'), content);
 }
 
+test('global routing settings read and save through the same request boundary as Electron IPC', async t => {
+  const root = fixture(t);
+  token(path.join(root, 'data', 'state'), 'test-token');
+  let current = { mode: 'auto', defaultWorkerId: null };
+  const calls = [];
+  const params = { root, config: {}, env: {}, fetch: async (url, request) => {
+    assert.equal(url, 'http://127.0.0.1:7676/agent-runtime/local');
+    assert.equal(request.headers['x-devspace-agent-token'], 'test-token');
+    const body = JSON.parse(request.body);
+    calls.push(body.action);
+    if (body.action === 'set-routing-settings') current = body.input;
+    return Response.json(current);
+  }};
+  assert.deepEqual(await requestAgentRuntime({...params, action:'routing-settings'}), current);
+  for (const mode of ['single', 'group', 'auto']) {
+    const input = { mode, defaultWorkerId: 'worker-1' };
+    assert.deepEqual(await requestAgentRuntime({...params, action:'set-routing-settings', payload:{input}}), input);
+    assert.deepEqual(await requestAgentRuntime({...params, action:'routing-settings'}), input);
+  }
+  assert.equal(calls.length, 7);
+  await assert.rejects(requestAgentRuntime({...params, action:'not-an-agent-action'}), /INVALID_AGENT_ACTION/);
+  assert.equal(calls.length, 7);
+});
+
 test('missing source-instance token gives an actionable error and never contacts another installation', async t => {
   const root = fixture(t);
   token(path.join(root, 'other-live', 'data', 'state'), 'other-instance');
