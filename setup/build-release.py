@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import json
@@ -404,8 +405,11 @@ def write_checksums(files: list[Path], plugin_entries: list[tuple[Path, Path]]) 
     temporary.replace(CHECKSUM_FILE)
 
 
-def write_zip(files: list[Path], plugin_entries: list[tuple[Path, Path]], version: str) -> Path:
-    output = ROOT / f"DevSpacePortable-Windows-x64-{version}.zip"
+def write_zip(
+    files: list[Path], plugin_entries: list[tuple[Path, Path]], version: str, output: Path | None = None
+) -> Path:
+    output = output or ROOT / f"DevSpacePortable-Windows-x64-{version}.zip"
+    output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".zip.tmp")
     temporary.unlink(missing_ok=True)
     output.unlink(missing_ok=True)
@@ -437,6 +441,9 @@ def write_zip(files: list[Path], plugin_entries: list[tuple[Path, Path]], versio
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output", type=Path, help="Write the complete Portable ZIP to this path.")
+    args = parser.parse_args()
     manifest = json.loads((ROOT / "VERSION-MANIFEST.json").read_text(encoding="utf-8"))
     policy = json.loads((ROOT / "setup" / "legacy-release-policy.json").read_text(encoding="utf-8"))
     version = release_version()
@@ -476,7 +483,7 @@ def main() -> int:
     validate_release_payload(files)
     print(f"Release {version}: {len(files) + len(plugin_entries)} payload files", flush=True)
     write_checksums(files, plugin_entries)
-    output = write_zip(files, plugin_entries, version)
+    output = write_zip(files, plugin_entries, version, args.output)
     print(f"Created: {output}", flush=True)
     print(f"SHA-256: {sha256_file(output)}", flush=True)
 

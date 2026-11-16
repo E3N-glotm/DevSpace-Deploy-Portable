@@ -69,6 +69,22 @@ try {
   assert.ok(result.metadata.width > 0);
   assert.ok(result.metadata.height > 0);
   assert.ok(elapsedMs < 2_500, `compatibility broker probe took ${elapsedMs} ms`);
+  // Empty text exercises the native input path without sending any keystrokes.
+  const emptyText = { action: "type_text", text: "" };
+  const sequence = await performComputerAction({
+    action: "sequence",
+    steps: [{ ...emptyText, delayMs: 20 }, emptyText],
+    screenshotAfter: true,
+  }, { leaseId: lease.leaseId, region: { x: 0, y: 0, width: 64, height: 64 } });
+  assert.equal(sequence.metadata.action, "sequence");
+  assert.deepEqual(sequence.metadata.actions, ["type_text", "type_text"]);
+  assert.equal(sequence.metadata.steps, 2);
+  assert.equal(sequence.metadata.screenshot, true);
+  assert.ok(sequence.image?.length > 0);
+  await assert.rejects(performComputerAction({
+    action: "sequence",
+    steps: [emptyText, { action: "keypress", keys: ["UnsupportedDevSpaceTestKey"] }, emptyText],
+  }, { leaseId: lease.leaseId }), /stopped at step 2 \(keypress\); 1\/3 steps confirmed/);
   const heartbeatResult = manager("ui-heartbeat", { leaseId: lease.leaseId });
   assert.equal(heartbeatResult.broker?.pid, brokerPid);
   const combinedPoll = manager("ui-runtime-poll", { leaseId: lease.leaseId, dashboard: false, continuations: false });

@@ -339,8 +339,10 @@ function syntheticAckWorkTicket(input, outcome) {
         requiredBeforeFinal,
     };
 }
+const agentToolServers = new WeakSet();
 function registerAppTool(server, name, definition, handler) {
     const guardedDefinition = continuationTaskContractsEnabled
+        && !agentToolServers.has(server)
         && name !== "continuation_anchor"
         && name !== "continuation_task"
         && name !== "continuation_sender"
@@ -3022,8 +3024,11 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         version: DEVSPACE_SERVER_VERSION,
         description: "Local coding workspace and durable execution runtime for MCP clients, with persistent processes, sessions, diagnostics, events, permission rules, and local plugins.",
     }, {
-        instructions: serverInstructions(config)+mandatoryModelInstruction,
+        instructions: runtimeServices.internalAgentTools ? undefined : serverInstructions(config)+mandatoryModelInstruction,
     });
+    // The in-process client shares tool handlers, but has its own task
+    // lifecycle and cannot perform ChatGPT conversation control.
+    if (runtimeServices.internalAgentTools) agentToolServers.add(server);
     const workspaceResourceUri = workspaceAppUri(config);
     const continuationAnchorResourceUri = workspaceAppAnchorUri(config);
     const workspaceResourceMetadata = {
@@ -4471,7 +4476,7 @@ export function createServer(config = loadConfig(), options = {}) {
         agentToolConnect??=(async()=>{
             const [clientTransport,serverTransport]=InMemoryTransport.createLinkedPair();
             agentToolServer=createMcpServer(config,workspaces,reviewCheckpoints,processSessions,localAgentProviders,incomingArtifactAdapters,{
-                runtimeState,fileWatches,permissionRules,pluginManager,uiLease,memoryStore,hookManager,remoteAgents,continuationSupervisor,modelWorker,
+                runtimeState,fileWatches,permissionRules,pluginManager,uiLease,memoryStore,hookManager,remoteAgents,continuationSupervisor,modelWorker,internalAgentTools:true,
             });
             agentToolClient=new Client({name:"devspace-agent-runtime",version:"1.0.0"});
             await agentToolServer.connect(serverTransport);await agentToolClient.connect(clientTransport);

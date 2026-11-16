@@ -22,7 +22,7 @@ async function eventually(get) {
     throw new Error("TASK_NEVER_FINISHED");
 }
 function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRounds=0,
-    protectedKey=false,deepseek=false }={}){
+    protectedKey=false,deepseek=false,fetchOverride }={}){
     const root=mkdtempSync(resolve(reports,".tmp-native-model-"));
     const project=resolve(root,"project");
     mkdirSync(project);
@@ -55,6 +55,7 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRoun
         finishWrite:async(_id,_ws,_p,ok)=>{writeFinished++;assert.equal(ok,true);},
         fetchImpl:async(_url,opts)=>{
             count++;
+            if(fetchOverride)return fetchOverride(_url,opts);
             if(protectedKey)assert.equal(opts.headers.Authorization,"Bearer TEST-ONLY-WORKER-KEY");
             else assert.ok(!opts.headers.Authorization);
             assert.match(_url,/\/chat\/completions$/);
@@ -82,6 +83,25 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRoun
 function response(payload) {
     return {ok:true,status:200,headers:{get:()=>null},text:async()=>JSON.stringify(payload)};
 }
+
+test("Agent deadline covers backend queue time and cancels stalled inference",async()=>{
+    let fetchStarted;
+    const started=new Promise(resolve=>{fetchStarted=resolve;});
+    const f=prepare({fetchOverride:(_url,{signal})=>new Promise((_,reject)=>{
+        signal.addEventListener("abort",()=>reject(signal.reason),{once:true});
+        fetchStarted();
+    })});
+    try{
+        const model=f.runtime.agentProfiles()[0];
+        const agent=()=>({profileId:model.id,inputTokens:0,outputTokens:0,estimatedUSD:0});
+        const request=deadline=>f.runtime.agentRequest({deadline},agent(),model,[],[]);
+        const stalled=assert.rejects(request(Date.now()+300),/AGENT_TIME_BUDGET_EXHAUSTED/);
+        await started;
+        await assert.rejects(request(Date.now()+30),/AGENT_TIME_BUDGET_EXHAUSTED/);
+        assert.equal(f.counts().count,1,"a queued request that expired must never reach the backend");
+        await stalled;
+    }finally{f.dispose();}
+});
 
 test("model list never exposes encrypted keys",()=>{
     const f=prepare();

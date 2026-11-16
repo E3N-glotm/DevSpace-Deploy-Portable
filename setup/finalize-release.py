@@ -168,6 +168,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "docs/releases/DEV-1.1.68-dev15.md",
             "docs/releases/DEV-1.1.68-dev16.md",
             "docs/releases/DEV-1.1.68-dev17.md",
+            "docs/releases/DEV-1.1.68-dev18.md",
             "vendor/waishnav-devspace/dist/computer-image.js",
             "vendor/waishnav-devspace/dist/computer-image.ps1",
             "app/node_modules/@waishnav/devspace/dist/computer-image.js",

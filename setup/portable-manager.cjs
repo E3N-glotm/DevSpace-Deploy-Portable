@@ -84,7 +84,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.68";
-const PORTABLE_DEV_ITERATION = "dev17";
+const PORTABLE_DEV_ITERATION = "dev18";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -923,6 +923,41 @@ function runComputerInput(request, inputFile, outputFile) {
   };
 }
 
+function requireLiveComputerUseRequest(request) {
+  const current = readJson(UI_LEASE_FILE, null);
+  if (current?.leaseId !== request.leaseId || current?.computerUseEnabled !== true
+      || !(Date.parse(current.expiresAt) > Date.now()) || !computerUseRuntimeEnabled()) {
+    throw new Error("The active Computer Use lease was closed, disabled or expired.");
+  }
+  if (request.expiresAt && !(Date.parse(request.expiresAt) > Date.now())) {
+    throw new Error("The Computer Use request expired.");
+  }
+}
+
+function runComputerSequence(request, inputFile, outputFile) {
+  const { steps } = request.payload;
+  const supported = new Set(["move", "click", "double_click", "right_click", "scroll", "keypress", "type_text"]);
+  if (!Array.isArray(steps) || !steps.length || steps.length > 50
+      || steps.some(step => !supported.has(step?.action))) {
+    throw new Error("Computer Use sequence requires 1 to 50 supported input actions.");
+  }
+  const actions = [];
+  const diagnostics = [];
+  let metadata = {};
+  for (const step of steps) {
+    try {
+      requireLiveComputerUseRequest(request);
+      const result = runComputerInput({ ...request, payload: step }, inputFile, outputFile);
+      metadata = result.metadata;
+      if (result.stderr) diagnostics.push(result.stderr);
+      actions.push(step.action);
+    } catch (error) {
+      throw new Error(`Computer Use sequence stopped at step ${actions.length + 1} (${step.action}); ${actions.length}/${steps.length} steps confirmed. Take a new snapshot before retrying any input. ${error.message}`);
+    }
+  }
+  return { metadata: { ...metadata, steps: actions.length, actions }, stderr: diagnostics.join("\n") };
+}
+
 function captureComputerScreen(imageFile) {
   if (!fs.existsSync(COMPUTER_USE_CAPTURE)) {
     throw new Error(`Desktop capture helper is missing: ${COMPUTER_USE_CAPTURE}`);
@@ -949,7 +984,8 @@ function processComputerUseRequests(lease, { onActivity } = {}) {
   if (!lease?.computerUseEnabled || !computerUseRuntimeEnabled()) {
     return { processed: 0, failed: 0, disabled: true, error: "computer-use-disabled" };
   }
-  if (!fs.existsSync(COMPUTER_USE_HELPER)) return { processed: 0, failed: 0, error: "input helper missing" };
+  if (!fs.existsSync(COMPUTER_USE_INPUT) && !fs.existsSync(COMPUTER_USE_HELPER))
+    return { processed: 0, failed: 0, error: "input helper missing" };
   fs.mkdirSync(COMPUTER_USE_REQUESTS, { recursive: true });
   fs.mkdirSync(COMPUTER_USE_RESPONSES, { recursive: true });
   let processed = 0;
@@ -975,6 +1011,7 @@ function processComputerUseRequests(lease, { onActivity } = {}) {
         failed += 1;
         continue;
       }
+      requireLiveComputerUseRequest(request);
       // Only a live, lease-authorized request may pulse the visible desktop
       // control indicator. The broker owns the signal, not arbitrary callers.
       authorizedActivity = true;
@@ -986,20 +1023,26 @@ function processComputerUseRequests(lease, { onActivity } = {}) {
       let stderr = "";
       try {
         if (action !== "snapshot") {
-          const inputResult = runComputerInput(request, actionInputFile, imageFile);
+          const inputResult = action === "sequence"
+            ? runComputerSequence(request, actionInputFile, imageFile)
+            : runComputerInput(request, actionInputFile, imageFile);
           metadata = { ...metadata, ...inputResult.metadata, action };
           stderr = inputResult.stderr;
         }
         if (request.payload?.screenshotAfter !== false) {
-          const captureResult = captureComputerScreen(imageFile);
-          metadata = { ...metadata, ...captureResult.metadata, action, screenshot: true };
-          stderr = [stderr, captureResult.stderr].filter(Boolean).join("\n");
+          try {
+            requireLiveComputerUseRequest(request);
+            const captureResult = captureComputerScreen(imageFile);
+            metadata = { ...metadata, ...captureResult.metadata, action, screenshot: true };
+            stderr = [stderr, captureResult.stderr].filter(Boolean).join("\n");
+          } catch (error) {
+            if (action === "snapshot") throw error;
+            metadata.screenshotError = brokerErrorText(error?.message || error);
+            metadata.recovery = "Request a new screenshot; do not repeat the preceding input.";
+          }
         }
       } finally {
         fs.rmSync(actionInputFile, { force: true });
-      }
-      if (metadata.screenshot && !fs.existsSync(imageFile)) {
-        throw new Error("Computer Use capture helper did not produce the requested screenshot.");
       }
       writeComputerUseResponse(requestId, {
         success: true,

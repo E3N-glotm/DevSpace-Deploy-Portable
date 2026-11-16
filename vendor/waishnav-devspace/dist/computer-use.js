@@ -64,17 +64,18 @@ async function invokeComputerUse(payload, options = {}) {
     const paths = brokerPaths(requestId);
     await mkdir(paths.requests, { recursive: true });
     await mkdir(paths.responses, { recursive: true });
+    const deadline = Date.now() + requestTimeout(payload);
     const request = {
         formatVersion: 1,
         requestId,
         leaseId,
         createdAt: new Date().toISOString(),
+        expiresAt: new Date(deadline).toISOString(),
         payload,
     };
     try {
         await writeFile(paths.requestTemporary, JSON.stringify(request, null, 2) + "\n", { mode: 0o600 });
         await rename(paths.requestTemporary, paths.request);
-        const deadline = Date.now() + requestTimeout(payload);
         let response;
         while (Date.now() < deadline) {
             response = await readJsonIfPresent(paths.response);
@@ -83,7 +84,9 @@ async function invokeComputerUse(payload, options = {}) {
             await delay(POLL_INTERVAL_MS);
         }
         if (!response) {
-            throw new Error("Computer Use broker timed out. Keep the local DevSpace Portable UI open and visible, then retry.");
+            throw new Error(payload.action === "snapshot"
+                ? "Computer Use broker timed out. Keep the local DevSpace Portable UI open and visible, then request a new snapshot."
+                : "Computer Use broker timed out. Some input may already have executed. Request a new snapshot before retrying any input.");
         }
         if (!response.success) {
             throw new Error(redactText(response.error || "Computer Use broker failed."));

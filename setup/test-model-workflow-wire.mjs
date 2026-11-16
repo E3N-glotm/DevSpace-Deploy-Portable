@@ -37,6 +37,9 @@ try{
             const request=JSON.parse(body);
             assert.equal(request.model,"fake-enabled-worker");
             if(request.messages.some(m=>m.role==="user"&&m.content==="Agent Runtime integration test")){
+                const read=request.tools.find(tool=>tool.function.name==="read");
+                assert.ok(read?.function.description,"Agent Runtime must receive the normal read tool description");
+                assert.doesNotMatch(read.function.description,/CONVERSATION-CARD PRECONDITION|continuation_task/);
                 const calls=request.messages.filter(m=>m.role==="tool");
                 const next=calls.length===0?{name:"read",arguments:JSON.stringify({path:"safe.txt"})}:
                     calls.length===1?{name:"exec_command",arguments:JSON.stringify({argv:["node","--version"],yieldTimeMs:1000})}:
@@ -86,6 +89,7 @@ try{
             ?"full":"codex",DEVSPACE_WIDGETS:"changes",
         DEVSPACE_SUBAGENTS:"0",DEVSPACE_LOG_REQUESTS:"0",
         DEVSPACE_LOG_TOOL_CALLS:"0",
+        DEVSPACE_CONTINUATION_GUARD:"1",
         DEVSPACE_PERMISSION_PROFILE:"custom",
         DEVSPACE_ALLOW_ARBITRARY_COMMANDS:"1",
         DEVSPACE_ALLOW_SHELL_MUTATION:"1",
@@ -116,6 +120,7 @@ try{
     }
     const readTool=tools.find(x=>["read","read_file"].includes(x.name));
     assert.ok(readTool,"Missing read tool");
+    assert.match(readTool.description,/CONVERSATION-CARD PRECONDITION/);
     const hostCommandTool=tools.find(x=>["exec_command","bash"].includes(x.name));
     assert.ok(hostCommandTool,
         "Missing command tool in the selected DevSpace tool mode");
