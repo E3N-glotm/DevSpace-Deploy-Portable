@@ -684,6 +684,9 @@ export class StructuredRuntimeState {
         const owner = String(task.delivery_owner ?? "").trim();
         const syntheticOwned = ["synthetic-pending", "synthetic-active"].includes(owner);
         const continuationPending = Number(task.continuation_pending || 0);
+        if (syntheticOwned && !this.autoContinuationEnabled()) {
+            return { accepted: false, reason: "automatic-continuation-disabled", taskId: task.id };
+        }
         // The status claim consumes the model-visible capability and persists
         // generation ownership here. Ordinary tools are authorized solely by
         // that server-owned lease; their schemas must never grow a transport
@@ -3471,6 +3474,9 @@ export class StructuredRuntimeState {
         return { abandoned: Number(result.changes || 0), cutoffAt: cutoffIso };
     }
     ensureContinuationTaskContract(input = {}) {
+        if (!this.autoContinuationEnabled()) {
+            return { created: false, accepted: true, reason: "automatic-continuation-disabled", finalResponseAllowed: true };
+        }
         const workspaceId = String(input.workspaceId ?? "").trim();
         const conversationScopeId = String(input.conversationScopeId ?? "").trim();
         if (!conversationScopeId)
@@ -3628,6 +3634,10 @@ export class StructuredRuntimeState {
         const nowIso = now.toISOString();
         const terminalStates = TERMINAL_CONTINUATION_STATES;
         const anchorEnforcementEnabled = this.autoContinuationEnabled();
+        const disabledStatus = action === "status" && !anchorEnforcementEnabled;
+        if (["begin-auto", "claim-continuation"].includes(action) && !anchorEnforcementEnabled) {
+            return { accepted: false, reason: "automatic-continuation-disabled", finalResponseAllowed: true };
+        }
         const normalizedMode = (value, fallback = "compat") => {
             const mode = String(value ?? "").trim().toLowerCase();
             if (mode === "resident") return "resident";
@@ -3821,7 +3831,7 @@ export class StructuredRuntimeState {
             const remainingMilestones = required.filter((milestone) => !completed.has(milestone));
             const taskIncomplete = remainingMilestones.length > 0 && !terminalStates.has(task.state);
             const blocked = ["WAITING_EXTERNAL", "WAITING_SUPERVISOR", "PAUSED_BY_USER"].includes(task.state);
-            const continueRequired = taskIncomplete && task.state === "RUNNING" && task.continuationMode !== "compat";
+            const continueRequired = anchorEnforcementEnabled && taskIncomplete && task.state === "RUNNING" && task.continuationMode !== "compat";
             const syntheticWorkMustContinue = continueRequired
                 && String(task.deliveryOwner || "") === "synthetic-active"
                 && task.assistantTurnState !== "COMPLETION_REQUESTED";
@@ -3859,7 +3869,7 @@ export class StructuredRuntimeState {
                 // the model explicitly signs the Assistant Turn Completion
                 // Contract for the current turn lease. The Host still must
                 // confirm lifecycle teardown before a continuation can be sent.
-                finalResponseAllowed: !taskIncomplete || blocked || normalTurnCompletionRequested,
+                finalResponseAllowed: !anchorEnforcementEnabled || !taskIncomplete || blocked || normalTurnCompletionRequested,
             };
         };
         // checkpoint and complete are authoritative mutation boundaries for
@@ -3881,7 +3891,7 @@ export class StructuredRuntimeState {
         // chance to replace them.  Recover the conversation/card structure
         // first, then let the begin branch below apply/replace the plan once.
         const beginOwnsRequiredPlanMutation = action === "begin";
-        const recoveredCanonicalProjection = this.recoverCanonicalConversationTaskProjection({
+        const recoveredCanonicalProjection = disabledStatus ? undefined : this.recoverCanonicalConversationTaskProjection({
             conversationScopeId: input.conversationScopeId,
             taskId: input.taskId,
             workspaceId: input.workspaceId,
@@ -3960,6 +3970,23 @@ export class StructuredRuntimeState {
             const readOnlyStatus = input.readOnlyStatus === true;
             const manualTakeover = input.manualTakeover === true
                 || String(input.note ?? "").trim() === "manual-user-turn-takeover";
+            if (disabledStatus) {
+                // A manual turn still takes precedence over authority that
+                // was issued before the owner turned automatic delivery off.
+                // Otherwise status is observational and never starts a task.
+                const needsTakeover = row && manualTakeover && !deliveryToken && !readOnlyStatus
+                    && input.internalAnchorPreparation !== true && (
+                        ["synthetic-pending", "synthetic-active"].includes(String(row.delivery_owner ?? ""))
+                        || Boolean(row.delivery_token)
+                        || this.continuationModelToolAuthorization({ conversationScopeId: row.conversation_scope_id }).accepted === false
+                    );
+                if (!needsTakeover) {
+                    return {
+                        task: rowToTask(row), accepted: !deliveryToken, readOnlyStatus: true,
+                        reason: "automatic-continuation-disabled", continueRequired: false, finalResponseAllowed: true,
+                    };
+                }
+            }
             const expectedGeneration = row?.delivery_token
                 ? this.database.sqlite.prepare(`
                     select generation,state,delivered_at,turn_acked_at from continuation_generations
@@ -5840,7 +5867,7 @@ export class StructuredRuntimeState {
             // anchor result for this manual round. Whether the iframe later
             // mounts and ACKs is separate UI health telemetry and must not
             // block verified business completion.
-            if (!row.anchor_mount_requested_at) {
+            if (anchorEnforcementEnabled && !row.anchor_mount_requested_at) {
                 return { task: rowToTask(row), accepted: false, reason: "continuation-anchor-required" };
             }
             // UI delivery is independently observable product state. A missing

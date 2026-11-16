@@ -521,8 +521,8 @@ assert.match(coordinator, /function acceptTask\([\s\S]{0,1700}terminal\(state\.t
   "observing terminal state must synchronously cancel supervisor and lifecycle timers");
 assert.match(runtimeStateSource, /closeTerminalContinuationArtifacts\([\s\S]{0,5200}state='NO_WORK'[\s\S]{0,3400}delivery_token=null[\s\S]{0,2200}stall_armed_at=null/,
   "terminal task transitions must seal synthetic generations and clear pending delivery/retry/stall state");
-assert.match(server, /if \(!coordinatorCall && !continuationControlCall && conversationScopeId && structuredRuntimeState\)[\s\S]{0,1300}touchContinuationModelActivity\([\s\S]{0,260}substantive: false/,
-  "the wrapper may retain non-substantive telemetry for ordinary tools only after excluding all continuation control-plane calls");
+assert.match(server, /if \(automaticContinuationActive && !coordinatorCall && !continuationControlCall && conversationScopeId && structuredRuntimeState\)[\s\S]{0,1300}touchContinuationModelActivity\([\s\S]{0,260}substantive: false/,
+  "ordinary tools may record continuation telemetry only while enabled and after excluding continuation control-plane calls");
 assert.doesNotMatch(server, /if \(!coordinatorCall && conversationScopeId && structuredRuntimeState\)[\s\S]{0,1300}touchContinuationModelActivity/,
   "continuation_anchor/continuation_task must be excluded before the wrapper can touch model activity or renew the Turn Lease");
 assert.match(server, /const boundTaskConversationScopeId = input\.taskId[\s\S]{0,1200}const conversationScopeId = input\.coordinatorInstanceId[\s\S]{0,500}requestConversationScopeId \?\? boundTaskConversationScopeId/,
@@ -793,8 +793,8 @@ assert.match(server, /Retry transient transport failures over bounded readiness 
   "server guidance must retain bounded transport-readiness retries");
 assert.match(server, /Before replaying uncertain side effects, inspect durable state/,
   "transport recovery must remain side-effect aware before replaying uncertain mutations");
-assert.match(server, /CONVERSATION_CARD_PRECONDITION[\s\S]{0,1800}Automatic continuation is opt-in[\s\S]{0,500}while it is disabled, status remains headless[\s\S]{0,700}When automatic continuation is enabled[\s\S]{0,500}continuation_anchor exactly once before substantive DevSpace work/,
-  "ordinary DevSpace tool descriptions must keep OFF headless and require exactly one anchor only when automatic continuation is enabled");
+assert.match(server, /CONVERSATION_CARD_PRECONDITION[\s\S]{0,1800}Automatic continuation is opt-in[\s\S]{0,500}while it is disabled, status is a read-only probe and ordinary DevSpace calls do not create continuation records[\s\S]{0,700}When automatic continuation is enabled[\s\S]{0,500}continuation_anchor exactly once before substantive DevSpace work/,
+  "tool descriptions must explain disabled status and record behavior and require one anchor only when enabled");
 assert.match(server, /manualTakeover=true exactly once[\s\S]{0,1200}When automatic continuation is enabled[\s\S]{0,700}continuation_anchor exactly once before substantive DevSpace work/,
   "manual turn ownership must remain exactly once while card issuance is conditional on the enabled policy");
 assert.match(server, /Synthetic\/App continuation turns omit manualTakeover and reuse the current card while requiredMilestones is unchanged/,

@@ -489,10 +489,11 @@ export function PluginsPage() {
 }
 
 export function ContinuationsPage() {
-  const [includeTerminal,setIncludeTerminal]=useState(false);
-  const request=useMemo(()=>({includeTerminal,limit:300}),[includeTerminal]);
+  const [showHistory,setShowHistory]=useState(false);
+  const request=useMemo(()=>({automaticOnly:true,includeTerminal:showHistory,includeProvisional:showHistory,limit:300}),[showHistory]);
   const b=useBackend('continuation-list',request);
   const tasks=asItems(b.data,'tasks');
+  const automaticDisabled=b.data?.autoContinuationEnabled===false;
   const [selected,setSelected]=useState<string[]>([]);
   const [minutes,setMinutes]=useState('');
   const [locked,setLocked]=useState(false);
@@ -504,15 +505,16 @@ export function ContinuationsPage() {
     const result=await b.call(action,{taskIds:selected},confirm);
     if(result&&action==='continuation-delete')setSelected([]);
   };
-  return <Panel title="自动续轮任务" caption="支持任务选择、暂停、恢复、锁定、解锁、结束与删除；这些控制直接使用现有续轮数据库和管理协议。">
+  return <Panel title="自动续轮任务" caption="默认显示仍需续轮的任务">
     <ActionRow><Button onClick={b.load} disabled={b.busy}>刷新任务</Button>
-      <Checkbox checked={includeTerminal} onChange={(_e,d)=>setIncludeTerminal(Boolean(d.checked))} label="包含已结束任务"/>
-      <Button onClick={()=>setSelected(tasks.map(t=>String(t.id)))}>全选当前结果</Button>
+      <Checkbox checked={showHistory} onChange={(_e,d)=>{setSelected([]);setShowHistory(Boolean(d.checked));}} label="查看历史记录"/>
+      <Button disabled={!tasks.length} onClick={()=>setSelected(tasks.map(t=>String(t.id)))}>全选当前结果</Button>
       <span className="op-subtle">已选 {selected.length} 项</span></ActionRow>
     <Message error={b.error} notice={b.notice}/>
+    {automaticDisabled&&<p className="op-subtle" role="status">自动续轮已关闭。已有任务记录可在历史中查看。</p>}
     <div className="op-task-actions">
       <Button disabled={b.busy||!selected.length} onClick={()=>run('continuation-pause')}>暂停</Button>
-      <Button disabled={b.busy||!selected.length} onClick={()=>run('continuation-resume')}>恢复</Button>
+      <Button disabled={automaticDisabled||b.busy||!selected.length} onClick={()=>run('continuation-resume')}>恢复</Button>
       <Button disabled={b.busy||!selected.length} onClick={()=>run('continuation-lock')}>锁定</Button>
       <Button disabled={b.busy||!selected.length} onClick={()=>run('continuation-unlock')}>解锁</Button>
       <Button disabled={b.busy||!selected.length} onClick={()=>run('continuation-stop',true)}>手动结束</Button>
@@ -520,11 +522,16 @@ export function ContinuationsPage() {
     </div>
     <div className="op-tasks">{tasks.map(t=>{
       const id=String(t.id||'');
+      const required=Array.isArray(t.requiredMilestones)?t.requiredMilestones:[];
+      const done=new Set(Array.isArray(t.completedMilestones)?t.completedMilestones:[]);
+      const milestonesDone=required.length>0&&required.every(milestone=>done.has(milestone));
+      const state=t.state==='SUCCEEDED'?'已结束':t.state==='RUNNING'&&milestonesDone?'里程碑已完成':
+        t.state==='RUNNING'&&automaticDisabled?'自动续轮已关闭':t.state||'未知状态';
       return <label className="op-task" key={id}><input type="checkbox" checked={selected.includes(id)}
         onChange={e=>toggle(id,e.target.checked)}/>
         <div><strong>{t.objective||t.title||id}</strong>
-          <small>{t.state||'未知状态'} · {t.progressCompleted??0}/{t.progressRequired??0} 里程碑 · 续轮 {t.continuationCount??0}/{t.maxContinuations??'—'} · {t.updatedAt||''}</small></div></label>;
-    })}{!tasks.length&&<div className="op-empty">没有符合条件的续轮任务。</div>}</div>
+          <small>{state} · {t.progressCompleted??0}/{t.progressRequired??0} 里程碑 · 续轮 {t.continuationCount??0}/{t.unlimitedContinuations?'不限':t.maxContinuations??'—'} · {t.updatedAt||''}</small></div></label>;
+    })}{!tasks.length&&<div className="op-empty">{showHistory?'暂无历史记录':'暂无需要续轮的任务'}</div>}</div>
     <div className="op-subsection"><h3>Host 截断时间预估</h3>
       <p className="help">该设置仅供界面展示，不控制 ChatGPT 实际时长，也不会改动自动续轮阈值。</p>
       <ActionRow><Button disabled={estimating} onClick={async()=>{setEstimating(true);try{setEstimate(await window.devspace.admin('continuation-cutoff-estimate-get',{}));}finally{setEstimating(false);}}}>读取历史预估</Button>

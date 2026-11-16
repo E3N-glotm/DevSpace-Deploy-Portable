@@ -51,13 +51,13 @@ try {
   assert.equal(Boolean(manualOff.manualRoundCardRequired), false,
     "OFF must keep manual DevSpace work headless");
   assert.equal(Boolean(manualOff.initialAnchorRequired), false);
-  assert.equal(Boolean(manualOff.task.anchorMountRecoveryRequired), false);
+  assert.equal(manualOff.task, undefined, "OFF status must not create a ledger");
+  assert.equal(manualOff.finalResponseAllowed, true);
+  assert.equal(runtime.ensureContinuationTaskContract({ conversationScopeId: scope, sourceTool: "exec_command", substantive: true }).created, false);
+  assert.equal(runtime.continuationTask({ action: "begin-auto", conversationScopeId: scope }).accepted, false);
+  assert.equal(runtime.database.sqlite.prepare("select count(*) as count from continuation_tasks").get().count, 0);
   assert.equal(runtime.continuationModelToolAuthorization({ conversationScopeId: scope }).accepted, true,
     "OFF must not block ordinary DevSpace tools on a milestone card");
-  assert.equal(runtime.prepareContinuationAnchorMount({
-    taskId: manualOff.task.id, conversationScopeId: scope,
-  }).reason, "automatic-continuation-disabled",
-  "OFF must refuse automatic anchor preparation");
 
   // Standalone switch must not mutate deployment, authorization, or CU state.
   const configFile = join(configDir, "config.json");
@@ -78,9 +78,41 @@ try {
   const manual = runtime.continuationTask({
     action: "status", manualTakeover: true, conversationScopeId: scope,
   });
-  assert.equal(manual.accepted, true, "OFF must not disable manual MCP task creation");
-  assert.ok(manual.task.id);
+  assert.equal(manual.accepted, true, "OFF must preserve the status handshake");
+  assert.equal(manual.task, undefined);
   assert.equal(Boolean(manual.manualRoundCardRequired), false);
+  const historicalScope = "v1/test-auto-continuation-history";
+  const explicit = runtime.continuationTask({
+    action: "begin", conversationScopeId: historicalScope,
+    objective: "Explicit manual test", requiredMilestones: ["finished milestone"],
+  });
+  assert.ok(explicit.task?.id, "The owner can still create an explicit manual task");
+  const historical = explicit.task.id;
+  assert.equal(runtime.prepareContinuationAnchorMount({
+    taskId: historical, conversationScopeId: historicalScope,
+  }).reason, "automatic-continuation-disabled",
+  "OFF must refuse automatic anchor preparation for an existing task");
+  const observe = runtime.continuationTask({
+    action: "status", manualTakeover: true, conversationScopeId: historicalScope,
+    objective: "Ordinary status must not replace the saved plan",
+  });
+  assert.equal(observe.task.id, historical);
+  assert.equal(observe.task.objective, explicit.task.objective);
+  assert.equal(observe.task.turnLeaseId, explicit.task.turnLeaseId);
+  const explicitDone = runtime.continuationTask({
+    action: "complete", taskId: historical, conversationScopeId: historicalScope,
+    completedMilestones: ["finished milestone"], evidence: { verified: true },
+  });
+  assert.equal(explicitDone.accepted, true, "Manual completion while OFF must not require a card");
+  assert.equal(explicitDone.task.state, "SUCCEEDED");
+  // Reproduce the stale RUNNING rows from upgraded installations. Do not let
+  // a completed ledger appear as an active continuation, even after enabling.
+  runtime.database.sqlite.prepare("update continuation_tasks set state='RUNNING',anchor_mount_requested_at=? where id=?")
+    .run(new Date().toISOString(), historical);
+  const offList = invoke("continuation-list", { automaticOnly: true });
+  assert.equal(offList.autoContinuationEnabled, false);
+  assert.deepEqual(offList.tasks, []);
+  assert.ok(invoke("continuation-list", { automaticOnly: true, includeTerminal: true }).tasks.some(task => task.id === historical));
   assert.equal(readFileSync(configFile, "utf8"), originalConfig);
   assert.equal(readFileSync(deploymentFile, "utf8"), originalDeployment);
 
@@ -99,6 +131,9 @@ try {
     taskId: manualOn.task.id, conversationScopeId: scope,
   });
   assert.equal(anchor.accepted, true);
+  const activeList = invoke("continuation-list", { automaticOnly: true });
+  assert.equal(activeList.autoContinuationEnabled, true);
+  assert.deepEqual(activeList.tasks.map(task => task.id), [manualOn.task.id]);
   assert.equal(runtime.continuationModelToolAuthorization({ conversationScopeId: scope }).accepted, true,
     "issuing the requested anchor releases ordinary DevSpace work");
   assert.equal(runtime.claimReadyContinuationGeneration({}).reason, "sender-capability-required");
@@ -122,7 +157,8 @@ try {
   assert.match(native, /RunJsonAsync\("set-auto-continuation", new \{ enabled = enabled \}\)/);
   assert.match(native, /GetBool\(_currentConfig, "autoContinuationEnabled", false\)/);
   console.log(JSON.stringify({ defaultEnabled: false, disabledBlocksNewSynthetic: true,
-    disabledKeepsManualHeadless: true, enabledForcesAnchor: true,
+    disabledKeepsManualHeadless: true, disabledDoesNotCreateLedger: true,
+    historyPreserved: true, completedRowsExcluded: true, enabledForcesAnchor: true,
     manualMcpStillAllowed: true, enablesWithoutRestart: true,
     persistent: true, failClosed: true, nativeHeaderToggle: true, isolatedFromComputerUse: true }));
 } finally {

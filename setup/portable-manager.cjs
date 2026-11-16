@@ -84,7 +84,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.68";
-const PORTABLE_DEV_ITERATION = "dev20";
+const PORTABLE_DEV_ITERATION = "dev21";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -1767,6 +1767,11 @@ async function runContinuationAdmin(action, payload = {}) {
       return { ok: true, cutoffEstimate: cutoffPreference() };
     }
     if (action === "list") {
+      const automaticOnly = payload.automaticOnly === true && payload.includeTerminal !== true;
+      const automaticEnabled = autoContinuationEnabled();
+      if (automaticOnly && !automaticEnabled) {
+        return { tasks: [], cutoffEstimate: cutoffPreference(), activeCount: 0, autoContinuationEnabled: false };
+      }
       const abandonedCutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       const abandonedAt = new Date().toISOString();
       database.sqlite.prepare(`
@@ -1801,10 +1806,22 @@ async function runContinuationAdmin(action, payload = {}) {
       if (!includeProvisional) {
         clauses.push("not (auto_created=1 and task_source='auto-conversation' and coalesce(last_anchor_mounted_at,'')='' and coalesce(completed_milestones_json,'[]')='[]' and coalesce(evidence_json,'{}')='{}' and continuation_count=0 and coalesce(watch_process_handles_json,'[]')='[]' and coalesce(substantive_activity_count,0)=0)");
       }
+      if (automaticOnly) {
+        clauses.push("continuation_mode in ('completion-driven','resident','timeout-recovery','explicit-long')");
+        clauses.push("(coalesce(anchor_mount_requested_at,'')<>'' or coalesce(last_anchor_mounted_at,'')<>'' or continuation_count>0 or continuation_pending>0)");
+        clauses.push(`exists (
+          select 1 from json_each(case when json_valid(required_milestones_json) then required_milestones_json else '[]' end) required
+          where not exists (
+            select 1 from json_each(case when json_valid(completed_milestones_json) then completed_milestones_json else '[]' end) completed
+            where completed.value=required.value
+          )
+        )`);
+      }
       const where = clauses.length ? `where ${clauses.join(" and ")}` : "";
       const rows = database.sqlite.prepare(`select * from continuation_tasks ${where} order by updated_at desc limit ?`).all(limit);
       return {
         tasks: rows.map(taskFromRow),
+        autoContinuationEnabled: automaticEnabled,
         cutoffEstimate: cutoffPreference(),
         activeCount: rows.filter((row) => !new Set(['SUCCEEDED','FAILED_TERMINAL','CANCELLED_BY_USER','ABORTED_NO_PROGRESS','BUDGET_EXHAUSTED','ABANDONED_AUTO_TASK']).has(row.state)).length,
       };
