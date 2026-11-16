@@ -149,16 +149,35 @@ export function createModelWorkerRuntime({
     const activeHostMutations = new Map();
     const agentWriters = new Map();
     const backendQueues = new Map();
-    async function withBackend(model,signal,fn){
-        // Profiles that point at a single router/backend share a conservative
-        // physical slot. Independent endpoints may run concurrently.
+    async function withBackend(model,signal,fn,requestedLimit=1){
+        // One FIFO admission controller per actual endpoint. A group can
+        // explicitly opt into the known number of backend slots; unrelated
+        // and legacy callers keep their conservative single-slot contract.
         const key=new URL(model.baseUrl).origin;
-        const previous=backendQueues.get(key)||Promise.resolve();
-        let release;
-        const next=new Promise(r=>{release=r;});
-        backendQueues.set(key,next);
-        try{await previous;if(signal?.aborted)throw Error("AGENT_REQUEST_ABORTED");return await fn();}
-        finally{release();if(backendQueues.get(key)===next)backendQueues.delete(key);}
+        const limit=Math.max(1,Math.min(8,Number(requestedLimit)||1));
+        const state=backendQueues.get(key)||{active:new Map(),waiting:[]};
+        backendQueues.set(key,state);
+        const ticket={limit};
+        function pump(){
+            while(state.waiting.length){
+                const next=state.waiting[0];
+                const capacity=Math.min(next.limit,...state.active.values());
+                if(state.active.size>=capacity)break;
+                state.waiting.shift();state.active.set(next,next.limit);next.grant();
+            }
+            if(!state.waiting.length&&!state.active.size&&backendQueues.get(key)===state)backendQueues.delete(key);
+        }
+        let onAbort;
+        try{
+            await new Promise((grant,reject)=>{
+                ticket.grant=grant;
+                onAbort=()=>{const i=state.waiting.indexOf(ticket);if(i>=0){state.waiting.splice(i,1);reject(Error("AGENT_REQUEST_ABORTED"));pump();}};
+                if(signal?.aborted){reject(Error("AGENT_REQUEST_ABORTED"));pump();return;}
+                state.waiting.push(ticket);signal?.addEventListener("abort",onAbort,{once:true});pump();
+            });
+            if(signal?.aborted)throw Error("AGENT_REQUEST_ABORTED");
+            return await fn();
+        }finally{signal?.removeEventListener("abort",onAbort);state.active.delete(ticket);pump();}
     }
     const restricted = (text, n = MAX_TOOL_REPLY) => String(text || "").slice(0, n);
     function snapshot(job, includeAnswer = false) {
@@ -447,7 +466,7 @@ export function createModelWorkerRuntime({
         async agentRequest(task,agent,model,messages,tools,signal,onDelta){
             const job={modelId:agent.profileId,deadline:task.deadline,maxTaskUSD:model.maxTaskUSD||1,
                 inputTokens:agent.inputTokens,outputTokens:agent.outputTokens,estimatedUSD:agent.estimatedUSD};
-            try{return await withBackend(model,signal,()=>infer(job,model,messages,tools,true,signal,onDelta));}
+            try{return await withBackend(model,signal,()=>infer(job,model,messages,tools,true,signal,onDelta),task.backendParallelism);}
             finally{agent.inputTokens=job.inputTokens;agent.outputTokens=job.outputTokens;agent.estimatedUSD=job.estimatedUSD;if(job.reasoning)agent.reasoning=job.reasoning;}
         },
         beginAgentWriter(workspaceId,id){

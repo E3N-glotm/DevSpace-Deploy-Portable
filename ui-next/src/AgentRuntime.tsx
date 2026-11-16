@@ -2,9 +2,19 @@ import {useCallback,useEffect,useRef,useState} from 'react';
 import {Button,Dialog,DialogSurface,DialogBody,DialogTitle,DialogContent,Field,Input,Switch,Textarea} from '@fluentui/react-components';
 import type {AgentEvent,AgentGroup,AgentTask,ModelProvider} from './api';
 
-const empty=():AgentGroup=>({id:'',name:'',members:[],isDefault:false,requiredReviews:1});
+const empty=():AgentGroup=>({id:'',name:'',members:[],childGroups:[],isDefault:false,requiredReviews:1,parallelism:4,backendParallelism:1,leaderId:'',writerId:''});
 const errorText=(e:unknown)=>e instanceof Error?e.message:String(e);
 const profileLabel=(p:ModelProvider)=>p.name+' · '+p.model+' · '+Math.round(p.contextLength/1024)+'K · '+p.id;
+function memberIds(group:AgentGroup,groups:AgentGroup[],seen=new Set<string>()):string[]{
+  if(seen.has(group.id)&&group.id)return [];
+  const next=new Set([...seen,group.id]);
+  return [...new Set([...group.members,...(group.childGroups||[]).flatMap(id=>{const child=groups.find(g=>g.id===id);return child?memberIds(child,groups,next):[];})])];
+}
+function containsGroup(group:AgentGroup,id:string,groups:AgentGroup[],seen=new Set<string>()):boolean{
+  if(!id||seen.has(group.id))return false;
+  const next=new Set([...seen,group.id]);
+  return group.id===id||(group.childGroups||[]).some(c=>{const child=groups.find(g=>g.id===c);return child?containsGroup(child,id,groups,next):false;});
+}
 export function AgentGroupsPanel({profiles,open,onClose}:{profiles:ModelProvider[];open:boolean;onClose:()=>void}){
   const [groups,setGroups]=useState<AgentGroup[]>([]);
   const [form,setForm]=useState<AgentGroup>(empty);
@@ -13,23 +23,51 @@ export function AgentGroupsPanel({profiles,open,onClose}:{profiles:ModelProvider
   const reload=useCallback(async()=>setGroups(await window.devspace.agentGroupsList()),[]);
   useEffect(()=>{if(open){setForm(empty());setError('');setNotice('');void reload().catch(e=>setError(errorText(e)));}},[open,reload]);
   async function save(){try{const next=await window.devspace.agentGroupsSave(form);setForm(next);await reload();setError('');setNotice('模型组已保存');}catch(e){setError(errorText(e));}}
+  const effective=memberIds(form,groups);
+  function changeMembers(next:AgentGroup){
+    const ids=memberIds(next,groups);
+    setForm({...next,leaderId:ids.includes(next.leaderId||'')?next.leaderId:'',writerId:ids.includes(next.writerId||'')?next.writerId:'',requiredReviews:Math.min(next.requiredReviews,Math.max(1,ids.length-1))});
+  }
+  const referenced=new Set(groups.flatMap(g=>g.childGroups||[]));
+  const roots=groups.filter(g=>!referenced.has(g.id));
+  const renderTree=(g:AgentGroup,ancestors:string[]=[]):React.ReactNode=>{
+    if(ancestors.includes(g.id))return <small key={g.id}>循环引用</small>;
+    const children=(g.childGroups||[]).map(id=>groups.find(c=>c.id===id)).filter((x):x is AgentGroup=>Boolean(x));
+    return <div className="agent-tree-node" key={g.id}>
+      <button className={'models-item '+(g.id===form.id?'selected':'')} onClick={()=>{setForm({...empty(),...g});setNotice('');}}><strong>{g.name}{g.isDefault?' · 默认':''}</strong><small>{memberIds(g,groups).length} 个模型 · {children.length} 个子组</small></button>
+      {(children.length>0||g.members.length>0)&&<details open><summary>成员与子组</summary><div className="agent-tree-children">
+        {g.members.map(id=><small className="agent-tree-leaf" key={id}>{profiles.find(p=>p.id===id)?.name||id}</small>)}
+        {children.map(child=>renderTree(child,[...ancestors,g.id]))}
+      </div></details>}
+    </div>;
+  };
   return <Dialog open={open} onOpenChange={(_,d)=>{if(!d.open)onClose();}}>
     <DialogSurface className="agent-dialog"><DialogBody>
       <DialogTitle>模型组管理</DialogTitle>
       <DialogContent>
-        <p className="op-subtle">模型组引用已保存的模型配置。默认组用于上游 Agent 委派；各成员独立上下文，共用同一后端时按槽位排队。</p>
+        <p className="op-subtle">模型组可包含模型与其他模型组，重复引用同一模型只运行一个成员。默认组用于上游委派，协调者分配任务、唯一执行者修改、独立成员审查。</p>
         <div className="models-actions"><Button onClick={()=>{setForm(empty());setNotice('');}}>创建模型组</Button><Button onClick={onClose}>返回</Button></div>
         {error&&<div className="op-message op-error">{error}</div>}
         {notice&&<div className="op-message op-success">{notice}</div>}
         <div className="agent-group-layout">
-          <aside className="models-list">{groups.map(g=><button key={g.id} className={'models-item '+(g.id===form.id?'selected':'')} onClick={()=>{setForm({...g});setNotice('');}}><strong>{g.name}{g.isDefault?' · 默认':''}</strong><small>{g.members.length} 个成员 · {g.requiredReviews} 个独立审查</small></button>)}</aside>
+          <aside className="models-list agent-tree"><strong>模型组树</strong>{(roots.length?roots:groups).map(g=>renderTree(g))}</aside>
           <div className="models-editor">
             <Field label="模型组名称"><Input value={form.name} onChange={(_,d)=>setForm(x=>({...x,name:d.value}))}/></Field>
             <Switch label="设为默认模型组" checked={form.isDefault} onChange={(_,d)=>setForm(x=>({...x,isDefault:d.checked}))}/>
-            <strong>成员（引用已保存的模型配置）</strong>
-            {profiles.filter(p=>p.api==='chat').map(p=><label key={p.id} className="models-check"><input type="checkbox" disabled={!p.allowCalls&&!form.members.includes(p.id)} checked={form.members.includes(p.id)} onChange={e=>setForm(x=>{const members=e.target.checked?[...x.members,p.id]:x.members.filter(id=>id!==p.id);return {...x,members,requiredReviews:Math.min(x.requiredReviews,Math.max(1,members.length-1))};})}/>{profileLabel(p)}{p.allowCalls?'':'（已禁用）'}</label>)}
-            <Field label="所需独立审查数量"><Input type="number" min={1} max={Math.max(1,form.members.length-1)} value={String(form.requiredReviews)} onChange={(_,d)=>setForm(x=>({...x,requiredReviews:Number(d.value)}))}/></Field>
-            <div className="models-actions"><Button appearance="primary" disabled={!form.name.trim()||!form.members.length} onClick={()=>void save()}>保存模型组</Button>{form.id&&<Button onClick={async()=>{if(!window.confirm('删除此模型组？模型配置不会删除。'))return;try{await window.devspace.agentGroupsDelete(form.id);setForm(empty());await reload();}catch(e){setError(errorText(e));}}}>删除模型组</Button>}</div>
+            <strong>直接成员（已保存模型）</strong>
+            {profiles.filter(p=>p.api==='chat').map(p=><label key={p.id} className="models-check"><input type="checkbox" disabled={!p.allowCalls&&!form.members.includes(p.id)} checked={form.members.includes(p.id)} onChange={e=>changeMembers({...form,members:e.target.checked?[...form.members,p.id]:form.members.filter(id=>id!==p.id)})}/>{profileLabel(p)}{p.allowCalls?'':'（已禁用）'}</label>)}
+            <strong>子模型组</strong>
+            {groups.filter(g=>g.id!==form.id).map(g=><label key={g.id} className="models-check"><input type="checkbox" disabled={containsGroup(g,form.id,groups)} checked={(form.childGroups||[]).includes(g.id)} onChange={e=>changeMembers({...form,childGroups:e.target.checked?[...(form.childGroups||[]),g.id]:(form.childGroups||[]).filter(id=>id!==g.id)})}/>{g.name} · {memberIds(g,groups).length} 个有效成员</label>)}
+            <div className="models-usage"><strong>展开后有效成员：{effective.length}</strong><p>{effective.map(id=>{const p=profiles.find(p=>p.id===id);return p?p.name+' · '+Math.round(p.contextLength/1024)+'K':id;}).join(' / ')||'尚未选择成员'}</p></div>
+            <Field label="团队协调者"><select className="op-select" value={form.leaderId||''} onChange={e=>setForm(x=>({...x,leaderId:e.target.value}))}><option value="">自动（优先规划角色）</option>{effective.map(id=><option key={id} value={id}>{profiles.find(p=>p.id===id)?.name||id} · {id}</option>)}</select></Field>
+            <Field label="唯一执行者（文件、Shell、桌面）"><select className="op-select" value={form.writerId||''} onChange={e=>setForm(x=>({...x,writerId:e.target.value}))}><option value="">自动（优先执行角色）</option>{effective.map(id=><option key={id} value={id}>{profiles.find(p=>p.id===id)?.name||id} · {id}</option>)}</select></Field>
+            <div className="models-two">
+              <Field label="团队最多同时推理"><Input type="number" min={1} max={8} value={String(form.parallelism??4)} onChange={(_,d)=>setForm(x=>({...x,parallelism:Number(d.value)}))}/></Field>
+              <Field label="同一后端最大并发槽位"><Input type="number" min={1} max={8} value={String(form.backendParallelism??1)} onChange={(_,d)=>setForm(x=>({...x,backendParallelism:Number(d.value)}))}/></Field>
+            </div>
+            <p className="op-subtle">同一后端默认 1。确认后端真实并发槽位和显存容量后再调大；不同后端可以同时推理。子组继承当前运行的上级组调度策略。</p>
+            <Field label="所需独立审查数量"><Input type="number" min={1} max={Math.max(1,effective.length-1)} value={String(form.requiredReviews)} onChange={(_,d)=>setForm(x=>({...x,requiredReviews:Number(d.value)}))}/></Field>
+            <div className="models-actions"><Button appearance="primary" disabled={!form.name.trim()||!effective.length} onClick={()=>void save()}>保存模型组</Button>{form.id&&<Button onClick={async()=>{if(!window.confirm('删除此模型组？模型配置不会删除。'))return;try{await window.devspace.agentGroupsDelete(form.id);setForm(empty());await reload();}catch(e){setError(errorText(e));}}}>删除模型组</Button>}</div>
           </div>
         </div>
       </DialogContent>
@@ -37,8 +75,8 @@ export function AgentGroupsPanel({profiles,open,onClose}:{profiles:ModelProvider
   </Dialog>;
 }
 
-const statusNames:Record<string,string>={running:'运行中',paused:'已暂停','awaiting-review':'等待验收',completed:'已完成',failed:'失败',cancelled:'已取消',ready:'就绪',waiting:'等待',submitted:'已提交',approved:'已审查'};
-const eventNames:Record<string,string>={created:'任务开始',state:'状态变更',recovered:'任务恢复','inference-start':'开始推理','inference-stream':'正在生成',output:'模型输出',message:'协作消息',review:'审查','tool-start':'调用工具','tool-result':'工具结果',compaction:'上下文压缩'};
+const statusNames:Record<string,string>={running:'运行中',paused:'已暂停','awaiting-review':'等待验收',completed:'已完成',failed:'失败',cancelled:'已取消',ready:'就绪',waiting:'等待',submitted:'已提交',approved:'已审查',planning:'制定计划',working:'分工执行',reviewing:'独立审查',queued:'等待依赖',active:'执行中',reported:'已交付'};
+const eventNames:Record<string,string>={created:'任务开始',state:'状态变更',recovered:'任务恢复','inference-start':'开始推理','inference-stream':'正在生成',output:'模型输出',message:'协作消息',review:'审查','tool-start':'调用工具','tool-result':'工具结果',compaction:'上下文压缩',plan:'任务分配','plan-fallback':'自动备用计划',assignment:'子任务开始',report:'子任务交付','parallel-dispatch':'并行推理调度'};
 type TimelineEvent=AgentEvent&{taskId:string};
 const active=(t:AgentTask)=>['running','paused','awaiting-review'].includes(t.status);
 function mergeEvents(old:TimelineEvent[],incoming:TimelineEvent[]){
@@ -92,7 +130,13 @@ export function AgentRuntimePage(){
     {shown.filter(t=>active(t)||filter).map(t=><section className="models-usage" key={t.id}>
       <div className="models-usage-header"><strong>{groupName(t)} · {statusNames[t.status]||t.status} · {t.steps} 步</strong><small>{t.id.slice(-8)}</small></div>
       <div>{t.instruction}</div>{t.error&&<div className="op-message op-error">{t.error}</div>}
-      <div className="agent-roster">{t.agents.map(a=><div key={a.id}><strong>{agentLabel(t,a.id)}</strong><small>{statusNames[a.state]||a.state} · {a.steps} 步 · 上下文约 {a.contextEstimate.toLocaleString()}</small><small>{a.inputTokens||a.outputTokens?'输入 '+a.inputTokens.toLocaleString()+' / 输出 '+a.outputTokens.toLocaleString():'暂无服务端用量'}</small></div>)}</div>
+      {t.team&&<div className="agent-summary"><strong>{statusNames[t.team.phase]||t.team.phase}</strong><span>协调者 {t.team.leader} · 唯一执行者 {t.team.writer}</span><span>审查 {t.team.reviewers.join(', ')} · 最大并行 {t.parallelism} / 同后端 {t.backendParallelism}</span></div>}
+      <div className="agent-roster">{t.agents.map(a=><div key={a.id}><strong>{agentLabel(t,a.id)}</strong>
+        {t.team&&<small>{[a.id===t.team.leader?'协调者':'',a.id===t.team.writer?'唯一执行者':'',t.team.reviewers.includes(a.id)?'审查者':''].filter(Boolean).join(' · ')||'协作成员'}</small>}
+        {a.groupPaths?.length?<small>{a.groupPaths.map(p=>p.join(' / ')).join('；')}</small>:null}
+        <small>{statusNames[a.state]||a.state} · {a.steps} 步 · 上下文约 {a.contextEstimate.toLocaleString()}</small><small>{a.inputTokens||a.outputTokens?'输入 '+a.inputTokens.toLocaleString()+' / 输出 '+a.outputTokens.toLocaleString():'暂无服务端用量'}</small>
+        {t.team?.assignments[a.id]&&<><small>{statusNames[t.team.assignments[a.id].status]} · {t.team.assignments[a.id].dependsOn.length?'依赖 '+t.team.assignments[a.id].dependsOn.join(', '):'无依赖'}</small><p>{t.team.assignments[a.id].goal}</p>{t.team.assignments[a.id].summary&&<details><summary>交付证据</summary><pre>{t.team.assignments[a.id].summary}</pre></details>}</>}
+      </div>)}</div>
       {t.pending!=null&&<Switch label="我已核对中断工具是否执行，允许恢复（不自动重放）" checked={ack[t.id]===true} onChange={(_,d)=>setAck(x=>({...x,[t.id]:d.checked}))}/>}
       <div className="models-actions"><Button disabled={busy||t.status!=='running'} onClick={()=>void control('pause',t)}>暂停</Button><Button disabled={busy||!['paused','awaiting-review'].includes(t.status)||(t.pending!=null&&!ack[t.id])} onClick={()=>void control('resume',t)}>恢复</Button><Button disabled={busy||t.status!=='awaiting-review'} onClick={()=>void control('accept',t)}>人工验收</Button><Button disabled={busy||!active(t)} onClick={()=>void control('cancel',t)}>取消任务</Button></div>
       {t.result&&<details><summary>提交结果</summary><pre>{t.result}</pre></details>}

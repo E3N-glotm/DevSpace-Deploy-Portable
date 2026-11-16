@@ -104,6 +104,18 @@ function makeBudget(model){
   };
 }
 function apiPath(base,suffix){return base.replace(/\/$/,'')+'/'+suffix;}
+function creationTime(entry){
+  const stored=Date.parse(entry.createdAt||'');
+  if(Number.isFinite(stored))return stored;
+  const match=/^model-([a-z0-9]{8,10})$/i.exec(entry.id||'');
+  const stamp=match?parseInt(match[1],36):NaN;
+  return stamp>=1577836800000&&stamp<=4102444800000?stamp:null;
+}
+function creationOrder(entries){
+  const known=entries.filter(e=>creationTime(e)!==null).sort((a,b)=>creationTime(a)-creationTime(b));
+  let index=0;
+  return entries.map(e=>creationTime(e)===null?e:known[index++]);
+}
 function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fetch,
   filesystem=fs,usageStore=createModelUsageStore(root),
   credentialVault=createModelDpapiVault()}){
@@ -115,7 +127,7 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     try {
       const parsed=JSON.parse(filesystem.readFileSync(filename,'utf8'));
       if(parsed.version!==1||!Array.isArray(parsed.models))throw Error('模型配置版本不兼容');
-      return parsed.models;
+      return creationOrder(parsed.models);
     }catch(error){
       if(error.code==='ENOENT')return [];
       throw error;
@@ -177,9 +189,10 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
       ?old.allowCalls!==false:input.allowCalls!==false},{hasKey:Boolean(encryptedKey)});
     // Every profile edit invalidates any short-lived mandatory-workflow
     // approval previously issued for this model in an MCP session.
-    const stored={...model,callPolicyRevision:randomUUID(),
+    const created=old?creationTime(old):Date.now();
+    const stored={...model,...(created!==null?{createdAt:new Date(created).toISOString()}:{}),callPolicyRevision:randomUUID(),
       ...(encryptedKey?{encryptedKey,workerEncryptedKey}:{})};
-    persist([...models.filter(m=>m.id!==model.id),stored]);
+    persist(old?models.map(m=>m.id===model.id?stored:m):[...models,stored]);
     return visible(stored);
   }
   function remove(id){

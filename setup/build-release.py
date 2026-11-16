@@ -300,6 +300,14 @@ def validate_release_payload(files: list[Path]) -> None:
     silently placing authentication or SQLite state in a release archive.
     The validator inspects names only and never opens sensitive files.
     """
+    # npm install --ignore-scripts can discard these native ConPTY runtime
+    # files while leaving the JavaScript package and its prebuilt .node intact.
+    # A successful archive/CRC check alone cannot detect that regression.
+    payload = {relative.as_posix() for relative in files}
+    conpty = "app/node_modules/node-pty/build/Release/conpty/"
+    required_conpty = {conpty + "conpty.dll", conpty + "OpenConsole.exe"}
+    if "app/node_modules/node-pty/package.json" in payload and not required_conpty <= payload:
+        raise RuntimeError("Release missing native ConPTY files: " + ", ".join(sorted(required_conpty - payload)))
     forbidden: list[str] = []
     for relative in files:
         name = relative.name.lower()

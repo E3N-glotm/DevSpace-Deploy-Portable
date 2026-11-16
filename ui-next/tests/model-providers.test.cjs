@@ -33,6 +33,19 @@ function json(data,status=200) {return {
   text:async()=>JSON.stringify(data),
 };}
 
+test('saved models retain creation order across edits, toggles and reload',()=>{
+  const f=fixture();
+  try{
+    const ids=['first','second','third'];
+    for(const id of ids)f.service.save(input({id,name:id}));
+    f.service.save(input({id:'first',name:'edited first'}));
+    f.service.setAllowed('second',false);
+    assert.deepEqual(f.service.list().map(p=>p.id),ids);
+    const reloaded=createModelProviderService({root:f.root,cryptoService:f.cryptoService,credentialVault:f.credentialVault});
+    assert.deepEqual(reloaded.list().map(p=>p.id),ids);
+  }finally{f.cleanup();}
+});
+
 test('Qwen Flash native reasoning settings are mapped and probe evidence distinguishes acceptance from actual reasoning',async()=>{
   const sent=[];
   const f=fixture(async(_url,opts)=>{

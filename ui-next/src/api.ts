@@ -49,8 +49,9 @@ export type ModelProvider = {
 export type ModelProviderDraft = Omit<ModelProvider,'hasKey'|'keyEncrypted'|'workerCredentialReady'> & {
   apiKey?:string;clearKey?:boolean;
 };
-export type AgentGroup={id:string;name:string;members:string[];isDefault:boolean;requiredReviews:number};
-export type AgentTask={id:string;instruction:string;workspaceId:string;groupId:string|null;status:string;steps:number;error?:string;result?:string;pending?:unknown;agents:{id:string;profileId:string;state:string;steps:number;inputTokens:number;outputTokens:number;estimatedUSD:number;contextEstimate:number}[]};
+export type AgentGroup={id:string;name:string;members:string[];childGroups?:string[];isDefault:boolean;requiredReviews:number;parallelism?:number;backendParallelism?:number;leaderId?:string;writerId?:string};
+export type AgentTeam={leader:string;writer:string;reviewers:string[];phase:string;assignments:Record<string,{goal:string;dependsOn:string[];status:string;summary?:string}>};
+export type AgentTask={id:string;instruction:string;workspaceId:string;groupId:string|null;status:string;steps:number;error?:string;result?:string;pending?:unknown;team?:AgentTeam;parallelism?:number;backendParallelism?:number;agents:{id:string;profileId:string;state:string;steps:number;inputTokens:number;outputTokens:number;estimatedUSD:number;contextEstimate:number;groupPaths?:string[][]}[]};
 export type AgentEvent={seq:number;at:string;kind:string;agent:string|null;[key:string]:unknown};
 export type ModelDiscovery = {reachable:boolean;httpStatus:number;models:string[];reason?:string;contexts?:Record<string,number>};
 export type ReasoningSettings={adapter:string;requested:string;effective:string;parameters:Record<string,unknown>};

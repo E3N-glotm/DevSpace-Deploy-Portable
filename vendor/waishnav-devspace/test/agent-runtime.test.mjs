@@ -37,8 +37,8 @@ function fixture(overrides={}){
         request:async(_t,a,_p,messages,tools)=>{
             assert.ok(messages[0].content.includes("use E drive"));
             assert.ok(!tools.some(x=>x.function.name==="permission_rules_reload"));
-            if(a.id==="a1"&&a.steps===0)return reply(call("read",{path:"file.txt"}));
-            if(a.id==="a2"&&a.steps===0)return reply(call("agent_send",{to:"a1",message:"I can review the result"}));
+            if(a.id==="a1"&&a.steps===0)return reply(call("agent_plan",{assignments:[{to:"a2",goal:"Check evidence"}]}));
+            if(a.id==="a2"&&a.steps===0)return reply(call("read",{path:"file.txt"}),call("agent_send",{to:"a1",message:"I can review the result"}),call("agent_report",{summary:"Evidence verified"}));
             if(a.id==="a1")return reply(call("agent_finish",{decision:"submit",summary:"verified"}));
             return reply(call("agent_finish",{decision:"approve",summary:"independently reviewed"}));
         },...overrides,sqlite
@@ -58,14 +58,50 @@ test("default group independently reviews, records events and workspace memory",
 test("review threshold cannot complete a group before all configured members participate",async()=>{
     const profiles=[1,2,3].map(i=>({id:"p"+i,name:"Agent "+i,role:"worker",api:"chat",allowCalls:true,callPolicyRevision:"r"+i,contextLength:32000,maxOutputTokens:1024}));
     const f=fixture({profiles:()=>profiles,groups:()=>[{id:"g",members:profiles.map(p=>p.id),isDefault:true,requiredReviews:1}],request:async(_t,a)=>{
+        if(a.id==="a1"&&!a.steps)return reply(call("agent_plan",{assignments:[{to:"a2",goal:"Implement"},{to:"a3",goal:"Analyze"}]}));
         if(a.id==="a1")return reply(call("agent_finish",{decision:"submit",summary:"verified"}));
-        if(a.id==="a2")return reply(call("agent_finish",{decision:"approve",summary:"reviewed"}));
-        return {content:"Third agent independently participated",tool_calls:[]};
+        if(_t.team.phase==="reviewing")return reply(call("agent_finish",{decision:"approve",summary:"reviewed"}));
+        return reply(call("agent_report",{summary:"Independently participated"}));
     }});
     const t=f.runtime.start({workspaceId:"ws",instruction:"task"});
     const done=await until(f.runtime,t.id,["completed","paused"]);
     assert.equal(done.status,"completed",done.error);
-    assert.deepEqual(done.agents.map(a=>a.steps),[1,1,1]);
+    assert.deepEqual(done.agents.map(a=>a.steps),[2,1,2]);
+    await f.runtime.close();f.sqlite.close();
+});
+test("nested groups resolve once, parallel inference, dependency ordering and exclusive mutation",async()=>{
+    const profiles=[1,2,3,4].map(i=>({id:"p"+i,name:"Agent "+i,role:i===1?"planner":i===4?"reviewer":"worker",api:"chat",allowCalls:true,callPolicyRevision:"r"+i,contextLength:32000,maxOutputTokens:1024}));
+    let active=0,peak=0,writerDone=false;
+    const f=fixture({profiles:()=>profiles,groups:()=>[
+        {id:"root",name:"Root",members:["p1"],childGroups:["child","qa"],isDefault:true,requiredReviews:1,parallelism:3,leaderId:"p1",writerId:"p2"},
+        {id:"child",name:"Execution",members:["p2","p3"],requiredReviews:1},
+        {id:"qa",name:"Review",members:["p3","p4"],requiredReviews:1}
+    ],request:async(t,a,p,m,tools)=>{
+        if(t.team.phase==="planning"){
+            assert.equal(a.id,"a1");assert.ok(!tools.some(x=>x.function.name==="apply_patch"));
+            return reply(call("agent_plan",{assignments:[
+                {to:"a2",goal:"Implement"}, {to:"a3",goal:"Analyze"}, {to:"a4",goal:"Verify implementation",dependsOn:["a2"]}
+            ]}));
+        }
+        if(t.team.phase==="reviewing"){
+            assert.ok(!tools.some(x=>x.function.name==="apply_patch"));
+            return reply(call("agent_finish",{decision:"approve",summary:"Independent review"}));
+        }
+        if(a.id==="a1"){assert.ok(writerDone);return reply(call("agent_finish",{decision:"submit",summary:"Integrated result"}));}
+        active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,35));active--;
+        if(a.id==="a2"){
+            assert.ok(tools.some(x=>x.function.name==="apply_patch"));
+            return reply(call("apply_patch",{patch:"approved mutation"}),call("agent_report",{summary:"Implemented"}));
+        }
+        if(a.id==="a4")assert.ok(writerDone);
+        assert.ok(!tools.some(x=>x.function.name==="apply_patch"));
+        return reply(call("apply_patch",{patch:"unauthorized mutation"}),call("agent_report",{summary:"Read-only evidence"}));
+    },callTool:async(name,args)=>{assert.equal(name,"apply_patch");assert.equal(args.patch,"approved mutation");writerDone=true;return {content:[{type:"text",text:"verified"}]};}});
+    const task=f.runtime.start({workspaceId:"ws",instruction:"team task",allowWrites:true});
+    const done=await until(f.runtime,task.id,["completed","paused"]);
+    assert.equal(done.status,"completed",done.error);assert.equal(done.agents.length,4);assert.equal(peak,2);
+    assert.equal(done.agents[2].groupPaths.length,2);assert.ok(f.runtime.events(task.id).some(e=>e.kind==="parallel-dispatch"));
+    assert.ok(f.runtime.events(task.id).some(e=>e.kind==="tool-error"&&e.error==="AGENT_TOOL_NOT_AUTHORIZED"));
     await f.runtime.close();f.sqlite.close();
 });
 test("scope, explicit grants, sensitive memory and single agent acceptance",async()=>{
