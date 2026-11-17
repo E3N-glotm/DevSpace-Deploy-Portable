@@ -145,6 +145,24 @@ test("automatic routing retains a single model for optional parallel work withou
     assert.throws(()=>start({}),/AGENT_DEFAULT_GROUP_REQUIRED/);
     await f.runtime.close();f.sqlite.close();
 });
+test("A paused Agent persisted by an older release resumes after its obsolete timeout",async()=>{
+    const f=fixture({request:async()=>({content:"Ready for review"})});
+    const first=f.runtime.start({workspaceId:"ws",instruction:"Check the project",timeoutSeconds:1});
+    assert.equal(first.deadline,undefined);
+    await until(f.runtime,first.id,["awaiting-review"]);
+    await f.runtime.close();
+    const row=f.sqlite.prepare("select data from devspace_agent_tasks where id=?").get(first.id);
+    const data={...JSON.parse(row.data),status:"paused",deadline:Date.now()-86400000,error:"AGENT_TIME_BUDGET_EXHAUSTED"};
+    f.sqlite.prepare("update devspace_agent_tasks set data=? where id=?").run(JSON.stringify(data),first.id);
+    const restored=fixture({sqlite:f.sqlite,request:async()=>({content:"Finished after resuming"})});
+    try{
+        assert.equal(restored.runtime.status(first.id).deadline,undefined);
+        restored.runtime.resume(first.id);
+        const finished=await until(restored.runtime,first.id,["awaiting-review","paused"]);
+        assert.equal(finished.status,"awaiting-review",finished.error);
+        assert.equal(finished.result,"Finished after resuming");
+    }finally{await restored.runtime.close();f.sqlite.close();}
+});
 test("an automatic single model promotes in place, keeping evidence and exclusive writes",async()=>{
     let originalId;
     const f=fixture({request:async(t,a,_p,messages,tools)=>{

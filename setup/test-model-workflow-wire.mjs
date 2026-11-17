@@ -131,6 +131,7 @@ try{
     }
     for(const tool of tools.filter(x=>["model_delegate_task","agent_task_start"].includes(x.name))){
         assert.equal(Object.hasOwn(tool.inputSchema.properties,"maxSteps"),false,tool.name);
+        assert.equal(Object.hasOwn(tool.inputSchema.properties,"timeoutSeconds"),false,tool.name);
     }
     const readTool=tools.find(x=>["read","read_file"].includes(x.name));
     assert.ok(readTool,"Missing read tool");
@@ -199,7 +200,7 @@ try{
         assert.equal((await localAction("set-routing-settings",{mode:"single",defaultWorkerId:"worker-one"})).status,200);
         const routingList=await client.callTool({name:"model_worker_list",arguments:{}});
         assert.deepEqual(routingList.structuredContent.data.modelRouting,{mode:"single",defaultWorkerId:"worker-one"});
-        const starter=await client.callTool({name:"agent_task_start",arguments:{workspaceId,instruction:"Agent Runtime integration test",allowShell:true,maxSteps:1}});
+        const starter=await client.callTool({name:"agent_task_start",arguments:{workspaceId,instruction:"Agent Runtime integration test",allowShell:true,maxSteps:1,timeoutSeconds:1}});
         assert.ok(!starter.isError,contentText(starter));
         const id=starter.structuredContent?.data?.id;assert.ok(id);
         assert.equal(starter.structuredContent.data.routing.reason,"global-single");
@@ -249,7 +250,7 @@ try{
     assert.equal(list.structuredContent?.data?.mandatoryModelWorkflow,true);
     const delegated=await client.callTool({name:"model_delegate_task",arguments:{
         workspaceId,modelId:"worker-one",useSpecifiedModel:true,instruction:"Review project only",
-        allowWrites:false,maxSteps:1000,timeoutSeconds:7200,
+        allowWrites:false,maxSteps:1000,timeoutSeconds:1,
     }});
     const taskId=delegated.structuredContent?.data?.taskId;
     assert.ok(taskId);

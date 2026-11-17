@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve, relative, isAbsolute, sep, dirname, posix } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fetch as httpFetch, getGlobalDispatcher } from "undici";
 import reasoningAdapter from "./reasoning-adapter.cjs";
 import {
     readFileTool, grepFilesTool, listDirectoryTool, writeFileTool, editFileTool,
@@ -14,6 +15,13 @@ import {
 const MAX_TASKS = 32;
 const MAX_TASK_TEXT = 8000;
 const MAX_TOOL_REPLY = 14000;
+// The model route can queue or prefill for a long time before sending headers
+// or the next stream frame. Explicit cancellation still aborts the request.
+const modelDispatcher = {
+    dispatch(options,handler){
+        return getGlobalDispatcher().dispatch({...options,headersTimeout:0,bodyTimeout:0},handler);
+    },
+};
 // OpenAI-compatible providers may stream real deltas, or reply with a
 // conventional JSON body. Both paths preserve the actual returned content.
 export async function collectAgentStream(response,onDelta){
@@ -58,8 +66,7 @@ export async function collectAgentStream(response,onDelta){
     onDelta?.(message);
     return {choices:[{message}],usage};
 }
-// Long-running Workers are bounded by their explicit step/time/cost budgets,
-// not by a hidden 24-tool-call quota. Memory usage is bounded separately.
+// Keep recent tool history in context independently of task execution.
 const WORKER_HISTORY_MESSAGES = 120;
 const TOOL_DEFINITIONS = [
     { type: "function", function: {
@@ -119,7 +126,8 @@ export function publicModelProfiles(root) {
 
 export function createModelWorkerRuntime({
     portableRoot, config, workspaces, reviewCheckpoints, hookManager,
-    fetchImpl = globalThis.fetch, readProfiles = publicModelProfiles,
+    fetchImpl = httpFetch,
+    readProfiles = publicModelProfiles,
     prepareWrite = async () => {}, finishWrite = async () => {},
     usageStore,credentialVault,openRemoteWorkerTool,
 }) {
@@ -318,7 +326,7 @@ export function createModelWorkerRuntime({
         const outputReserve=maxTokens*(model.outputPerMillionUSD||0)/1e6+
             (agent?Math.ceil(JSON.stringify([messages,tools]).length/2)*(model.inputPerMillionUSD||0)/1e6:0);
         if (remaining < outputReserve) throw new Error("MODEL_TASK_BUDGET_EXHAUSTED");
-        const controller=new AbortController();job.controller=controller;
+        const controller=new AbortController();
         const abort=()=>controller.abort();
         signal?.addEventListener("abort",abort,{once:true});
         if(signal?.aborted)abort();
@@ -333,7 +341,6 @@ export function createModelWorkerRuntime({
         const startedNs=process.hrtime.bigint();
         let succeeded=false;
         let actualUsage=null;
-        const timeout=setTimeout(()=>controller.abort(),Math.max(1,Math.min(agent?1800000:180000,job.deadline-Date.now())));
         try {
             const url=model.baseUrl.replace(/\/$/,"")+"/chat/completions";
             const authorization=workerAuthorization(model,agent);
@@ -342,7 +349,7 @@ export function createModelWorkerRuntime({
             const response=await fetchImpl(url,{
                 method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json",
                     ...authorization},
-                redirect:"error",signal:controller.signal,
+                redirect:"error",signal:controller.signal,dispatcher:modelDispatcher,
                 body:JSON.stringify({model:model.model,messages,tools,tool_choice:"auto",stream:agent,
                     ...(agent?{stream_options:{include_usage:true}}:{}),
                     max_tokens:maxTokens,
@@ -371,7 +378,7 @@ export function createModelWorkerRuntime({
             return reply;
         } finally {
             clearInterval(disabledCheck);
-            clearTimeout(timeout);job.controller=null;signal?.removeEventListener("abort",abort);
+            signal?.removeEventListener("abort",abort);
             try{
                 accounting.record({
                     profileId:job.modelId,model:model.model,source:"worker",
@@ -392,6 +399,7 @@ export function createModelWorkerRuntime({
     }
     async function run(job,workspace,model) {
         job.status="running";
+        const signal=job.controller.signal;
         try{
             const messages=[
                 {role:"system",content:
@@ -408,8 +416,7 @@ export function createModelWorkerRuntime({
             while(true){
                 getProfile(job.modelId);
                 if(job.cancelled)throw new Error("MODEL_TASK_CANCELLED");
-                if(Date.now()>job.deadline)throw new Error("MODEL_TASK_TIMEOUT");
-                const result=await withBackend(model,null,()=>infer(job,model,messages,allowedTools));
+                const result=await withBackend(model,signal,()=>infer(job,model,messages,allowedTools,false,signal));
                 getProfile(job.modelId);
                 if(job.cancelled)throw new Error("MODEL_TASK_CANCELLED");
                 if(!result)throw new Error("MODEL_NO_MESSAGE");
@@ -468,24 +475,16 @@ export function createModelWorkerRuntime({
         async agentRequest(task,agent,model,messages,tools,signal,onDelta){
             const priorUSD=(task.previousAgents??[]).filter(a=>a.profileId===agent.profileId)
                 .reduce((sum,a)=>sum+a.estimatedUSD,0);
-            const job={modelId:agent.profileId,deadline:task.deadline,maxTaskUSD:model.maxTaskUSD||1,
+            const job={modelId:agent.profileId,maxTaskUSD:model.maxTaskUSD||1,
                 inputTokens:agent.inputTokens,outputTokens:agent.outputTokens,estimatedUSD:agent.estimatedUSD+priorUSD};
-            const deadlineController=new AbortController();
-            const requestSignal=signal?AbortSignal.any([signal,deadlineController.signal]):deadlineController.signal;
-            let timer;
-            function armDeadline(){
-                const remaining=task.deadline-Date.now();
-                if(remaining<=0)deadlineController.abort();
-                else timer=setTimeout(armDeadline,Math.min(remaining,2_147_483_647));
-            }
-            armDeadline();
             try{
-                return await withBackend(model,requestSignal,()=>infer(job,model,messages,tools,true,requestSignal,onDelta),task.backendParallelism);
-            }catch(error){
-                if(!signal?.aborted&&(deadlineController.signal.aborted||Date.now()>=task.deadline))throw Error("AGENT_TIME_BUDGET_EXHAUSTED");
-                throw error;
+                return await withBackend(model,signal,()=>infer(job,model,messages,tools,true,signal,onDelta),task.backendParallelism);
+            }finally{
+                agent.inputTokens=job.inputTokens;
+                agent.outputTokens=job.outputTokens;
+                agent.estimatedUSD=Math.max(0,job.estimatedUSD-priorUSD);
+                if(job.reasoning)agent.reasoning=job.reasoning;
             }
-            finally{clearTimeout(timer);agent.inputTokens=job.inputTokens;agent.outputTokens=job.outputTokens;agent.estimatedUSD=Math.max(0,job.estimatedUSD-priorUSD);if(job.reasoning)agent.reasoning=job.reasoning;}
         },
         beginAgentWriter(workspaceId,id){
             if(this.hasActiveWriter(workspaceId)||(activeHostMutations.get(workspaceId)||0)>0)
@@ -509,7 +508,7 @@ export function createModelWorkerRuntime({
             if(count<=1)activeHostMutations.delete(workspaceId);
             else activeHostMutations.set(workspaceId,count-1);
         },
-        delegate({workspaceId,modelId,instruction,allowWrites=false,timeoutSeconds=3600}){
+        delegate({workspaceId,modelId,instruction,allowWrites=false}){
             const workspace=workspaces.getWorkspace(workspaceId);
             if(workspace.backend!=="local"&&(workspace.backend!=="remote-agent"||!openRemoteWorkerTool))
                 throw new Error("MODEL_WORKER_WORKSPACE_BACKEND_UNAVAILABLE");
@@ -524,15 +523,13 @@ export function createModelWorkerRuntime({
             if(allowWrites!==true && allowWrites!==false)throw new Error("INVALID_WRITE_AUTHORIZATION");
             if(allowWrites && !config.permissions.allowShellMutation
                 && !config.permissions.allowArbitraryCommands)throw new Error("WRITE_PERMISSION_DENIED");
-            if(!Number.isInteger(timeoutSeconds)||timeoutSeconds<30||timeoutSeconds>86400)
-                throw new Error("INVALID_TASK_TIMEOUT");
             const model=getProfile(modelId);
             const taskId="mworker_"+randomUUID();
             const job={taskId,workspaceId,modelId,status:"queued",instruction,
                 allowWrites,steps:0,toolCalls:0,inputTokens:0,outputTokens:0,
                 estimatedUSD:0,maxTaskUSD:model.maxTaskUSD||1,evidence:[],answer:"",
-                error:null,controller:null,cancelled:false,
-                startedAt:new Date().toISOString(),deadline:Date.now()+timeoutSeconds*1000};
+                error:null,controller:new AbortController(),cancelled:false,
+                startedAt:new Date().toISOString()};
             if(jobs.size>=MAX_TASKS){
                 const done=[...jobs.values()].find(j=>["completed","failed","cancelled"].includes(j.status));
                 if(done)jobs.delete(done.taskId);else throw new Error("TOO_MANY_ACTIVE_MODEL_TASKS");

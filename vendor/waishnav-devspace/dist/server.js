@@ -3183,7 +3183,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_delegate_task",{
         title:"Delegate to configured DevSpace models",
-        description:"Compatibility entry for model delegation. Uses the current global routing by default, including when a cached client supplies modelId. Set useSpecifiedModel only for an explicitly requested legacy single Worker. Use model_task_status/result/cancel with the returned taskId. Default is read-only. First open the workspace.",
+        description:"Compatibility entry for model delegation. Uses the current global routing by default, including when a cached client supplies modelId. Set useSpecifiedModel only for an explicitly requested legacy single Worker. Execution has no fixed deadline. Poll model_task_status with the returned taskId until a result is available. Default is read-only. First open the workspace.",
         inputSchema:{
             workspaceId:z.string(),
             modelId:z.string().optional().describe("Worker ID, used only when useSpecifiedModel is true."),
@@ -3192,7 +3192,6 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             parallelWorkstreams:z.number().int().min(0).optional(),
             instruction:z.string().min(1).max(8000),
             allowWrites:z.boolean().optional().describe("Default false. True explicitly delegates file edits."),
-            timeoutSeconds:z.number().int().min(30).max(86400).optional(),
         },
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
@@ -3208,7 +3207,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         return workerResult(started);
     });
     for(const [toolName,action,description] of [
-        ["model_task_status","status","Get progress for a delegated Worker or Agent task."],
+        ["model_task_status","status","Get progress for a delegated Worker or Agent task. Queued and running tasks remain active and can be polled again with the same taskId."],
         ["model_task_result","result","Read a delegated Worker or Agent result for independent verification. For Agent tool records use agent_task_events. After verifying an Agent result marked awaiting-review, finish it with agent_task_accept."],
         ["model_task_cancel","cancel","Cancel a delegated Worker or Agent task and abort its current model request."],
     ]){
@@ -3240,12 +3239,11 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         instruction:z.string().min(1).max(16000),allowWrites:z.boolean().optional(),
         allowShell:z.boolean().optional(),allowComputer:z.boolean().optional(),
         allowMemory:z.boolean().optional(),allowPlugins:z.boolean().optional(),
-        timeoutSeconds:z.number().int().min(30).max(2592000).optional(),
     };
     if(runtimeServices.agentRuntime){
         registerAppTool(server,"agent_task_start",{
             title:"Start persistent DevSpace Agent task",
-            description:"Delegate a durable task using DevSpace's global automatic, single-model or group routing. In automatic mode, pass independentReview or parallelWorkstreams when warranted. A task uses no fixed step cap. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and verify the result independently.",
+            description:"Delegate a durable task using DevSpace's global automatic, single-model or group routing. In automatic mode, pass independentReview or parallelWorkstreams when warranted. Execution has no fixed step cap or deadline. Poll agent_task_status with the returned taskId until a result is available. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and verify the result independently.",
             inputSchema:agentInput,outputSchema:resultOutputSchema({data:z.unknown()}),
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:SHELL_TOOL_ANNOTATIONS,
@@ -3259,7 +3257,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         for(const action of ["status","events","pause","resume","cancel","accept"]){
             registerAppTool(server,"agent_task_"+action,{
                 title:"Agent task "+action,description:action==="status"
-                    ?"Inspect a durable Agent task and any final result. In mandatory workflow, inspecting the finished result from the dispatching conversation releases the review requirement for Host writes."
+                    ?"Inspect a durable Agent task and any final result. Running tasks continue independently and can be polled again with the same taskId. In mandatory workflow, inspecting the finished result from the dispatching conversation releases the review requirement for Host writes."
                     :action==="accept"?"Mark the single-model result complete after independently verifying it and inspecting task status."
                     :"Inspect or control a durable Agent Runtime task. Resume requires explicit acknowledgment if a tool outcome was uncertain.",
                 inputSchema:{taskId:z.string(),...(action==="events"?{after:z.number().int().min(0).optional(),limit:z.number().int().min(1).max(500).optional()}:action==="resume"?{acknowledge:z.boolean().optional()}: {})},

@@ -96,6 +96,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
     };
     for(const row of sqlite.prepare("select data from devspace_agent_tasks").all()){
         const t=JSON.parse(row.data);tasks.set(t.id,t);
+        delete t.deadline; // Older Portable versions persisted a task deadline.
         if(!terminal.has(t.status)){
             const auto=t.status==="running"||t.resumeOnBoot===true;
             if(t.status==="running"||t.pending||auto){t.status="paused";t.error=t.pending?"INTERRUPTED_TOOL_REQUIRES_REVIEW":"SERVER_RESTARTED";}
@@ -331,7 +332,6 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                 return [...baseTools.filter(x=>enabled(t,x.function.name,a)),...control.map(x=>({type:"function",function:x}))];
             }
             while(t.status==="running"&&!signal.aborted){
-                if(Date.now()>=t.deadline)throw Error("AGENT_TIME_BUDGET_EXHAUSTED");
                 advanceTeam(t);
                 let batch;
                 if(t.team){
@@ -494,11 +494,9 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         const workspace=workspaces.getWorkspace(input.workspaceId);
         const target=resolveRoute(input);
         const instruction=String(input.instruction??"").trim();if(!instruction||instruction.length>16000)throw Error("INVALID_AGENT_INSTRUCTION");
-        const timeoutSeconds=input.timeoutSeconds??86400;
-        if(!Number.isInteger(timeoutSeconds)||timeoutSeconds<30||timeoutSeconds>2592000)throw Error("INVALID_AGENT_BUDGET");
         const permissions={write:input.allowWrites===true,shell:input.allowShell===true,computer:input.allowComputer===true,memory:input.allowMemory===true,plugins:input.allowPlugins===true};
         const t={id:"agent_"+randomUUID(),workspaceId:input.workspaceId,instruction,permissions,writer:permissions.write||permissions.shell||permissions.computer||permissions.plugins,
-            status:"paused",cursor:0,steps:0,deadline:Date.now()+timeoutSeconds*1000,
+            status:"paused",cursor:0,steps:0,
             approvals:[],submission:null,pending:null,routing:target.routing,createdAt:new Date().toISOString()};
         installAgents(t,workspace,target);
         tasks.set(t.id,t);save(t);event(t,"created",null,{groupId:t.groupId,permissions});

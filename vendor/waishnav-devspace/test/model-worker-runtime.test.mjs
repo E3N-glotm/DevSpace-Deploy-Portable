@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createServer } from "node:http";
 import {createRequire} from "node:module";
 // Use the production-packed core so its ESM dependencies resolve the same way
 // as in the Windows Portable runtime, not a separate vendor/node_modules tree.
@@ -11,6 +12,7 @@ import { createRemoteWorkerToolOpener } from "../../../app/node_modules/@waishna
 
 const repo = resolve(import.meta.dirname, "..", "..", "..");
 const {createModelUsageStore}=createRequire(import.meta.url)(resolve(repo,"setup","model-usage.cjs"));
+const {Agent:HttpAgent,fetch:httpFetch,getGlobalDispatcher,setGlobalDispatcher}=createRequire(resolve(repo,"app","package.json"))("undici");
 const reports = resolve(repo, "reports");
 mkdirSync(reports,{recursive:true});
 
@@ -144,23 +146,95 @@ test("legacy Worker forwards the configured output tokens and accepts a large JS
     }finally{f.dispose();}
 });
 
-test("Agent deadline covers backend queue time and cancels stalled inference",async()=>{
-    let fetchStarted;
-    const started=new Promise(resolve=>{fetchStarted=resolve;});
-    const f=prepare({fetchOverride:(_url,{signal})=>new Promise((_,reject)=>{
+test("Worker inference and queued Agent inference survive the former deadlines",async(t)=>{
+    t.mock.timers.enable({apis:["Date","setTimeout"]});
+    const first=Promise.withResolvers(),second=Promise.withResolvers();
+    const admissions=[first,second];
+    const f=prepare({fetchOverride:(_url,{signal})=>new Promise((resolve,reject)=>{
         signal.addEventListener("abort",()=>reject(signal.reason),{once:true});
-        fetchStarted();
+        admissions.shift().resolve({signal,resolve});
     })});
     try{
         const model=f.runtime.agentProfiles()[0];
-        const agent=()=>({profileId:model.id,inputTokens:0,outputTokens:0,estimatedUSD:0});
-        const request=deadline=>f.runtime.agentRequest({deadline},agent(),model,[],[]);
-        const stalled=assert.rejects(request(Date.now()+300),/AGENT_TIME_BUDGET_EXHAUSTED/);
-        await started;
-        await assert.rejects(request(Date.now()+30),/AGENT_TIME_BUDGET_EXHAUSTED/);
-        assert.equal(f.counts().count,1,"a queued request that expired must never reach the backend");
-        await stalled;
+        const worker=f.runtime.delegate({workspaceId:"ws_test",modelId:model.id,instruction:"Wait for Worker inference",timeoutSeconds:30});
+        const activeWorker=await first.promise;
+        const agent={profileId:model.id,inputTokens:0,outputTokens:0,estimatedUSD:0};
+        const queued=f.runtime.agentRequest({deadline:Date.now()+30000},agent,model,[],[]);
+        const advanceDays=32*24*60*60*1000;
+        t.mock.timers.tick(advanceDays);
+        assert.equal(f.runtime.status(worker.taskId).status,"running");
+        assert.equal(activeWorker.signal.aborted,false);
+        assert.equal(f.counts().count,1,"The Agent remains queued behind the in-flight request");
+        const success=answer=>response({choices:[{message:{role:"assistant",content:answer}}]});
+        activeWorker.resolve(success("Worker delivered"));
+        const activeAgent=await second.promise;
+        assert.equal(f.runtime.result(worker.taskId).answer,"Worker delivered");
+        t.mock.timers.tick(advanceDays);
+        assert.equal(activeAgent.signal.aborted,false);
+        activeAgent.resolve(success("Agent delivered"));
+        assert.equal((await queued).content,"Agent delivered");
     }finally{f.dispose();}
+});
+
+test("Explicit cancellation aborts an in-flight Worker and removes queued Worker and Agent requests",async()=>{
+    const first=Promise.withResolvers();
+    const f=prepare({fetchOverride:(_url,{signal})=>new Promise((_,reject)=>{
+        signal.addEventListener("abort",()=>reject(signal.reason),{once:true});
+        first.resolve(signal);
+    })});
+    try{
+        const model=f.runtime.agentProfiles()[0];
+        const start=instruction=>f.runtime.delegate({workspaceId:"ws_test",modelId:model.id,instruction});
+        const active=start("Occupy the backend"),activeSignal=await first.promise;
+        const queued=start("Wait for the backend");
+        const agent={profileId:model.id,inputTokens:0,outputTokens:0,estimatedUSD:0};
+        const controller=new AbortController();
+        const check=assert.rejects(f.runtime.agentRequest({},agent,model,[],[],controller.signal),/AGENT_REQUEST_ABORTED/);
+        controller.abort();
+        await check;
+        f.runtime.cancel(queued.taskId);
+        assert.equal((await eventually(()=>f.runtime.status(queued.taskId))).status,"cancelled");
+        assert.equal(activeSignal.aborted,false);
+        f.runtime.cancel(active.taskId);
+        assert.equal((await eventually(()=>f.runtime.status(active.taskId))).status,"cancelled");
+        assert.equal(activeSignal.aborted,true);
+        assert.equal(f.counts().count,1,"Cancelled queued jobs must never make a request");
+    }finally{f.dispose();}
+});
+
+test("Model HTTP requests disable header and body timers through the existing dispatcher",async(t)=>{
+    const server=createServer((_request,reply)=>{
+        setTimeout(()=>{
+            reply.writeHead(200,{"Content-Type":"application/json"});
+            reply.flushHeaders();
+            setTimeout(()=>reply.end(JSON.stringify({choices:[{message:{content:"Delivered after silence"}}]})),40);
+        },40);
+    });
+    await new Promise((resolve,reject)=>server.listen(0,"127.0.0.1",resolve).once("error",reject));
+    const origin="http://127.0.0.1:"+server.address().port;
+    const prior=getGlobalDispatcher();
+    const transport=new HttpAgent({headersTimeout:10,bodyTimeout:10});
+    const dispatch=transport.dispatch.bind(transport);
+    const dispatchSpy=t.mock.method(transport,"dispatch",(options,handler)=>{
+        assert.equal(options.headersTimeout,0);
+        assert.equal(options.bodyTimeout,0);
+        return dispatch(options,handler);
+    });
+    setGlobalDispatcher(transport);
+    const f=prepare({fetchOverride:(_url,options)=>httpFetch(origin,options)});
+    try{
+        const worker=f.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",instruction:"Read a delayed model response"});
+        const result=await eventually(()=>f.runtime.result(worker.taskId));
+        assert.equal(result.status,"completed",result.error);
+        assert.equal(result.answer,"Delivered after silence");
+        assert.equal(dispatchSpy.mock.callCount(),1);
+    }finally{
+        f.dispose();
+        setGlobalDispatcher(prior);
+        server.closeAllConnections();
+        await new Promise(resolve=>server.close(resolve));
+        await transport.destroy();
+    }
 });
 
 test("model list never exposes encrypted keys",()=>{
@@ -242,9 +316,6 @@ test("Worker completes past the old step and tool-call limits even with a cached
         assert.ok(done.evidence.length<=25,
             "public evidence must remain bounded for long-running tasks");
         assert.equal(f.counts().count,rounds+1);
-        assert.throws(()=>f.runtime.delegate({workspaceId:"ws_test",
-            modelId:"qwen_worker",instruction:"Invalid",timeoutSeconds:86401}),
-            /INVALID_TASK_TIMEOUT/);
     }finally{f.dispose();}
 });
 test("explicit writes go through the same before/after mutation guard",async()=>{
