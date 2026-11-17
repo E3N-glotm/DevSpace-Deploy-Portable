@@ -61,6 +61,9 @@ function modelWorkflowScope(context) {
     return modelWorkflowRequestScope.getStore()?.scope
         ?? openAiConversationScopeId(context?._meta);
 }
+function mcpTaskActor(context,tool) {
+    return {source:"mcp",scope:modelWorkflowScope(context),tool};
+}
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
 // Each MCP transport owns a complete McpServer/tool registration graph. A
@@ -3152,7 +3155,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         structuredContent: {result:JSON.stringify(value),data:value},
     });
     function startAgentTask(input, context) {
-        const task = runtimeServices.agentRuntime.start(input,{delegated:true});
+        const task = runtimeServices.agentRuntime.start(input,{delegated:true,actor:mcpTaskActor(context,"agent_task_start")});
         runtimeServices.modelWorkflowGate?.onAgentStart(task, modelWorkflowScope(context));
         return task;
     }
@@ -3208,7 +3211,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             return workerResult(legacyAgentView(startAgentTask({...taskInput,...permissions},context)));
         }
         if(!modelId)throw Error("WORKER_PROFILE_NOT_FOUND");
-        const started=runtimeServices.modelWorker.delegate({...taskInput,modelId});
+        const started=runtimeServices.modelWorker.delegate({...taskInput,modelId},{actor:mcpTaskActor(context,"model_delegate_task")});
         runtimeServices.modelWorkflowGate?.onDelegate(
             started,modelWorkflowScope(context));
         return workerResult(started);
@@ -3216,22 +3219,23 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     for(const [toolName,action,description] of [
         ["model_task_status","status","Get progress for a delegated Worker or Agent task. Queued and running tasks remain active and can be polled again with the same taskId."],
         ["model_task_result","result","Read a delegated Worker or Agent result for independent verification. Single-model delegations complete automatically on delivery unless independent review was requested. Use agent_task_events for tool records and agent_task_accept if a verified result is still awaiting review."],
-        ["model_task_cancel","cancel","Cancel a delegated Worker or Agent task and abort its current model request."],
+        ["model_task_cancel","cancel","Cancel only a task created by this conversation and abort its current model request. Do not cancel a healthy running task simply because you finished another task. Cancel only when explicitly requested, superseded, or genuinely blocked; provide the reason. Older tasks without a verified owner can be managed in the local workbench."],
     ]){
         registerAppTool(server,toolName,{
             title:toolName,description,
-            inputSchema:{taskId:z.string()},
+            inputSchema:{taskId:z.string(),...(action==="cancel"?{reason:z.string().trim().min(1).max(500).optional().describe("Reason for stopping the task; omitted only by cached legacy clients.")}: {})},
             outputSchema:resultOutputSchema({data:z.unknown()}),
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:action==="cancel"?SHELL_TOOL_ANNOTATIONS:READ_ONLY_TOOL_ANNOTATIONS,
-        },async({taskId},context)=>{
+        },async({taskId,reason},context)=>{
+            const actor=mcpTaskActor(context,toolName);
             if(taskId.startsWith("agent_")){
-                const task=runtimeServices.agentRuntime[action==="result"?"status":action](taskId);
+                const task=runtimeServices.agentRuntime[action==="result"?"status":action](taskId,actor,reason);
                 if(action==="result")
                     runtimeServices.modelWorkflowGate?.onAgentStatus(task,modelWorkflowScope(context));
                 return workerResult(legacyAgentView(task));
             }
-            const result=runtimeServices.modelWorker[action](taskId);
+            const result=runtimeServices.modelWorker[action](taskId,actor,reason);
             if(action==="result")
                 runtimeServices.modelWorkflowGate?.onResult(
                     result,modelWorkflowScope(context));
@@ -3265,15 +3269,18 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             registerAppTool(server,"agent_task_"+action,{
                 title:"Agent task "+action,description:action==="status"
                     ?"Inspect a durable Agent task and any final result. Running tasks continue independently and can be polled again with the same taskId. In mandatory workflow, inspecting the finished result from the dispatching conversation releases the review requirement for Host writes."
-                    :action==="accept"?"Mark the single-model result complete after independently verifying it and inspecting task status."
+                    :action==="accept"?"Mark the single-model result complete after independently verifying it and inspecting task status; only the creating conversation may accept it."
+                    :action==="cancel"?"Cancel only a task created by this conversation. Do not cancel a healthy running task simply because unrelated work is complete. Provide the reason; use local workbench for legacy ownerless tasks."
                     :"Inspect or control a durable Agent Runtime task. Resume requires explicit acknowledgment if a tool outcome was uncertain.",
-                inputSchema:{taskId:z.string(),...(action==="events"?{after:z.number().int().min(0).optional(),limit:z.number().int().min(1).max(500).optional()}:action==="resume"?{acknowledge:z.boolean().optional()}: {})},
+                inputSchema:{taskId:z.string(),...(action==="events"?{after:z.number().int().min(0).optional(),limit:z.number().int().min(1).max(500).optional()}:action==="resume"?{acknowledge:z.boolean().optional()}: {}),...(["pause","resume","cancel","accept"].includes(action)?{reason:z.string().trim().min(1).max(500).optional()}: {})},
                 outputSchema:resultOutputSchema({data:z.unknown()}),
                 ...toolWidgetDescriptorMeta(config,"workspace"),
                 annotations:["status","events"].includes(action)?READ_ONLY_TOOL_ANNOTATIONS:SHELL_TOOL_ANNOTATIONS,
             },async(input,context)=>{
+                const actor=mcpTaskActor(context,"agent_task_"+action);
                 const result=action==="events"?runtimeServices.agentRuntime.events(input.taskId,input.after,input.limit)
-                    :runtimeServices.agentRuntime[action](input.taskId,input.acknowledge);
+                    :action==="resume"?runtimeServices.agentRuntime.resume(input.taskId,input.acknowledge,actor,input.reason)
+                    :runtimeServices.agentRuntime[action](input.taskId,actor,input.reason);
                 if(action==="status"||action==="accept")runtimeServices.modelWorkflowGate?.onAgentStatus(result,modelWorkflowScope(context));
                 return workerResult(result);
             });
@@ -4545,6 +4552,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const modelWorker = createModelWorkerRuntime({
         portableRoot:process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..",".."),
         config,workspaces,reviewCheckpoints,hookManager,
+        onControlAudit:entry=>logToolCall(config,entry),
         openRemoteWorkerTool:createRemoteWorkerToolOpener(remoteAgents),
         prepareWrite:(workspaceId,workspace,rel)=>prepareMutation(reviewCheckpoints,hookManager,{
             workspaceId,workspaceRoot:workspace.root,paths:[rel],toolName:"model_worker_edit",
@@ -4568,6 +4576,7 @@ export function createServer(config = loadConfig(), options = {}) {
     const agentRuntime=createAgentRuntime({
         sqlite:runtimeState.database.sqlite,portableRoot:process.env.DEVSPACE_PORTABLE_ROOT||resolve(config.stateDir,"..",".."),
         config,workspaces,worker:modelWorker,memoryStore,
+        onControlAudit:entry=>logToolCall(config,entry),
         profiles:()=>modelWorker.agentProfiles(),
         request:(...args)=>modelWorker.agentRequest(...args),
         getTools:async()=>{const client=await agentTools();return (await client.listTools()).tools;},
@@ -4827,7 +4836,8 @@ export function createServer(config = loadConfig(), options = {}) {
         const expected=Buffer.from(agentUiToken);
         if(!local||supplied.length!==expected.length||!timingSafeEqual(supplied,expected)){res.sendStatus(403);return;}
         try{
-            const {action,taskId,after,acknowledge}=req.body||{};
+            const {action,taskId,after,acknowledge,reason}=req.body||{};
+            const actor={source:"local-ui",tool:"agent_task_"+action};
             if(action==="list")return res.json(agentRuntime.list());
             if(action==="routing-settings")return res.json(agentRuntime.routingSettings());
             if(action==="set-routing-settings")return res.json(agentRuntime.setRoutingSettings(req.body.input));
@@ -4848,10 +4858,11 @@ export function createServer(config = loadConfig(), options = {}) {
                     if(opened.isError)throw Error(opened.content?.[0]?.text||"WORKSPACE_OPEN_FAILED");
                     const workspaceId=opened.structuredContent?.workspaceId;
                     if(!workspaceId)throw Error("WORKSPACE_OPEN_FAILED");
-                    res.json(agentRuntime.start({...input,workspaceId}));
+                    res.json(agentRuntime.start({...input,workspaceId},{actor}));
                 }catch(error){res.status(400).json({error:String(error.message)});}})();
             }
-            if(["status","pause","resume","cancel","accept"].includes(action))return res.json(agentRuntime[action](taskId,acknowledge===true));
+            if(action==="resume")return res.json(agentRuntime.resume(taskId,acknowledge===true,actor,reason));
+            if(["status","pause","cancel","accept"].includes(action))return res.json(agentRuntime[action](taskId,actor,reason));
             res.status(400).json({error:"INVALID_AGENT_ACTION"});
         }catch(error){res.status(400).json({error:String(error.message)});}
     });

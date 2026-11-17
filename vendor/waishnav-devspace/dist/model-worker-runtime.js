@@ -5,6 +5,7 @@ import { resolve, relative, isAbsolute, sep, dirname, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fetch as httpFetch, getGlobalDispatcher } from "undici";
 import reasoningAdapter from "./reasoning-adapter.cjs";
+import { taskControlOwner, taskControlDecision } from "./agent-task-control.js";
 import {
     readFileTool, grepFilesTool, listDirectoryTool, writeFileTool, editFileTool,
 } from "./pi-tools.js";
@@ -129,7 +130,7 @@ export function createModelWorkerRuntime({
     fetchImpl = httpFetch,
     readProfiles = publicModelProfiles,
     prepareWrite = async () => {}, finishWrite = async () => {},
-    usageStore,credentialVault,openRemoteWorkerTool,
+    usageStore,credentialVault,openRemoteWorkerTool,onControlAudit=()=>{},
 }) {
     // The MCP server and Electron UI are distinct processes. Both write
     // independent, atomic model-request events into the same Portable data
@@ -508,7 +509,7 @@ export function createModelWorkerRuntime({
             if(count<=1)activeHostMutations.delete(workspaceId);
             else activeHostMutations.set(workspaceId,count-1);
         },
-        delegate({workspaceId,modelId,instruction,allowWrites=false}){
+        delegate({workspaceId,modelId,instruction,allowWrites=false},{actor}={}){
             const workspace=workspaces.getWorkspace(workspaceId);
             if(workspace.backend!=="local"&&(workspace.backend!=="remote-agent"||!openRemoteWorkerTool))
                 throw new Error("MODEL_WORKER_WORKSPACE_BACKEND_UNAVAILABLE");
@@ -529,7 +530,7 @@ export function createModelWorkerRuntime({
                 allowWrites,steps:0,toolCalls:0,inputTokens:0,outputTokens:0,
                 estimatedUSD:0,maxTaskUSD:model.maxTaskUSD||1,evidence:[],answer:"",
                 error:null,controller:new AbortController(),cancelled:false,
-                startedAt:new Date().toISOString()};
+                startedAt:new Date().toISOString(),controlOwner:taskControlOwner(actor)};
             if(jobs.size>=MAX_TASKS){
                 const done=[...jobs.values()].find(j=>["completed","failed","cancelled"].includes(j.status));
                 if(done)jobs.delete(done.taskId);else throw new Error("TOO_MANY_ACTIVE_MODEL_TASKS");
@@ -540,8 +541,11 @@ export function createModelWorkerRuntime({
         },
         status:taskId=>snapshot(find(taskId)),
         result:taskId=>snapshot(find(taskId),true),
-        cancel(taskId){
-            const job=find(taskId);job.cancelled=true;job.controller?.abort();
+        cancel(taskId,actor,reason){
+            const job=find(taskId),audit=taskControlDecision(job.controlOwner,actor,"cancel",reason);
+            onControlAudit({...audit,taskId,workspaceId:job.workspaceId,status:job.status,success:audit.allowed});
+            if(!audit.allowed)throw Error(audit.error);
+            if(!["completed","failed","cancelled"].includes(job.status)){job.cancelled=true;job.controller?.abort();}
             return snapshot(job);
         },
     };

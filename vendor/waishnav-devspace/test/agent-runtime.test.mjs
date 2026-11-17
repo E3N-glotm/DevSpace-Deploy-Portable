@@ -415,6 +415,53 @@ test("cancelled task remains protected until in-flight work unwinds",async()=>{
     await f.runtime.close();
     f.sqlite.close();
 });
+test("task ownership survives restart; other conversations cannot cancel or otherwise control it",async()=>{
+    const audit=[];
+    const owner={source:"mcp",scope:"chat-one",tool:"agent_task_cancel"};
+    const other={source:"mcp",scope:"chat-two",tool:"model_task_cancel"};
+    const ui={source:"local-ui",tool:"agent_task_cancel"};
+    const f=fixture({onControlAudit:e=>audit.push(e),request:async()=>reply(call("agent_finish",{decision:"submit",summary:"ready"}))});
+    const start=(actor)=>f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"control test",allowWrites:false,allowShell:false,allowComputer:false,allowMemory:false,allowPlugins:false},{actor});
+    const t=start(owner),local=start(ui),legacy=start();
+    for(const task of [t,local,legacy])await until(f.runtime,task.id,["awaiting-review"]);
+    assert.ok(!Object.hasOwn(f.runtime.status(t.id),"controlOwner"));
+    assert.throws(()=>f.runtime.cancel(t.id,other,"wrong task"),/AGENT_TASK_NOT_OWNED/);
+    assert.throws(()=>f.runtime.pause(t.id,other),/AGENT_TASK_NOT_OWNED/);
+    assert.throws(()=>f.runtime.resume(t.id,false,other),/AGENT_TASK_NOT_OWNED/);
+    assert.throws(()=>f.runtime.accept(t.id,other),/AGENT_TASK_NOT_OWNED/);
+    assert.throws(()=>f.runtime.cancel(t.id,{source:"mcp"}),/AGENT_TASK_NOT_OWNED/);
+    assert.throws(()=>f.runtime.cancel(local.id,owner),/AGENT_TASK_NOT_OWNED/);
+    // Simulate a pre-dev33 persisted task without ownership metadata.
+    await f.runtime.close();
+    const row=f.sqlite.prepare("select data from devspace_agent_tasks where id=?").get(legacy.id);
+    const data=JSON.parse(row.data);delete data.controlOwner;
+    f.sqlite.prepare("update devspace_agent_tasks set data=? where id=?").run(JSON.stringify(data),legacy.id);
+    const g=fixture({sqlite:f.sqlite,onControlAudit:e=>audit.push(e)});
+    assert.throws(()=>g.runtime.cancel(legacy.id,owner),/AGENT_TASK_OWNER_UNKNOWN/);
+    assert.equal(g.runtime.status(t.id).status,"awaiting-review");
+    assert.equal(g.runtime.cancel(t.id,{...owner,tool:"model_task_cancel"},"User requested stop; token=private").status,"cancelled");
+    assert.equal(g.runtime.cancel(local.id,ui,"Local confirmed").status,"cancelled");
+    assert.equal(g.runtime.cancel(legacy.id,ui).status,"cancelled");
+    const events=g.runtime.events(t.id).filter(e=>e.kind==="task-control");
+    assert.equal(events.length,6);assert.ok(events.slice(0,-1).every(e=>!e.ok&&!e.changed));
+    assert.equal(events.at(-1).tool,"model_task_cancel");assert.equal(events.at(-1).source,"mcp");
+    assert.equal(events.at(-1).status,"cancelled");assert.equal(events.at(-1).changed,true);
+    assert.match(events.at(-1).reason,/redacted/);assert.doesNotMatch(JSON.stringify(events),/chat-one|chat-two|private/);
+    assert.equal(audit.filter(e=>e.success===false).length,7);
+    assert.equal(audit.filter(e=>e.success===true).length,3);
+    await g.runtime.close();f.sqlite.close();
+});
+test("a rejected cross-conversation cancel does not abort active inference",async()=>{
+    const admitted=Promise.withResolvers();
+    const f=fixture({request:async(_t,_a,_p,_m,_tools,signal)=>new Promise((_,reject)=>{admitted.resolve(signal);signal.addEventListener("abort",()=>reject(signal.reason),{once:true});})});
+    const owner={source:"mcp",scope:"owner"};
+    const t=f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"active test"},{actor:owner});
+    const signal=await admitted.promise;
+    assert.throws(()=>f.runtime.cancel(t.id,{source:"mcp",scope:"other"}),/AGENT_TASK_NOT_OWNED/);
+    assert.equal(signal.aborted,false);assert.equal(f.runtime.status(t.id).status,"running");
+    f.runtime.cancel(t.id,owner,"user stop");assert.equal(signal.aborted,true);
+    await f.runtime.close();f.sqlite.close();
+});
 test("streaming joins real reasoning, content and tool deltas, rejects interrupted streams",async()=>{
     const chunk=data=>"data: "+JSON.stringify(data)+"\n\n";
     const parts=[

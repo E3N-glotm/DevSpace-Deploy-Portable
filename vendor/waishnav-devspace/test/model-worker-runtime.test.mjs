@@ -26,7 +26,7 @@ async function eventually(get,timeoutMs=1600) {
     throw new Error("TASK_NEVER_FINISHED");
 }
 function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRounds=0, maxOutputTokens=1024,
-    protectedKey=false,deepseek=false,fetchOverride,remoteWorkspace,openRemoteWorkerTool }={}){
+    protectedKey=false,deepseek=false,fetchOverride,remoteWorkspace,openRemoteWorkerTool,onControlAudit }={}){
     const root=mkdtempSync(resolve(reports,".tmp-native-model-"));
     const project=resolve(root,"project");
     mkdirSync(project);
@@ -51,6 +51,7 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRoun
             assert.equal(id,"ws_test");return remoteWorkspace??{root:project,backend:"local"};
         }},
         openRemoteWorkerTool,
+        onControlAudit,
         config:{permissions:{allowShellMutation:true,allowArbitraryCommands:false}},
         credentialVault:{decryptString:value=>{
             assert.equal(value,"DPAPI_CIPHERTEXT");
@@ -199,6 +200,21 @@ test("Explicit cancellation aborts an in-flight Worker and removes queued Worker
         assert.equal((await eventually(()=>f.runtime.status(active.taskId))).status,"cancelled");
         assert.equal(activeSignal.aborted,true);
         assert.equal(f.counts().count,1,"Cancelled queued jobs must never make a request");
+    }finally{f.dispose();}
+});
+test("legacy Worker also rejects cross-conversation cancellation and records source",async()=>{
+    const first=Promise.withResolvers(),audits=[];
+    const f=prepare({onControlAudit:e=>audits.push(e),fetchOverride:(_url,{signal})=>new Promise((_,reject)=>{signal.addEventListener("abort",()=>reject(signal.reason),{once:true});first.resolve(signal);})});
+    const owner={source:"mcp",scope:"chat-A",tool:"model_task_cancel"};
+    try{
+        const task=f.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",instruction:"test ownership"},{actor:owner});
+        const signal=await first.promise;
+        assert.throws(()=>f.runtime.cancel(task.taskId,{source:"mcp",scope:"chat-B"}),/AGENT_TASK_NOT_OWNED/);
+        assert.equal(signal.aborted,false);assert.equal(f.runtime.status(task.taskId).status,"running");
+        f.runtime.cancel(task.taskId,owner,"User requested stop");
+        assert.equal((await eventually(()=>f.runtime.status(task.taskId))).status,"cancelled");
+        assert.deepEqual(audits.map(e=>e.success),[false,true]);
+        assert.equal(audits[1].reason,"User requested stop");assert.equal(audits[1].source,"mcp");
     }finally{f.dispose();}
 });
 

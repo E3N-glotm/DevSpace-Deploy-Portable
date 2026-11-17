@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import reasoningAdapter from "./reasoning-adapter.cjs";
 import groupTree from "./agent-group-tree.cjs";
+import { taskControlOwner, taskControlDecision } from "./agent-task-control.js";
 
 const terminal = new Set(["completed","failed","cancelled"]);
 const routingModes = new Set(["auto","single","group"]);
@@ -85,7 +86,7 @@ export function resolveAgentPermissions(input,config){
         plugins:input.allowPlugins!==false,
     };
 }
-export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memoryStore,config,getTools,callTool,profiles,request,groups=()=>listAgentGroups(portableRoot)}){
+export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memoryStore,config,getTools,callTool,profiles,request,groups=()=>listAgentGroups(portableRoot),onControlAudit=()=>{}}){
     sqlite.exec(`
       create table if not exists devspace_agent_tasks(id text primary key, data text not null);
       create table if not exists devspace_agent_events(seq integer primary key autoincrement, task_id text not null, data text not null);
@@ -132,7 +133,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
     });
     const find=id=>{const t=tasks.get(id);if(!t)throw Error("UNKNOWN_AGENT_TASK");return t;};
     const view=t=>{
-        const {agents,previousAgents,pending,...rest}=t;
+        const {agents,previousAgents,pending,controlOwner,...rest}=t;
         const members=agents.map(({messages,...a})=>({...a,contextEstimate:estimate(messages)}));
         return {...rest,pending:pending??null,agents:[...(previousAgents??[]),...members]};
     };
@@ -543,27 +544,39 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         installAgents(draft,workspace,target,handoff);
         return {draft,handoff};
     }
-    function start(input,{delegated=false}={}){
+    function start(input,{delegated=false,actor}={}){
         const workspace=workspaces.getWorkspace(input.workspaceId);
         const target=resolveRoute(input);
         const instruction=String(input.instruction??"").trim();if(!instruction||instruction.length>16000)throw Error("INVALID_AGENT_INSTRUCTION");
         const permissions=resolveAgentPermissions(input,config);
         const t={id:"agent_"+randomUUID(),workspaceId:input.workspaceId,instruction,permissions,writer:permissions.write||permissions.shell||permissions.computer||permissions.plugins,
             status:"paused",cursor:0,steps:0,autoCompleteDelivery:delegated&&input.independentReview!==true&&target.routing.mode==="single",
-            approvals:[],submission:null,pending:null,routing:target.routing,createdAt:new Date().toISOString()};
+            approvals:[],submission:null,pending:null,routing:target.routing,createdAt:new Date().toISOString(),controlOwner:taskControlOwner(actor)};
         installAgents(t,workspace,target);
-        tasks.set(t.id,t);save(t);event(t,"created",null,{groupId:t.groupId,permissions});
+        tasks.set(t.id,t);save(t);event(t,"created",null,{groupId:t.groupId,permissions,source:t.controlOwner.source});
         event(t,"routing",null,t.routing);
         return launch(t);
+    }
+    function control(t,action,actor,reason,operation){
+        const audit=taskControlDecision(t.controlOwner,actor,action,reason);
+        const previousStatus=t.status;
+        const record=(success,error)=>{
+            const entry={...audit,ok:success,error:error??audit.error,taskId:t.id,workspaceId:t.workspaceId,previousStatus,status:t.status,changed:previousStatus!==t.status};
+            event(t,"task-control",null,entry);
+            onControlAudit({...entry,success});
+        };
+        if(!audit.allowed){record(false,audit.error);throw Error(audit.error);}
+        try{operation();}catch(e){record(false,safeText(e.message,500));throw e;}
+        record(true,null);return view(t);
     }
     return {start,groups,routingSettings,setRoutingSettings,list:()=>[...tasks.values()].map(view).reverse(),status:id=>view(find(id)),
         deleteHistory,
         recover(){for(const t of tasks.values())if(t.resumeOnBoot&&!t.pending){try{launch(t);}catch(e){t.resumeOnBoot=false;t.error=safeText(e.message);save(t);}}},
         events:(id,after=0,limit=100)=>{find(id);return sqlite.prepare("select seq,data from devspace_agent_events where task_id=? and seq>? order by seq limit ?").all(id,after,Math.min(500,Math.max(1,limit))).map(r=>({seq:r.seq,...JSON.parse(r.data)}));},
-        pause(id){const t=find(id);if(t.status==="running"){t.status="paused";t.resumeOnBoot=false;save(t);running.get(id)?.abort();}return view(t);},
-        resume(id,acknowledge=false){const t=find(id);if(terminal.has(t.status))throw Error("AGENT_TERMINAL");if(t.pending&&!acknowledge)throw Error("AGENT_UNCERTAIN_TOOL_ACK_REQUIRED");if(running.has(id))throw Error("AGENT_PAUSE_IN_PROGRESS");if(t.pending){event(t,"uncertain-tool-ack",null,t.pending);t.pending=null;}for(const a of t.agents)if(!t.team||a.state!=="approved")a.state="ready";return launch(t);},
-        cancel(id){const t=find(id);if(!terminal.has(t.status)){t.status="cancelled";save(t);running.get(id)?.abort();event(t,"state",null,{status:"cancelled"});}return view(t);},
-        accept(id){const t=find(id);if(t.status!=="awaiting-review"||running.has(id))throw Error("AGENT_NOT_AWAITING_REVIEW");t.status="completed";save(t);event(t,"user-accepted",null);return view(t);},
+        pause(id,actor,reason){const t=find(id);return control(t,"pause",actor,reason,()=>{if(t.status==="running"){t.status="paused";t.resumeOnBoot=false;save(t);running.get(id)?.abort();}});},
+        resume(id,acknowledge=false,actor,reason){const t=find(id);return control(t,"resume",actor,reason,()=>{if(terminal.has(t.status))throw Error("AGENT_TERMINAL");if(t.pending&&!acknowledge)throw Error("AGENT_UNCERTAIN_TOOL_ACK_REQUIRED");if(running.has(id))throw Error("AGENT_PAUSE_IN_PROGRESS");if(t.pending){event(t,"uncertain-tool-ack",null,t.pending);t.pending=null;}for(const a of t.agents)if(!t.team||a.state!=="approved")a.state="ready";launch(t);});},
+        cancel(id,actor,reason){const t=find(id);return control(t,"cancel",actor,reason,()=>{if(!terminal.has(t.status)){t.status="cancelled";t.resumeOnBoot=false;save(t);running.get(id)?.abort();event(t,"state",null,{status:"cancelled"});}});},
+        accept(id,actor,reason){const t=find(id);return control(t,"accept",actor,reason,()=>{if(t.status!=="awaiting-review"||running.has(id))throw Error("AGENT_NOT_AWAITING_REVIEW");t.status="completed";save(t);event(t,"user-accepted",null);});},
         async close(){for(const [id,controller] of running){const t=find(id);t.resumeOnBoot=t.status==="running"&&!t.pending;t.status="paused";save(t);controller.abort();}while(running.size)await new Promise(r=>setTimeout(r,20));}
     };
 }

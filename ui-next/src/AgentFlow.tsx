@@ -19,6 +19,7 @@ export const agentStatuses: Record<string, string> = {
 };
 
 const eventTitles: Record<string, string> = {
+  'task-control': '任务控制审计',
   created: '任务创建', state: '任务状态', routing: '模型调度', recovered: '任务恢复', 'inference-start': '模型推理',
   'inference-stream': '模型推理', output: '模型推理', message: '协作消息', review: '审查',
   'tool-start': '工具操作', 'tool-result': '工具操作', 'tool-error': '工具操作',
@@ -27,6 +28,7 @@ const eventTitles: Record<string, string> = {
   'user-accepted': '人工验收', 'auto-accepted': '自动验收', 'memory-saved': '已保存记忆', 'memory-skipped': '记忆未保存',
 };
 const fieldTitles: Record<string, string> = {
+  action: '控制操作', source: '操作来源', caller: '调用会话指纹', owner: '归属会话指纹', ownerSource: '任务来源', reason: '操作原因', allowed: '归属校验通过', tool: '调用接口', taskId: '任务 ID', workspaceId: '工作区 ID',
   name: '工具名称', args: '调用参数', text: '工具返回', error: '错误',
   message: '消息内容', content: '模型输出', reasoning: '模型返回的思考内容', summary: '摘要',
   decision: '审查决定', reasoningConfig: '请求的思考参数', reasoningEvidence: '响应证据',
@@ -99,6 +101,11 @@ function describe(card: FlowCard, names: Map<string, string>) {
     title = '发送给 ' + (names.get(get('to')) ?? get('to'));
   } else if (first.kind === 'state') {
     preview ||= agentStatuses[get('status')] || get('status');
+  } else if (first.kind === 'task-control') {
+    const actions: Record<string,string> = {cancel:'取消',pause:'暂停',resume:'恢复',accept:'验收'};
+    const sources: Record<string,string> = {'local-ui':'本机工作台',mcp:'上游模型',internal:'内部运行时'};
+    title = (actions[get('action')] || get('action')) + (last.ok===false?'被拒绝 / 失败':'操作记录');
+    preview = [sources[get('source')] || get('source'),get('reason'),get('error')].filter(Boolean).join(' · ');
   } else if (first.kind === 'routing') {
     const mode = get('mode') as AgentRouteMode;
     preview = [routeModes[mode], routeReasons[get('reason')], get('detail')].filter(Boolean).join(' · ');

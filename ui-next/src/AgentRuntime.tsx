@@ -145,6 +145,8 @@ export function AgentRuntimePage() {
   const [tabPreference, setTabPreference] = useState<TaskFilter>();
   const [selectedId, setSelectedId] = useState<string>();
   const [eventView, setEventView] = useState<EventView>();
+  const [cancelTarget, setCancelTarget] = useState<AgentTask>();
+  const [cancelReason, setCancelReason] = useState('');
   const [historyAction, setHistoryAction] = useState<HistoryAction>();
   const [createOpen, setCreateOpen] = useState(false);
   const [path, setPath] = useState('');
@@ -278,10 +280,10 @@ export function AgentRuntimePage() {
     finally { setBusy(false); }
   }
 
-  async function control(action: ControlAction, targetTask: AgentTask) {
+  async function control(action: ControlAction, targetTask: AgentTask, reason?: string) {
     setBusy(true);
     try {
-      const updated = await window.devspace.agentRuntime(action, { taskId: targetTask.id, acknowledge: ack[targetTask.id] === true }) as AgentTask;
+      const updated = await window.devspace.agentRuntime(action, { taskId: targetTask.id, acknowledge: ack[targetTask.id] === true, reason }) as AgentTask;
       setSelectedId(updated.id);
       setTasks(items => items.map(item => item.id === updated.id ? updated : item));
       setError('');
@@ -363,7 +365,7 @@ export function AgentRuntimePage() {
             {['paused', 'awaiting-review'].includes(task.status) && <Button size="small" disabled={busy || (task.pending != null && !ack[task.id])}
               onClick={() => void control('resume', task)}>恢复</Button>}
             {task.status === 'awaiting-review' && <Button size="small" disabled={busy} onClick={() => void control('accept', task)}>人工验收</Button>}
-            <Button size="small" disabled={busy} onClick={() => void control('cancel', task)}>取消任务</Button>
+            <Button size="small" disabled={busy} onClick={() => {setCancelTarget(task);setCancelReason('');}}>取消任务</Button>
           </div>}
         </div>
         {task.error && <div className="op-message op-error">{task.error}</div>}
@@ -406,6 +408,18 @@ export function AgentRuntimePage() {
           <Button appearance="primary" className="agent-confirm-remove" disabled={busy} onClick={() => void removeHistory(historyAction)}>
             {historyAction.task ? '删除历史' : '清空历史'}
           </Button>
+        </DialogActions>
+      </DialogBody></DialogSurface>
+    </Dialog>}
+    {cancelTarget && <Dialog open onOpenChange={(_, data) => {if(!data.open&&!busy)setCancelTarget(undefined);}}>
+      <DialogSurface className="agent-dialog"><DialogBody>
+        <DialogTitle>确认取消任务</DialogTitle>
+        <DialogContent><p>取消会终止当前模型请求，任务无法直接恢复；已执行的文件操作不会回滚。需要稍后继续时，请选择暂停。</p>
+          <p className="op-subtle">{cancelTarget.instruction}</p>
+          <Field label="取消原因（可选，将写入任务审计）"><Textarea value={cancelReason} rows={2} maxLength={500} onChange={(_,data)=>setCancelReason(data.value)}/></Field>
+        </DialogContent>
+        <DialogActions><Button disabled={busy} onClick={()=>setCancelTarget(undefined)}>返回</Button>
+          <Button appearance="primary" disabled={busy} onClick={async()=>{const target=cancelTarget;setCancelTarget(undefined);await control('cancel',target,cancelReason.trim()||'本机用户确认取消');}}>确认取消</Button>
         </DialogActions>
       </DialogBody></DialogSurface>
     </Dialog>}
