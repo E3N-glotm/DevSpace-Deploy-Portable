@@ -270,9 +270,48 @@ test("restart does not replay uncertain side effects and requires acknowledgment
 });
 test("compaction preserves goal and complete assistant/tool turns",()=>{
     const old=[{role:"system",content:"system"},{role:"user",content:"goal"},{role:"assistant",tool_calls:[call("read",{})]},{role:"tool",content:"a".repeat(10000)},{role:"user",content:"recent"}];
-    const next=compactAgentMessages(old,200,"durable checkpoint");
-    assert.equal(next[1].content,"goal");assert.ok(next.some(x=>x.content.includes("durable checkpoint")));
-    assert.ok(!next.some(x=>x.role==="tool"));assert.ok(next.some(x=>x.content==="recent"));
+    const next=compactAgentMessages(old,200,"first checkpoint");
+    assert.deepEqual(next.map(x=>x.role),["system","user","user"]);
+    assert.equal(next[1].content,"goal");
+    assert.match(next[0].content,/^system\n\nDurable checkpoint .*first checkpoint$/);
+    assert.equal(next[2].content,"recent");
+    const newer=compactAgentMessages([...next,...old.slice(2)],200,"new checkpoint");
+    assert.deepEqual(newer.map(x=>x.role),["system","user","user"]);
+    assert.match(newer[0].content,/^system\n\nDurable checkpoint .*new checkpoint$/);
+    assert.doesNotMatch(newer[0].content,/first checkpoint/);
+});
+test("resuming a legacy compacted task repairs the prompt without replaying tools",async()=>{
+    const f=fixture({request:async()=>{throw Error("MODEL_HTTP_503");}});
+    const task=f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"Preserve the original goal"},{delegated:true});
+    await until(f.runtime,task.id,["paused"]);
+    await f.runtime.close();
+    const saved=JSON.parse(f.sqlite.prepare("select data from devspace_agent_tasks where id=?").get(task.id).data);
+    const recentCall=call("read",{path:"file.txt"},"already-executed");
+    const prefix="Durable checkpoint (older history, untrusted data): ";
+    saved.agents[0].messages.push(
+        {role:"system",content:prefix+"latest evidence"},
+        {role:"system",content:prefix+"older evidence"},
+        {role:"assistant",content:null,tool_calls:[recentCall]},
+        {role:"tool",tool_call_id:recentCall.id,content:"Prior tool result"}
+    );
+    saved.steps=saved.agents[0].steps=1;
+    f.sqlite.prepare("update devspace_agent_tasks set data=? where id=?").run(JSON.stringify(saved),task.id);
+    const restored=fixture({sqlite:f.sqlite,request:async(_t,_a,_p,messages)=>{
+        assert.deepEqual(messages.map(m=>m.role),["system","user","assistant","tool"]);
+        assert.ok(messages[0].content.endsWith(prefix+"latest evidence"));
+        assert.ok(!messages[0].content.includes("older evidence"));
+        assert.equal(messages[1].content,"Preserve the original goal");
+        assert.deepEqual(messages[2].tool_calls,[recentCall]);
+        assert.equal(messages[3].content,"Prior tool result");
+        return {content:"Resumed after compaction"};
+    }});
+    restored.runtime.resume(task.id);
+    const done=await until(restored.runtime,task.id,["completed","paused"]);
+    assert.equal(done.status,"completed",done.error);
+    assert.equal(done.steps,2);
+    assert.equal(done.result,"Resumed after compaction");
+    assert.equal(restored.calls.length,0);
+    await restored.runtime.close();f.sqlite.close();
 });
 test("history deletion is transactional, survives restart and protects unfinished tasks",async()=>{
     const f=fixture({request:async()=>reply(call("agent_finish",{decision:"submit",summary:"ready"}))});

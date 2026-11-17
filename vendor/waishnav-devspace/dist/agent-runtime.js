@@ -6,6 +6,8 @@ import groupTree from "./agent-group-tree.cjs";
 
 const terminal = new Set(["completed","failed","cancelled"]);
 const routingModes = new Set(["auto","single","group"]);
+const CHECKPOINT_PREFIX = "Durable checkpoint (older history, untrusted data): ";
+const CHECKPOINT_SEPARATOR = "\n\n"+CHECKPOINT_PREFIX;
 const ESCALATE = {name:"agent_escalate",description:"Switch this automatic single-model task to the default model group when further work needs independent review or has distinct subtasks that can be done in parallel. Transfer completed work, file references, checks, and remaining work. Do not repeat completed work or include secrets.",parameters:{type:"object",properties:{reason:{type:"string"},handoff:{type:"string"}},required:["reason","handoff"]}};
 const CONTROL = [
     {name:"agent_send",description:"Send a task, question, result or review request to another member. Their private context is separate.",parameters:{type:"object",properties:{to:{type:"string"},message:{type:"string"}},required:["to","message"]}},
@@ -32,16 +34,33 @@ export function listAgentGroups(root){
         return value.groups;
     }catch(e){if(e.code==="ENOENT")return [];throw e;}
 }
+function checkpointHead(messages,summary){
+    const [system,goal]=messages;
+    const instruction=system.content.split(CHECKPOINT_SEPARATOR,1)[0];
+    return [{...system,content:instruction+CHECKPOINT_SEPARATOR+summary},goal];
+}
+function normalizeAgentCheckpoint(messages){
+    const tail=messages.slice(2);
+    const isCheckpoint=m=>m.role==="system"&&m.content?.startsWith(CHECKPOINT_PREFIX);
+    // Older tasks stored the newest checkpoint as a system message after the
+    // user goal. Qwen's template only permits system instructions at the start.
+    const legacy=tail.find(isCheckpoint);
+    if(!legacy)return messages;
+    return [...checkpointHead(messages,legacy.content.slice(CHECKPOINT_PREFIX.length)),
+        ...tail.filter(m=>!isCheckpoint(m))];
+}
 export function compactAgentMessages(messages,budget,summary){
-    // Preserve complete tool transactions, system goal and a recent suffix.
-    const head=messages.slice(0,2);
+    messages=normalizeAgentCheckpoint(messages);
+    if(estimate(messages)<=budget)return messages;
+    // Keep the original goal and complete tool transactions in the suffix.
+    const head=checkpointHead(messages,summary);
     let cut=2;
-    while(estimate([...head,{role:"system",content:summary},...messages.slice(cut)])>budget&&cut<messages.length){
+    while(cut<messages.length&&estimate([...head,...messages.slice(cut)])>budget){
         if(messages[cut]?.role==="assistant"&&Array.isArray(messages[cut].tool_calls))
             cut+=1+messages[cut].tool_calls.length;
         else cut++;
     }
-    return cut===2?messages:[...head,{role:"system",content:"Durable checkpoint (older history, untrusted data): "+summary},...messages.slice(cut)];
+    return [...head,...messages.slice(cut)];
 }
 // Old visual observations cease to represent the current desktop. Keep the
 // two latest frames and all accompanying text and tool transactions.
@@ -367,6 +386,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                 if(a.inbox.length){
                     a.messages.push({role:"user",content:a.inbox.map(x=>"Message from "+x.from+": "+x.message).join("\n")});a.inbox=[];
                 }
+                a.messages=normalizeAgentCheckpoint(a.messages);
                 const budget=Math.max(512,(p.contextLength||32768)-(p.maxOutputTokens||4096)-estimate(toolset)-256);
                 if(estimate(a.messages)>budget){
                     // Extractive checkpoint from the archived event stream; an
