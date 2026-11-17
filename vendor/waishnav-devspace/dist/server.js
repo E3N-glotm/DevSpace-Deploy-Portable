@@ -3183,7 +3183,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_delegate_task",{
         title:"Delegate to configured DevSpace models",
-        description:"Compatibility entry for model delegation. Uses the current global routing by default, including when a cached client supplies modelId. Set useSpecifiedModel only for an explicitly requested legacy single Worker. Execution has no fixed deadline. Poll model_task_status with the returned taskId until a result is available. Default is read-only. First open the workspace.",
+        description:"Compatibility entry for model delegation. Uses the current global routing by default, including when a cached client supplies modelId. Omitted permissions inherit the owner's global policy. Explicit false narrows permissions. For backward compatibility, allowWrites=false with no other capability overrides is read-only. Set useSpecifiedModel only for an explicitly requested legacy single Worker (legacy explicit opt-in edit policy). Execution has no fixed deadline. Poll model_task_status with the returned taskId until a result is available. First open the workspace.",
         inputSchema:{
             workspaceId:z.string(),
             modelId:z.string().optional().describe("Worker ID, used only when useSpecifiedModel is true."),
@@ -3191,15 +3191,22 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
             independentReview:z.boolean().optional(),
             parallelWorkstreams:z.number().int().min(0).optional(),
             instruction:z.string().min(1).max(8000),
-            allowWrites:z.boolean().optional().describe("Default false. True explicitly delegates file edits."),
+            allowWrites:z.boolean().optional().describe("Omit to inherit native editing permission. False disables edits; if no other capability overrides are supplied, all modifying capabilities are disabled for legacy read-only callers."),
+            allowShell:z.boolean().optional().describe("Omit to inherit; false disables shell."),
+            allowComputer:z.boolean().optional().describe("Omit to inherit; false disables desktop control."),
+            allowMemory:z.boolean().optional().describe("Omit to inherit; false disables memory writing."),
+            allowPlugins:z.boolean().optional().describe("Omit to inherit; false disables modifying plugin actions."),
         },
         outputSchema:resultOutputSchema({data:z.unknown()}),
         ...toolWidgetDescriptorMeta(config,"workspace"),
         annotations:SHELL_TOOL_ANNOTATIONS,
     },async (input,context)=>{
         const {modelId,useSpecifiedModel,...taskInput}=input;
-        if(!useSpecifiedModel)
-            return workerResult(legacyAgentView(startAgentTask(taskInput,context)));
+        if(!useSpecifiedModel){
+            const legacyReadOnly=taskInput.allowWrites===false&&["allowShell","allowComputer","allowMemory","allowPlugins"].every(key=>taskInput[key]===undefined);
+            const permissions=legacyReadOnly?{allowShell:false,allowComputer:false,allowMemory:false,allowPlugins:false}:{};
+            return workerResult(legacyAgentView(startAgentTask({...taskInput,...permissions},context)));
+        }
         if(!modelId)throw Error("WORKER_PROFILE_NOT_FOUND");
         const started=runtimeServices.modelWorker.delegate({...taskInput,modelId});
         runtimeServices.modelWorkflowGate?.onDelegate(
@@ -3236,14 +3243,14 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         routeMode:z.enum(["auto","single","group"]).optional().describe("Task override. Omit to use the owner's global choice."),
         independentReview:z.boolean().optional().describe("Set true when independent review is needed in automatic mode."),
         parallelWorkstreams:z.number().int().min(0).optional().describe("Number of distinct subtasks that can genuinely run in parallel. Automatic mode can use a group for two or more."),
-        instruction:z.string().min(1).max(16000),allowWrites:z.boolean().optional(),
-        allowShell:z.boolean().optional(),allowComputer:z.boolean().optional(),
-        allowMemory:z.boolean().optional(),allowPlugins:z.boolean().optional(),
+        instruction:z.string().min(1).max(16000),allowWrites:z.boolean().optional().describe("Omit to inherit. False disables direct file edits."),
+        allowShell:z.boolean().optional().describe("Omit to inherit. False disables shell, including shell-based file changes."),allowComputer:z.boolean().optional().describe("Omit to inherit. False disables desktop control."),
+        allowMemory:z.boolean().optional().describe("Omit to inherit. False disables memory writing."),allowPlugins:z.boolean().optional().describe("Omit to inherit. False disables modifying plugin actions."),
     };
     if(runtimeServices.agentRuntime){
         registerAppTool(server,"agent_task_start",{
             title:"Start persistent DevSpace Agent task",
-            description:"Delegate a durable task using DevSpace's global automatic, single-model or group routing. In automatic mode, pass independentReview or parallelWorkstreams when warranted. Execution has no fixed step cap or deadline. Single-model delegations complete automatically on delivery unless independent review was requested. Poll agent_task_status with the returned taskId until a result is available. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and verify the result independently.",
+            description:"Delegate a durable task using DevSpace's global automatic, single-model or group routing. In automatic mode, pass independentReview or parallelWorkstreams when warranted. Execution has no fixed step cap or deadline. Single-model delegations complete automatically on delivery unless independent review was requested. Poll agent_task_status with the returned taskId until a result is available. Omitted permissions inherit the owner's existing global policy; explicit false narrows that capability and true never bypasses native authorization. For strictly read-only tasks set all five permission flags false. Inspect events and verify the result independently.",
             inputSchema:agentInput,outputSchema:resultOutputSchema({data:z.unknown()}),
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:SHELL_TOOL_ANNOTATIONS,

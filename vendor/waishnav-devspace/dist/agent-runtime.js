@@ -72,6 +72,19 @@ export function retainRecentComputerImages(messages, keep=2){
         return {...m,content:"Historical computer screenshot omitted; use the latest observation. The original tool result and coordinates remain in history."};
     }).reverse();
 }
+// Workspace file edits, restricted shell commands and enabled plugin actions
+// are native MCP capabilities even in the workspace permission profile.
+// Their individual operations are authorized by the native handlers, not
+// by the full-access flags (which only widen the native permission boundary).
+export function resolveAgentPermissions(input,config){
+    return {
+        write:input.allowWrites!==false,
+        shell:input.allowShell!==false,
+        computer:input.allowComputer!==false&&config.features?.computerUse===true&&config.permissions?.allowComputerUse===true,
+        memory:input.allowMemory!==false&&config.features?.memories===true,
+        plugins:input.allowPlugins!==false,
+    };
+}
 export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memoryStore,config,getTools,callTool,profiles,request,groups=()=>listAgentGroups(portableRoot)}){
     sqlite.exec(`
       create table if not exists devspace_agent_tasks(id text primary key, data text not null);
@@ -534,7 +547,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         const workspace=workspaces.getWorkspace(input.workspaceId);
         const target=resolveRoute(input);
         const instruction=String(input.instruction??"").trim();if(!instruction||instruction.length>16000)throw Error("INVALID_AGENT_INSTRUCTION");
-        const permissions={write:input.allowWrites===true,shell:input.allowShell===true,computer:input.allowComputer===true,memory:input.allowMemory===true,plugins:input.allowPlugins===true};
+        const permissions=resolveAgentPermissions(input,config);
         const t={id:"agent_"+randomUUID(),workspaceId:input.workspaceId,instruction,permissions,writer:permissions.write||permissions.shell||permissions.computer||permissions.plugins,
             status:"paused",cursor:0,steps:0,autoCompleteDelivery:delegated&&input.independentReview!==true&&target.routing.mode==="single",
             approvals:[],submission:null,pending:null,routing:target.routing,createdAt:new Date().toISOString()};

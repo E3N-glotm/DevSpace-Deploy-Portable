@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 import {createRequire} from "node:module";
 // Exercise the same packed core and dependency tree shipped with Portable.
-import {createAgentRuntime,compactAgentMessages} from "../../../app/node_modules/@waishnav/devspace/dist/agent-runtime.js";
+import {createAgentRuntime,compactAgentMessages,resolveAgentPermissions} from "../../../app/node_modules/@waishnav/devspace/dist/agent-runtime.js";
 import {collectAgentStream} from "../../../app/node_modules/@waishnav/devspace/dist/model-worker-runtime.js";
 import {WorkspaceRegistry} from "../../../app/node_modules/@waishnav/devspace/dist/workspaces.js";
 import {resolve} from "node:path";
@@ -248,7 +248,7 @@ test("scope, explicit grants, sensitive memory and single agent acceptance",asyn
         if(!a.steps)return reply(call("exec_command",{argv:["git","status"]}),call("read",{workspaceId:"other",path:"foo"}),call("read",{path:"E:/Desktop/review.txt"}),call("memory_upsert",{scope:"global",allowSensitive:true,title:"note",content:"data"}));
         return reply(call("agent_finish",{decision:"submit",summary:"done"}));
     }});
-    const t=f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"task",allowMemory:true});
+    const t=f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"task",allowWrites:false,allowShell:false,allowComputer:false,allowPlugins:false,allowMemory:true});
     const done=await until(f.runtime,t.id,["awaiting-review","paused"]);assert.equal(done.status,"awaiting-review",done.error);
     assert.equal(f.calls.length,2);
     assert.deepEqual(f.calls[0],{name:"read",args:{path:"E:/Desktop/review.txt",workspaceId:"ws"}});
@@ -256,6 +256,34 @@ test("scope, explicit grants, sensitive memory and single agent acceptance",asyn
     assert.equal(f.calls[1].args.scope,"workspace");assert.equal(f.calls[1].args.allowSensitive,false);
     assert.equal(f.runtime.accept(t.id).status,"completed");
     await f.runtime.close();f.sqlite.close();
+});
+test("omitted task flags inherit native capabilities; explicit false restricts only its own capability",()=>{
+    const full={features:{computerUse:true,memories:true},permissions:{allowComputerUse:true,allowArbitraryCommands:true,allowShellMutation:true}};
+    assert.deepEqual(resolveAgentPermissions({},full),{write:true,shell:true,computer:true,memory:true,plugins:true});
+    assert.deepEqual(resolveAgentPermissions({allowWrites:false,allowMemory:false},full),{write:false,shell:true,computer:true,memory:false,plugins:true});
+    const restricted={features:{computerUse:true,memories:false},permissions:{allowComputerUse:false,allowArbitraryCommands:false,allowShellMutation:false}};
+    // Restricted native shell and workspace editing remain available, even
+    // when arbitrary shell commands and external paths are not authorized.
+    assert.deepEqual(resolveAgentPermissions({allowComputer:true,allowMemory:true},restricted),{write:true,shell:true,computer:false,memory:false,plugins:true});
+    assert.equal(resolveAgentPermissions({}, {...full,features:{computerUse:false,memories:true}}).computer,false);
+    assert.deepEqual(resolveAgentPermissions({allowWrites:false,allowShell:false,allowComputer:false,allowMemory:false,allowPlugins:false},full),{write:false,shell:false,computer:false,memory:false,plugins:false});
+});
+test("new tasks inherit actual tool catalog but old persisted grants are not expanded",async()=>{
+    const config={features:{computerUse:true,memories:true},permissions:{allowComputerUse:true}};
+    const expected=["apply_patch","exec_command","computer_action","memory_upsert","plugin_action"];
+    const f=fixture({config,request:async(t,_a,_p,_m,tools)=>{
+        for(const name of expected)assert.equal(tools.some(x=>x.function.name===name),t.instruction==="default",name);
+        return reply(call("agent_finish",{decision:"submit",summary:"verified"}));
+    }});
+    const defaultTask=f.runtime.start({workspaceId:"ws",instruction:"default",modelId:"p1"},{delegated:true});
+    assert.equal((await until(f.runtime,defaultTask.id,["completed","paused"])).status,"completed");
+    const readOnly=f.runtime.start({workspaceId:"ws",instruction:"restricted",modelId:"p1",allowWrites:false,allowShell:false,allowComputer:false,allowMemory:false,allowPlugins:false},{delegated:true});
+    const done=await until(f.runtime,readOnly.id,["completed","paused"]);assert.equal(done.status,"completed");
+    assert.equal(f.writers.size,0);
+    await f.runtime.close();
+    const restored=fixture({sqlite:f.sqlite,config});
+    assert.deepEqual(restored.runtime.status(readOnly.id).permissions,{write:false,shell:false,computer:false,memory:false,plugins:false});
+    await restored.runtime.close();f.sqlite.close();
 });
 test("native access policy rejection is retained for delegated absolute paths",async()=>{
     const f=fixture({
@@ -348,7 +376,7 @@ test("resuming a legacy compacted task repairs the prompt without replaying tool
 });
 test("history deletion is transactional, survives restart and protects unfinished tasks",async()=>{
     const f=fixture({request:async()=>reply(call("agent_finish",{decision:"submit",summary:"ready"}))});
-    const start=()=>f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"history test"});
+    const start=()=>f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"history test",allowWrites:false,allowShell:false,allowComputer:false,allowMemory:false,allowPlugins:false});
     const first=start(), second=start(), waiting=start();
     for(const t of [first,second,waiting])await until(f.runtime,t.id,["awaiting-review"]);
     for(const t of [first,second])f.runtime.accept(t.id);

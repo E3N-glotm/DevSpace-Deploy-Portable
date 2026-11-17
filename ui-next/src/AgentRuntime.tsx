@@ -153,7 +153,7 @@ export function AgentRuntimePage() {
   const [independentReview, setIndependentReview] = useState(false);
   const [parallelWork, setParallelWork] = useState(false);
   const [advanced, setAdvanced] = useState(false);
-  const [permissions, setPermissions] = useState({ allowWrites: false, allowShell: false, allowComputer: false, allowMemory: true, allowPlugins: false });
+  const [permissions, setPermissions] = useState<Partial<Record<'allowWrites'|'allowShell'|'allowComputer'|'allowMemory'|'allowPlugins', boolean>>>({});
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [serviceIssue, setServiceIssue] = useState('');
@@ -326,7 +326,7 @@ export function AgentRuntimePage() {
 
   return <div className="panel models-page agent-workbench">
     <div className="section-heading"><div><h2>Agent 协作</h2></div>
-      <Button appearance="primary" disabled={!connected} onClick={() => setCreateOpen(true)}>新建任务</Button>
+      <Button appearance="primary" disabled={!connected} onClick={() => {setPermissions({});setAdvanced(false);setCreateOpen(true);}}>新建任务</Button>
     </div>
     {error && <div className="op-message op-error" role="alert">{error}</div>}
     {notice && <div className="op-message op-success" role="status">{notice}</div>}
@@ -427,10 +427,11 @@ export function AgentRuntimePage() {
           </div>}
           <Field label="任务目标与验收条件"><Textarea value={instruction} rows={4} onChange={(_, data) => setInstruction(data.value)} /></Field>
           <Button onClick={() => setAdvanced(value => !value)}>{advanced ? '收起' : '展开'}权限设置</Button>
-          {advanced && ([['allowWrites', '允许编辑文件'], ['allowShell', '允许 Shell（继承现有权限）'],
-            ['allowComputer', '允许 Computer Use（需要桌面开关）'], ['allowMemory', '允许工作区记忆写入'],
-            ['allowPlugins', '允许已授权插件调用']] as const).map(([id, label]) => <Switch key={id} label={label} checked={permissions[id]}
-              onChange={(_, data) => setPermissions(state => ({ ...state, [id]: data.checked }))} />)}
+          <p className="op-subtle">默认继承 DevSpace 全局权限和功能开关；单独关闭某项仅限制本次任务。</p>
+          {advanced && ([['allowWrites', '继承文件编辑权限'], ['allowShell', '继承 Shell 权限'],
+            ['allowComputer', '继承 Computer Use 权限（需要桌面开关）'], ['allowMemory', '继承工作区记忆写入权限'],
+            ['allowPlugins', '继承已授权插件操作权限']] as const).map(([id, label]) => <Switch key={id} label={label} checked={permissions[id]!==false}
+              onChange={(_, data) => setPermissions(state => ({ ...state, [id]: data.checked ? undefined : false }))} />)}
           <div className="models-actions"><Button appearance="primary" disabled={busy || !path.trim() || !instruction.trim()}
             onClick={() => void start()}>启动任务</Button><Button onClick={() => setCreateOpen(false)}>取消</Button></div>
         </div>
