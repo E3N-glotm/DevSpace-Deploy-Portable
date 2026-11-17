@@ -4,6 +4,8 @@ import {createRequire} from "node:module";
 // Exercise the same packed core and dependency tree shipped with Portable.
 import {createAgentRuntime,compactAgentMessages} from "../../../app/node_modules/@waishnav/devspace/dist/agent-runtime.js";
 import {collectAgentStream} from "../../../app/node_modules/@waishnav/devspace/dist/model-worker-runtime.js";
+import {WorkspaceRegistry} from "../../../app/node_modules/@waishnav/devspace/dist/workspaces.js";
+import {resolve} from "node:path";
 import reasoningAdapter from "../../../app/node_modules/@waishnav/devspace/dist/reasoning-adapter.cjs";
 const require=createRequire(new URL("../../../app/package.json",import.meta.url));
 const Database=require("better-sqlite3");
@@ -243,15 +245,46 @@ test("an automatic single model promotes in place, keeping evidence and exclusiv
 test("scope, explicit grants, sensitive memory and single agent acceptance",async()=>{
     const f=fixture({request:async(_t,a,_p,_m,tools)=>{
         assert.ok(!tools.some(x=>["exec_command","computer_action","apply_patch","plugin_action"].includes(x.function.name)));
-        if(!a.steps)return reply(call("exec_command",{argv:["git","status"]}),call("read",{workspaceId:"other",path:"foo"}),call("read",{path:"../secrets"}),call("memory_upsert",{scope:"global",allowSensitive:true,title:"note",content:"data"}));
+        if(!a.steps)return reply(call("exec_command",{argv:["git","status"]}),call("read",{workspaceId:"other",path:"foo"}),call("read",{path:"E:/Desktop/review.txt"}),call("memory_upsert",{scope:"global",allowSensitive:true,title:"note",content:"data"}));
         return reply(call("agent_finish",{decision:"submit",summary:"done"}));
     }});
     const t=f.runtime.start({workspaceId:"ws",modelId:"p1",instruction:"task",allowMemory:true});
     const done=await until(f.runtime,t.id,["awaiting-review","paused"]);assert.equal(done.status,"awaiting-review",done.error);
-    assert.equal(f.calls.length,1);assert.equal(f.calls[0].name,"memory_upsert");
-    assert.equal(f.calls[0].args.scope,"workspace");assert.equal(f.calls[0].args.allowSensitive,false);
+    assert.equal(f.calls.length,2);
+    assert.deepEqual(f.calls[0],{name:"read",args:{path:"E:/Desktop/review.txt",workspaceId:"ws"}});
+    assert.equal(f.calls[1].name,"memory_upsert");
+    assert.equal(f.calls[1].args.scope,"workspace");assert.equal(f.calls[1].args.allowSensitive,false);
     assert.equal(f.runtime.accept(t.id).status,"completed");
     await f.runtime.close();f.sqlite.close();
+});
+test("native access policy rejection is retained for delegated absolute paths",async()=>{
+    const f=fixture({
+        callTool:async(name,args)=>{
+            assert.equal(name,"read");assert.equal(args.workspaceId,"ws");
+            assert.equal(args.path,"E:/outside.txt");
+            return {isError:true,content:[{type:"text",text:"Path is outside workspace root"}]};
+        },
+        request:async(_t,a)=>a.steps?reply(call("agent_finish",{decision:"submit",summary:"Read permission respected"})):reply(call("read",{path:"E:/outside.txt"}))
+    });
+    const t=f.runtime.start({workspaceId:"ws",instruction:"task",modelId:"p1",allowWrites:false},{delegated:true});
+    const done=await until(f.runtime,t.id,["completed","paused"]);
+    assert.equal(done.status,"completed",done.error);
+    assert.ok(f.runtime.events(t.id).some(e=>e.kind==="tool-result"&&e.ok===false));
+    await f.runtime.close();f.sqlite.close();
+});
+test("parent local file permissions and remote workspace limits apply through the native resolver",()=>{
+    const config={permissions:{allowExternalPaths:true}};
+    const registry=new WorkspaceRegistry(config);
+    const local={root:resolve("fixture-project")};
+    const outside=resolve("review.txt");
+    assert.equal(registry.resolvePath(local,outside),outside);
+    config.permissions.allowExternalPaths=false;
+    assert.throws(()=>registry.resolvePath(local,outside));
+    assert.equal(registry.resolvePath(local,"review.txt"),resolve(local.root,"review.txt"));
+    config.permissions.allowExternalPaths=true;
+    const remote={backend:"remote-agent",root:"/home/agent/project"};
+    assert.equal(registry.resolvePath(remote,"review.txt"),"/home/agent/project/review.txt");
+    assert.throws(()=>registry.resolvePath(remote,"/home/agent/outside.txt"));
 });
 test("restart does not replay uncertain side effects and requires acknowledgment",async()=>{
     const f=fixture({callTool:async()=>{throw Error("connection lost");},request:async()=>reply(call("apply_patch",{patch:"test"}))});

@@ -90,6 +90,7 @@ export type Backend = {
   modelProvidersDiscover(id:string):Promise<ModelDiscovery>;
   modelProvidersProbe(id:string,tools?:boolean,reasoning?:boolean):Promise<ModelProbe>;
   modelProvidersStats(id:string):Promise<ModelUsageStats>;
+  modelProvidersClearStats(id:string,model:string):Promise<ModelUsageStats>;
   agentGroupsList():Promise<AgentGroup[]>;
   agentGroupsSave(input:AgentGroup):Promise<AgentGroup>;
   agentGroupsDelete(id:string):Promise<{removed:boolean}>;

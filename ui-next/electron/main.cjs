@@ -389,6 +389,7 @@ function installHandlers() {
   register('modelProvidersDiscover',id=>modelProviders.discover(id));
   register('modelProvidersProbe',(id,tools,reasoning)=>modelProviders.probe(id,{tools:tools===true,reasoning:reasoning===true&&tools!==true}));
   register('modelProvidersStats',id=>modelProviders.stats(id));
+  register('modelProvidersClearStats',(id,model)=>modelProviders.clearStats(id,model));
   const groups=createAgentGroupService(ROOT,()=>modelProviders.list());
   register('agentGroupsList',()=>groups.list());
   register('agentGroupsSave',input=>operation(()=>groups.save(input)));

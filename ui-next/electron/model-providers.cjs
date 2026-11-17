@@ -223,6 +223,11 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
     const model=get(id);
     return model.model?usageStore.stats(id,model.model):emptyStats(id,'');
   }
+  function clearStats(id,expectedModel){
+    const model=get(id);
+    if(!model.model||model.model!==expectedModel)throw Error('MODEL_USAGE_SELECTION_CHANGED');
+    return usageStore.clear(id,model.model);
+  }
   function auth(model){
     if(!model.encryptedKey)return {};
     if(!available())throw Error('无法解密当前 Windows 用户保存的 API Key');
@@ -354,6 +359,6 @@ function createModelProviderService({root,cryptoService,fetchImpl=globalThis.fet
       }
     }
   }
-  return {list,save,remove,setAllowed,discover,probe,stats,makeBudget,filename};
+  return {list,save,remove,setAllowed,discover,probe,stats,clearStats,makeBudget,filename};
 }
 module.exports={createModelProviderService,validate,normalizeUrl,makeBudget,estimateCost};

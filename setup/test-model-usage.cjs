@@ -66,6 +66,21 @@ test('a different underlying model or provider profile never inherits another mo
   }finally{f.cleanup();}
 });
 
+test('clear is durable, isolated, and ignores calls in flight before the reset',()=>{
+  const f=fixture();
+  try{
+    record(f.store);
+    record(f.store,{model:'qwen-27b-256k'});
+    assert.equal(f.store.clear('model_local','qwen-27b-128k').totalCalls,0);
+    record(f.store,{startedAt:'2026-11-04T06:00:01.500Z'});
+    const restored=createModelUsageStore(f.root);
+    assert.equal(restored.stats('model_local','qwen-27b-128k').totalCalls,0);
+    assert.equal(restored.stats('model_local','qwen-27b-256k').totalCalls,1);
+    record(f.store,{startedAt:'2026-11-04T06:00:03.000Z'});
+    assert.equal(restored.stats('model_local','qwen-27b-128k').totalCalls,1);
+  }finally{f.cleanup();}
+});
+
 test('event files cannot contain prompt, response, URL, request headers or credentials',()=>{
   const f=fixture();
   try{

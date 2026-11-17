@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, Dialog, DialogActions, DialogBody, DialogContent, DialogSurface, DialogTitle } from '@fluentui/react-components';
 import { ArrowUpRightRegular } from '@fluentui/react-icons';
 import type { AgentEvent, AgentRouteMode } from './api';
@@ -119,6 +119,19 @@ function FlowLink({ from, to }: { from: number; to: number }) {
   </div>;
 }
 
+function StreamText({value}: {value: string}) {
+  const node=useRef<HTMLPreElement>(null);
+  const position=useRef({top:0,follow:false});
+  useLayoutEffect(()=>{
+    const el=node.current;
+    if(el)el.scrollTop=position.current.follow ? el.scrollHeight : position.current.top;
+  },[value]);
+  return <pre ref={node} style={{overflowAnchor:'none'}} onScroll={e=>{
+    const el=e.currentTarget;
+    position.current={top:el.scrollTop,follow:el.scrollHeight-el.clientHeight>0&&el.scrollHeight-el.clientHeight-el.scrollTop<=12};
+  }}>{value}</pre>;
+}
+
 function FlowDetail({ card, lane, title, onClose }: { card: FlowCard; lane: FlowLane; title: string; onClose: () => void }) {
   return <Dialog open onOpenChange={(_, data) => { if (!data.open) onClose(); }}>
     <DialogSurface className="agent-dialog agent-flow-detail">
@@ -129,11 +142,11 @@ function FlowDetail({ card, lane, title, onClose }: { card: FlowCard; lane: Flow
           {card.events.map(event => {
             const fields = Object.entries(event).filter(([key, value]) =>
               !['seq', 'at', 'agent', 'kind'].includes(key) && value != null && value !== '');
-            return <section className="agent-flow-detail-section" key={event.seq}>
+            return <section className="agent-flow-detail-section" key={event.kind==='inference-stream'||event.kind==='output'?'inference-response':event.seq}>
               <h4>{eventTitles[event.kind] || event.kind} <time>{formatAgentTime(event.at)}</time></h4>
               {fields.map(([key, value]) => <div className="agent-flow-field" key={key}>
                 <strong>{fieldTitles[key] || key}</strong>
-                <pre>{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</pre>
+                <StreamText value={typeof value === 'string' ? value : JSON.stringify(value, null, 2)}/>
               </div>)}
             </section>;
           })}

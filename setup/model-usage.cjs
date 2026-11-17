@@ -90,6 +90,11 @@ function createModelUsageStore(root,{filesystem=fs,now=()=>new Date(),uuid=rando
     let months;
     try{months=filesystem.readdirSync(dir,{withFileTypes:true});}
     catch(e){if(e?.code==='ENOENT')return result;throw e;}
+    let resetAt=0;
+    for(const entry of months){
+      const match=/^reset-(\d{13})-[0-9a-f-]{36}\.marker$/i.exec(entry.name);
+      if(entry.isFile()&&match)resetAt=Math.max(resetAt,Number(match[1]));
+    }
     for(const month of months){
       if(!month.isDirectory()||!/^\d{4}-\d{2}$/.test(month.name))continue;
       const monthDir=path.join(dir,month.name);
@@ -108,6 +113,8 @@ function createModelUsageStore(root,{filesystem=fs,now=()=>new Date(),uuid=rando
           checkedNumber(entry.outputTokens,MAX_TOKEN_COUNT,true);
           checkedNumber(entry.estimatedUSD,MAX_COST_USD);
         }catch{result.corruptRecords++;continue;}
+        // Requests already in flight when cleared belong to the old period.
+        if(resetAt&&Date.parse(entry.startedAt)<=resetAt)continue;
         result.totalCalls++;
         result.successfulCalls+=Number(entry.success);
         result.failedCalls+=Number(!entry.success);
@@ -130,7 +137,16 @@ function createModelUsageStore(root,{filesystem=fs,now=()=>new Date(),uuid=rando
     result.estimatedUSD=Number(result.estimatedUSD.toFixed(8));
     return result;
   }
-  return {record,stats,base};
+  function clear(profileId,model){
+    const dir=modelDir(profileId,model);
+    const date=now();
+    if(!(date instanceof Date)||!Number.isFinite(date.getTime()))throw Error('MODEL_USAGE_INVALID_TIME');
+    filesystem.mkdirSync(dir,{recursive:true});
+    const marker=path.join(dir,'reset-'+String(date.getTime()).padStart(13,'0')+'-'+uuid()+'.marker');
+    filesystem.writeFileSync(marker,'',{flag:'wx',mode:0o600});
+    return stats(profileId,model);
+  }
+  return {record,stats,clear,base};
 }
 
 module.exports={createModelUsageStore,emptyStats};

@@ -217,7 +217,7 @@ test('native Electron bridge exposes dedicated model calls, not a plugin executi
   const main=fs.readFileSync(path.join(__dirname,'../electron/main.cjs'),'utf8');
   const preload=fs.readFileSync(path.join(__dirname,'../electron/preload.cjs'),'utf8');
   const app=fs.readFileSync(path.join(__dirname,'../src/App.tsx'),'utf8');
-  for(const action of ['modelProvidersList','modelProvidersSave','modelProvidersDelete','modelProvidersDiscover','modelProvidersProbe','modelProvidersStats','modelProvidersSetAllowed']){
+  for(const action of ['modelProvidersList','modelProvidersSave','modelProvidersDelete','modelProvidersDiscover','modelProvidersProbe','modelProvidersStats','modelProvidersClearStats','modelProvidersSetAllowed']){
     assert.ok(main.includes("register('"+action+"'"),action);
     assert.ok(preload.includes(action+':'),action);
   }

@@ -94,35 +94,48 @@ export function ModelProvidersPage(){
   const [probe,setProbe]=useState<ModelProbe|null>(null);
   const [usage,setUsage]=useState<ModelUsageStats|null>(null);
   const [usageError,setUsageError]=useState('');
+  const [clearingUsage,setClearingUsage]=useState(false);
   const [groupDialog,setGroupDialog]=useState(false);
   const [showReasoningAdvanced,setShowReasoningAdvanced]=useState(false);
   const selectedRef=useRef('');
   const discoveryGeneration=useRef(0);
   const saved=items.find(x=>x.id===selected);
+  const usageIdentity=useRef('');
+  const usageGeneration=useRef(0);
+  const clearingIdentity=useRef('');
+  usageIdentity.current=JSON.stringify([selected,saved?.model]);
   const update=(values:Partial<ModelProviderDraft>)=>{setForm(old=>({...old,...values}));setProbe(null);};
   const reload=useCallback(async()=>setItems(await window.devspace.modelProvidersList()),[]);
   useEffect(()=>{reload().catch(e=>setError(message(e)));},[reload]);
   const refreshUsage=useCallback(async(id:string,model:string)=>{
+    const identity=JSON.stringify([id,model]);
+    if(usageIdentity.current!==identity||clearingIdentity.current===identity)return;
+    const generation=++usageGeneration.current;
     try{
       const next=await window.devspace.modelProvidersStats(id);
-      if(next.model!==model)return;
+      if(next.model!==model||usageIdentity.current!==identity||usageGeneration.current!==generation)return;
       setUsage(next);setUsageError('');
-    }catch(e){setUsageError(message(e));}
+    }catch(e){if(usageIdentity.current===identity&&usageGeneration.current===generation)setUsageError(message(e));}
   },[]);
+  async function clearUsage(id:string,model:string){
+    const identity=JSON.stringify([id,model]);
+    if(clearingIdentity.current||usageIdentity.current!==identity)return;
+    if(!window.confirm('确定清空当前模型的调用统计？仅重置统计起点，不影响其他模型、任务历史或正在执行的请求。'))return;
+    clearingIdentity.current=identity;setClearingUsage(true);++usageGeneration.current;
+    try{
+      const next=await window.devspace.modelProvidersClearStats(id,model);
+      if(usageIdentity.current===identity){setUsage(next);setUsageError('');}
+    }catch(e){if(usageIdentity.current===identity)setUsageError(message(e));}
+    finally{clearingIdentity.current='';setClearingUsage(false);}
+  }
   useEffect(()=>{
     if(!selected||!saved?.model){setUsage(null);setUsageError('');return;}
-    let active=true;
     const id=selected,model=saved.model;
-    const refresh=async()=>{
-      try{
-        const next=await window.devspace.modelProvidersStats(id);
-        if(active&&next.model===model){setUsage(next);setUsageError('');}
-      }catch(e){if(active)setUsageError(message(e));}
-    };
+    const refresh=()=>refreshUsage(id,model);
     setUsage(null);void refresh();
     const timer=setInterval(()=>void refresh(),10_000);
-    return ()=>{active=false;clearInterval(timer);};
-  },[selected,saved?.model]);
+    return ()=>{++usageGeneration.current;clearInterval(timer);};
+  },[selected,saved?.model,refreshUsage]);
   async function discover(id:string){
     const generation=++discoveryGeneration.current;
     let result:ModelDiscovery;
@@ -340,8 +353,11 @@ export function ModelProvidersPage(){
         {selected&&saved?.model&&<section className="models-usage" aria-label="当前选中模型的调用统计">
           <div className="models-usage-header">
             <strong>选中模型的调用统计</strong>
-            <Button size="small" icon={<ArrowClockwiseRegular/>}
-              onClick={()=>void refreshUsage(saved.id,saved.model)}>刷新统计</Button>
+            <div style={{display:'flex',flexDirection:'column',gap:6}}>
+              <Button size="small" icon={<ArrowClockwiseRegular/>} disabled={clearingUsage}
+                onClick={()=>void refreshUsage(saved.id,saved.model)}>刷新统计</Button>
+              <Button size="small" disabled={clearingUsage} onClick={()=>void clearUsage(saved.id,saved.model)}>清空统计</Button>
+            </div>
           </div>
           <div className="models-usage-grid">
             <div><small>最后调用时间</small><strong>{usage?localTime(usage.lastCallAt):'—'}</strong></div>
@@ -357,7 +373,7 @@ export function ModelProvidersPage(){
           <p className="op-subtle">统计范围：MCP Worker 推理 {count(usage?.bySource.worker??0)} 次，
             连接测试 {count(usage?.bySource['connection-test']??0)} 次，
             Function Calling 测试 {count(usage?.bySource['function-test']??0)} 次。
-            从 dev3 启用后开始累计，重启不清零；不包含 Open WebUI 或其他应用直接请求模型服务的调用。</p>
+            从 dev3 启用或最近一次手动清零后开始累计，重启不清零；不包含 Open WebUI 或其他应用直接请求模型服务的调用。</p>
           {(usage?.usageMissingCalls??0)>0&&<p className="op-subtle">有 {count(usage?.usageMissingCalls??0)} 次请求未返回 Token 使用量，因此 Token 合计只包含服务端实际报告的数据。</p>}
           {(usage?.corruptRecords??0)>0&&<p className="op-message op-error">统计记录中有 {count(usage?.corruptRecords??0)} 条无法解析，已跳过，累计值可能偏低。</p>}
           {usageError&&<p className="op-message op-error">统计读取失败：{usageError}</p>}

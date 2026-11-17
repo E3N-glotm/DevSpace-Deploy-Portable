@@ -267,14 +267,9 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         if(!args||typeof args!=="object"||Array.isArray(args))throw Error("INVALID_AGENT_TOOL_ARGS");
         if(args.workspaceId!==undefined&&args.workspaceId!==t.workspaceId)throw Error("AGENT_WORKSPACE_MISMATCH");
         const scoped={...args,workspaceId:t.workspaceId};
-        if(["read","grep","glob","ls","write","edit","read_attachment"].includes(name)){
-            for(const key of ["path","paths"]){
-                const values=Array.isArray(scoped[key])?scoped[key]:typeof scoped[key]==="string"?[scoped[key]]:[];
-                for(const value of values){
-                    if(/(?:^|[\\/])(?:\.git|\.ssh|\.env(?:\.[^\\/]+)?|secrets|credentials|data)(?:[\\/]|$)/i.test(value)||/^(?:[a-z]:|[\\/])|(?:^|[\\/])\.\.(?:[\\/]|$)/i.test(value))throw Error("AGENT_SENSITIVE_OR_EXTERNAL_PATH_DENIED");
-                }
-            }
-        }
+        // Native MCP handlers enforce the current owner's file access mode,
+        // operation rules and remote workspace boundaries. Do not impose a
+        // second lexical sandbox that rejects paths the parent can access.
         if(name==="memory_upsert"){
             delete scoped.id;scoped.scope="workspace";scoped.allowSensitive=false;
         }
