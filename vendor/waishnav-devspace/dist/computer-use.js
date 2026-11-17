@@ -7,11 +7,24 @@ import { fitComputerImage } from "./computer-image.js";
 const BASE_BROKER_TIMEOUT_MS = 12_000;
 const MAX_BROKER_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 10;
+const screenshots = new Map();
+
+export function mapScreenshotPoint(screen, {x,y}, coordinateSpace){
+    const r=screen.captureRegion;
+    const iw=screen.imageWidth,ih=screen.imageHeight;
+    if(coordinateSpace==="normalized"){
+        if(![x,y].every(v=>Number.isFinite(v)&&v>=0&&v<=1))throw Error("Normalized screenshot coordinates must be between 0 and 1.");
+        return {x:r.x+Math.min(r.width-1,Math.floor(x*r.width)),y:r.y+Math.min(r.height-1,Math.floor(y*r.height))};
+    }
+    if(!Number.isInteger(x)||!Number.isInteger(y)||x<0||y<0||x>=iw||y>=ih)
+        throw Error("Point is outside the transmitted image; use its imageWidth and imageHeight.");
+    return {x:r.x+Math.floor((x+0.5)*r.width/iw),y:r.y+Math.floor((y+0.5)*r.height/ih)};
+}
 
 function requestTimeout(payload) {
     const steps = Array.isArray(payload?.steps) ? payload.steps : [payload];
     const requestedDelay = steps.reduce((total, step) => total + Math.max(0, Math.min(3000, Number(step?.delayMs || 0))), 0);
-    return Math.min(MAX_BROKER_TIMEOUT_MS, Math.max(BASE_BROKER_TIMEOUT_MS, BASE_BROKER_TIMEOUT_MS + requestedDelay));
+    return Math.min(MAX_BROKER_TIMEOUT_MS, BASE_BROKER_TIMEOUT_MS + requestedDelay + Math.max(0, Number(payload.settleMs)||0));
 }
 
 function portableRoot() {
@@ -96,6 +109,9 @@ async function invokeComputerUse(payload, options = {}) {
         if (metadata.screenshot) {
             try {
                 ({image,mimeType,metadata}=await fitComputerImage(paths.image,await readFile(paths.image),metadata,options.region));
+                metadata={...metadata,snapshotId:requestId};
+                screenshots.set(requestId,{scope:options.workspaceId,leaseId,metadata});
+                while(screenshots.size>32)screenshots.delete(screenshots.keys().next().value);
             } catch (error) {
                 // Input may already have succeeded. Never make a transport error
                 // look like a failed input action that should be blindly replayed.
@@ -118,9 +134,24 @@ async function invokeComputerUse(payload, options = {}) {
 }
 
 export async function captureDesktop(options = {}) {
-    return invokeComputerUse({ action: "snapshot", screenshotAfter: true }, options);
+    return invokeComputerUse({ action: "snapshot", screenshotAfter: true, settleMs: options.settleMs }, options);
 }
 
 export async function performComputerAction(input, options = {}) {
-    return invokeComputerUse({ ...input, screenshotAfter: input.screenshotAfter === true }, options);
+    const {snapshotId,coordinateSpace=snapshotId?"image":"desktop",...payload}=input;
+    if(coordinateSpace!=="desktop"&&!snapshotId)throw Error("Image or normalized coordinates require the snapshotId returned with the image.");
+    if(snapshotId){
+        const entry=screenshots.get(snapshotId);
+        if(!entry||entry.leaseId!==options.leaseId||entry.scope!==options.workspaceId)
+            throw Error("Screenshot is no longer available in this workspace and Computer Use session. Take a fresh snapshot.");
+        const screen=entry.metadata;
+        payload.expectedDesktop={left:screen.left??0,top:screen.top??0,width:screen.width,height:screen.height};
+        const map=step=>{
+            if(coordinateSpace==="desktop"||step.x===undefined&&step.y===undefined)return step;
+            return {...step,...mapScreenshotPoint(screen,step,coordinateSpace)};
+        };
+        if(Array.isArray(payload.steps))payload.steps=payload.steps.map(map);
+        else Object.assign(payload,map(payload));
+    }
+    return invokeComputerUse({ ...payload, screenshotAfter: input.screenshotAfter === true }, options);
 }

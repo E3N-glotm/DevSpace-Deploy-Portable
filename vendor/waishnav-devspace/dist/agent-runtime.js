@@ -16,7 +16,7 @@ const CONTROL = [
 const READ = new Set(["read","grep","glob","ls","read_attachment","show_changes","session_changes","process_list","process_attach","memory_list","plugin_list","plugin_read","plugin_query","hook_list"]);
 const WRITE = new Set(["write","edit","apply_patch"]);
 const SHELL = new Set(["exec_command","bash","write_stdin","process_kill"]);
-const COMPUTER = new Set(["computer_snapshot","computer_action"]);
+const COMPUTER = new Set(["computer_snapshot","computer_action","computer_browser"]);
 const estimate = value => {
     let images=0;
     const text=JSON.stringify(value,(_key,v)=>{if(typeof v==="string"&&v.startsWith("data:image/")){images++;return "[image]";}return v;});

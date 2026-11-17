@@ -17,7 +17,19 @@ public static class DevSpaceUser32 {
   private const uint DESKTOP_WRITEOBJECTS = 0x0080;
   private const uint DESKTOP_SWITCHDESKTOP = 0x0100;
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [StructLayout(LayoutKind.Sequential)] public struct Point { public int X; public int Y; }
+  [DllImport("user32.dll")] public static extern bool SetPhysicalCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern bool GetPhysicalCursorPos(out Point point);
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(Point point, uint flags);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+  public static void MovePhysical(int x, int y) {
+    Point target = new Point { X = x, Y = y };
+    if (MonitorFromPoint(target, 0) == IntPtr.Zero || !SetPhysicalCursorPos(x, y))
+      throw new InvalidOperationException("Mouse point is outside the connected desktop.");
+    Point actual;
+    if (!GetPhysicalCursorPos(out actual) || actual.X != x || actual.Y != y)
+      throw new InvalidOperationException("The physical cursor could not reach the requested point. Capture a new snapshot before clicking.");
+  }
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
   [DllImport("user32.dll", SetLastError=true)] private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint desiredAccess);
   [DllImport("user32.dll", SetLastError=true)] private static extern bool CloseDesktop(IntPtr desktop);
@@ -85,6 +97,14 @@ $document = Get-Content -LiteralPath $InputFile -Raw | ConvertFrom-Json
 $payload = if ($null -ne $document.payload) { $document.payload } else { $document }
 $action = [string]$payload.action
 if ($action -ne "broker_probe") { [DevSpaceUser32]::AssertInteractiveDesktop() }
+$expected = $payload.expectedDesktop
+if ($null -ne $expected -and (
+  [int]$expected.left -ne [DevSpaceUser32]::GetSystemMetrics(76) -or
+  [int]$expected.top -ne [DevSpaceUser32]::GetSystemMetrics(77) -or
+  [int]$expected.width -ne [DevSpaceUser32]::GetSystemMetrics(78) -or
+  [int]$expected.height -ne [DevSpaceUser32]::GetSystemMetrics(79))) {
+  throw "Desktop bounds changed since the screenshot. Capture a new snapshot before clicking."
+}
 
 function Invoke-Mouse([uint32]$flags, [int]$data = 0) {
   $encoded = [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes([int32]$data), 0)
@@ -93,7 +113,7 @@ function Invoke-Mouse([uint32]$flags, [int]$data = 0) {
 
 function Set-Point([object]$value) {
   if ($null -eq $value.x -or $null -eq $value.y) { throw "x and y are required for this action" }
-  if (-not [DevSpaceUser32]::SetCursorPos([int]$value.x, [int]$value.y)) { throw "SetCursorPos failed" }
+  [DevSpaceUser32]::MovePhysical([int]$value.x, [int]$value.y)
 }
 
 function Escape-SendKeys([string]$text) {

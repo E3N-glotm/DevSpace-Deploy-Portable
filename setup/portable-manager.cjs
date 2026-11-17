@@ -84,7 +84,7 @@ const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
 const PORTABLE_VERSION = "1.1.68";
-const PORTABLE_DEV_ITERATION = "dev27";
+const PORTABLE_DEV_ITERATION = "dev28";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -868,6 +868,10 @@ function runComputerInput(request, inputFile, outputFile) {
     if (Number.isInteger(payload.x)) args.push("--x", String(payload.x));
     if (Number.isInteger(payload.y)) args.push("--y", String(payload.y));
     if (Number.isInteger(payload.delta)) args.push("--delta", String(payload.delta));
+    if (payload.expectedDesktop) {
+      const bounds = payload.expectedDesktop;
+      args.push("--desktop-bounds", ...["left", "top", "width", "height"].map(key => String(bounds[key])));
+    }
     if (Number.isInteger(payload.delayMs)) args.push("--delay", String(payload.delayMs));
     for (const key of Array.isArray(payload.keys) ? payload.keys : []) {
       args.push("--key", String(key));
@@ -947,7 +951,7 @@ function runComputerSequence(request, inputFile, outputFile) {
   for (const step of steps) {
     try {
       requireLiveComputerUseRequest(request);
-      const result = runComputerInput({ ...request, payload: step }, inputFile, outputFile);
+      const result = runComputerInput({ ...request, payload: { ...step, expectedDesktop: request.payload.expectedDesktop } }, inputFile, outputFile);
       metadata = result.metadata;
       if (result.stderr) diagnostics.push(result.stderr);
       actions.push(step.action);
@@ -977,6 +981,44 @@ function captureComputerScreen(imageFile) {
     metadata: parseLastJsonLine(result.stdout, "Desktop capture helper"),
     stderr: brokerErrorText(result.stderr),
   };
+}
+
+let lastComputerInput;
+const computerSettleSleep = new Int32Array(new SharedArrayBuffer(4));
+function computerInputSettleMs(payload) {
+  const steps = payload.action === "sequence" ? payload.steps : [payload];
+  return Math.max(0, ...steps.map(step => {
+    if (step.action === "move" || step.action === "broker_probe") return 0;
+    if (step.action === "keypress" && step.keys?.some(key => /^(F5|CTRL\+R)$/i.test(key))) return 600;
+    return step.action === "scroll" ? 300 : 240;
+  }));
+}
+
+function captureAfterRender(request, imageFile, capture = captureComputerScreen) {
+  const now = Date.now();
+  const recent = lastComputerInput?.leaseId === request.leaseId && now-lastComputerInput.at<1200;
+  const minimum = request.payload.settleMs ?? (recent ? lastComputerInput.minimum : 0);
+  if (!Number.isInteger(minimum) || minimum < 0 || minimum > 5000)
+    throw new Error("settleMs must be an integer between 0 and 5000.");
+  if (minimum <= 0) return capture(imageFile);
+  const waitUntil = request.payload.settleMs === undefined ? lastComputerInput.at+minimum : now+minimum;
+  function checkFrame() {
+    requireLiveComputerUseRequest(request);
+    return capture(imageFile);
+  }
+  Atomics.wait(computerSettleSleep, 0, 0, Math.max(0, waitUntil-Date.now()));
+  let result = checkFrame();
+  let previous = fs.readFileSync(imageFile);
+  const confirmationDeadline = Date.now()+850;
+  let settled = false;
+  for(let samples=1; samples<4 && Date.now()<confirmationDeadline; samples++){
+    Atomics.wait(computerSettleSleep, 0, 0, 125);
+    result = checkFrame();
+    const frame = fs.readFileSync(imageFile);
+    if (frame.equals(previous)) { settled = true; break; }
+    previous = frame;
+  }
+  return { ...result, metadata: { ...result.metadata, screenshotSettled: settled, observationWaitMs: Date.now()-now } };
 }
 
 function processComputerUseRequests(lease, { onActivity } = {}) {
@@ -1028,11 +1070,12 @@ function processComputerUseRequests(lease, { onActivity } = {}) {
             : runComputerInput(request, actionInputFile, imageFile);
           metadata = { ...metadata, ...inputResult.metadata, action };
           stderr = inputResult.stderr;
+          lastComputerInput = {leaseId:request.leaseId,at:Date.now(),minimum:computerInputSettleMs(request.payload)};
         }
         if (request.payload?.screenshotAfter !== false) {
           try {
             requireLiveComputerUseRequest(request);
-            const captureResult = captureComputerScreen(imageFile);
+            const captureResult = captureAfterRender(request, imageFile);
             metadata = { ...metadata, ...captureResult.metadata, action, screenshot: true };
             stderr = [stderr, captureResult.stderr].filter(Boolean).join("\n");
           } catch (error) {
@@ -4849,6 +4892,7 @@ module.exports = {
   UI_LEASE_FILE,
   computerUseRuntimeEnabled,
   processComputerUseRequests,
+  captureAfterRender,
   readJson,
   uiLeaseStatus,
   writeJson,

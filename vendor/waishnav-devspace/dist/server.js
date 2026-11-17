@@ -831,7 +831,7 @@ function serverInstructions(config) {
             ? " Configured lifecycle hooks run deterministically around workspace, command, mutation, review, and rollback events; do not simulate hooks with ad-hoc shell commands."
             : "",
         config.features?.computerUse && config.permissions.allowComputerUse
-            ? " Computer Use is available only while the local Portable UI is open. Use computer_snapshot before coordinate-based actions, keep actions bounded and user-directed, and prefer workspace/file tools for code and file operations."
+            ? " Computer Use is available while the local Portable UI is open. Prefer computer_browser for reading or refreshing web pages; use an F5 keypress to refresh a focused browser without CDP. For visual targets use computer_snapshot, and pass its snapshotId to computer_action with points in image pixels or normalized coordinates. Prefer workspace/file tools for file operations."
             : "",
         config.features?.uiSessionReview
             ? " show_changes also reports aggregate changes since the persisted workspace session captured its first structured-mutation baseline. Session rollback restores the tracked structured paths, creates a pre-rollback safety snapshot, and requires the exact confirmation token returned by the review result. The same bounded sparse-journal model is used for local and remote-agent workspaces; arbitrary shell side effects outside tracked paths are not claimed as rollback-safe."

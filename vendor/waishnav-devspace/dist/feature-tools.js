@@ -1,6 +1,7 @@
 import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import * as z from "zod/v4";
 import { captureDesktop, performComputerAction } from "./computer-use.js";
+import { useBrowser } from "./computer-browser.js";
 
 const READ_ONLY_ANNOTATIONS = {
     readOnlyHint: true,
@@ -23,7 +24,8 @@ const SCREEN_REGION = z.object({x:z.number().int(),y:z.number().int(),width:z.nu
 function screenshotText(captured) {
     const m=captured.metadata;
     if (!captured.image) return ` Screenshot unavailable: ${m.screenshotError??'no image'}. ${m.recovery??''}`;
-    return ` Image ${m.imageWidth}x${m.imageHeight}, ${m.mimeType}, ${m.transmittedBytes} bytes; desktop origin (${m.captureRegion.x},${m.captureRegion.y}), scale (${m.scaleX},${m.scaleY}). Convert image coordinates to desktop coordinates using the origin and scale. Use a region screenshot for full-resolution detail.`;
+    const settle=m.screenshotSettled===false?" Desktop was still changing; inspect the current state before another coordinate action.":"";
+    return ` Image ${m.imageWidth}x${m.imageHeight}. Use snapshotId ${m.snapshotId} with image pixels or normalized coordinates, and DevSpace will convert the point.${settle}`;
 }
 
 function textBlock(text) {
@@ -69,8 +71,8 @@ function validateComputerAction(input) {
         throw new Error("computer_action requires action or steps.");
     const pointActions = new Set(["move", "click", "double_click", "right_click"]);
     if (pointActions.has(input.action)
-        && (!Number.isInteger(input.x) || !Number.isInteger(input.y))) {
-        throw new Error(`${input.action} requires integer x and y coordinates.`);
+        && (!Number.isFinite(input.x) || !Number.isFinite(input.y))) {
+        throw new Error(`${input.action} requires x and y coordinates.`);
     }
     if (input.action === "scroll" && !Number.isInteger(input.delta))
         throw new Error("scroll requires an integer delta.");
@@ -334,17 +336,43 @@ export function registerFeatureTools(server, services) {
         return jsonResult(restore, { restore });
     });
 
+    registerAppTool(server, "computer_browser", {
+        title:"Inspect a local browser",
+        description:"Prefer this tool to screenshots or clipboard clicks for browser work. List local Chrome/Edge tabs, read rendered DOM text and labeled controls with an optional CSS selector, get selected text, or reload one tab and check its ready state. Requires the Computer Use permission, a live UI lease, and the user's enabled browser debugging connection. If unavailable, use keypress F5 to refresh the focused browser.",
+        inputSchema:{
+            workspaceId:z.string(),
+            operation:z.enum(["tabs","read","selection","reload"]),
+            tabId:z.string().max(250).optional(),
+            browser:z.enum(["chrome","edge"]).optional(),
+            selector:z.string().max(600).optional(),
+            offset:z.number().int().min(0).optional(),
+            limit:z.number().int().min(1).max(40000).optional(),
+        },
+        outputSchema:{result:z.string(),browser:z.unknown()},
+        ...toolMeta("runtime"),
+        annotations:COMPUTER_ANNOTATIONS,
+    },async({workspaceId,...input})=>{
+        const lease=computerUseGuard(config,uiLease);
+        workspaces.getWorkspace(workspaceId);
+        const browser=await useBrowser(input,()=>{
+            if(computerUseGuard(config,uiLease).leaseId!==lease.leaseId)
+                throw Error("The Computer Use lease changed.");
+        });
+        runtimeState.appendEvent({kind:"computer.browser",workspaceId,payload:{operation:input.operation,tabId:input.tabId}});
+        return jsonResult(browser,{browser});
+    });
+
     registerAppTool(server, "computer_snapshot", {
         title: "Capture desktop",
         description: "Capture the current Windows virtual desktop or a region in absolute desktop coordinates. Large images are automatically encoded within the MCP transport budget. Use region for fine text instead of waiting or repeating oversized captures. Requires explicit Computer Use enablement, permission, and an active local Portable UI heartbeat.",
-        inputSchema: { workspaceId: z.string(), region: SCREEN_REGION.optional() },
+        inputSchema: { workspaceId: z.string(), region: SCREEN_REGION.optional(), settleMs:z.number().int().min(0).max(5000).optional() },
         outputSchema: { result: z.string(), screen: z.unknown() },
         ...toolMeta("runtime"),
         annotations: READ_ONLY_ANNOTATIONS,
-    }, async ({ workspaceId, region }) => {
+    }, async ({ workspaceId, region, settleMs }) => {
         const lease = computerUseGuard(config, uiLease);
         workspaces.getWorkspace(workspaceId);
-        const captured = await captureDesktop({ leaseId: lease.leaseId, region });
+        const captured = await captureDesktop({ leaseId: lease.leaseId, workspaceId, region, settleMs });
         const result = `Captured Windows virtual desktop ${captured.metadata.width}x${captured.metadata.height}.`+screenshotText(captured);
         runtimeState.appendEvent({ kind: "computer.snapshot", workspaceId, payload: captured.metadata });
         return {
@@ -355,22 +383,25 @@ export function registerFeatureTools(server, services) {
 
     registerAppTool(server, "computer_action", {
         title: "Use computer",
-        description: "Perform one bounded Windows desktop action, or a sequence of up to 50 actions. Set screenshotAfter=true to observe the new state in the same call; use steps only for predictable interactions. Optional region crops the final screenshot in desktop coordinates. If a screenshot fails after an action succeeds, request a new snapshot, never repeat the action. Actions are explicit and audited. Requires Computer Use enablement, permission, and an active local Portable UI heartbeat.",
+        description: "Perform a Windows desktop action or predictable steps. For a focused browser use keypress with F5 to reload, Ctrl+L for the address bar, or Ctrl+C for an existing selection. Prefer computer_browser for reading web pages. For pixels in an observation pass its snapshotId and use image coordinates, or use coordinateSpace=normalized to pass ratios from 0 to 1. Without a snapshotId, x/y are absolute desktop pixels. screenshotAfter waits briefly for rendering after input; settleMs overrides the minimum settling time. Requires Computer Use permission and a live local UI.",
         inputSchema: {
             workspaceId: z.string(),
             action: z.enum(["move", "click", "double_click", "right_click", "scroll", "keypress", "type_text"]).optional(),
-            x: z.number().int().optional(),
-            y: z.number().int().optional(),
+            x: z.number().optional(),
+            y: z.number().optional(),
+            snapshotId: z.string().uuid().optional(),
+            coordinateSpace:z.enum(["desktop","image","normalized"]).optional(),
             delta: z.number().int().min(-12_000).max(12_000).optional(),
             keys: z.array(z.string()).max(20).optional(),
             text: z.string().max(20_000).optional(),
             delayMs: z.number().int().min(0).max(3000).optional(),
             screenshotAfter: z.boolean().optional(),
+            settleMs: z.number().int().min(0).max(5000).optional(),
             region: SCREEN_REGION.optional(),
             steps: z.array(z.object({
                 action: z.enum(["move", "click", "double_click", "right_click", "scroll", "keypress", "type_text"]),
-                x: z.number().int().optional(),
-                y: z.number().int().optional(),
+                x: z.number().optional(),
+                y: z.number().optional(),
                 delta: z.number().int().min(-12_000).max(12_000).optional(),
                 keys: z.array(z.string()).max(20).optional(),
                 text: z.string().max(20_000).optional(),
@@ -384,10 +415,15 @@ export function registerFeatureTools(server, services) {
         const lease = computerUseGuard(config, uiLease);
         workspaces.getWorkspace(workspaceId);
         validateComputerAction(input);
+        if((input.coordinateSpace??(input.snapshotId?"image":"desktop"))==="desktop"){
+            for(const point of input.steps??[input])
+                if([point.x,point.y].some(v=>v!==undefined&&!Number.isInteger(v)))
+                    throw Error("Desktop coordinates require integer physical pixels.");
+        }
         const payload = Array.isArray(input.steps)
-            ? { action: "sequence", steps: input.steps, screenshotAfter: input.screenshotAfter === true }
+            ? { action: "sequence", steps: input.steps, snapshotId:input.snapshotId,coordinateSpace:input.coordinateSpace,settleMs:input.settleMs,screenshotAfter: input.screenshotAfter === true }
             : { ...input, screenshotAfter: input.screenshotAfter === true };
-        const actionResult = await performComputerAction(payload, { leaseId: lease.leaseId, region: input.region });
+        const actionResult = await performComputerAction(payload, { leaseId: lease.leaseId, workspaceId, region: input.region });
         const actionName = Array.isArray(input.steps) ? `sequence (${input.steps.length} steps)` : input.action;
         const result = `Computer Use action completed: ${actionName}.`+(input.screenshotAfter===true?screenshotText(actionResult):'');
         runtimeState.appendEvent({

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -46,7 +46,8 @@ function manager(command, payload) {
   return result.stdout.trim() ? JSON.parse(result.stdout.trim()) : {};
 }
 
-const { performComputerAction } = await import("../app/node_modules/@waishnav/devspace/dist/computer-use.js");
+const { performComputerAction,mapScreenshotPoint } = await import("../app/node_modules/@waishnav/devspace/dist/computer-use.js");
+const managerModule = createRequire(import.meta.url)(MANAGER);
 const lease = manager("ui-open");
 let brokerPid = null;
 
@@ -69,6 +70,19 @@ try {
   assert.ok(result.metadata.width > 0);
   assert.ok(result.metadata.height > 0);
   assert.ok(elapsedMs < 2_500, `compatibility broker probe took ${elapsedMs} ms`);
+  const image = {captureRegion:{x:-1440,y:120,width:1280,height:1024},imageWidth:640,imageHeight:512};
+  assert.deepEqual(mapScreenshotPoint(image,{x:100,y:200},"image"),{x:-1239,y:521});
+  assert.deepEqual(mapScreenshotPoint(image,{x:1,y:1},"normalized"),{x:-161,y:1143});
+  assert.throws(()=>mapScreenshotPoint(image,{x:640,y:0},"image"),/outside/);
+  const testImage = join(temporary,"render-test.png");
+  const frames = ["half-rendered","finished","finished"];
+  const resultAfterRender = managerModule.captureAfterRender({leaseId:lease.leaseId,payload:{settleMs:20}},testImage,file=>{
+    writeFileSync(file,frames.shift());
+    return {metadata:{},stderr:""};
+  });
+  assert.equal(readFileSync(testImage,"utf8"),"finished");
+  assert.equal(resultAfterRender.metadata.screenshotSettled,true);
+  assert.equal(frames.length,0);
   // Empty text exercises the native input path without sending any keystrokes.
   const emptyText = { action: "type_text", text: "" };
   const sequence = await performComputerAction({
@@ -80,7 +94,18 @@ try {
   assert.deepEqual(sequence.metadata.actions, ["type_text", "type_text"]);
   assert.equal(sequence.metadata.steps, 2);
   assert.equal(sequence.metadata.screenshot, true);
+  assert.ok(sequence.metadata.observationWaitMs>=200);
+  assert.match(sequence.metadata.snapshotId,/^[0-9a-f-]{36}$/);
   assert.ok(sequence.image?.length > 0);
+  await assert.rejects(performComputerAction({
+    action:"move",snapshotId:sequence.metadata.snapshotId,x:0,y:0,
+  },{leaseId:lease.leaseId,workspaceId:"different-workspace"}),/no longer available/);
+  const input = resolve(ROOT,"app","node_modules","@waishnav","devspace","dist","helpers","computer-use-input.exe");
+  const staleDesktop = spawnSync(input,["--action","broker_probe","--desktop-bounds",
+    String(result.metadata.left),String(result.metadata.top),String(result.metadata.width+1),String(result.metadata.height)],
+    {encoding:"utf8",windowsHide:true});
+  assert.equal(staleDesktop.status,1);
+  assert.match(staleDesktop.stderr,/Desktop bounds changed/);
   await assert.rejects(performComputerAction({
     action: "sequence",
     steps: [emptyText, { action: "keypress", keys: ["UnsupportedDevSpaceTestKey"] }, emptyText],
@@ -114,8 +139,6 @@ try {
     leaseId: lease.leaseId,
     payload: { action: "broker_probe", screenshotAfter: false },
   }));
-  const require = createRequire(import.meta.url);
-  const managerModule = require(MANAGER);
   const persistedLease = managerModule.readJson(managerModule.UI_LEASE_FILE, {});
   assert.equal(persistedLease.computerUseEnabled, false,
     "the persisted UI lease must become an immediate Computer Use kill-switch");

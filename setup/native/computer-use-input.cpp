@@ -24,6 +24,8 @@ struct Options {
     int y{};
     int delta{};
     int delayMs{};
+    bool hasExpectedDesktop{ false };
+    RECT expectedDesktop{};
     std::vector<std::string> keys;
     std::wstring textFile;
 };
@@ -96,6 +98,13 @@ Options ParseOptions(int argc, wchar_t** argv) {
             options.hasY = true;
         } else if (argument == L"--delta") {
             options.delta = ParseInteger(next(), "delta");
+        } else if (argument == L"--desktop-bounds") {
+            auto& bounds = options.expectedDesktop;
+            bounds.left = ParseInteger(next(), "desktop left");
+            bounds.top = ParseInteger(next(), "desktop top");
+            bounds.right = bounds.left + ParseInteger(next(), "desktop width");
+            bounds.bottom = bounds.top + ParseInteger(next(), "desktop height");
+            options.hasExpectedDesktop = true;
         } else if (argument == L"--delay") {
             options.delayMs = ParseInteger(next(), "delay");
         } else if (argument == L"--key") {
@@ -142,8 +151,16 @@ void SetPoint(const Options& options, const RECT& bounds) {
         || options.y < bounds.top || options.y >= bounds.bottom) {
         throw std::runtime_error("Mouse coordinates are outside the virtual desktop.");
     }
-    if (!SetCursorPos(options.x, options.y)) {
-        throw std::runtime_error("SetCursorPos failed: " + Win32ErrorText(GetLastError()));
+    POINT target{options.x, options.y};
+    if (!MonitorFromPoint(target, MONITOR_DEFAULTTONULL)) {
+        throw std::runtime_error("Mouse point is outside the connected monitors.");
+    }
+    if (!SetPhysicalCursorPos(options.x, options.y)) {
+        throw std::runtime_error("SetPhysicalCursorPos failed: " + Win32ErrorText(GetLastError()));
+    }
+    POINT actual{};
+    if (!GetPhysicalCursorPos(&actual) || actual.x != options.x || actual.y != options.y) {
+        throw std::runtime_error("The physical cursor could not reach the requested point. Capture a new snapshot before clicking.");
     }
 }
 
@@ -281,6 +298,8 @@ int wmain(int argc, wchar_t** argv) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         const Options options = ParseOptions(argc, argv);
         const RECT bounds = VirtualDesktop();
+        if (options.hasExpectedDesktop && !EqualRect(&bounds, &options.expectedDesktop))
+            throw std::runtime_error("Desktop bounds changed since the screenshot. Capture a new snapshot before clicking.");
         Execute(options, bounds);
         std::cout << "{\"action\":\"" << options.action
             << "\",\"left\":" << bounds.left

@@ -311,6 +311,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "app/node_modules/@waishnav/devspace/dist/hook-manager.js",
             "app/node_modules/@waishnav/devspace/dist/feature-tools.js",
             "app/node_modules/@waishnav/devspace/dist/computer-use.js",
+            "app/node_modules/@waishnav/devspace/dist/computer-browser.js",
             "app/node_modules/@waishnav/devspace/dist/helpers/computer-use.ps1",
             "app/node_modules/@waishnav/devspace/dist/helpers/computer-use-capture.exe",
             "app/node_modules/@waishnav/devspace/dist/helpers/computer-use-input.exe",

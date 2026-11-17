@@ -1,6 +1,6 @@
 {
   "name": "devspace-portable-ui-next",
-  "version": "1.1.68-dev27",
+  "version": "1.1.68-dev28",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
