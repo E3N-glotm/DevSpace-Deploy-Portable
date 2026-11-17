@@ -191,6 +191,8 @@ try{
     const requestOptions={method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"list"})};
     const localAction=(action,input,token=uiToken)=>fetch(localUrl,{...requestOptions,
         headers:{...requestOptions.headers,"x-devspace-agent-token":token},body:JSON.stringify({action,input})});
+    const localTask=(action,taskId,token=uiToken)=>fetch(localUrl,{...requestOptions,
+        headers:{...requestOptions.headers,"x-devspace-agent-token":token},body:JSON.stringify({action,taskId})});
     if(process.env.DEVSPACE_TEST_WORKFLOW_TOOL_MODE!=="full"){
         assert.deepEqual(await (await localAction("routing-settings")).json(),{mode:"auto",defaultWorkerId:null});
         assert.equal((await localAction("set-routing-settings",{mode:"group"},"invalid")).status,403);
@@ -210,30 +212,27 @@ try{
         assert.match(contentText(uninspected),/MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY/);
         let state;
         for(let i=0;i<100;i++){
-            state=(await client.callTool({name:"agent_task_status",arguments:{taskId:id}})).structuredContent.data;
+            state=await (await localTask("status",id)).json();
             if(state.status!=="running")break;await sleep(30);
         }
-        assert.equal(state.status,"awaiting-review",JSON.stringify(state));
+        assert.equal(state.status,"completed",JSON.stringify(state));
         assert.equal(state.steps,3);
+        const unreviewed=await client.callTool({name:hostCommandTool.name,arguments:{workspaceId,argv:["node","--version"],yieldTimeMs:1000}});
+        assert.match(contentText(unreviewed),/MODEL_WORKFLOW_WORKSPACE_WRITER_BUSY/);
+        const result=await client.callTool({name:"agent_task_status",arguments:{taskId:id}});
+        assert.equal(result.structuredContent?.data?.result,"Verified source and command",contentText(result));
         const inspected=await client.callTool({name:hostCommandTool.name,arguments:{workspaceId,argv:["node","--version"],yieldTimeMs:1000}});
         assert.notEqual(inspected.isError,true,contentText(inspected));
         const events=(await client.callTool({name:"agent_task_events",arguments:{taskId:id}})).structuredContent.data;
         assert.ok(events.some(e=>e.kind==="tool-result"&&e.name==="read"&&e.ok&&e.text.includes("source code content")));
         assert.ok(events.some(e=>e.kind==="tool-result"&&e.name==="exec_command"&&e.ok&&/v\d+\./.test(e.text)));
+        assert.equal(events.filter(e=>e.kind==="auto-accepted").length,1);
         assert.equal((await fetch(localUrl,requestOptions)).status,403);
         const authorized=await fetch(localUrl,{...requestOptions,headers:{...requestOptions.headers,"x-devspace-agent-token":uiToken}});
         assert.equal(authorized.status,200);assert.ok((await authorized.json()).some(t=>t.id===id));
-        const localHistory=(action,token=uiToken)=>fetch(localUrl,{...requestOptions,
-            headers:{...requestOptions.headers,"x-devspace-agent-token":token},body:JSON.stringify({action,taskId:id})});
-        assert.equal((await localHistory("clear-history","invalid")).status,403);
-        assert.equal((await localHistory("delete-history")).status,400);
-        assert.deepEqual(await (await localHistory("clear-history")).json(),{deletedIds:[]});
-        const accepted=await client.callTool({name:"agent_task_accept",arguments:{taskId:id}});
-        assert.equal(accepted.structuredContent?.data?.status,"completed",contentText(accepted));
-        const afterAccept=await client.callTool({name:hostCommandTool.name,arguments:{workspaceId,argv:["node","--version"],yieldTimeMs:1000}});
-        assert.notEqual(afterAccept.isError,true,contentText(afterAccept));
-        assert.deepEqual(await (await localHistory("delete-history")).json(),{deletedIds:[id]});
-        assert.equal((await localHistory("events")).status,400);
+        assert.equal((await localTask("clear-history",id,"invalid")).status,403);
+        assert.deepEqual(await (await localTask("delete-history",id)).json(),{deletedIds:[id]});
+        assert.equal((await localTask("events",id)).status,400);
         setPolicy(true,"worker-policy");
     }
     const argumentsRead={workspaceId,path:"safe.txt"};
@@ -397,8 +396,12 @@ try{
             if(finished.status!=="running")break;
             await sleep(25);
         }
-        assert.equal(finished.status,"awaiting-review",JSON.stringify(finished));
+        assert.equal(finished.status,hints.independentReview?"awaiting-review":"completed",JSON.stringify(finished));
         assert.match(finished.answer,/examined the task/);
+        if(hints.independentReview){
+            const accepted=await client.callTool({name:"agent_task_accept",arguments:{taskId}});
+            assert.equal(accepted.structuredContent?.data?.status,"completed",contentText(accepted));
+        }
     }
     await selectRouting("group");
     const desktop=await localAction("start",{path:workspace,instruction:"Desktop follows the same global mode"});
@@ -410,7 +413,14 @@ try{
     assert.equal(singleDesktop.status,200);
     const desktopOverride=await singleDesktop.json();
     assert.equal(desktopOverride.routing.reason,"selected-single");
-    assert.equal((await legacyTask("cancel",desktopOverride.id)).structuredContent?.data?.status,"cancelled");
+    let desktopResult;
+    for(let attempt=0;attempt<80;attempt++){
+        desktopResult=await (await localTask("status",desktopOverride.id)).json();
+        if(desktopResult.status!=="running")break;
+        await sleep(25);
+    }
+    assert.equal(desktopResult.status,"awaiting-review",JSON.stringify(desktopResult));
+    assert.equal((await (await localTask("accept",desktopOverride.id)).json()).status,"completed");
     assert.equal((await (await localAction("routing-settings")).json()).mode,"group");
     const override=await legacyDelegate({useSpecifiedModel:true});
     assert.ok(!override.isError,contentText(override));

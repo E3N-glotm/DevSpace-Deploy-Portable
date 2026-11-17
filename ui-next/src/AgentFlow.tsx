@@ -24,7 +24,7 @@ const eventTitles: Record<string, string> = {
   'tool-start': '工具操作', 'tool-result': '工具操作', 'tool-error': '工具操作',
   compaction: '上下文压缩', plan: '任务分配', 'plan-fallback': '备用计划',
   assignment: '子任务开始', report: '交付报告', 'parallel-dispatch': '并行调度',
-  'user-accepted': '人工验收', 'memory-saved': '已保存记忆', 'memory-skipped': '记忆未保存',
+  'user-accepted': '人工验收', 'auto-accepted': '自动验收', 'memory-saved': '已保存记忆', 'memory-skipped': '记忆未保存',
 };
 const fieldTitles: Record<string, string> = {
   name: '工具名称', args: '调用参数', text: '工具返回', error: '错误',

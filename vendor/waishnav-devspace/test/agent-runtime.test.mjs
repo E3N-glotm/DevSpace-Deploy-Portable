@@ -46,7 +46,7 @@ function fixture(overrides={}){
     return {runtime,sqlite,calls,memories,writers};
 }
 test("default group independently reviews, records events and workspace memory",async()=>{
-    const f=fixture();const t=f.runtime.start({workspaceId:"ws",instruction:"task",allowMemory:true,independentReview:true});
+    const f=fixture();const t=f.runtime.start({workspaceId:"ws",instruction:"task",allowMemory:true,independentReview:true},{delegated:true});
     const done=await until(f.runtime,t.id,["completed","paused"]);
     assert.equal(done.status,"completed",done.error);assert.equal(done.result,"verified");
     assert.equal(f.calls[0].args.workspaceId,"ws");assert.equal(f.memories.length,1);
@@ -54,6 +54,50 @@ test("default group independently reviews, records events and workspace memory",
     assert.equal(done.routing.reason,"independent-review");
     assert.ok(f.runtime.events(t.id).some(e=>e.kind==="message"));
     assert.ok(f.runtime.events(t.id).some(e=>e.kind==="review"&&e.decision==="approve"));
+    assert.ok(!f.runtime.events(t.id).some(e=>e.kind==="auto-accepted"));
+    await f.runtime.close();f.sqlite.close();
+});
+test("delegated single-model delivery settles once after the writer exits",async()=>{
+    const instruction="Verify delivery";
+    const f=fixture({request:async t=>t.permissions.write
+        ?reply(call("agent_finish",{decision:"submit",summary:"Verified"}))
+        :{content:"Verified"}});
+    for(const allowWrites of [false,true]){
+        const task=f.runtime.start({workspaceId:"ws",instruction,allowWrites,allowMemory:true},{delegated:true});
+        const done=await until(f.runtime,task.id,["completed","paused","awaiting-review"]);
+        assert.equal(done.status,"completed",done.error);
+        assert.equal(done.result,"Verified");
+        assert.equal(f.writers.size,0);
+        assert.equal(f.memories.length,0);
+        assert.equal(f.runtime.events(task.id).filter(e=>e.kind==="auto-accepted").length,1);
+    }
+    const desktop=f.runtime.start({workspaceId:"ws",instruction});
+    await until(f.runtime,desktop.id,["awaiting-review"]);
+    await f.runtime.close();
+    const record=f.sqlite.prepare("select data from devspace_agent_tasks where id=?");
+    const staged={...JSON.parse(record.get(desktop.id).data),id:"agent_staged_delivery",autoCompleteDelivery:true};
+    f.sqlite.prepare("insert into devspace_agent_tasks(id,data) values(?,?)").run(staged.id,JSON.stringify(staged));
+    for(let i=0;i<2;i++){
+        const restored=fixture({sqlite:f.sqlite});
+        assert.equal(restored.runtime.status(desktop.id).status,"awaiting-review");
+        assert.equal(restored.runtime.status(staged.id).status,"completed");
+        assert.equal(restored.runtime.events(staged.id).filter(e=>e.kind==="auto-accepted").length,1);
+        await restored.runtime.close();
+    }
+    f.sqlite.close();
+});
+test("delegated empty results and inference errors cannot be automatically accepted",async()=>{
+    const f=fixture({request:async t=>{
+        if(t.instruction==="failed request")throw Error("MODEL_STREAM_INCOMPLETE");
+        return {content:" \n "};
+    }});
+    for(const [instruction,error] of [["empty result","EMPTY_AGENT_RESULT"],["failed request","MODEL_STREAM_INCOMPLETE"]]){
+        const task=f.runtime.start({workspaceId:"ws",instruction},{delegated:true});
+        const done=await until(f.runtime,task.id,["paused","completed","awaiting-review"]);
+        assert.equal(done.status,"paused");
+        assert.equal(done.error,error);
+        assert.ok(!f.runtime.events(task.id).some(e=>e.kind==="auto-accepted"));
+    }
     await f.runtime.close();f.sqlite.close();
 });
 test("review threshold cannot complete a group before all configured members participate",async()=>{

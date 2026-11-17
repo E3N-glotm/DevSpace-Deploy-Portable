@@ -88,6 +88,16 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         save(t);
         event(t,"routing",null,{...t.routing,handoff});
     });
+    const finishDelegatedDelivery=sqlite.transaction(t=>{
+        if(t.autoCompleteDelivery!==true||t.status!=="awaiting-review"||
+            t.team||t.agents.length!==1||t.pending||t.error||t.resumeOnBoot||
+            !t.result?.trim())return false;
+        t.status="completed";
+        save(t);
+        event(t,"auto-accepted",null);
+        event(t,"state",null,{status:t.status,error:null});
+        return true;
+    });
     const find=id=>{const t=tasks.get(id);if(!t)throw Error("UNKNOWN_AGENT_TASK");return t;};
     const view=t=>{
         const {agents,previousAgents,pending,...rest}=t;
@@ -97,6 +107,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
     for(const row of sqlite.prepare("select data from devspace_agent_tasks").all()){
         const t=JSON.parse(row.data);tasks.set(t.id,t);
         delete t.deadline; // Older Portable versions persisted a task deadline.
+        if(t.status==="awaiting-review"&&finishDelegatedDelivery(t))continue;
         if(!terminal.has(t.status)){
             const auto=t.status==="running"||t.resumeOnBoot===true;
             if(t.status==="running"||t.pending||auto){t.status="paused";t.error=t.pending?"INTERRUPTED_TOOL_REQUIRES_REVIEW":"SERVER_RESTARTED";}
@@ -264,7 +275,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
             event(t,"message",a,{to:to.id,message});return "Delivered to "+to.id;
         }
         if(name==="agent_finish"){
-            const summary=safeText(args.summary,8000);
+            const summary=safeText(args.summary,8000).trim();
             if(!summary)throw Error("EMPTY_AGENT_SUMMARY");
             if(args.decision==="submit"){
                 if(t.team){
@@ -419,7 +430,11 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                         reportWork(t,a,reply.content);
                     }else if(t.team&&t.team.phase==="working"&&a.id===t.team.leader&&String(reply.content||"").trim()&&Object.values(t.team.assignments).every(w=>w.status==="reported")){
                         await execute(t,a,{function:{name:"agent_finish",arguments:JSON.stringify({decision:"submit",summary:reply.content})}});
-                    }else if(t.agents.length===1){t.status="awaiting-review";t.result=safeText(reply.content);}
+                    }else if(t.agents.length===1){
+                        const result=safeText(reply.content).trim();
+                        if(result){a.state="submitted";t.status="awaiting-review";t.result=result;}
+                        else{t.status="paused";t.error="EMPTY_AGENT_RESULT";}
+                    }
                     else if(!t.team){const other=t.agents.find(x=>x!==a&&x.state!=="ready");if(other){other.inbox.push({from:a.id,message:safeText(reply.content,8000)});other.state="ready";}}
                 }
                 if(t.team?.phase==="planning"&&a.id===t.team.leader&&t.status==="running"&&(a.steps>=3||!calls.length)){event(t,"plan-fallback",a);fallbackPlan(t,a);}
@@ -435,7 +450,17 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
                 }
             }
         }catch(e){if(t.status==="running"){t.status="paused";t.error=safeText(e.message,500);}}
-        finally{if(t.status==="running")t.status="paused";for(const a of t.agents)if(a.state==="running")a.state="ready";save(t);event(t,"state",null,{status:t.status,error:t.error??null});running.delete(t.id);if(t.writer)worker.endAgentWriter(t.workspaceId,t.id);if(desktopOwner===t.id)desktopOwner=null;}
+        finally{
+            if(t.status==="running")t.status="paused";
+            for(const a of t.agents)if(a.state==="running")a.state="ready";
+            running.delete(t.id);
+            if(t.writer)worker.endAgentWriter(t.workspaceId,t.id);
+            if(desktopOwner===t.id)desktopOwner=null;
+            if(!finishDelegatedDelivery(t)){
+                save(t);
+                event(t,"state",null,{status:t.status,error:t.error??null});
+            }
+        }
     }
     function launch(t){
         if(running.has(t.id))throw Error("AGENT_ALREADY_RUNNING");
@@ -490,13 +515,13 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         installAgents(draft,workspace,target,handoff);
         return {draft,handoff};
     }
-    function start(input){
+    function start(input,{delegated=false}={}){
         const workspace=workspaces.getWorkspace(input.workspaceId);
         const target=resolveRoute(input);
         const instruction=String(input.instruction??"").trim();if(!instruction||instruction.length>16000)throw Error("INVALID_AGENT_INSTRUCTION");
         const permissions={write:input.allowWrites===true,shell:input.allowShell===true,computer:input.allowComputer===true,memory:input.allowMemory===true,plugins:input.allowPlugins===true};
         const t={id:"agent_"+randomUUID(),workspaceId:input.workspaceId,instruction,permissions,writer:permissions.write||permissions.shell||permissions.computer||permissions.plugins,
-            status:"paused",cursor:0,steps:0,
+            status:"paused",cursor:0,steps:0,autoCompleteDelivery:delegated&&input.independentReview!==true&&target.routing.mode==="single",
             approvals:[],submission:null,pending:null,routing:target.routing,createdAt:new Date().toISOString()};
         installAgents(t,workspace,target);
         tasks.set(t.id,t);save(t);event(t,"created",null,{groupId:t.groupId,permissions});

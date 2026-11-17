@@ -3152,7 +3152,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         structuredContent: {result:JSON.stringify(value),data:value},
     });
     function startAgentTask(input, context) {
-        const task = runtimeServices.agentRuntime.start(input);
+        const task = runtimeServices.agentRuntime.start(input,{delegated:true});
         runtimeServices.modelWorkflowGate?.onAgentStart(task, modelWorkflowScope(context));
         return task;
     }
@@ -3208,7 +3208,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     for(const [toolName,action,description] of [
         ["model_task_status","status","Get progress for a delegated Worker or Agent task. Queued and running tasks remain active and can be polled again with the same taskId."],
-        ["model_task_result","result","Read a delegated Worker or Agent result for independent verification. For Agent tool records use agent_task_events. After verifying an Agent result marked awaiting-review, finish it with agent_task_accept."],
+        ["model_task_result","result","Read a delegated Worker or Agent result for independent verification. Single-model delegations complete automatically on delivery unless independent review was requested. Use agent_task_events for tool records and agent_task_accept if a verified result is still awaiting review."],
         ["model_task_cancel","cancel","Cancel a delegated Worker or Agent task and abort its current model request."],
     ]){
         registerAppTool(server,toolName,{
@@ -3243,7 +3243,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     if(runtimeServices.agentRuntime){
         registerAppTool(server,"agent_task_start",{
             title:"Start persistent DevSpace Agent task",
-            description:"Delegate a durable task using DevSpace's global automatic, single-model or group routing. In automatic mode, pass independentReview or parallelWorkstreams when warranted. Execution has no fixed step cap or deadline. Poll agent_task_status with the returned taskId until a result is available. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and verify the result independently.",
+            description:"Delegate a durable task using DevSpace's global automatic, single-model or group routing. In automatic mode, pass independentReview or parallelWorkstreams when warranted. Execution has no fixed step cap or deadline. Single-model delegations complete automatically on delivery unless independent review was requested. Poll agent_task_status with the returned taskId until a result is available. All sensitive capabilities default to false; explicitly grant only necessary tools. Inspect events and verify the result independently.",
             inputSchema:agentInput,outputSchema:resultOutputSchema({data:z.unknown()}),
             ...toolWidgetDescriptorMeta(config,"workspace"),
             annotations:SHELL_TOOL_ANNOTATIONS,
