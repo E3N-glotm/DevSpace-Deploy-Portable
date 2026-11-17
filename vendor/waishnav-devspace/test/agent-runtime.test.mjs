@@ -262,10 +262,10 @@ test("streaming joins real reasoning, content and tool deltas, rejects interrupt
         "data: [DONE]\n\n"
     ];
     const response=new Response(parts.join(""),{headers:{"content-type":"text/event-stream"}});
-    const result=await collectAgentStream(response,10000);
+    const result=await collectAgentStream(response);
     assert.equal(result.choices[0].message.reasoning_content,"real reasoning");
     assert.equal(result.choices[0].message.content,"real answer");
     assert.deepEqual(JSON.parse(result.choices[0].message.tool_calls[0].function.arguments),{path:"safe.txt"});
     assert.equal(result.usage.completion_tokens,12);
-    await assert.rejects(collectAgentStream(new Response(parts[0]),10000),/INCOMPLETE/);
+    await assert.rejects(collectAgentStream(new Response(parts[0])),/INCOMPLETE/);
 });

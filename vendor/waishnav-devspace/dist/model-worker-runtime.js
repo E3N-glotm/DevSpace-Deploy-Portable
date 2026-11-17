@@ -13,12 +13,11 @@ import {
 // Credentials are never returned by any of the model_worker_* MCP tools.
 const MAX_TASKS = 32;
 const MAX_TASK_TEXT = 8000;
-const MAX_MODEL_RESPONSE = 512 * 1024;
 const MAX_TOOL_REPLY = 14000;
 // OpenAI-compatible providers may stream real deltas, or reply with a
 // conventional JSON body. Both paths preserve the actual returned content.
-export async function collectAgentStream(response,limit,onDelta){
-    const decoder=new TextDecoder();let buffer="",bytes=0,usage=null,lastEmit=0,finished=false,finishReason=null;
+export async function collectAgentStream(response,onDelta){
+    const decoder=new TextDecoder();let buffer="",usage=null,lastEmit=0,finished=false,finishReason=null;
     const message={role:"assistant",content:"",reasoning_content:"",tool_calls:[]};
     const consume=line=>{
         if(!line.startsWith("data:"))return;
@@ -43,8 +42,9 @@ export async function collectAgentStream(response,limit,onDelta){
             lastEmit=Date.now();onDelta?.(message);
         }
     };
+    // Frame metadata can exceed the actual model text many times over.
+    // Discard consumed frames instead of applying a limit to transport bytes.
     for await(const chunk of response.body){
-        bytes+=chunk.length;if(bytes>limit)throw Error("MODEL_REPLY_TOO_LARGE");
         buffer+=decoder.decode(chunk,{stream:true});
         const lines=buffer.split(/\r?\n/);buffer=lines.pop()||"";
         for(const line of lines)consume(line);
@@ -314,10 +314,10 @@ export function createModelWorkerRuntime({
         const remaining = job.maxTaskUSD - job.estimatedUSD;
         // Refuse a new paid request if remaining budget cannot cover even
         // the configured maximum output tokens. True billing varies by provider.
-        const outputReserve=(model.maxOutputTokens||4096)*(model.outputPerMillionUSD||0)/1e6+
+        const maxTokens=Math.max(16,model.maxOutputTokens||4096);
+        const outputReserve=maxTokens*(model.outputPerMillionUSD||0)/1e6+
             (agent?Math.ceil(JSON.stringify([messages,tools]).length/2)*(model.inputPerMillionUSD||0)/1e6:0);
         if (remaining < outputReserve) throw new Error("MODEL_TASK_BUDGET_EXHAUSTED");
-        const maxTokens=agent?Math.max(16,model.maxOutputTokens||4096):Math.min(2048,Math.max(16,model.maxOutputTokens||2048));
         const controller=new AbortController();job.controller=controller;
         const abort=()=>controller.abort();
         signal?.addEventListener("abort",abort,{once:true});
@@ -349,15 +349,11 @@ export function createModelWorkerRuntime({
                     ...thinking}),
             });
             if(!response.ok)throw new Error("MODEL_HTTP_"+response.status);
-            const length=Number(response.headers?.get?.("content-length")||0);
-            const replyLimit=agent?Math.max(MAX_MODEL_RESPONSE,Math.min(32*1024*1024,maxTokens*24)):MAX_MODEL_RESPONSE;
-            if (length>replyLimit)throw new Error("MODEL_REPLY_TOO_LARGE");
             let json;
             if(agent&&String(response.headers?.get?.("content-type")||"").includes("text/event-stream"))
-                json=await collectAgentStream(response,replyLimit,onDelta);
+                json=await collectAgentStream(response,onDelta);
             else{
                 const raw=await response.text();
-                if (Buffer.byteLength(raw,"utf8")>replyLimit)throw new Error("MODEL_REPLY_TOO_LARGE");
                 try {json=JSON.parse(raw);}catch {throw new Error("MODEL_INVALID_JSON");}
             }
             const usage=json.usage||{};

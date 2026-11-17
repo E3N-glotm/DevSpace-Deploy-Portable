@@ -23,7 +23,7 @@ async function eventually(get,timeoutMs=1600) {
     }
     throw new Error("TASK_NEVER_FINISHED");
 }
-function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRounds=0,
+function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRounds=0, maxOutputTokens=1024,
     protectedKey=false,deepseek=false,fetchOverride,remoteWorkspace,openRemoteWorkerTool }={}){
     const root=mkdtempSync(resolve(reports,".tmp-native-model-"));
     const project=resolve(root,"project");
@@ -34,7 +34,7 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRoun
         id:"qwen_worker",name:"Local Qwen",type:deepseek?"deepseek":"ollama",role:"worker",api:"chat",
         baseUrl:deepseek?"https://api.deepseek.com/v1":"http://127.0.0.1:11434/v1",
         model:deepseek?"deepseek-flash":"local-qwen:latest",maxTaskUSD:1,
-        maxOutputTokens:1024,inputPerMillionUSD:1,outputPerMillionUSD:1,
+        maxOutputTokens,inputPerMillionUSD:1,outputPerMillionUSD:1,
         callPolicyRevision:"revision-1",
     };
     if(protectedKey){model.encryptedKey="NATIVE_CIPHERTEXT";
@@ -86,6 +86,63 @@ function prepare({ allowCalls=false, noTool=false, errorStatus=0, repeatToolRoun
 function response(payload) {
     return {ok:true,status:200,headers:{get:()=>null},text:async()=>JSON.stringify(payload)};
 }
+
+test("Agent reconstructs a complete tool call from an SSE stream above the former maximum wire size",async()=>{
+    const encoder=new TextEncoder();
+    const frameCount=33000;
+    const text="鹈鹕".repeat(600);
+    const padding="x".repeat(1024);
+    const toolArguments=JSON.stringify({path:"pelican.svg",content:text});
+    let streamedBytes=0;
+    const f=prepare({maxOutputTokens:32768,fetchOverride:(_url,{body})=>{
+        assert.equal(JSON.parse(body).max_tokens,32768);
+        let i=0;
+        const stream=new ReadableStream({pull(controller){
+            if(i===frameCount){
+                const finalFrame={choices:[{delta:{},finish_reason:"tool_calls"}],usage:{completion_tokens:900}};
+                controller.enqueue(encoder.encode("data: "+JSON.stringify(finalFrame)+"\n\ndata: [DONE]\n\n"));
+                controller.close();
+                return;
+            }
+            const delta=i<toolArguments.length?{tool_calls:[{
+                index:0,...(i===0?{id:"call",function:{name:"write",arguments:toolArguments[i]}}:
+                    {function:{arguments:toolArguments[i]}}),
+            }]}:{};
+            const frame=encoder.encode("data: "+JSON.stringify({provider_metadata:padding,choices:[{delta}]})+"\r\n\r\n");
+            streamedBytes+=frame.length;
+            controller.enqueue(frame);
+            i++;
+        }});
+        return new Response(stream,{headers:{"content-type":"text/event-stream"}});
+    }});
+    try{
+        const model=f.runtime.agentProfiles()[0];
+        const agent={profileId:model.id,inputTokens:0,outputTokens:0,estimatedUSD:0};
+        const result=await f.runtime.agentRequest({deadline:Date.now()+30000},agent,model,[],[]);
+        assert.ok(streamedBytes>32*1024*1024,streamedBytes);
+        assert.deepEqual(result.tool_calls,[{type:"function",id:"call",function:{name:"write",arguments:toolArguments}}]);
+        assert.equal(agent.outputTokens,900);
+    }finally{f.dispose();}
+});
+
+test("legacy Worker forwards the configured output tokens and accepts a large JSON reply",async()=>{
+    const answer="Completed a long response.";
+    const f=prepare({maxOutputTokens:32768,fetchOverride:(_url,{body})=>{
+        assert.equal(JSON.parse(body).max_tokens,32768);
+        const payload=JSON.stringify({choices:[{message:{role:"assistant",content:answer,
+            reasoning_content:"review ".repeat(90000)}}],usage:{completion_tokens:6000}});
+        const length=Buffer.byteLength(payload);
+        assert.ok(length>512*1024);
+        return new Response(payload,{headers:{"content-type":"application/json","content-length":String(length)}});
+    }});
+    try{
+        const task=f.runtime.delegate({workspaceId:"ws_test",modelId:"qwen_worker",instruction:"Check the output"});
+        const result=await eventually(()=>f.runtime.result(task.taskId));
+        assert.equal(result.status,"completed",result.error);
+        assert.equal(result.answer,answer);
+        assert.equal(result.outputTokens,6000);
+    }finally{f.dispose();}
+});
 
 test("Agent deadline covers backend queue time and cancels stalled inference",async()=>{
     let fetchStarted;
