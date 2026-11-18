@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.68",
-  "builtAt": "2026-11-18T16:36:40+08:00",
+  "builtAt": "2026-11-18T17:02:37+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -760,7 +760,7 @@
     "setup/permission-rules.example.json.sha256": "e4dd0625758878e3eb2e765685bfc8afdf245406210e9fc5a017f962d045928e",
     "setup/plugin-example/manifest.json.sha256": "6215f2797419c9f7f5fa56d379a00feedf6f76f6be950256c7c01a0b42d57532",
     "setup/plugin-example/skills/devspace-plugin-example/SKILL.md.sha256": "61a7c337049279b530fa63e65f25e415e22acacb0c48ba00b4753608e08518c0",
-    "setup/portable-manager.cjs.sha256": "2c432a9e28bb61ff29de2d4a21363ab2ef0d1278b79bad3ab70d3768ed2b4572",
+    "setup/portable-manager.cjs.sha256": "f616a2356ffa222c6c2e94118b95c8edfa5952a0f41b0a45121998526c927f0a",
     "setup/portable-updater.ps1.sha256": "1fc0e3c7951d860b7eca83bfbc4e2f7a5d4ff4ee7dc62fe2bc328651d84c8f24",
     "setup/remote-ssh-admin.cjs.sha256": "7df228c238ec40e1764d82b7095af079210b0f6419baeb21a9a27fd6f786a939",
     "setup/ssh-error-codes.cjs.sha256": "a13ed3292490785299064b782ae438f18a43c258dd5ff6f731bc3e63cc04ab3f",
@@ -770,7 +770,7 @@
     "setup/test-card-host-interactions.mjs.sha256": "4f4aa12dc5e52c3ed5a09cafd0791886fa2b9c6608455055154a2a6130e52d0d",
     "setup/test-codex-runtime-bridge.mjs.sha256": "e9b7985d7eff121d7725460a273d9b956e740bb418b518dcb9657e292e489d11",
     "setup/test-computer-use-batch.mjs.sha256": "a14afb90e542dc39ef67647906feb456e679897f8fce9be48c3ffd824faff349",
-    "setup/test-computer-use-broker.mjs.sha256": "2d2306f9986488677182f8f288e6ac536e9d33ae57b9a2ec1fc5b7e3ca564863",
+    "setup/test-computer-use-broker.mjs.sha256": "d04a479b7c87816a328c3273f64180591e749bd8096f2c26db25cb87a88ea787",
     "setup/test-computer-use-live.mjs.sha256": "a48b56ff978ee9bec149ac5c604bbaa1be5ccf65ffba0118f177ce8b31f012a4",
     "setup/test-continuation-guard.mjs.sha256": "bb31fd892b36dd2d829e21fbea5090d2ab8bd1e6c57ad8cfb699d77a6bbb1f7b",
     "setup/test-continuation-supervisor-scheduler.mjs.sha256": "12a0fad38de894d15cd7562faeb8041f4972c1adcb1743aecd6c0ea0a4ffbce4",
