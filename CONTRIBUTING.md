@@ -1,58 +1,21 @@
 # 参与维护
 
-## 分支与 Pull Request
+从最新 `main` 开始，一个 Pull Request 聚焦一个主题。说明改动目的、验证方法和已知限制。合并前由维护者审查并通过所需 CI。涉及部署、更新器、凭据、Computer Use 或回退时，说明故障表现与恢复步骤。
 
-1. 从最新 `main` 创建功能分支，建议命名为 `feature/...`、`fix/...` 或 `release/...`；
-2. 一个 PR 只处理一个明确主题；
-3. 不得提交 `runtime/`、`app/node_modules/`、`data/`、日志、ZIP、Token 或 OAuth 数据库；
-4. 至少通过一名维护者审查和全部必需 CI 后再合并；
-5. 对部署、更新器、凭据、Computer Use、回退逻辑的修改应在 PR 中明确列出失败模式和回滚方式。
+## 在哪里修改
 
-## 修改 Portable 核心
+- MCP 核心、Agent 与工具源码在 `vendor/waishnav-devspace/`。
+- Windows 控制中心在 `ui-next/`，启动器和更新器在 `setup/`。
+- 用户上手说明从 [README](README.md) 进入，安装和操作见 [使用指南](README-PORTABLE.md)。
 
-不要直接修改 `app/node_modules/@waishnav/devspace`。受控代码位于：
+修改核心后，用 `npm run core:pack` 生成本地 TGZ，再用 `npm ci --prefix app` 更新测试依赖。构建和测试细节见 [开发指南](docs/DEVELOPMENT.md)。
 
-```text
-vendor/waishnav-devspace/
-```
+## 提交检查
 
-修改后运行：
+- 保持 Windows 路径对空格和非 ASCII 用户名的兼容性。
+- 按 `.gitattributes` 保持行尾格式。Markdown、JavaScript、TypeScript、Python 和 Shell 使用 LF，C#、CMD、PowerShell 使用 CRLF。
+- 提交源码与必要的锁文件、文档和测试。生成的运行时、安装包、用户数据、日志和凭据保留在本地。
+- 新增第三方运行时或依赖时，标明版本、来源、完整性信息和许可。
+- 根据改动运行相应测试，并执行 `npm run source:verify`。发行变更还应验证最终附件与升级路径。
 
-```powershell
-npm run core:pack
-```
-
-该命令会生成被 Git 忽略的 `packages/waishnav-devspace-1.0.7.tgz`。随后运行 `scripts/bootstrap-dev.ps1` 或 `npm ci --prefix app` 安装到本地运行目录。
-
-## 版本变更
-
-每个版本必须同步修改：
-
-- `VERSION-MANIFEST.json`；
-- `setup/portable-manager.cjs` 的 Portable 版本；
-- `app/node_modules` 对应核心源码中的服务端版本（通过 `vendor/` 修改）；
-- 原生 UI 页脚版本；
-- `docs/releases/HOTFIX-<版本>.md`；
-- `CHANGELOG.md` 与 README 当前版本；
-- 相关测试输出中的版本文本。
-
-使用 `python setup/finalize-release.py <版本> --hotfix docs/releases/HOTFIX-<版本>.md` 更新包完整性与关键文件哈希。
-
-## 提交前检查
-
-```powershell
-npm run source:verify
-npm run core:pack
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/test-source.ps1
-```
-
-修改发行逻辑时，还应从空目录解压最终 ZIP 并重新运行核心回归。
-
-## 编码与兼容性
-
-- JavaScript/TypeScript/Python/Shell/Markdown 使用 LF；
-- WinForms C#、CMD、PowerShell 使用 CRLF；
-- Windows 路径处理必须支持非 ASCII 用户名和带空格目录；
-- 不得通过字符串黑名单声称实现 Windows 沙箱；
-- 新增运行时或依赖必须固定版本、下载来源和 SHA-256，并补充第三方许可。
-
+正式版本标识、升级兼容和附件发布见 [发行流程](docs/RELEASING.md)。安全问题请按 [安全政策](SECURITY.md) 私下报告。
