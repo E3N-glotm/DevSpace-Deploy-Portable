@@ -408,7 +408,12 @@ try{
     assert.equal(desktop.status,200);
     const desktopGroup=await desktop.json();
     assert.equal(desktopGroup.routing.reason,"global-group");
-    assert.equal((await legacyTask("cancel",desktopGroup.id)).structuredContent?.data?.status,"cancelled");
+    const desktopCancelFromMcp=await legacyTask("cancel",desktopGroup.id);
+    assert.equal(desktopCancelFromMcp.isError,true,contentText(desktopCancelFromMcp));
+    assert.match(contentText(desktopCancelFromMcp),/AGENT_TASK_NOT_OWNED/);
+    const desktopCancelled=await localTask("cancel",desktopGroup.id);
+    assert.equal(desktopCancelled.status,200);
+    assert.equal((await desktopCancelled.json()).status,"cancelled");
     const singleDesktop=await localAction("start",{path:workspace,modelId:"worker-one",instruction:"Override this one Desktop task"});
     assert.equal(singleDesktop.status,200);
     const desktopOverride=await singleDesktop.json();
