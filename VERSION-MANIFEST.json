@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.68",
-  "builtAt": "2026-11-18T16:17:03+08:00",
+  "builtAt": "2026-11-18T16:36:40+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -543,7 +543,11 @@
     "cloudflared-windows-amd64.exe.sha256": "8635da433b6df8194746e88ed9d2589566c20e38bfc2a80e431a348b7c765841"
   },
   "keyFiles": {
+    "DevSpace-Portable-Next.exe.sha256": "3711b16ff0efe805f7c4e7ff0dcba6c9f5a070a7e52be2db289b0a559aaab17b",
     "DevSpace-Portable.cmd.sha256": "cd10ca0aae1c499835cdf28ef1328f8b90f8dc790ff81eb63a4247bc8cdad3ea",
+    "DevSpace-Portable.exe.sha256": "5e3e9ebf47b85eecdf0d351b55399f933bdbdd0f1b4f09fcd7e044660f8dbb9c",
+    "DevSpace-SshAskPass.exe.sha256": "ce6e7251e751da4faec1d75f5b32588e971e9eea474dc2cf5b26e282dad514e1",
+    "Update.exe.sha256": "486f0c91daa033e08435ac67bf4cb4a06127d2baaef65718a9705c38bd74f38b",
     "app/DevSpace-Plugin.cmd.sha256": "aa0fbe0e7f248476ac425ffc0d17752e2c14351b8079ab1d3d2cc56d0104c338",
     "app/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/package.json.sha256": "652933475722a1ac7b8531f29a728f856e018332f56ea39f79a2dcc3544d56d0",
     "app/node_modules/@earendil-works/pi-coding-agent/npm-shrinkwrap.json.sha256": "b0bf8e1d63a90fa656a51fefcc5588799247c0c69c21a50cd9bada9bf74fe61f",
@@ -818,7 +822,7 @@
     "setup/tunnel-launcher.cjs.sha256": "7bba0ada07e0d2685885159287462726ee16018bebf82919c5ab6cd6136aad66",
     "ui-next/dist/index.html.sha256": "6ac575c7049efb9f63bf74f7549b900a69f1cb2fc5973faef7a7777651e37fbd",
     "ui-next/electron/agent-runtime-client.cjs.sha256": "b82552ee1be3f9de58da5e3a5c0003c0fda50e66c957d709703fef68d65c0150",
-    "ui-next/electron/main.cjs.sha256": "694bdca9cc60047a1493b65d1ed3fad563e40af6ce334fe17a248fee278e34d3",
+    "ui-next/electron/main.cjs.sha256": "127828d2a0f8bcc158a1ba9a1899c4b5305b45ebd46e17fb14ff23edcf37b2ad",
     "ui-next/electron/model-providers.cjs.sha256": "22e331ec9aae6fd16363d6f79c1fb987a067dd34b404a097a84bdbd4e5088d69",
     "ui-next/electron/preload.cjs.sha256": "aed9f42ca640125dbcc2c8863cf5a2eab75296880579f951a6b7138496b3c8e3",
     "ui-next/electron/update-status.cjs.sha256": "a3deb18c8d98905721ae1035ba1d39ff05cd9c8421dda91ae830f2a81a64c2e6",
