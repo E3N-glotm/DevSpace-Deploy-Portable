@@ -1,7 +1,7 @@
 {
   "formatVersion": 2,
   "release": "DevSpacePortable-Windows-x64-1.1.68",
-  "builtAt": "2026-11-18T17:02:37+08:00",
+  "builtAt": "2026-11-19T11:09:27+08:00",
   "platform": "win32-x64",
   "releaseMetadata": {
     "requiresToolSchemaRefresh": true
@@ -709,7 +709,7 @@
     "docs/releases/HOTFIX-1.1.65.md.sha256": "3422afd1d00f421deed6a9a27c23a46dd0b727986af87de0ace501807c958316",
     "docs/releases/HOTFIX-1.1.66.md.sha256": "a40991106a01eccd67f2debc68cc19d9433698ff7ddd5cd61e106437bb5a8247",
     "docs/releases/HOTFIX-1.1.67.md.sha256": "d7855218cee9691cb33435fdece3a727ff954cb785a67cc9a62fcdf1bd60890e",
-    "docs/releases/HOTFIX-1.1.68.md.sha256": "5f93ca0c1e853a2947910b5e962fdcacb30de875121a0ad0ef8346f7108edb2d",
+    "docs/releases/HOTFIX-1.1.68.md.sha256": "2c7492e797a064c7ebd4628e903065c3c12e507ef4bfece83ecfd385917fda6f",
     "docs/releases/HOTFIX-1.1.7.md.sha256": "ff933198773788193d73d87f861d7abaabd0b3299f6e87090c049b7d5589899e",
     "docs/releases/HOTFIX-1.1.8.md.sha256": "6cf9c3997017b030d57ff095c87aaf0b5299c24c141fe42f015a7ec00bd71f09",
     "docs/releases/HOTFIX-1.1.9.md.sha256": "0bb546acfafaa0ea69d83790eb95a6bea2f113b936cb5116ec7968ad58da218e",
@@ -723,7 +723,7 @@
     "scripts/start-devspace.sh.sha256": "315cdff3cab90152e2fc570397e9b678e105125bfcaab9c9c6fa321204393a12",
     "scripts/start-tunnel.cmd.sha256": "7f46d9acf63e632fff252d6302a4aa28a7dd23d355f3b4d4ac14bf78199178c9",
     "scripts/start-tunnel.sh.sha256": "1065b667659a26560dd2c7c108b63cc68f511a08ee6305623abd51e6408c2b87",
-    "scripts/test-source.ps1.sha256": "4bc2fa75a7861b537fdceeed36678f0146d1d6762a3af59e6708523669da82e1",
+    "scripts/test-source.ps1.sha256": "f0d80f9f24d0759b2d04260dc19bf6be99272ac54420097e3ca7f5f2d69d997f",
     "scripts/verify-source-tree.mjs.sha256": "86e5a0d0239d6a11dd13bd4dc983ccf8d710fbca5e0c6d8e47cab6407ea2a034",
     "setup/Portable-Setup.hta.sha256": "5562632866a222ddd24bb7688a8dcb9b31679d793bac97e129ab6c762dfe5582",
     "setup/assets/devspace-portable.ico.sha256": "ecbf8634d1a8cb0532eea4dc0dcdcb02293b3f11c13e4561b5c7620a3c8d5f05",
@@ -820,7 +820,7 @@
     "setup/test-upstream-workspace-reuse.mjs.sha256": "87a4d35a9eb1ddfb154cecf625adc410d2db414e9716e0e8426cb0b76d59ba12",
     "setup/test-windows-app-icon.mjs.sha256": "2f48e3da2331fa5ed67a19799c61179c1527e0c9a888de08147529fd1497fd20",
     "setup/tunnel-launcher.cjs.sha256": "7bba0ada07e0d2685885159287462726ee16018bebf82919c5ab6cd6136aad66",
-    "ui-next/dist/index.html.sha256": "6ac575c7049efb9f63bf74f7549b900a69f1cb2fc5973faef7a7777651e37fbd",
+    "ui-next/dist/index.html.sha256": "dce243b540de7465cda5e058d97869d3c2a6a2567a31a0ac617a23d6b22c7e30",
     "ui-next/electron/agent-runtime-client.cjs.sha256": "b82552ee1be3f9de58da5e3a5c0003c0fda50e66c957d709703fef68d65c0150",
     "ui-next/electron/main.cjs.sha256": "127828d2a0f8bcc158a1ba9a1899c4b5305b45ebd46e17fb14ff23edcf37b2ad",
     "ui-next/electron/model-providers.cjs.sha256": "22e331ec9aae6fd16363d6f79c1fb987a067dd34b404a097a84bdbd4e5088d69",

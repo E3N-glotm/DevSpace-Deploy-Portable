@@ -215,6 +215,8 @@ foreach ($Test in $Tests) {
 if ($NextIsDefault) {
     Write-Host '==> setup/test-ui-next-navigation.mjs'
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-ui-next-navigation.mjs') -FailureMessage 'Next UI navigation acceptance failed.'
+    Write-Host '==> setup/test-agent-flow-layout.mjs'
+    Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-agent-flow-layout.mjs') -FailureMessage 'Agent flow card layout acceptance failed.'
     Write-Host '==> setup/test-dev4-feature-coverage.mjs'
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev4-feature-coverage.mjs') -FailureMessage 'Next UI feature and contrast coverage failed.'
     if ($EffectiveNextIteration -ge 6) {
