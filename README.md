@@ -32,7 +32,7 @@ DevSpace 本地 MCP 默认监听 `127.0.0.1:7676`。公网接入使用已经配�
 
 - [安装、连接、升级与排查](README-PORTABLE.md)
 - [模型提供商、模型组与 Agent 工作台](docs/AGENT-WORKBENCH.md)
-- [1.1.68 正式版说明](docs/releases/HOTFIX-1.1.68.md) · [版本记录](CHANGELOG.md)
+- [1.1.69 正式版说明](docs/releases/HOTFIX-1.1.69.md) · [版本记录](CHANGELOG.md)
 - [开发指南](docs/DEVELOPMENT.md) · [发行流程](docs/RELEASING.md) · [参与维护](CONTRIBUTING.md)
 
 使用问题与功能建议可提交到 [GitHub Issues](https://github.com/E3N-glotm/DevSpace-Deploy-Portable/issues)。漏洞请按 [安全政策](SECURITY.md) 私下报告。

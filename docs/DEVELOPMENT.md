@@ -15,10 +15,10 @@ if (-not (Test-Path ui-next/runtime/electron.exe)) {
 npm run build --prefix ui-next
 ```
 
-构建完整 Portable 包时，从上一正式版恢复打包所需的运行时。例如，构建 1.1.68 时以 1.1.67 为基础。已存在运行时需要替换时，在隔离目录内显式使用 `-Force`。
+构建完整 Portable 包时，从上一正式版恢复打包所需的运行时。例如，构建 1.1.69 时以 1.1.68 为基础。已存在运行时需要替换时，在隔离目录内显式使用 `-Force`。
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.67
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from-release.ps1 -Version 1.1.68
 ```
 
 ## 源码位置

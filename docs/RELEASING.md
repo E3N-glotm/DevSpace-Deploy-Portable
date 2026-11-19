@@ -12,7 +12,7 @@ GitHub Release 是 Windows 完整包和在线更新附件的发布入口。正�
 在发布工作区执行构建和检查。将示例版本替换为本次版本。
 
 ```powershell
-$Version = '1.1.68'
+$Version = '1.1.69'
 npm run core:pack
 npm ci --prefix app
 node setup/harden-nested-dependencies.mjs
@@ -31,13 +31,13 @@ python setup/build-release.py
 
 提交正式版源码后创建并推送注解标签。仓库变量 `DEVSPACE_RELEASE_APPROVED` 为 `true` 时，推送 `vX.Y.Z` 标签会触发 GitHub Actions 的 Release 构建。工作流从低于目标版本的最近稳定版恢复运行时，然后执行测试、生产依赖审计、打包和上传。
 
-当前正式版应包含以下附件。文件名示例使用 1.1.68。
+当前正式版应包含以下附件。文件名示例使用 1.1.69。
 
 | 附件 | 用途 |
 | --- | --- |
-| `DevSpacePortable-Windows-x64-1.1.68.zip` | 全新安装或完整包恢复 |
-| `DevSpacePortable-Windows-x64-1.1.68.blockmap` | 复用本机文件块并通过 HTTP Range 下载差异 |
-| `DevSpacePortable-Update-<起始版本>-to-1.1.68.zip` | 兼容指定旧版本的升级桥 |
+| `DevSpacePortable-Windows-x64-1.1.69.zip` | 全新安装或完整包恢复 |
+| `DevSpacePortable-Windows-x64-1.1.69.blockmap` | 复用本机文件块并通过 HTTP Range 下载差异 |
+| `DevSpacePortable-Update-<起始版本>-to-1.1.69.zip` | 兼容指定旧版本的升级桥 |
 | `update-manifest.json` | 更新器读取的版本、附件和 SHA-256 信息 |
 | `SHA256SUMS-release.txt` | 完整 ZIP、blockmap 和升级包的校验清单 |
 
