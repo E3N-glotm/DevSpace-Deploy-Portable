@@ -3154,17 +3154,24 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         content: [textBlock(JSON.stringify(value, null, 2))],
         structuredContent: {result:JSON.stringify(value),data:value},
     });
-    function startAgentTask(input, context) {
-        const task = runtimeServices.agentRuntime.start(input,{delegated:true,actor:mcpTaskActor(context,"agent_task_start")});
+    function startAgentTask(input, context, sourceTool="agent_task_start") {
+        const task = runtimeServices.agentRuntime.start(input,{delegated:true,actor:mcpTaskActor(context,sourceTool)});
         runtimeServices.modelWorkflowGate?.onAgentStart(task, modelWorkflowScope(context));
         return task;
     }
-    function legacyAgentView(task) {
+    function legacyAgentView(task, includeEvidence=false) {
         return {
             ...task,
             taskId: task.id,
+            modelId: task.agents.length===1?task.agents[0].profileId:null,
             allowWrites: task.permissions.write,
+            startedAt: task.createdAt,
+            finishedAt: ["completed","failed","cancelled"].includes(task.status)?task.updatedAt:null,
+            inputTokens: task.agents.reduce((total,a)=>total+(a.inputTokens||0),0),
+            outputTokens: task.agents.reduce((total,a)=>total+(a.outputTokens||0),0),
+            estimatedUSD: task.agents.reduce((total,a)=>total+(a.estimatedUSD||0),0),
             answer: task.result ?? task.submission?.summary ?? "",
+            ...(includeEvidence?runtimeServices.agentRuntime.compatibilityEvidence(task.id):{}),
         };
     }
     registerAppTool(server,"model_worker_list",{
@@ -3186,11 +3193,11 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     });
     registerAppTool(server,"model_delegate_task",{
         title:"Delegate to configured DevSpace models",
-        description:"Compatibility entry for model delegation. Uses the current global routing by default, including when a cached client supplies modelId. Omitted permissions inherit the owner's global policy. Explicit false narrows permissions. For backward compatibility, allowWrites=false with no other capability overrides is read-only. Set useSpecifiedModel only for an explicitly requested legacy single Worker (legacy explicit opt-in edit policy). Execution has no fixed deadline. Poll model_task_status with the returned taskId until a result is available. First open the workspace.",
+        description:"Compatibility entry for visible Agent delegation. Every call creates a persisted Agent workbench task, including useSpecifiedModel=true. Global single/group routing is authoritative; a specified model is only a target hint in global auto mode. Omitted permissions inherit the owner's global policy. Explicit false narrows permissions. For backward compatibility, allowWrites=false with no other capability overrides is read-only. Execution has no fixed deadline. Poll model_task_status with the returned taskId until a result is available. First open the workspace.",
         inputSchema:{
             workspaceId:z.string(),
-            modelId:z.string().optional().describe("Worker ID, used only when useSpecifiedModel is true."),
-            useSpecifiedModel:z.boolean().optional().describe("Use the specified legacy single Worker for this task only."),
+            modelId:z.string().optional().describe("Compatibility model hint when useSpecifiedModel=true and global routing is auto."),
+            useSpecifiedModel:z.boolean().optional().describe("Accept the compatibility model hint in global auto mode. Always creates a visible Agent task; never bypasses global single/group routing."),
             independentReview:z.boolean().optional(),
             parallelWorkstreams:z.number().int().min(0).optional(),
             instruction:z.string().min(1).max(8000),
@@ -3205,16 +3212,11 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
         annotations:SHELL_TOOL_ANNOTATIONS,
     },async (input,context)=>{
         const {modelId,useSpecifiedModel,...taskInput}=input;
-        if(!useSpecifiedModel){
-            const legacyReadOnly=taskInput.allowWrites===false&&["allowShell","allowComputer","allowMemory","allowPlugins"].every(key=>taskInput[key]===undefined);
-            const permissions=legacyReadOnly?{allowShell:false,allowComputer:false,allowMemory:false,allowPlugins:false}:{};
-            return workerResult(legacyAgentView(startAgentTask({...taskInput,...permissions},context)));
-        }
-        if(!modelId)throw Error("WORKER_PROFILE_NOT_FOUND");
-        const started=runtimeServices.modelWorker.delegate({...taskInput,modelId},{actor:mcpTaskActor(context,"model_delegate_task")});
-        runtimeServices.modelWorkflowGate?.onDelegate(
-            started,modelWorkflowScope(context));
-        return workerResult(started);
+        if(useSpecifiedModel&&!modelId)throw Error("WORKER_PROFILE_NOT_FOUND");
+        const legacyReadOnly=taskInput.allowWrites===false&&["allowShell","allowComputer","allowMemory","allowPlugins"].every(key=>taskInput[key]===undefined);
+        const permissions=legacyReadOnly?{allowShell:false,allowComputer:false,allowMemory:false,allowPlugins:false}:{};
+        const target=useSpecifiedModel?{modelId}:{};
+        return workerResult(legacyAgentView(startAgentTask({...taskInput,...target,...permissions},context,"model_delegate_task")));
     });
     for(const [toolName,action,description] of [
         ["model_task_status","status","Get progress for a delegated Worker or Agent task. Queued and running tasks remain active and can be polled again with the same taskId."],
@@ -3233,7 +3235,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
                 const task=runtimeServices.agentRuntime[action==="result"?"status":action](taskId,actor,reason);
                 if(action==="result")
                     runtimeServices.modelWorkflowGate?.onAgentStatus(task,modelWorkflowScope(context));
-                return workerResult(legacyAgentView(task));
+                return workerResult(legacyAgentView(task,action==="result"));
             }
             const result=runtimeServices.modelWorker[action](taskId,actor,reason);
             if(action==="result")
@@ -3244,7 +3246,7 @@ function createMcpServer(config, workspaces, reviewCheckpoints, processSessions,
     }
     const agentInput={
         workspaceId:z.string(),groupId:z.string().optional(),modelId:z.string().optional(),
-        routeMode:z.enum(["auto","single","group"]).optional().describe("Task override. Omit to use the owner's global choice."),
+        routeMode:z.enum(["auto","single","group"]).optional().describe("Task preference in global auto mode. The owner's global single/group setting always wins for MCP delegation."),
         independentReview:z.boolean().optional().describe("Set true when independent review is needed in automatic mode."),
         parallelWorkstreams:z.number().int().min(0).optional().describe("Number of distinct subtasks that can genuinely run in parallel. Automatic mode can use a group for two or more."),
         instruction:z.string().min(1).max(16000),allowWrites:z.boolean().optional().describe("Omit to inherit. False disables direct file edits."),

@@ -188,8 +188,13 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         });
         return {group,leaves,members};
     }
-    function resolveRoute(input){
+    function resolveRoute(input,{delegated=false}={}){
         const settings=routingSettings();
+        // MCP arguments are chosen by the upstream model, not by the owner.
+        // Fixed global modes must therefore win over cached/explicit targets.
+        // The authenticated local workbench keeps its manual per-task choice.
+        if(delegated&&settings.mode!=="auto")
+            input={...input,routeMode:undefined,modelId:undefined,groupId:undefined};
         const explicit=input.routeMode;
         if(explicit!==undefined&&!routingModes.has(explicit))throw Error("AGENT_ROUTING_MODE_INVALID");
         if((input.modelId&&input.groupId)||(input.modelId&&explicit==="group")||(input.groupId&&explicit==="single"))
@@ -546,7 +551,7 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
     }
     function start(input,{delegated=false,actor}={}){
         const workspace=workspaces.getWorkspace(input.workspaceId);
-        const target=resolveRoute(input);
+        const target=resolveRoute(input,{delegated});
         const instruction=String(input.instruction??"").trim();if(!instruction||instruction.length>16000)throw Error("INVALID_AGENT_INSTRUCTION");
         const permissions=resolveAgentPermissions(input,config);
         const t={id:"agent_"+randomUUID(),workspaceId:input.workspaceId,instruction,permissions,writer:permissions.write||permissions.shell||permissions.computer||permissions.plugins,
@@ -569,7 +574,25 @@ export function createAgentRuntime({sqlite,portableRoot,workspaces,worker,memory
         try{operation();}catch(e){record(false,safeText(e.message,500));throw e;}
         record(true,null);return view(t);
     }
+    function compatibilityEvidence(id){
+        find(id);
+        const rows=sqlite.prepare("select data from devspace_agent_events where task_id=? and json_extract(data,'$.kind') in ('tool-start','tool-result','tool-error') order by seq desc limit 75").all(id).reverse();
+        const starts=new Map(),evidence=[];
+        for(const {data} of rows){
+            const e=JSON.parse(data),key=e.agent+":"+e.callId;
+            if(e.kind==="tool-start"){
+                try{starts.set(key,JSON.parse(e.args));}catch{starts.set(key,{});}
+            }else{
+                const path=starts.get(key)?.path;
+                starts.delete(key);
+                evidence.push({tool:e.name,...(path?{path}:{}),ok:e.kind==="tool-result"&&e.ok!==false,...(e.error?{error:e.error}:{})});
+            }
+        }
+        const {count}=sqlite.prepare("select count(*) as count from devspace_agent_events where task_id=? and json_extract(data,'$.kind') in ('tool-result','tool-error')").get(id);
+        return {toolCalls:count,evidence:evidence.slice(-25)};
+    }
     return {start,groups,routingSettings,setRoutingSettings,list:()=>[...tasks.values()].map(view).reverse(),status:id=>view(find(id)),
+        compatibilityEvidence,
         deleteHistory,
         recover(){for(const t of tasks.values())if(t.resumeOnBoot&&!t.pending){try{launch(t);}catch(e){t.resumeOnBoot=false;t.error=safeText(e.message);save(t);}}},
         events:(id,after=0,limit=100)=>{find(id);return sqlite.prepare("select seq,data from devspace_agent_events where task_id=? and seq>? order by seq limit ?").all(id,after,Math.min(500,Math.max(1,limit))).map(r=>({seq:r.seq,...JSON.parse(r.data)}));},

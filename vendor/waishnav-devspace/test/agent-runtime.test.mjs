@@ -57,6 +57,9 @@ test("default group independently reviews, records events and workspace memory",
     assert.ok(f.runtime.events(t.id).some(e=>e.kind==="message"));
     assert.ok(f.runtime.events(t.id).some(e=>e.kind==="review"&&e.decision==="approve"));
     assert.ok(!f.runtime.events(t.id).some(e=>e.kind==="auto-accepted"));
+    assert.deepEqual(f.runtime.compatibilityEvidence(t.id),{
+        toolCalls:1,evidence:[{tool:"read",path:"file.txt",ok:true}],
+    });
     await f.runtime.close();f.sqlite.close();
 });
 test("delegated single-model delivery settles once after the writer exits",async()=>{
@@ -179,6 +182,33 @@ test("global routing persists, honors explicit targets, and uses single-model mo
     assert.equal(chosen.routing.reason,"selected-single");
     assert.equal(chosen.agents[0].profileId,"p2");
     await restored.runtime.close();f.sqlite.close();
+});
+test("fixed global modes govern MCP targets while local workbench choices remain explicit",async()=>{
+    const f=fixture();
+    f.runtime.setRoutingSettings({mode:"group",defaultWorkerId:"p1"});
+    for(const hint of [{modelId:"p1"},{routeMode:"single"},{routeMode:"auto"},
+        {groupId:"stale-group"},{modelId:"stale-model",routeMode:"single"}]){
+        const task=f.runtime.start({workspaceId:"ws",instruction:"Honor global group",...hint},{delegated:true});
+        assert.equal(task.routing.reason,"global-group");
+        assert.equal(task.groupId,"g");
+        assert.deepEqual(task.agents.map(a=>a.profileId),["p1","p2"]);
+        const done=await until(f.runtime,task.id,["completed","paused"]);
+        assert.equal(done.status,"completed",done.error);
+        assert.ok(done.agents.every(a=>a.steps>0),"All group members must actually participate");
+        assert.ok(f.runtime.events(task.id).some(e=>e.kind==="review"));
+        assert.ok(f.sqlite.prepare("select data from devspace_agent_tasks where id=?").get(task.id));
+    }
+    f.runtime.setRoutingSettings({mode:"single",defaultWorkerId:"p1"});
+    const single=f.runtime.start({workspaceId:"ws",instruction:"Honor global single",groupId:"g",routeMode:"group"},{delegated:true});
+    assert.equal(single.routing.reason,"global-single");
+    assert.deepEqual(single.agents.map(a=>a.profileId),["p1"]);
+    assert.equal((await until(f.runtime,single.id,["completed"])).status,"completed");
+    f.runtime.setRoutingSettings({mode:"auto"});
+    const automatic=f.runtime.start({workspaceId:"ws",instruction:"Auto accepts a task target",modelId:"p2"},{delegated:true});
+    assert.equal(automatic.routing.reason,"selected-single");
+    assert.equal(automatic.agents[0].profileId,"p2");
+    await until(f.runtime,automatic.id,["completed"]);
+    await f.runtime.close();f.sqlite.close();
 });
 test("automatic routing retains a single model for optional parallel work without a default team",async()=>{
     const f=fixture({groups:()=>[],request:async()=>({content:"Finished"})});

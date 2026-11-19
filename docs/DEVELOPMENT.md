@@ -40,6 +40,27 @@ PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/hydrate-runtime-from
 5. Run the application from a non-production checkout and verify that no
    scheduled task or tunnel points at the production directory.
 
+## Model delegation and global routing
+
+Both MCP delegation tools, `agent_task_start` and `model_delegate_task`, create
+persisted Agent Runtime tasks. The compatibility flag `useSpecifiedModel=true`
+must never start an invisible `mworker_` job. New compatibility calls return an
+`agent_` task through the existing `taskId`/`answer` response shape; status,
+result and cancellation tools continue accepting older `mworker_` IDs that
+remain in the running process.
+
+For MCP delegation, a fixed global `single` or `group` mode takes precedence
+over `modelId`, `groupId`, `routeMode` and compatibility target hints. In global
+`auto` mode an explicit task target remains available. A manual task selection
+in the authenticated local workbench may override its global default. Routing
+is resolved when a task is created; existing tasks are not silently restarted
+or reassigned when the global setting changes.
+
+Regression coverage lives in `vendor/waishnav-devspace/test/agent-runtime.test.mjs`
+and `setup/test-model-workflow-wire.mjs`. The latter exercises real OAuth, MCP
+and workbench HTTP endpoints against a local fake model, without using a bound
+production model or modifying production state.
+
 ## Native UI
 
 The native control center source is:

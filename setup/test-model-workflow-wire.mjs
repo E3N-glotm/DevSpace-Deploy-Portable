@@ -40,7 +40,7 @@ try{
                 const evidence=request.messages.find(m=>m.role==="tool");
                 if(evidence)assert.match(evidence.content,/remote file from enrolled Agent/);
                 const message=evidence?{content:"Verified remote file"}:{content:null,tool_calls:[{
-                    id:"remote-read",type:"function",function:{name:"read_file",arguments:JSON.stringify({path:"remote.txt"})}
+                    id:"remote-read",type:"function",function:{name:request.tools.find(t=>["read","read_file"].includes(t.function.name)).function.name,arguments:JSON.stringify({path:"remote.txt"})}
                 }]};
                 res.writeHead(200,{"Content-Type":"application/json"});
                 res.end(JSON.stringify({choices:[{message}],usage:{prompt_tokens:20,completion_tokens:10}}));
@@ -253,6 +253,8 @@ try{
     }});
     const taskId=delegated.structuredContent?.data?.taskId;
     assert.ok(taskId);
+    assert.match(taskId,/^agent_/,"Even the explicit compatibility Worker must create a persisted Agent task");
+    assert.ok((await (await localAction("list")).json()).some(t=>t.id===taskId),"Compatibility task missing from workbench");
     assert.equal(delegated.structuredContent?.data?.allowWrites,false);
     const readDuringDelegation=await client.callTool({
         name:readTool.name,arguments:argumentsRead});
@@ -408,7 +410,9 @@ try{
     assert.equal(desktop.status,200);
     const desktopGroup=await desktop.json();
     assert.equal(desktopGroup.routing.reason,"global-group");
-    assert.equal((await legacyTask("cancel",desktopGroup.id)).structuredContent?.data?.status,"cancelled");
+    const desktopCancelled=await localTask("cancel",desktopGroup.id);
+    assert.equal(desktopCancelled.status,200);
+    assert.equal((await desktopCancelled.json()).status,"cancelled");
     const singleDesktop=await localAction("start",{path:workspace,modelId:"worker-one",instruction:"Override this one Desktop task"});
     assert.equal(singleDesktop.status,200);
     const desktopOverride=await singleDesktop.json();
@@ -424,8 +428,33 @@ try{
     assert.equal((await (await localAction("routing-settings")).json()).mode,"group");
     const override=await legacyDelegate({useSpecifiedModel:true});
     assert.ok(!override.isError,contentText(override));
-    assert.equal(override.structuredContent.data.modelId,"worker-two");
+    assert.match(override.structuredContent.data.taskId,/^agent_/);
+    assert.equal(override.structuredContent.data.routing.reason,"global-group");
+    assert.equal(override.structuredContent.data.agents.length,2);
+    assert.ok((await (await localAction("list")).json()).some(t=>t.id===override.structuredContent.data.taskId));
     await legacyTask("cancel",override.structuredContent.data.taskId);
+    for(const hint of [{routeMode:"single"},{modelId:"worker-one"},{routeMode:"auto",modelId:"stale-cached-model"}]){
+        const native=await client.callTool({name:"agent_task_start",arguments:{workspaceId,instruction:"MCP cannot override fixed global group",...hint,
+            allowWrites:false,allowShell:false,allowComputer:false,allowMemory:false,allowPlugins:false}});
+        assert.ok(!native.isError,contentText(native));
+        const task=native.structuredContent.data;
+        assert.equal(task.routing.reason,"global-group");
+        assert.equal(task.agents.length,2);
+        assert.ok((await (await localAction("list")).json()).some(t=>t.id===task.id));
+        await legacyTask("cancel",task.id);
+    }
+    await selectRouting("auto");
+    const specifiedAuto=await legacyDelegate({useSpecifiedModel:true});
+    assert.ok(!specifiedAuto.isError,contentText(specifiedAuto));
+    assert.match(specifiedAuto.structuredContent.data.taskId,/^agent_/);
+    assert.equal(specifiedAuto.structuredContent.data.modelId,"worker-two");
+    await legacyTask("cancel",specifiedAuto.structuredContent.data.taskId);
+    await selectRouting("single");
+    const specifiedSingle=await legacyDelegate({useSpecifiedModel:true});
+    assert.ok(!specifiedSingle.isError,contentText(specifiedSingle));
+    assert.equal(specifiedSingle.structuredContent.data.routing.reason,"global-single");
+    assert.equal(specifiedSingle.structuredContent.data.modelId,"worker-one");
+    await legacyTask("cancel",specifiedSingle.structuredContent.data.taskId);
     rmSync(groupsFile);
     profiles.models.pop();
     writeFileSync(profilesFile,JSON.stringify(profiles));
