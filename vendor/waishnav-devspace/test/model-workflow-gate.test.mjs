@@ -256,7 +256,7 @@ test("MCP HTTP transport handles all tools/call including plugin tools",()=>{
     assert.match(s,/modelWorkflowGates\.get\(transport\)/);
     assert.match(s,/model_workflow_tool_blocked/);
     assert.match(s,/Batch tools\/call requests are disabled/);
-    assert.match(s,/modelWorkflowGate\?\.onDelegate/);
+    assert.doesNotMatch(s,/modelWorker\.delegate\(/,"MCP delegation must not bypass the persisted Agent Runtime");
     assert.match(s,/modelWorkflowGate\?\.onResult/);
     assert.match(s,/modelWorkflowGate\?\.onAgentStart/);
     assert.match(s,/modelWorkflowGate\?\.onAgentStatus/);
