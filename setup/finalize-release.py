@@ -222,6 +222,7 @@ def update_manifest(version: str, hotfix: str | None, dev_iteration: str | None)
             "setup/create-rescue-overlay.py",
             "setup/create-blockmap.py",
             "setup/blockmap-updater.cjs",
+            "setup/blockmap-plan.cjs",
             "setup/portable-updater.ps1",
             "setup/test-runtime-cards.mjs",
             "setup/test-card-host-interactions.mjs",

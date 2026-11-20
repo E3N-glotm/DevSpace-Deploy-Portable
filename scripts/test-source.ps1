@@ -145,6 +145,7 @@ $Tests = @(
     "setup/test-online-updater-contract.mjs",
     "setup/test-updater-long-path.mjs",
     "setup/test-blockmap-update.mjs",
+    "setup/test-blockmap-plan.mjs",
     "setup/test-release-migration-contract.mjs",
     "setup/test-updater-apply-recovery.mjs",
     "setup/test-update-launch-ack.mjs",

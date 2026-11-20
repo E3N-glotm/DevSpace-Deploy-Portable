@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const zlib = require("node:zlib");
+const changePlan = require("./blockmap-plan.cjs");
 
 const MAGIC = Buffer.from("DSPBLK2\n", "ascii");
 const PRELUDE_SIZE = 24;
@@ -358,7 +359,7 @@ async function probeCandidate(curl, candidate, temporaryRoot, sampleBytes) {
     if (result.code !== 0 || status !== 206 || size !== expectedBytes) {
       return { ...candidate, ok: false, error: result.stderr.trim() || `HTTP ${status}, ${size} bytes`, elapsedMs };
     }
-    return { ...candidate, ok: true, status, ttfb, total, speed, elapsedMs };
+    return { ...candidate, ok: true, status, ttfb, total, speed, elapsedMs, probeData: fs.readFileSync(file) };
   } finally {
     fs.rmSync(file, { force: true });
   }
@@ -457,6 +458,7 @@ async function downloadRange(curl, routeState, start, end, output) {
   const expectedBytes = end - start + 1;
   const errors = [];
   for (;;) {
+    const routeEpoch = routeState.refreshes;
     for (const candidate of routeState.candidates) {
       const temporary = path.join(routeState.temporaryRoot, `range-${crypto.randomUUID()}.part`);
       const timeoutSeconds = rangeTimeoutSeconds(candidate, expectedBytes);
@@ -482,14 +484,20 @@ async function downloadRange(curl, routeState, start, end, output) {
         fs.rmSync(temporary, { force: true });
       }
     }
-    if (!routeState.sameTierReprobeUsed) {
-      routeState.log(`all candidates failed for tier=${routeState.tierName} range=${start}-${end}; re-probing before failover`);
-      await reprobeCurrentRouteTier(curl, routeState);
-      continue;
-    }
-    routeState.log(`re-probed tier=${routeState.tierName} still failed for range=${start}-${end}; moving to the next priority tier`);
-    routeState.sameTierReprobeUsed = false;
-    if (!(await advanceRouteTier(curl, routeState))) break;
+    // Concurrent ranges share one route refresh; do not advance multiple tiers
+    // just because several requests observed the same transient failure.
+    if (!routeState.recovery) routeState.recovery = (async () => {
+      if (routeState.refreshes !== routeEpoch) return true;
+      if (!routeState.sameTierReprobeUsed) {
+        routeState.log(`all candidates failed for tier=${routeState.tierName} range=${start}-${end}; re-probing before failover`);
+        await reprobeCurrentRouteTier(curl, routeState);
+        return true;
+      }
+      routeState.log(`re-probed tier=${routeState.tierName} still failed for range=${start}-${end}; moving to the next priority tier`);
+      routeState.sameTierReprobeUsed = false;
+      return advanceRouteTier(curl, routeState);
+    })().finally(() => { routeState.recovery = null; });
+    if (!(await routeState.recovery)) break;
   }
   fail(`HTTP Range ${start}-${end} failed through all ranked endpoints: ${errors.join("; ")}`);
 }
@@ -497,8 +505,13 @@ async function downloadRange(curl, routeState, start, end, output) {
 async function readHeader(curl, routeState, assetSize, expectedHeaderSize, expectedHeaderSha256, temporaryRoot, progress) {
   if (!Number.isSafeInteger(assetSize) || assetSize <= PRELUDE_SIZE) fail("blockmap asset size is invalid");
   const preludeFile = path.join(temporaryRoot, "blockmap-prelude.bin");
-  await downloadRange(curl, routeState, 0, PRELUDE_SIZE - 1, preludeFile);
-  const prelude = fs.readFileSync(preludeFile);
+  const prefetched = routeState.changedOnly ? routeState.candidates[0].probeData : null;
+  let prelude;
+  if (Buffer.isBuffer(prefetched) && prefetched.length >= PRELUDE_SIZE) prelude = prefetched.subarray(0, PRELUDE_SIZE);
+  else {
+    await downloadRange(curl, routeState, 0, PRELUDE_SIZE - 1, preludeFile);
+    prelude = fs.readFileSync(preludeFile);
+  }
   if (!prelude.subarray(0, 8).equals(MAGIC)) fail("blockmap prelude magic is invalid");
   const compressedSize = Number(prelude.readBigUInt64LE(8));
   const rawSize = Number(prelude.readBigUInt64LE(16));
@@ -510,11 +523,13 @@ async function readHeader(curl, routeState, assetSize, expectedHeaderSize, expec
 
   const headerFile = path.join(temporaryRoot, "blockmap-header.bin");
   fs.rmSync(headerFile, { force: true });
-  const segmentCount = Math.ceil(compressedSize / HEADER_RANGE_SEGMENT_SIZE);
-  let receivedHeaderBytes = 0;
+  const prefetchedSize = Buffer.isBuffer(prefetched) ? Math.min(compressedSize, prefetched.length - PRELUDE_SIZE) : 0;
+  if (prefetchedSize > 0) fs.writeFileSync(headerFile, prefetched.subarray(PRELUDE_SIZE, PRELUDE_SIZE + prefetchedSize));
+  const segmentCount = Math.ceil((compressedSize - prefetchedSize) / HEADER_RANGE_SEGMENT_SIZE);
+  let receivedHeaderBytes = prefetchedSize;
   const headerStarted = Date.now();
   for (let segmentIndex = 0; segmentIndex < segmentCount; segmentIndex += 1) {
-    const relativeStart = segmentIndex * HEADER_RANGE_SEGMENT_SIZE;
+    const relativeStart = prefetchedSize + segmentIndex * HEADER_RANGE_SEGMENT_SIZE;
     const relativeEnd = Math.min(compressedSize, relativeStart + HEADER_RANGE_SEGMENT_SIZE) - 1;
     const absoluteStart = PRELUDE_SIZE + relativeStart;
     const absoluteEnd = PRELUDE_SIZE + relativeEnd;
@@ -673,16 +688,21 @@ function missingChunks(header, files, reusable) {
   return [...missing.values()].sort((left, right) => left.offset - right.offset);
 }
 
-function groupChunks(chunks) {
+function groupChunks(chunks, coalesce = false) {
   const groups = [];
   let current = null;
+  let gaps = 0;
+  const gapBudget = coalesce ? Math.max(64 * 1024, Math.floor(chunks.reduce((n, c) => n + c.compressedSize, 0) * 0.15)) : 0;
   for (const chunk of chunks) {
     const end = chunk.offset + chunk.compressedSize;
     if (
       current
-      && chunk.offset === current.end
+      && chunk.offset >= current.end
+      && chunk.offset - current.end <= (coalesce ? 32 * 1024 : 0)
+      && gaps + chunk.offset - current.end <= gapBudget
       && end - current.start <= RANGE_GROUP_LIMIT
     ) {
+      gaps += chunk.offset - current.end;
       current.chunks.push(chunk);
       current.end = end;
       continue;
@@ -695,15 +715,15 @@ function groupChunks(chunks) {
 
 async function downloadMissingChunks(curl, routeState, header, dataOffset, chunks, cacheRoot, temporaryRoot, progress, reusedBytes, targetBytes) {
   mkdirp(cacheRoot);
-  const groups = groupChunks(chunks);
-  const totalCompressedBytes = chunks.reduce((sum, chunk) => sum + chunk.compressedSize, 0);
+  const groups = groupChunks(chunks, routeState.changedOnly);
+  const totalCompressedBytes = groups.reduce((sum, group) => sum + group.end - group.start, 0);
   let downloadedBytes = 0;
   const started = Date.now();
   let transport = routeState.candidates[0].transport;
   let selectedCandidate = routeState.candidates[0];
 
-  for (let groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
-    const group = groups[groupIndex];
+  progress("downloading", "正在下载差分缺失块", { bytesTotal: totalCompressedBytes, transport });
+  await changePlan.mapLimit(groups, routeState.changedOnly ? 3 : 1, async (group, groupIndex) => {
     const rangeFile = path.join(temporaryRoot, `group-${String(groupIndex + 1).padStart(5, "0")}.bin`);
     const absoluteStart = dataOffset + group.start;
     const absoluteEnd = dataOffset + group.end - 1;
@@ -735,7 +755,7 @@ async function downloadMissingChunks(curl, routeState, header, dataOffset, chunk
       reusedBytes,
       targetBytes,
     });
-  }
+  });
   return { downloadedBytes, totalCompressedBytes, transport, groupCount: groups.length, selectedCandidate };
 }
 
@@ -785,7 +805,8 @@ function reconstructFiles(payload, files, reusable, cacheRoot, progress, reusabl
         digest.update(raw);
         writtenBytes += raw.length;
       }
-      fs.fsyncSync(output);
+      // Staging is disposable and hash checked; keep OS write buffering instead
+      // of serializing a disk flush for every installed dependency file.
     } finally {
       fs.closeSync(output);
     }
@@ -817,6 +838,9 @@ async function stage(args) {
   const headerSize = Number(requireArg(args, "header-size"));
   const headerSha256 = requireArg(args, "header-sha256").toLowerCase();
   const targetVersion = requireArg(args, "target-version");
+  const changedOnly = args.mode === "changed-files";
+  const planFile = changedOnly ? path.resolve(requireArg(args, "plan-file")) : "";
+  const reuseIndex = args["reuse-index"] || path.join(root, "data", "state", "blockmap-reuse-index.json");
   const progress = createProgressWriter(args["progress-file"] ? path.resolve(args["progress-file"]) : "");
   const log = createDiagnosticLogger(args["log-file"] ? path.resolve(args["log-file"]) : "");
   if (!/^\d+\.\d+\.\d+$/.test(targetVersion)) fail(`invalid target version: ${targetVersion}`);
@@ -826,6 +850,7 @@ async function stage(args) {
   const curl = resolveCurl(root, args.curl);
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "devspace-blockmap-"));
   const cacheRoot = path.join(temporaryRoot, "chunks");
+  const startedAt = Date.now();
   try {
     const selected = await selectRangeCandidates(curl, assetUrl, assetSize, args, temporaryRoot, progress, log, 0);
     const routeState = {
@@ -841,8 +866,12 @@ async function stage(args) {
       tierCount: selected.tierCount,
       refreshes: 0,
       sameTierReprobeUsed: false,
+      changedOnly,
     };
+    log(`route selected elapsed=${Date.now() - startedAt}ms`);
+    progress("blockmap-header", "正在读取并校验差分索引", { bytesTotal: headerSize });
     const { header, dataOffset } = await readHeader(curl, routeState, assetSize, headerSize, headerSha256, temporaryRoot, progress);
+    log(`header ready bytes=${headerSize} elapsed=${Date.now() - startedAt}ms`);
     const validated = validateHeader(header, targetVersion);
     progress("analyzing", "分析当前安装文件并计算可复用块", {
       bytesReceived: 0,
@@ -850,11 +879,16 @@ async function stage(args) {
       transport: "local-sha256",
       targetBytes: validated.totalBytes,
     });
-    const reuse = analyzeLocalReuse(root, validated.files, progress);
-    const missing = missingChunks(header, validated.files, reuse.reusable);
+    const analysisAt = Date.now();
+    const reuse = changedOnly
+      ? await changePlan.analyze(root, validated.files, Number(header.blockSize), reuseIndex, progress)
+      : analyzeLocalReuse(root, validated.files, progress);
+    const materializedFiles = changedOnly ? reuse.changed : validated.files;
+    const materializedBytes = materializedFiles.reduce((sum, item) => sum + item.size, 0);
+    const missing = missingChunks(header, materializedFiles, reuse.reusable);
     const uniqueTargetChunks = new Set(validated.files.flatMap((file) => file.blocks.map((block) => block.hash))).size;
-    const missingRawBytes = missing.reduce((sum, item) => sum + item.size, 0);
-    const reusableRawBytes = Math.max(0, validated.totalBytes - missingRawBytes);
+    const reusableRawBytes = validated.files.reduce((sum, file) => sum + file.blocks.reduce((n, b) => n + (reuse.reusable.has(b.hash) ? b.size : 0), 0), 0);
+    log(`analysis complete files=${validated.files.length} changed=${materializedFiles.length} scannedBytes=${reuse.scannedBytes ?? validated.totalBytes} cacheHits=${reuse.cacheHits || 0} elapsed=${Date.now() - analysisAt}ms`);
 
     let download = {
       downloadedBytes: 0,
@@ -878,19 +912,24 @@ async function stage(args) {
       );
     }
 
+    log(`missing chunks ready downloaded=${download.downloadedBytes} ranges=${download.groupCount}`);
+    const reconstructAt = Date.now();
+    progress("reconstructing", "正在准备发生变化的更新文件", { bytesTotal: materializedBytes });
     fs.rmSync(payload, { recursive: true, force: true });
     mkdirp(payload);
     const writtenBytes = reconstructFiles(
       payload,
-      validated.files,
+      materializedFiles,
       reuse.reusable,
       cacheRoot,
       progress,
       reusableRawBytes,
-      validated.totalBytes,
+      materializedBytes,
     );
+    log(`reconstruction complete files=${materializedFiles.length} writtenBytes=${writtenBytes} elapsed=${Date.now() - reconstructAt}ms total=${Date.now() - startedAt}ms`);
 
-    const versionManifestPath = path.join(payload, "VERSION-MANIFEST.json");
+    const stagedManifest = path.join(payload, "VERSION-MANIFEST.json");
+    const versionManifestPath = fs.existsSync(stagedManifest) ? stagedManifest : path.join(root, "VERSION-MANIFEST.json");
     let versionManifest;
     try {
       versionManifest = JSON.parse(fs.readFileSync(versionManifestPath, "utf8"));
@@ -901,7 +940,12 @@ async function stage(args) {
       fail(`reconstructed version manifest does not report ${targetVersion}`);
     }
 
-    progress("staged", "Blockmap 差分包已重组并完成逐文件 SHA-256 校验", {
+    let planResult = {};
+    if (changedOnly) {
+      const deleted = await changePlan.obsoleteFiles(root, validated.files, Number(header.blockSize));
+      planResult = changePlan.writePlan(planFile, targetVersion, headerSha256, reuse, deleted, Number(header.blockSize));
+    }
+    progress("staged", "Blockmap 更新文件已准备并完成 SHA-256 校验", {
       bytesReceived: download.downloadedBytes,
       bytesTotal: download.totalCompressedBytes,
       transport: download.transport,
@@ -910,6 +954,11 @@ async function stage(args) {
     });
     return {
       success: true,
+      payloadMode: changedOnly ? "changed-files" : "full",
+      planFile,
+      ...planResult,
+      scannedBytes: reuse.scannedBytes ?? validated.totalBytes,
+      cacheHits: reuse.cacheHits || 0,
       format: "devspace-block-pack-v2",
       targetVersion,
       targetFileCount: validated.files.length,
@@ -965,6 +1014,13 @@ async function main() {
   let result;
   if (action === "self-test") result = selfTest();
   else if (action === "stage") result = await stage(args);
+  else if (action === "verify-plan") result = await changePlan.verify(
+    path.resolve(requireArg(args, "root")), path.resolve(requireArg(args, "payload")),
+    path.resolve(requireArg(args, "plan-file")), requireArg(args, "plan-sha256"),
+    args.installed === "true", args["reuse-index"] || "",
+    createProgressWriter(args["progress-file"] || ""),
+    args["verify-all"] === "true",
+  );
   else fail(`unsupported blockmap updater action: ${action}`);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

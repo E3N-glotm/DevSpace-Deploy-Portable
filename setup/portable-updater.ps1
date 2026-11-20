@@ -1135,14 +1135,15 @@ function Get-LatestRelease {
     }
 }
 
-function ConvertTo-SafeRelativePath([string]$Value) {
+function ConvertTo-SafeRelativePath([string]$Value, [switch]$AllowBundledPlugin) {
     $normalized = ([string]$Value).Replace('\','/')
     if ([string]::IsNullOrWhiteSpace($normalized)) { throw "Update path is empty." }
     if ($normalized.StartsWith('/') -or $normalized -match '(^|/)\.\.(/|$)' -or $normalized -match '^[A-Za-z]:') {
         throw "Unsafe update path: $Value"
     }
     $first = ($normalized -split '/')[0]
-    if (@("data", "logs", "reports") -contains $first) {
+    $bundledPlugin = $AllowBundledPlugin -and $normalized.StartsWith('data/plugins/installed/codex-runtime-bridge/', [StringComparison]::OrdinalIgnoreCase)
+    if ((@("data", "logs", "reports") -contains $first) -and -not $bundledPlugin) {
         throw "Incremental updates may not modify persistent path: $normalized"
     }
     return $normalized
@@ -1490,6 +1491,7 @@ function Stage-BlockmapUpdate([object]$Latest, [object]$Blockmap) {
     $stage = Join-Path $UpdateRoot ("{0}-blockmap-{1}" -f $Latest.version, [guid]::NewGuid().ToString("N"))
     $payload = Join-Path $stage "payload"
     $portableRoot = Join-Path $payload "DevSpacePortable"
+    $blockmapPlanFile = Join-Path $stage "blockmap-plan.json"
     New-Item -ItemType Directory -Force -Path $stage,$payload | Out-Null
     try {
         $node = Join-Path $Root "runtime\node\node.exe"
@@ -1502,6 +1504,8 @@ function Stage-BlockmapUpdate([object]$Latest, [object]$Blockmap) {
         $arguments = @(
             $engine,
             "stage",
+            "--mode", "changed-files",
+            "--plan-file", $blockmapPlanFile,
             "--root", $Root,
             "--asset-url", ([string]$Blockmap.asset.browser_download_url),
             "--asset-size", ([string][int64]$Blockmap.manifest.size),
@@ -1534,20 +1538,31 @@ function Stage-BlockmapUpdate([object]$Latest, [object]$Blockmap) {
         if (-not [bool]$blockmapResult.success) { throw "Blockmap updater did not report a successful staging result." }
 
         foreach ($required in @("DevSpace-Portable.exe", "runtime\node\node.exe", "setup\portable-manager.cjs", "VERSION-MANIFEST.json")) {
-            if (-not (Test-Path (Join-Path $portableRoot $required) -PathType Leaf)) { throw "Blockmap staged update is incomplete: $required" }
+            if (-not (Test-Path (Join-Path $portableRoot $required) -PathType Leaf) -and -not (Test-Path (Join-Path $Root $required) -PathType Leaf)) { throw "Blockmap staged update is incomplete: $required" }
         }
-        $targetManifest = Get-Content -LiteralPath (Join-Path $portableRoot "VERSION-MANIFEST.json") -Raw | ConvertFrom-Json
+        $targetManifestFile = Join-Path $portableRoot "VERSION-MANIFEST.json"
+        if (-not (Test-Path $targetManifestFile)) { $targetManifestFile = Join-Path $Root "VERSION-MANIFEST.json" }
+        $targetManifest = Get-Content -LiteralPath $targetManifestFile -Raw | ConvertFrom-Json
         if ([string]$targetManifest.runtime.devspacePortable -ne [string]$Latest.version) {
             throw "Blockmap staged version manifest does not report $($Latest.version)."
         }
 
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $stage "portable-updater.ps1") -Force
+        foreach ($helper in @("blockmap-updater.cjs", "blockmap-plan.cjs")) {
+            Copy-Item -LiteralPath (Join-Path $Root "setup\$helper") -Destination (Join-Path $stage $helper) -Force
+        }
         $stageInfo = [ordered]@{
-            formatVersion = 3
+            formatVersion = 4
             currentVersion = $CurrentVersion
             targetVersion = $Latest.version
             repository = $Repository
             updateMode = "blockmap"
+            payloadMode = "changed-files"
+            planSha256 = [string]$blockmapResult.planSha256
+            changedFileCount = [int]$blockmapResult.changedFileCount
+            unchangedFileCount = [int]$blockmapResult.unchangedFileCount
+            scannedBytes = [int64]$blockmapResult.scannedBytes
+            cacheHits = [int]$blockmapResult.cacheHits
             stagedAt = (Get-Date).ToUniversalTime().ToString("o")
             payloadRoot = $portableRoot
             blockmapName = [string]$Blockmap.manifest.name
@@ -2149,6 +2164,21 @@ function Repair-PortableTasksAndStart([switch]$IgnoreFailure) {
     return [pscustomobject]$result
 }
 
+function Invoke-BlockmapPlanVerification([string]$Stage, [object]$StageInfo, [string]$PayloadRoot, [switch]$Installed) {
+    $planHash = [string]$StageInfo.planSha256
+    if ($planHash -notmatch '^[0-9a-f]{64}$') { throw "Staged blockmap plan digest is invalid." }
+    $arguments = @(
+        (Join-Path $Stage "blockmap-updater.cjs"), "verify-plan",
+        "--root", $Root, "--payload", $PayloadRoot,
+        "--plan-file", (Join-Path $Stage "blockmap-plan.json"),
+        "--plan-sha256", $planHash
+    )
+    $arguments += @("--progress-file", $ProgressFile, "--reuse-index", (Join-Path $Root "data\state\blockmap-reuse-index.json"))
+    if ($Installed) { $arguments += @("--installed", "true") }
+    $output = & (Join-Path $Root "runtime\node\node.exe") @arguments 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Blockmap apply validation failed: $($output.Trim())" }
+}
+
 function Apply-StagedUpdate {
     if ([string]::IsNullOrWhiteSpace($StagingPath)) { throw "StagingPath is required for Apply." }
     $stage = [IO.Path]::GetFullPath($StagingPath).TrimEnd('\')
@@ -2162,6 +2192,7 @@ function Apply-StagedUpdate {
     Assert-Version $targetVersion "Target version"
     $updateMode = if ([string]$stageInfo.updateMode) { [string]$stageInfo.updateMode } else { "full" }
     if (@("full", "blockmap", "incremental", "incremental-chain") -notcontains $updateMode) { throw "Unsupported staged update mode: $updateMode" }
+    $blockmapChanges = $updateMode -eq "blockmap" -and [string]$stageInfo.payloadMode -eq "changed-files"
     $payloadRoot = ""
     if ($updateMode -ne "incremental-chain") {
         $payloadRoot = [IO.Path]::GetFullPath([string]$stageInfo.payloadRoot).TrimEnd('\')
@@ -2169,7 +2200,16 @@ function Apply-StagedUpdate {
     }
     $deltaManifest = $null
     $deltaSteps = New-Object System.Collections.ArrayList
-    if ($updateMode -eq "full" -or $updateMode -eq "blockmap") {
+    if ($blockmapChanges) {
+        Invoke-BlockmapPlanVerification $stage $stageInfo $payloadRoot
+        $deltaManifest = Get-Content -LiteralPath (Join-Path $stage "blockmap-plan.json") -Raw | ConvertFrom-Json
+        if ([string]$deltaManifest.targetVersion -ne $targetVersion -or [string]$deltaManifest.headerSha256 -ne [string]$stageInfo.blockmapHeaderSha256) {
+            throw "Staged blockmap plan does not match its authenticated target."
+        }
+        $deltaManifest | Add-Member -NotePropertyName fromVersion -NotePropertyValue $CurrentVersion -Force
+        $deltaManifest | Add-Member -NotePropertyName toVersion -NotePropertyValue $targetVersion -Force
+        [void]$deltaSteps.Add([pscustomobject]@{ manifest = $deltaManifest; payloadRoot = $payloadRoot })
+    } elseif ($updateMode -eq "full" -or $updateMode -eq "blockmap") {
         if (-not (Test-Path (Join-Path $payloadRoot "DevSpace-Portable.exe"))) { throw "Staged Portable executable is missing." }
     } elseif ($updateMode -eq "incremental") {
         $deltaManifestPath = [IO.Path]::GetFullPath([string]$stageInfo.deltaManifestPath)
@@ -2253,7 +2293,7 @@ function Apply-StagedUpdate {
     try {
         Write-UpdateProgress -Phase "applying" -Message "Applying DevSpace Portable $targetVersion program files"
 
-        if ($updateMode -eq "incremental" -or $updateMode -eq "incremental-chain") {
+        if ($blockmapChanges -or $updateMode -eq "incremental" -or $updateMode -eq "incremental-chain") {
             $stepIndex = 0
             foreach ($deltaStep in @($deltaSteps)) {
                 $stepIndex++
@@ -2261,7 +2301,7 @@ function Apply-StagedUpdate {
                 $stepPayloadRoot = [string]$deltaStep.payloadRoot
                 Write-UpdateLog "Applying incremental step $stepIndex/$($deltaSteps.Count): $($stepManifest.fromVersion) -> $($stepManifest.toVersion)."
                 foreach ($entry in @($stepManifest.changedFiles)) {
-                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
+                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path) -AllowBundledPlugin:$blockmapChanges
                     $relativeWindows = $relative.Replace('/','\')
                     $source = Join-Path $stepPayloadRoot $relativeWindows
                     $target = Join-Path $Root $relativeWindows
@@ -2283,7 +2323,7 @@ function Apply-StagedUpdate {
                     if ($installedDuringUpdate.Add($relative)) { [void]$movedNew.Add($relative) }
                 }
                 foreach ($entry in @($stepManifest.deletedFiles)) {
-                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
+                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path) -AllowBundledPlugin:$blockmapChanges
                     $relativeWindows = $relative.Replace('/','\')
                     $target = Join-Path $Root $relativeWindows
                     if (-not (Test-Path $target)) { continue }
@@ -2302,7 +2342,7 @@ function Apply-StagedUpdate {
                     }
                 }
                 foreach ($entry in @($stepManifest.changedFiles)) {
-                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path)
+                    $relative = ConvertTo-SafeRelativePath ([string]$entry.path) -AllowBundledPlugin:$blockmapChanges
                     $target = Join-Path $Root ($relative.Replace('/','\'))
                     if (-not (Test-Path $target -PathType Leaf)) { throw "Incremental target file is missing after apply: $relative" }
                     $targetHash = Get-Sha256File $target
@@ -2341,6 +2381,7 @@ function Apply-StagedUpdate {
 
         $newManifest = Get-Content -LiteralPath (Join-Path $Root "VERSION-MANIFEST.json") -Raw | ConvertFrom-Json
         if ([string]$newManifest.runtime.devspacePortable -ne $targetVersion) { throw "Applied version manifest does not report $targetVersion." }
+        if ($blockmapChanges) { Invoke-BlockmapPlanVerification $stage $stageInfo $payloadRoot -Installed }
         $taskOutput = "Portable is not configured; task reconciliation was skipped."
         $startOutput = "Portable is not configured; service restart was skipped."
         $servicesRecovered = -not $shouldRestartServices

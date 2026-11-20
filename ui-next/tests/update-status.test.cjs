@@ -57,3 +57,17 @@ test('Electron update progress IPC exposes only the fixed state directory',()=>{
   assert.match(ui,/window\.devspace\.startUpdateInstaller\(stagedPath\)/);
   assert.doesNotMatch(ui.slice(ui.indexOf('export function UpdatesPage(')),/\{result&&simple\(result\)\}/);
 });
+
+test('blockmap stages replace probing and sanitize updater messages',()=>{
+  const dir=fs.mkdtempSync(path.join(__dirname,'.tmp-update-'));
+  try{
+    const data=path.join(dir,'data','state');fs.mkdirSync(data,{recursive:true});
+    const now=Date.parse('2026-11-20T03:00:00Z');
+    for(const [phase,title] of [['blockmap-header','正在下载差分索引'],['analyzing','正在分析本地文件'],['reconstructing','正在准备变化文件']]){
+      fs.writeFileSync(path.join(data,'update-progress.json'),JSON.stringify({phase,updatedAt:'2026-11-20T02:59:59Z',bytesReceived:32,bytesTotal:64,message:'secret token',transport:'private proxy'}));
+      const state=readUpdateState(dir,now-3000,now);
+      assert.equal(state.progress.title,title);assert.equal(state.progress.percent,50);
+      assert.doesNotMatch(JSON.stringify(state),/secret|token|private/);
+    }
+  }finally{fs.rmSync(dir,{recursive:true,force:true});}
+});
