@@ -2,7 +2,7 @@
 import { createRequire } from "node:module";
 import { stdin as input, stdout as output } from "node:process";
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -190,14 +190,20 @@ async function serve() {
     attachAgentHttpServer(httpServer);
     let agentLanServer;
     try { agentLanServer=await startAgentLanGateway(config,remoteAgents); }
-    catch(error) { await shutdownHttpServer(httpServer,close); throw error; }
+    catch(error) { console.warn("Agent LAN gateway unavailable; local MCP remains running:", error.message); }
+    try {
+        const portableRoot=process.env.DEVSPACE_PORTABLE_ROOT || resolve(config.stateDir,"..","..");
+        const supervisor=resolve(portableRoot,"setup","ssh-reverse-tunnel.cjs");
+        if(existsSync(supervisor))require(supervisor).reconcile(portableRoot);
+    }catch(error){console.warn("SSH reverse startup reconciliation unavailable:",error?.code||"error");}
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown)
             return;
         shuttingDown = true;
-        if(agentLanServer)await new Promise(resolve=>agentLanServer.close(()=>resolve()));
-        await shutdownHttpServer(httpServer, close);
+        const lanClosed=agentLanServer?new Promise((resolve,reject)=>
+            agentLanServer.close(error=>error?reject(error):resolve())):Promise.resolve();
+        await Promise.all([shutdownHttpServer(httpServer, close),lanClosed]);
         process.exit(0);
     };
     const handleShutdown = () => {

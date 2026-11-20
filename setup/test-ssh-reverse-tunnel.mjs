@@ -41,6 +41,8 @@ try{
   assert.deepEqual(flags.slice(-4),
     ["-T","-R",`127.0.0.1:${remotePort}:${localHost}:${localPort}`,"ht_qh_1@100.200.199.25"]);
   assert.ok(!flags.includes("0.0.0.0:18778"));
+  assert.ok(admin.reverseSshArgs(["user@host"],{remotePort,localHost:"127.0.0.1",localPort})
+    .includes(`127.0.0.1:${remotePort}:127.0.0.1:${localPort}`));
   assert.throws(()=>admin.reverseSshArgs(["user@host"],
     {remotePort,localHost:"8.8.8.8",localPort}));
 
@@ -63,6 +65,8 @@ try{
   while(Date.now()<until && !tunnel.state(temp,key).active)await sleep(50);
   assert.equal(tunnel.state(temp,key).active,true);
   assert.equal(launches,1);
+  await tunnel.supervise(temp,key,{launch:()=>{throw new Error("duplicate supervisor started");}});
+  assert.equal(launches,1,"duplicate supervisor must not launch another SSH process");
   child.kill();
   const reconnectDeadline=Date.now()+7000;
   while(Date.now()<reconnectDeadline && launches<2)await sleep(100);

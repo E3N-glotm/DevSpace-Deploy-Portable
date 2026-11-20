@@ -8,6 +8,7 @@ const crypto=require("node:crypto");
 const cp=require("node:child_process");
 const {remoteSshAdminFactory}=require("./remote-ssh-admin.cjs");
 const {privateIpv4,validateAgentUrl}=require("./agent-network.cjs");
+const {readRuntimeJson}=require("./runtime-json.cjs");
 
 function keyId(key) {
   if(typeof key!=="string"||!key||key.length>300)throw new Error("SSH reverse profile key is invalid.");
@@ -43,17 +44,43 @@ function validateSpec(spec) {
 }
 function statePath(root,key){return path.join(locations(root).run,keyId(key)+".json");}
 function stopPath(root,key){return path.join(locations(root).run,keyId(key)+".stop");}
+function lockPath(root,key){return path.join(locations(root).run,keyId(key)+".owner");}
 function isAlive(pid) {
   if(!Number.isInteger(pid)||pid<=0)return false;
   try{process.kill(pid,0);return true;}catch{return false;}
 }
+function ownerPid(root,key) {
+  const file=lockPath(root,key);
+  try {
+    const pid=Number(fs.readFileSync(file,"utf8"));
+    if(isAlive(pid))return pid;
+    // A concurrently-created file may not yet contain its PID.
+    if(!pid&&Date.now()-fs.statSync(file).mtimeMs<30000)return -1;
+  } catch(error){if(error.code!=="ENOENT")throw error;}
+  return 0;
+}
+function acquireOwner(root,key) {
+  const file=lockPath(root,key);
+  if(ownerPid(root,key))return false;
+  const before=fs.statSync(file,{throwIfNoEntry:false});
+  if(before){
+    if(ownerPid(root,key))return false;
+    const now=fs.statSync(file,{throwIfNoEntry:false});
+    if(now&&now.ino===before.ino&&now.mtimeMs===before.mtimeMs)
+      try{fs.unlinkSync(file);}catch(error){if(error.code!=="ENOENT")throw error;}
+  }
+  try{fs.writeFileSync(file,String(process.pid),{flag:"wx",mode:0o600});return true;}
+  catch(error){if(error.code==="EEXIST")return false;throw error;}
+}
 function state(root,key) {
   const p=statePath(root,key);
-  const x=readJson(p,{});
+  const x=readRuntimeJson(p,{});
   const recent=Date.now()-Date.parse(x.updatedAt||"")<15000;
-  const active=recent&&isAlive(x.pid)&&["starting","running","reconnecting"].includes(x.state);
-  return {active,phase:active?x.state:"stopped",pid:active?x.pid:0,
-    sshPid:active?Number(x.sshPid||0):0,
+  const recorded=recent&&isAlive(x.pid)&&["starting","running","reconnecting"].includes(x.state);
+  const owner=ownerPid(root,key);
+  const active=Boolean(recorded||owner);
+  return {active,phase:recorded?x.state:owner?"starting":"stopped",pid:recorded?x.pid:Math.max(owner,0),
+    sshPid:recorded?Number(x.sshPid||0):0,
     attempts:Number(x.attempts||0),updatedAt:x.updatedAt||null,
     lastConnectedAt:x.lastConnectedAt||null};
 }
@@ -142,6 +169,7 @@ async function supervise(root,key,{launch,adminFactory=makeAdmin}={}) {
   const launchSsh=launch||(()=>adminFactory(root).launchReverseSsh(key,spec));
   const run=locations(root).run;
   fs.mkdirSync(run,{recursive:true});
+  if(!acquireOwner(root,key))return;
   const statusFile=statePath(root,key),stopFile=stopPath(root,key);
   let child=null,stopping=false,attempts=0,lastConnectedAt=null,lastPhase="starting";
   const record=()=>atomicJson(statusFile,{pid:process.pid,sshPid:child?.pid||0,
@@ -178,8 +206,11 @@ async function supervise(root,key,{launch,adminFactory=makeAdmin}={}) {
       }
     }
   }finally{
-    shutdown();lastPhase="stopped";record();
-    process.off("SIGTERM",shutdown);process.off("SIGINT",shutdown);
+    try{shutdown();lastPhase="stopped";record();}
+    finally{
+      fs.rmSync(lockPath(root,key),{force:true});
+      process.off("SIGTERM",shutdown);process.off("SIGINT",shutdown);
+    }
   }
 }
 if(require.main===module){

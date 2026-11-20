@@ -33,9 +33,13 @@ export function readLanGatewayConfig(config) {
     throw new Error("Invalid Agent LAN gateway configuration.");
   return {enabled:true,port,host:hosts[0],hosts};
 }
-export async function startAgentLanGateway(config,remoteAgents) {
+export async function startAgentLanGateway(config,remoteAgents,{retryMs=5000}={}) {
   const lan=readLanGatewayConfig(config);
   if(!lan.enabled)return null;
+  // SSH reverse forwarding is local to this machine. An Agent-only
+  // loopback listener lets existing configured tunnels survive NIC changes
+  // without binding any newly discovered external address.
+  const bindHosts=lan.hosts.includes("0.0.0.0")?lan.hosts:[...lan.hosts,"127.0.0.1"];
   const dir=fileURLToPath(new URL("./linux-agent/",import.meta.url));
   const handleRequest=(req,res)=>{
     const paths=new Map([
@@ -49,38 +53,51 @@ export async function startAgentLanGateway(config,remoteAgents) {
       "Cache-Control":"no-store","X-Content-SHA256":createHash("sha256").update(data).digest("hex")});
     res.end(data);
   };
-  const servers=[];
-  const closeAll=async()=>{
-    await Promise.all(servers.map(server=>new Promise((resolve,reject)=>{
-      if(!server.listening){resolve();return;}
-      server.close(error=>error?reject(error):resolve());
-    })));
-  };
-  try {
-    for(const host of lan.hosts){
-      const server=createServer(handleRequest);
-      remoteAgents.attachHttpServer(server,{lan:true});
-      try{
-        await new Promise((resolve,reject)=>{
-          server.once("error",reject);
-          server.listen(lan.port,host,()=>{server.off("error",reject);resolve();});
-        });
-      }catch(error){
-        // A disconnected secondary NIC must not prevent existing Agent
-        // connections on a still-present interface from recovering after
-        // a service restart. Never silently ignore port conflicts/ACL errors.
-        if(error?.code==="EADDRNOTAVAIL"&&lan.hosts.length>1){
-          console.warn("Agent LAN interface unavailable (skipping): "+host+":"+lan.port);
-          continue;
+  const servers=new Map(), reported=new Map();
+  let closed=false, inFlight=null;
+  const closeServer=server=>new Promise((resolve,reject)=>{
+    if(!server.listening){resolve();return;}
+    server.close(error=>error?reject(error):resolve());
+  });
+  const reconcile=()=>{
+    if(closed)return Promise.resolve();
+    if(inFlight)return inFlight;
+    inFlight=(async()=>{
+      for(const host of bindHosts){
+        if(closed||servers.has(host))continue;
+        const server=createServer(handleRequest);
+        try{
+          await new Promise((resolve,reject)=>{
+            server.once("error",reject);
+            server.listen(lan.port,host,()=>{server.off("error",reject);resolve();});
+          });
+          remoteAgents.attachHttpServer(server,{lan:true});
+          server.on("error",error=>console.warn("Agent LAN listener error:",host,error.code||"error"));
+          servers.set(host,server);
+          reported.delete(host);
+          console.log("Agent-only LAN gateway listening on "+host+":"+lan.port);
+        }catch(error){
+          await closeServer(server).catch(()=>{});
+          const reason=error?.code||"error";
+          if(reported.get(host)!==reason){
+            console.warn("Agent LAN interface unavailable (retrying): "+host+":"+lan.port+" ("+reason+")");
+            reported.set(host,reason);
+          }
         }
-        throw error;
       }
-      servers.push(server);
-      console.log("Agent-only LAN gateway listening on "+host+":"+lan.port);
+    })().finally(()=>{inFlight=null;});
+    return inFlight;
+  };
+  await reconcile();
+  const timer=setInterval(()=>void reconcile().catch(error=>console.warn("Agent LAN reconciliation failed:",error.code||"error")),retryMs);
+  timer.unref?.();
+  return {
+    status:()=>({configured:lan.hosts,active:[...servers.keys()],unavailable:[...reported.keys()]}),
+    reconcile,
+    close(callback){
+      closed=true;clearInterval(timer);
+      void Promise.resolve(inFlight).then(()=>Promise.all([...servers.values()].map(closeServer)))
+        .then(()=>callback?.(),error=>callback?.(error));
     }
-    if(!servers.length)throw new Error("No configured Agent LAN interface is currently available.");
-    // Preserve the historical close(callback) contract for server shutdown
-    // and test harnesses while closing every bound socket, not only the first.
-    return {close(callback){void closeAll().then(()=>callback?.(),error=>callback?.(error));}};
-  }catch(error){await closeAll();throw error;}
+  };
 }

@@ -5179,7 +5179,7 @@ if (await isMainModule()) {
     attachAgentHttpServer(httpServer);
     let agentLanServer;
     try { agentLanServer=await startAgentLanGateway(config,remoteAgents); }
-    catch(error) { await shutdownHttpServer(httpServer,close); throw error; }
+    catch(error) { console.warn("Agent LAN gateway unavailable; local MCP remains running:", error.message); }
     // Scheduled MCP startup must restore configured SSH reverse tunnels even
     // when the Electron UI is closed; this starts only detached supervisors.
     try {

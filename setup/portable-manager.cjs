@@ -83,8 +83,8 @@ const TASK_MCP = "DevSpace Portable MCP Server";
 const TASK_TUNNEL = "DevSpace Portable Tunnel";
 const LEGACY_TASK_NGROK = "DevSpace Portable ngrok Tunnel";
 const LOCAL_RESTART_TASK_PREFIX = "DevSpace Portable Local Restart ";
-const PORTABLE_VERSION = "1.1.68";
-const PORTABLE_DEV_ITERATION = "dev33";
+const PORTABLE_VERSION = "1.1.70";
+const PORTABLE_DEV_ITERATION = "dev1";
 const PORTABLE_DISPLAY_VERSION = PORTABLE_DEV_ITERATION
   ? `${PORTABLE_VERSION} ${PORTABLE_DEV_ITERATION}`
   : PORTABLE_VERSION;
@@ -363,8 +363,11 @@ async function ensureCloudflaredRuntime() {
 }
 
 function readJson(file, fallback = null) {
-  if (!fs.existsSync(file)) return fallback;
-  return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+  const recoverable = [UI_LEASE_FILE, COMPUTER_USE_BROKER_FILE, TUNNEL_NETWORK_STATE_FILE,
+    DASHBOARD_PUBLIC_PROBE_FILE, LOCAL_RESTART_STATE_FILE].some(item => path.resolve(item) === path.resolve(file));
+  if (recoverable) return require("./runtime-json.cjs").readRuntimeJson(file, fallback);
+  try { return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, "")); }
+  catch (error) { if (error.code === "ENOENT") return fallback; throw error; }
 }
 
 function writeAtomic(file, content, encoding = "utf8") {
@@ -2171,13 +2174,13 @@ async function runRemoteSshAdmin(action, payload = {}) {
       existing?.localPort===Number(destination.port);
     const remotePort=same&&existing.remotePort
       ?existing.remotePort:service.pickReversePort(key);
-    const spec=reverseTunnel.validateSpec({key,remotePort,
+    let spec=reverseTunnel.validateSpec({key,remotePort,
       localHost:destination.hostname,localPort:Number(destination.port),enabled:true});
     if(existing && !same && reverseTunnel.state(ROOT,key).active)
       await reverseTunnel.stopTunnel(ROOT,key);
     reverseTunnel.writeEntry(ROOT,spec);
     reverseTunnel.spawnSupervisor(ROOT,key);
-    let lastError;
+    const verify=async()=>{
     for(let i=0;i<4;i++){
       await new Promise(resolve=>setTimeout(resolve,1500));
       try{
@@ -2189,10 +2192,42 @@ async function runRemoteSshAdmin(action, payload = {}) {
         return {ok:true,connectionMode:"ssh-reverse",serverUrl:spec.serverUrl,
           remotePort:spec.remotePort,tunnel:reverseTunnel.status(ROOT,key)};
       }catch(error){
-        lastError=error;
         if(String(error?.message||"").includes("SSH_REVERSE_FORWARD_UNSAFE_BINDING")){
           await reverseTunnel.stopTunnel(ROOT,key,{disable:true});
           throw error;
+        }
+      }
+    }
+    return null;
+    };
+    const ready=await verify();
+    if(ready)return ready;
+    // A crashed SSH session can leave its remote loopback socket alive.
+    // Only rotate after stopping our supervisor and verifying that the old
+    // remote listener really exists. Never kill the remote socket's owner.
+    if(same&&existing?.enabled){
+      const agents=(await runRemoteAgentAdmin("list",{})).agents||[];
+      const matching=agents.filter(agent=>agent.name===key.replace(/^name:/,"")||agent.id===key);
+      if(matching.length===1&&matching[0].status==="offline"){
+        await reverseTunnel.stopTunnel(ROOT,key);
+        try{
+          service.verifyReverseLoopback(key,existing.remotePort);
+          const freshPort=service.pickReversePort(key);
+          if(freshPort===existing.remotePort)throw new Error("Old reverse port is not occupied.");
+          spec=reverseTunnel.validateSpec({...spec,remotePort:freshPort});
+          writeJson(path.join(RUN_DIR,"ssh-reverse",reverseTunnel.keyId(key)+".recovery.json"),
+            {previous:existing,nextPort:freshPort});
+          reverseTunnel.writeEntry(ROOT,spec);
+          reverseTunnel.spawnSupervisor(ROOT,key);
+          const replacement=await verify();
+          if(!replacement)throw new Error("Replacement reverse tunnel failed verification.");
+          return {...replacement,previousServerUrl:existing.serverUrl,portRecovered:true};
+        }catch(error){
+          await reverseTunnel.stopTunnel(ROOT,key);
+          reverseTunnel.writeEntry(ROOT,existing);
+          fs.rmSync(path.join(RUN_DIR,"ssh-reverse",reverseTunnel.keyId(key)+".recovery.json"),{force:true});
+          reverseTunnel.spawnSupervisor(ROOT,key);
+          throw new Error("SSH_REVERSE_FORWARD_UNAVAILABLE: replacement port could not be verified; original configuration restored.");
         }
       }
     }
@@ -2209,7 +2244,23 @@ async function runRemoteSshAdmin(action, payload = {}) {
       if(!lanAgentEndpointEnabled(lan,desired))
         throw new Error("LAN Agent listener is disabled or the requested URL is not on a configured interface/port.");
     }
-    const result=await service.handle(action,{...payload,serverUrl:desired});
+    const key=String(payload.key||"");
+    const recoveryFile=key?path.join(RUN_DIR,"ssh-reverse",reverseTunnel.keyId(key)+".recovery.json"):null;
+    const pending=recoveryFile&&mode==="ssh-reverse"?readJson(recoveryFile,null):null;
+    const rollback=pending?.previous?.key===key&&
+      desired===`http://127.0.0.1:${pending.nextPort}` ? pending.previous:null;
+    let result;
+    try{result=await service.handle(action,{...payload,serverUrl:desired});}
+    catch(error){
+      if(rollback){
+        await reverseTunnel.stopTunnel(ROOT,key);
+        reverseTunnel.writeEntry(ROOT,rollback);
+        reverseTunnel.spawnSupervisor(ROOT,key);
+        fs.rmSync(recoveryFile,{force:true});
+      }
+      throw error;
+    }
+    if(result?.ok&&rollback)fs.rmSync(recoveryFile,{force:true});
     if(result?.ok){
       const store=readJson(path.join(CONFIG_DIR,"agent-connections.json"),{});
       store[String(payload.agentId)]={connectionMode:mode,serverUrl:desired};

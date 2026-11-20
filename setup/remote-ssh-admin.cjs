@@ -113,12 +113,14 @@ function remoteSshAdminFactory({root, readJson, writeJson, restrictAcl, remoteAd
       ||!Number.isInteger(remotePort)||remotePort<1024||remotePort>65535)
       throw new Error("Invalid restricted SSH reverse tunnel forwarding configuration.");
     const {executable,args,env}=sshConnection(find(key));
-    return cp.spawn(executable,reverseSshArgs(args,{remotePort,localHost,localPort}),
+    // The approved LAN gateway also exposes Agent-only loopback. Target it
+    // instead of a NIC address that can disappear after standby or reboot.
+    return cp.spawn(executable,reverseSshArgs(args,{remotePort,localHost:"127.0.0.1",localPort}),
       {cwd:root,windowsHide:true,stdio:"ignore",env});
   }
   function reverseSshArgs(baseArgs,{remotePort,localHost,localPort}) {
     const {privateIpv4}=require("./agent-network.cjs");
-    if(!privateIpv4(localHost)||!Number.isInteger(localPort)||localPort<1024||localPort>65535
+    if((localHost!=="127.0.0.1"&&!privateIpv4(localHost))||!Number.isInteger(localPort)||localPort<1024||localPort>65535
       ||!Number.isInteger(remotePort)||remotePort<1024||remotePort>65535)
       throw new Error("Invalid restricted SSH reverse forwarding configuration.");
     return [...baseArgs.slice(0,-1),
