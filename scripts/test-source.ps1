@@ -112,6 +112,8 @@ Write-Host "==> setup/test-agent-network-lan.mjs"
 Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-agent-network-lan.mjs") -FailureMessage "Test failed: setup/test-agent-network-lan.mjs"
 Write-Host "==> setup/test-ssh-reverse-tunnel.mjs"
 Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-ssh-reverse-tunnel.mjs") -FailureMessage "Test failed: setup/test-ssh-reverse-tunnel.mjs"
+Write-Host "==> setup/test-crash-network-resilience.mjs"
+Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-crash-network-resilience.mjs") -FailureMessage "Crash/network recovery regression failed."
 
 Write-Host "==> setup/test-agent-ssh-recovery-contract.mjs"
 Invoke-NativeChecked -FilePath "node" -ArgumentList @("setup\test-agent-ssh-recovery-contract.mjs") -FailureMessage "Test failed: setup/test-agent-ssh-recovery-contract.mjs"
@@ -145,6 +147,7 @@ $Tests = @(
     "setup/test-online-updater-contract.mjs",
     "setup/test-updater-long-path.mjs",
     "setup/test-blockmap-update.mjs",
+    "setup/test-blockmap-plan.mjs",
     "setup/test-release-migration-contract.mjs",
     "setup/test-updater-apply-recovery.mjs",
     "setup/test-update-launch-ack.mjs",
@@ -215,6 +218,8 @@ foreach ($Test in $Tests) {
 if ($NextIsDefault) {
     Write-Host '==> setup/test-ui-next-navigation.mjs'
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-ui-next-navigation.mjs') -FailureMessage 'Next UI navigation acceptance failed.'
+    Write-Host '==> setup/test-agent-flow-layout.mjs'
+    Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-agent-flow-layout.mjs') -FailureMessage 'Agent flow card layout acceptance failed.'
     Write-Host '==> setup/test-dev4-feature-coverage.mjs'
     Invoke-NativeChecked -FilePath $Node -ArgumentList @('setup/test-dev4-feature-coverage.mjs') -FailureMessage 'Next UI feature and contrast coverage failed.'
     if ($EffectiveNextIteration -ge 6) {

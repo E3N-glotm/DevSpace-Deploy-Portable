@@ -187,12 +187,12 @@
 .agent-flow-lane.is-execution,.agent-flow-node.is-execution{--agent-accent:#168070;--agent-ink:#19675e;--agent-wash:#e1f4ef}
 .agent-flow-lane.is-review,.agent-flow-node.is-review{--agent-accent:#7856b5;--agent-ink:#634390;--agent-wash:#f0eafa}
 .agent-flow-lane.is-member,.agent-flow-node.is-member{--agent-accent:#a36327;--agent-ink:#804a1b;--agent-wash:#f7ebdb}
-.agent-flow-node{margin:0 7px;min-width:0;display:grid;gap:7px;color:#163654;background:white;cursor:pointer;
+.agent-flow-node{margin:0 7px;min-width:0;display:grid;grid-template-columns:minmax(0,1fr);gap:7px;color:#163654;background:white;cursor:pointer;
   padding:9px 10px 8px;border:1px solid #d2deed;border-left:3px solid var(--agent-accent,#71839b);
   border-radius:8px;text-align:left;box-shadow:0 2px 4px #173a6010;transition:border-color 140ms,background 140ms}
 .agent-flow-node:hover{border-color:var(--agent-accent,#71839b);background:var(--agent-wash,#eaf0f6)}
-.agent-flow-node-head{display:flex;justify-content:space-between;align-items:start;gap:5px;color:var(--agent-ink,#455874)}
-.agent-flow-node-head strong{min-width:0;font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-flow-node-head{min-width:0;display:flex;justify-content:space-between;align-items:start;gap:5px;color:var(--agent-ink,#455874)}
+.agent-flow-node-head strong{flex:1;min-width:0;font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agent-flow-node-head svg{flex-shrink:0;font-size:13px}
 .agent-flow-preview{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:11.5px;line-height:1.45;color:#435a73;overflow-wrap:anywhere}
 .agent-flow-node time{color:#60738b;font-size:10px}
@@ -207,7 +207,7 @@
 .agent-history-task{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;color:#203c59}
 .agent-confirm-remove{background:#a93845!important;border-color:#a93845!important}
 .agent-confirm-remove:hover:not(:disabled){background:#8f2634!important}
-.agent-flow-detail{max-width:680px!important}
+.agent-flow-detail{max-width:680px!important;overflow-wrap:anywhere}
 .agent-flow-detail-meta{color:#49627e;font-size:13px;margin:0 0 10px}
 .agent-flow-detail-section{display:grid;gap:8px;border-top:1px solid #dce5ef;padding:10px 0}
 .agent-flow-detail-section h4{margin:0;color:#163653;font-size:13px;display:flex;justify-content:space-between;gap:10px}

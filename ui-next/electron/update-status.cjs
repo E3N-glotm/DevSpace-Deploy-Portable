@@ -7,6 +7,9 @@ const path = require('node:path');
 const PHASES = Object.freeze({
   metadata: ['正在获取更新信息', '连接发布服务并检查可用版本'],
   probing: ['正在选择下载线路', '正在寻找稳定、快速的下载连接'],
+  'blockmap-header': ['正在下载差分索引', '读取差分索引并校验完整性'],
+  analyzing: ['正在分析本地文件', '检查文件指纹，必要时重新计算内容校验'],
+  reconstructing: ['正在准备变化文件', '复用本地内容，仅重组需要替换的文件'],
   downloading: ['正在下载更新', '可以继续使用当前软件，尚未安装'],
   downloaded: ['下载完成', '准备校验下载文件'],
   verifying: ['正在校验文件', '检查文件是否完整、安全'],

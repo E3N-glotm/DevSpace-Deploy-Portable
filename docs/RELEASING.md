@@ -1,210 +1,65 @@
-# Release policy
+# 正式版发行流程
 
-The withdrawn 1.1.60 release remains prohibited. Subsequent stable releases
-resume at 1.1.61 and later. The release workflow is gated by the repository
-variable `DEVSPACE_RELEASE_APPROVED`; the stable tag must have no `development`
-field in `VERSION-MANIFEST.json`, must include a matching
-`docs/releases/HOTFIX-<version>.md`, and must pass CI before its assets count
-as published. Never infer successful publication merely from pushing a tag.
+GitHub Release 是 Windows 完整包和在线更新附件的发布入口。正式版的 Git 标签、版本清单、发布说明和附件应对应同一版本。
 
-# Release process
+## 准备版本
 
-## Version preparation
+1. 在最新 `main` 的发布工作区构建。保留本机运行目录和用户数据。
+2. 同步 Portable、桌面和 MCP 界面的版本标识。正式版 `VERSION-MANIFEST.json` 使用 `X.Y.Z` 显示版本，移除 `development` 字段。
+3. 更新 `CHANGELOG.md`，并为新版本添加 `docs/releases/HOTFIX-X.Y.Z.md`。
+4. 从上一个正式版恢复发行运行时，准备 Electron 运行时并构建界面。固定版本和准备步骤见 [.github/workflows/release.yml](../.github/workflows/release.yml)。
 
-1. Update code and tests.
-2. Add `docs/releases/HOTFIX-<version>.md`.
-3. Update `CHANGELOG.md`, README, UI, server, Portable manager, test strings,
-   and `VERSION-MANIFEST.json`.
-4. Run:
+在发布工作区执行构建和检查。将示例版本替换为本次版本。
 
 ```powershell
-npm run source:verify
+$Version = '1.1.69'
 npm run core:pack
 npm ci --prefix app
 node setup/harden-nested-dependencies.mjs
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/test-source.ps1 -SkipInstall
+npm ci --prefix ui-next
+npm run build --prefix ui-next
+python setup/finalize-release.py $Version --hotfix "docs/releases/HOTFIX-$Version.md"
+npm run source:verify
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-source.ps1 -SkipInstall -SkipAudit
 npm audit --omit=dev --prefix app
-python setup/finalize-release.py <version> --hotfix docs/releases/HOTFIX-<version>.md
 python setup/build-release.py
 ```
 
-The order above is intentional. `core:pack` may update the local core archive
-and lockfile, so `npm ci --prefix app` must run after the current pack before a
-formal ZIP is built. `test-source.ps1 -SkipInstall` is only valid here because
-the clean install has already completed in the preceding step. Running
-`build-release.py` directly against a stale lockfile or stale
-`app/node_modules/@waishnav/devspace` is rejected by the release preflight.
+打包预检会检查核心 TGZ、锁文件、已安装核心及源码行尾。按顺序运行 `core:pack` 和 `npm ci --prefix app`，使测试与最终包使用同一份核心代码。正式包包含发行自带的 `codex-runtime-bridge` 插件，并保留用户配置与运行数据和程序文件之间的边界。
 
-The source preflight also checks the working-tree EOLs declared by
-`.gitattributes`. This matters on long-lived Windows checkouts: Git can regard
-the logical text as clean while the on-disk LF/CRLF representation has drifted,
-which would otherwise change the bytes placed in a Portable ZIP or core TGZ.
-Re-materialize the checkout before releasing if that check fails.
+## 自动发布与附件
 
-Generated Python bytecode is never part of the maintained core package.
-`__pycache__`, `*.pyc`, and `*.pyo` are excluded by the core packer so running
-Python-side tests before a pack cannot perturb the release payload.
+提交正式版源码后创建并推送注解标签。仓库变量 `DEVSPACE_RELEASE_APPROVED` 为 `true` 时，推送 `vX.Y.Z` 标签会触发 GitHub Actions 的 Release 构建。工作流从低于目标版本的最近稳定版恢复运行时，然后执行测试、生产依赖审计、打包和上传。
 
-Every full `DevSpacePortable-Windows-x64-<version>.zip` must include the bundled
-`codex-runtime-bridge` plugin under
-`data/plugins/installed/codex-runtime-bridge/<version>/`. This is a mandatory
-release invariant, not an optional extra. `setup/build-release.py` validates
-the manifest, runtime, keep-awake helper, and Skill payload and fails the build
-if the bundled plugin is absent or incomplete.
+当前正式版应包含以下附件。文件名示例使用 1.1.69。
 
-Incremental `DevSpacePortable-Update-<from>-to-<version>.zip` packages also
-always carry the `setup/bundled-plugins/codex-runtime-bridge/` seed payload,
-even when that plugin is byte-identical to the base release. This keeps every
-official DevSpace ZIP self-contained with the bridge payload while still
-excluding user-persistent `data/`, `logs/`, and `reports/` roots from deltas.
+| 附件 | 用途 |
+| --- | --- |
+| `DevSpacePortable-Windows-x64-1.1.69.zip` | 全新安装或完整包恢复 |
+| `DevSpacePortable-Windows-x64-1.1.69.blockmap` | 复用本机文件块并通过 HTTP Range 下载差异 |
+| `DevSpacePortable-Update-<起始版本>-to-1.1.69.zip` | 兼容指定旧版本的升级桥 |
+| `update-manifest.json` | 更新器读取的版本、附件和 SHA-256 信息 |
+| `SHA256SUMS-release.txt` | 完整 ZIP、blockmap 和升级包的校验清单 |
 
-Versioned packed-core archives under
-`packages/waishnav-devspace-<semver>.tgz` are special-cased when they disappear
-from a target release. The delta records them as `retainedObsoleteFiles`
-instead of strict `deletedFiles`. The target lockfile points at the new core
-archive, so an older TGZ is inert; retaining it avoids rejecting historical
-same-version repacks whose generated TGZ bytes differ from the canonical base.
-All ordinary deleted program files keep the existing base-SHA drift guard.
+GitHub 的 **Source code** 归档用于查看源码。发行完成后，核对 Release 的正式状态、Latest 指向和各附件的上传状态、大小与 SHA-256。Git 标签和工作流状态用于追踪构建，不替代附件验证。
 
-Version 1.1.40 is the updater migration checkpoint. Its GitHub workflow builds
-exact deltas from every canonical 1.1.32-1.1.39 full ZIP plus the historical
-1.1.33 direct-extract rescue overlay. Version 1.1.41 is the stable follow-up to
-that migration and intentionally repeats the exact 1.1.32-1.1.39 compatibility
-edges while also publishing the normal 1.1.40 -> 1.1.41 adjacent edge. This is
-required because installed 1.1.32-1.1.39 clients can only select one exact
-fromVersion -> latest edge. The final 1.1.42 repack expands the direct matrix
-through 1.1.41 except 1.1.35 (and retains 1.1.32 compatibility), while introducing
-`block-pack-v2`. These generated ZIPs live only on the Release. Later Releases
-keep one direct `1.1.42 -> current` legacy delta as a bootstrap bridge for an
-earlier installed 1.1.42 updater; blockmap-capable clients do not need a
-growing previous -> current graph.
+## 手动发布
 
-## Tag release
+GitHub 托管运行器无法完成桌面交互测试时，可在可用 Windows 桌面上对相同标签提交完成全量源码和 Portable 回归、生产依赖审计及打包，再使用仓库的手动发布路径。保留工作流故障和本地验收记录。
 
-Commit the release state, then create an annotated tag:
+1. 用 `setup/build-release.py` 生成完整 ZIP 和升级桥。
+2. 用 `setup/create-blockmap.py` 以该 ZIP 生成同版本 `.blockmap`。
+3. 用 `setup/create-update-manifest.py` 指定 ZIP、blockmap、当前升级桥和工作流适用的上一版更新清单，生成本次的两份清单。
+4. 校验 ZIP 的 CRC、包内版本、blockmap 头，以及所有附件的大小和 SHA-256。先上传到对应标签的 GitHub Release 草稿，再核对实际上传结果并公开。也可参阅 [GitHub CLI 发布脚本](../scripts/publish-github-release.ps1)。
+5. 只有在有意重新制作同版本发行包并完成兼容性复验时，才替换已有同名附件。
 
-```powershell
-git tag -a v<version> -m "DevSpace Portable <version>"
-git push origin main --follow-tags
-```
+生产运行时来源、凭据及打包边界见 [安全政策](../SECURITY.md)。公开分发第三方运行时前核对 [第三方许可](../THIRD-PARTY-NOTICES.md)。
 
-The GitHub Release workflow uses the tag version, restores bundled runtimes
-from the latest existing stable Release, performs a clean dependency install,
-runs tests, rebuilds the Portable ZIP, and uploads:
+## 版本兼容
 
-- `DevSpacePortable-Windows-x64-<version>.zip`
-- for `v1.1.40`, eight migration deltas from `1.1.32` through `1.1.39`;
-- for `v1.1.41`, eight direct legacy deltas from `1.1.32` through `1.1.39`
-  plus `DevSpacePortable-Update-1.1.40-to-1.1.41.zip`;
-- for the final `v1.1.42` repack, nine direct deltas from `1.1.32`, `1.1.33`,
-  `1.1.34` and `1.1.36` through `1.1.41`; `1.1.35` is intentionally omitted;
-- for `v1.1.42` and later, `DevSpacePortable-Windows-x64-<version>.blockmap`,
-  the content-addressed Range-download asset;
-- after `v1.1.42`, one `DevSpacePortable-Update-1.1.42-to-<version>.zip`
-  bootstrap edge for the legacy 1.1.42 updater;
-- the `1.1.33 -> target` Rescue overlay on the 1.1.40, 1.1.41 and 1.1.42 compatibility Releases;
-- `release-assets/update-manifest.json`
-- `release-assets/SHA256SUMS-release.txt`
+- 1.1.59 为开发系列，1.1.60 已撤回。稳定升级桥从 **1.1.61** 开始，受支持的旧版本由 [升级策略配置](../setup/legacy-release-policy.json) 定义。
+- 当前原地升级的校验范围从 1.1.36 起，具体纳入的历史版本见升级策略。1.1.61 之后的正式版沿用历史更新清单，并按策略发布 1.1.61 以及 1.1.36–1.1.39 到目标版本的直接升级桥。旧更新器先安装兼容桥，必要时再由新更新器完成同版本的完整包修复。
+- 1.1.40–1.1.42 的迁移包和 1.1.33 救援包属于历史兼容安排。当前发布附件以对应 Release 的更新清单为准。
+- 用户持久数据与程序文件分别处理。完整包包含固定的内置插件种子，在线升级保留已有用户配置和运行数据。
 
-The 1.1.40-1.1.42 compatibility manifests carry `incrementalGraphAssets`, a
-compact SHA-256/size/download-URL graph copied forward from the previous
-manifest plus the current Release edge. The 1.1.42 manifest also carries
-`blockmapAsset`, including the block-pack SHA-256, compressed-header size and
-compressed-header SHA-256. The client validates that header, reuses matching
-local 1 MiB chunks and downloads only missing packed chunks with HTTP Range.
-Later manifests use this blockmap metadata as the primary path and do not need
-to keep expanding the historical graph. Legacy incremental and full ZIP paths
-remain bounded fallbacks.
-
-The blockmap excludes persistent `data`, `logs` and `reports` content except
-for the fixed Release-owned `data/plugins/installed/codex-runtime-bridge/`
-seed prefix present in the full ZIP checksum manifest. Apply still preserves
-the live `data` tree; the existing manager seed remains non-destructive.
-
-Use the `Backfill Incremental Update` workflow for that case. It downloads the
-already-published canonical full ZIPs for both versions on a GitHub runner,
-builds `DevSpacePortable-Update-<from>-to-<to>.zip`, preserves the delta and
-rescue entries already advertised by the target Release manifest, refreshes
-`update-manifest.json` and `SHA256SUMS-release.txt`, and uploads only those
-supplemental updater assets. It never rebuilds or replaces the target full ZIP.
-
-Version 1.1.40 is the migration checkpoint for the long-term updater topology.
-Its Release workflow downloads the canonical 1.1.32 through 1.1.39 full ZIPs on
-the GitHub runner and publishes eight exact `*-to-1.1.40.zip` migration deltas.
-Version 1.1.41 repeats those eight legacy compatibility edges to the new latest
-stable target and adds the adjacent `1.1.40 -> 1.1.41` edge. Those generated
-ZIPs are Release assets only; they are never committed to Git. The final
-1.1.42 repack refreshes the exact direct edges from 1.1.32 through 1.1.41 except
-1.1.35. The omitted 1.1.35 asset must not remain on the repacked Release, so no
-published same-version asset points at an older target tree.
-
-After 1.1.42, do **not** pass the previous manifest through
-`--carry-forward-manifest`. Generate the latest full ZIP, latest `.blockmap`,
-and one `1.1.42 -> latest` compatibility delta. The bridge exists only to
-bootstrap an earlier installed 1.1.42 updater into the blockmap-capable runtime;
-after that, clients jump directly to the newest Release by reconstructing the
-target from local blocks plus missing Range data. This keeps Git history free
-of binary update artifacts and prevents the latest Release metadata from
-accumulating an unbounded historical edge graph.
-
-### 1.1.60 stable updater bootstrap
-
-`1.1.59` is development-only and is never published. `1.1.60` is the stable
-bootstrap baseline for the updater hardening accumulated after `1.1.58`.
-Installed releases from `1.1.36` through `1.1.58` (using the actually published
-version set in `setup/legacy-release-policy.json`) receive a shallow
-`file-delta-v1` bridge instead of asking their historical updater to unpack the
-modern full package. The bridge contains only the Native control center,
-`VERSION-MANIFEST.json`, `portable-updater.ps1`, `portable-manager.cjs`, and a
-bootstrap marker. On first launch, the new control center performs a hardened
-same-version `ForceFull` repair to obtain the complete `1.1.60` tree.
-
-This two-stage path is intentional: it avoids the historical deep-path/.NET ZIP
-failure before the fixed updater has been installed, while preserving `data`,
-`logs`, and `reports`. The release build publishes one exact bridge for each
-supported historical version and carries those edges into the `1.1.60`
-`update-manifest.json`. Releases after `1.1.60` retain the immutable historical
-graph plus one `1.1.60 -> current` bridge; `1.1.36`-`1.1.39` additionally keep
-direct current-version bridges because those clients predate graph routing.
-
-The guaranteed in-place compatibility floor is `1.1.36`. Versions
-`1.1.14`-`1.1.35` do not share the same validated transactional updater base
-(`1.1.14` has no updater at all, and pre-`1.1.36` Apply generations include
-known transaction defects), so release notes must not claim one-click support
-for them without a separate migration package and acceptance run.
-
-## First bootstrap Release
-
-The first source-only repository Release could not hydrate its runtime from an
-older Release. Version 1.1.14 is the validated bootstrap source; version
-1.1.15 and later may restore the runtime from any compatible stable Release.
-
-The repository includes a GitHub CLI wrapper that reads `GH_TOKEN`,
-`GITHUB_TOKEN`, or the current Git credential store without printing or
-writing the credential to a temporary file. Install GitHub CLI first with
-`winget install --id GitHub.cli --exact --scope user`:
-
-```powershell
-PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-github-release.ps1 -Version 1.1.38 -BypassProxy
-```
-
-`-BypassProxy` is optional. Use it when a local HTTP proxy makes large Release
-uploads substantially slower and the machine can reach GitHub directly.
-
-The manual publisher is idempotent by default. An existing asset is skipped
-when its GitHub SHA-256, size, and upload state already match the local file.
-If the same Release already contains an asset with the same name but different
-bytes, the script fails before calling `--clobber`. Use `-AllowRepack` only for
-an intentional same-version replacement after the new full ZIP, deltas,
-manifest, checksums, and upgrade path have been independently validated.
-
-## Public-release requirements
-
-The repository and Releases are public. Before each public binary Release:
-
-1. remove bundled `runtime/ngrok/ngrok.exe` from the public ZIP or obtain
-   redistribution permission;
-2. replace it with an official first-run download and SHA-256 verification;
-3. review third-party notices and generated SBOM;
-4. confirm no historical commit or Release contains credentials or local
-   runtime state.
+需要补齐两个已发布版本之间的差异更新时，可使用 [Backfill Incremental Update 工作流](../.github/workflows/backfill-incremental.yml)。该流程以既有正式 ZIP 生成补充附件。

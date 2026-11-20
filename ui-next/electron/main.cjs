@@ -395,6 +395,12 @@ function installHandlers() {
   register('agentGroupsSave',input=>operation(()=>groups.save(input)));
   register('agentGroupsDelete',id=>operation(()=>groups.remove(id)));
   register('agentRuntime',async(action,payload={})=>{
+    // Navigation smoke runs without a live Portable service or credentials.
+    if (navigationSmokeMode) {
+      if (action === 'list') return [];
+      if (action === 'routing-settings') return {mode:'auto', defaultWorkerId:null};
+      throw new Error('Unexpected Agent Runtime navigation smoke action: ' + action);
+    }
     const config=readJson(path.join(CONFIG,'config.json'));
     return requestAgentRuntime({root:ROOT,config,fetch:(url,init)=>net.fetch(url,init),action,payload});
   });
@@ -824,14 +830,16 @@ app.whenReady().then(() => {
               );
               if (pageId==='models'||pageId==='agent-runtime') {
                 const label=pageId==='models'?'创建 / 管理模型组':'新建任务';
-                const title=pageId==='models'?'模型组管理':'新建 Agent 任务（可选）';
+                const title=pageId==='models'?'模型组管理':'新建 Agent 任务';
                 const before=await activeWindow.webContents.executeJavaScript(`(() => {
                   const visible=e=>e&&e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0;
                   if([...document.querySelectorAll('[role=dialog]')].some(visible))return {ok:false,reason:'dialog already visible'};
                   const root=document.querySelector('.page-body');
                   if(!root||root.textContent.includes(${JSON.stringify(title)}))return {ok:false,reason:'inline editor'};
                   const btn=[...root.querySelectorAll('button')].find(b=>b.textContent.trim()===${JSON.stringify(label)});
-                  if(!btn)return {ok:false,reason:'missing trigger'};btn.click();return {ok:true};
+                  if(!btn)return {ok:false,reason:'missing trigger'};
+                  if(btn.disabled)return {ok:false,reason:'disabled trigger'};
+                  btn.click();return {ok:true};
                 })()`);
                 await new Promise(resolve=>setTimeout(resolve,350));
                 const opened=before.ok&&await activeWindow.webContents.executeJavaScript(`(() => {

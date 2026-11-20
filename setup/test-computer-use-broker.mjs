@@ -60,10 +60,19 @@ try {
   assert.equal(lease.broker?.pollIntervalMs, 500);
   brokerPid = lease.broker.pid;
   const startedAt = performance.now();
-  const result = await performComputerAction({
-    action: "broker_probe",
-    screenshotAfter: false,
-  }, { leaseId: lease.leaseId });
+  let result;
+  try {
+    result = await performComputerAction({
+      action: "broker_probe",
+      screenshotAfter: false,
+    }, { leaseId: lease.leaseId });
+  } catch (error) {
+    const probeState = manager("ui-status").broker;
+    throw new Error("Computer Use probe failed: " + JSON.stringify({
+      ready:probeState?.ready, running:probeState?.running, reason:probeState?.reason,
+      lastLoopAt:probeState?.lastLoopAt, processed:probeState?.processed, failed:probeState?.failed,
+    }), {cause:error});
+  }
   const elapsedMs = Math.round(performance.now() - startedAt);
   assert.equal(result.metadata.action, "broker_probe");
   assert.equal(result.metadata.screenshot, false);

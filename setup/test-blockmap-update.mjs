@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -279,6 +279,60 @@ try {
   assert.notEqual(noRange.code, 0, "a server that ignores Range must not be accepted as differential source");
   assert.match(noRange.stderr, /no mirror\/proxy\/direct endpoint supports.*HTTP Range/i);
 
+
+  // The optimized path uses the complete blockmap alone. No delta ZIP exists.
+  mkdirSync(join(base,"runtime","node"),{recursive:true});
+  try{linkSync(join(root,"runtime","node","node.exe"),join(base,"runtime","node","node.exe"));}
+  catch{copyFileSync(join(root,"runtime","node","node.exe"),join(base,"runtime","node","node.exe"));}
+  for(const scenario of ["rollback","success"]){
+    const partialStage=join(base,".update-staging",scenario);
+    const partialPayload=join(partialStage,"payload","DevSpacePortable");
+    mkdirSync(partialStage,{recursive:true});
+    const planFile=join(partialStage,"blockmap-plan.json");
+    const partialArgs=[...commonArgs,"--mode","changed-files","--plan-file",planFile,"--payload",partialPayload,
+      "--asset-url",started.baseUrl+"/asset"];
+    const partial=await runProcess(node,partialArgs);
+    assert.equal(partial.code,0,partial.stderr||partial.stdout);
+    const report=JSON.parse(partial.stdout.trim());
+    assert.equal(report.payloadMode,"changed-files");
+    assert.equal(report.unchangedFileCount,1);
+    assert.equal(report.changedFileCount,targetFiles.length-1);
+    assert.ok(report.writtenBytes<report.targetBytes);
+    assert.equal(existsSync(join(partialPayload,"unchanged.bin")),false);
+    for(const name of targetFiles.filter(p=>p!=="unchanged.bin")){
+      assert.equal(sha256(readFileSync(join(partialPayload,name))),sha256(readFileSync(join(target,name))));
+    }
+    const warmStage=join(partialStage,"warm-run");mkdirSync(warmStage,{recursive:true});
+    const warm=await runProcess(node,[...partialArgs,"--payload",join(warmStage,"payload"),"--plan-file",join(warmStage,"blockmap-plan.json")]);
+    assert.equal(warm.code,0,warm.stderr||warm.stdout);
+    assert.equal(JSON.parse(warm.stdout.trim()).scannedBytes,0,"warm scan must not reread installed file contents");
+    // warm-plan and cold-plan share the same stable base snapshot.
+    for(const helper of ["blockmap-updater.cjs","blockmap-plan.cjs"])copyFileSync(join(root,"setup",helper),join(partialStage,helper));
+    writeFileSync(join(partialStage,"stage-info.json"),JSON.stringify({
+      formatVersion:4,currentVersion:"1.1.41",targetVersion:"1.1.42",updateMode:"blockmap",
+      payloadMode:"changed-files",payloadRoot:partialPayload,planSha256:report.planSha256,
+      blockmapHeaderSha256:metadata.headerSha256,
+    }));
+    const before=statSync(join(base,"unchanged.bin"),{bigint:true});
+    const applied=await runProcess("powershell.exe",[
+      "-NoProfile","-ExecutionPolicy","Bypass","-File",join(root,"setup","test-blockmap-apply.ps1"),
+      "-SourceRoot",root,"-Root",base,"-StagingPath",partialStage,
+      ...(scenario==="rollback"?["-FailAfterVerify"]:[]),
+    ]);
+    assert.equal(applied.code,0,applied.stderr||applied.stdout);
+    assert.match(applied.stdout,scenario==="rollback"?/rollbackVerified/:/applyVerified/);
+    const after=statSync(join(base,"unchanged.bin"),{bigint:true});
+    assert.equal(after.ino,before.ino,"unchanged file identity must survive apply");
+    assert.equal(after.mtimeNs,before.mtimeNs);
+    assert.equal(readFileSync(join(base,"data","user-state.txt"),"utf8"),"persistent\n");
+    if(scenario==="rollback"){
+      assert.equal(sha256(readFileSync(join(base,"nested","changed.bin"))),sha256(changedBase));
+      assert.equal(existsSync(join(base,"nested","new.bin")),false);
+    }else{
+      for(const name of targetFiles)assert.equal(sha256(readFileSync(join(base,name))),sha256(readFileSync(join(target,name))));
+    }
+  }
+
   const finalProgress = JSON.parse(readFileSync(progress, "utf8"));
   assert.ok(["staged", "probing"].includes(finalProgress.phase) || typeof finalProgress.phase === "string");
   console.log(JSON.stringify({
@@ -290,6 +344,11 @@ try {
     segmentedBlockmapHeader: true,
     rangeFailureReprobe: true,
     reconstructedFileSha256Validation: true,
+    changedOnlyStaging: true,
+    zeroWarmScanContentReads: true,
+    realPowerShellBlockmapApply: true,
+    realPowerShellBlockmapRollback: true,
+    unchangedFileIdentityPreserved: true,
     headerTamperFailsClosed: true,
     noRangeServerRejected: true,
     targetBytes: result.targetBytes,

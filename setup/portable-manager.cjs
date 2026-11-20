@@ -1256,26 +1256,20 @@ function startComputerUseBroker(lease) {
     },
   });
   child.unref();
-  const state = {
-    formatVersion: 1,
-    leaseId: lease.leaseId,
-    pid: child.pid,
-    startedAt: new Date().toISOString(),
-    lastLoopAt: null,
-    pollIntervalMs: 40,
-    transport: "local-file-queue",
-    status: "starting",
-  };
-  writeJson(COMPUTER_USE_BROKER_FILE, state);
-  restrictAcl(COMPUTER_USE_BROKER_FILE);
+  // The broker is the sole writer of its readiness record. The record
+  // inherits the restricted Computer Use directory ACL set by openUiLease.
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const status = computerUseBrokerStatus(lease.leaseId);
-    if (status.ready) return status;
-    if (!status.running) return status;
+    if (status.ready && status.pid === child.pid) return status;
+    if (!processExists(child.pid)) {
+      return {ready:false, running:false, pid:child.pid, reason:"process-exited"};
+    }
     sleepSync(25);
   }
-  return computerUseBrokerStatus(lease.leaseId);
+  const status = computerUseBrokerStatus(lease.leaseId);
+  return status.pid === child.pid
+    ? status : {ready:false, running:processExists(child.pid), pid:child.pid, reason:"starting"};
 }
 
 function ensureComputerUseBroker(lease) {

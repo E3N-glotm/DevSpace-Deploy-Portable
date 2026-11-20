@@ -1,5 +1,7 @@
 # Application and network lifecycle design through 1.1.34
 
+> 本页记录早期实现和设计演进。当前正式版的操作入口见 [使用指南](../README-PORTABLE.md#更新与迁移)，最新打包、差异更新和旧版兼容规则见 [发行流程](RELEASING.md)。
+
 ## Implemented in 1.1.34: frozen review history and verified mirror-first downloads
 
 - Historical review is no longer recomputed from an old baseline against the current live workspace. Successful structured mutations freeze a bounded session-owned summary/file list/patch, so later work cannot make an older session silently become `0`.

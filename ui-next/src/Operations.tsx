@@ -921,6 +921,11 @@ export function UpdatesPage({quickCheck=false,onQuickCheckConsumed}: {
     return ()=>window.clearInterval(timer);
   },[running]);
   const percent=progress?.percent;
+  const progressLabel=progress?.phase==='analyzing'?'本地分析进度'
+    :progress?.phase==='reconstructing'?'变化文件准备进度'
+    :progress?.phase==='blockmap-header'?'差分索引下载进度'
+    :progress?.phase==='downloading'?'下载进度':'当前文件进度';
+  const networkProgress=progress?.phase==='downloading'||progress?.phase==='blockmap-header';
   const formatBytes=(bytes:number)=>bytes>=1024*1024*1024?(bytes/(1024**3)).toFixed(2)+' GB'
     :bytes>=1024*1024?(bytes/(1024**2)).toFixed(1)+' MB'
       :bytes>=1024?(bytes/1024).toFixed(0)+' KB':bytes+' B';
@@ -956,10 +961,10 @@ export function UpdatesPage({quickCheck=false,onQuickCheckConsumed}: {
           :<p>检查和下载不会替换现有文件，也不会停止服务。</p>}
       {running==='stage'&&progress&&<>
         {progress.bytesTotal>0&&<div className="update-progress">
-          <div className="update-progress-label"><span>{progress.phase==='downloading'?'下载进度':'当前文件进度'}</span><strong>{percent===null?'计算中…':percent+'%'}</strong></div>
+          <div className="update-progress-label"><span>{progressLabel}</span><strong>{percent===null?'计算中…':percent+'%'}</strong></div>
           <progress max={100} value={percent??0} aria-label="更新文件传输进度"/>
           <div className="update-progress-meta"><span>{formatBytes(progress.bytesReceived)} / {formatBytes(progress.bytesTotal)}</span>
-            {progress.phase==='downloading'&&progress.speedBytesPerSecond>0&&
+            {networkProgress&&progress.speedBytesPerSecond>0&&
               <span>{formatBytes(progress.speedBytesPerSecond)}/秒
                 {progress.etaSeconds!==null?' · 约剩 '+duration(progress.etaSeconds):''}</span>}</div>
         </div>}

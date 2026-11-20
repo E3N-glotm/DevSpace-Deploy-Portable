@@ -197,7 +197,7 @@ export function AgentFlow({ lanes, cards }: { lanes: FlowLane[]; cards: FlowCard
               <button type="button" data-flow-card={card.family}
                 className={'agent-flow-node is-' + lane.tone + (detail.failure ? ' has-error' : '')}
                 style={{ gridColumn: laneIndex(card) + 1 }} onClick={() => setOpenId(card.id)}>
-                <span className="agent-flow-node-head"><strong>{detail.title}</strong><ArrowUpRightRegular /></span>
+                <span className="agent-flow-node-head"><strong title={detail.title}>{detail.title}</strong><ArrowUpRightRegular /></span>
                 {detail.preview && <span className="agent-flow-preview">{detail.preview}</span>}
                 <time>{formatAgentTime(card.events[0].at)}</time>
               </button>
