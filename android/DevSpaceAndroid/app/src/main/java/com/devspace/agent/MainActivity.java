@@ -2,13 +2,18 @@ package com.devspace.agent;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PersistableBundle;
+import android.text.InputType;
+import android.widget.EditText;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -25,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 public final class MainActivity extends Activity {
     private AgentConfig config;
     private WebView webView;
+    private AlertDialog credentialDialog;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -41,6 +47,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (credentialDialog != null) credentialDialog.dismiss();
         if (webView != null) {
             webView.removeJavascriptInterface("DevSpaceNative");
             webView.destroy();
@@ -243,6 +250,41 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))));
         }
 
+        @JavascriptInterface public String copyCredential(String field) {
+            String label = credentialLabel(field);
+            if (label == null) return okFailure("不支持的凭据类型").toString();
+            runOnUiThread(() -> {
+                try {
+                    if (isFinishing() || isDestroyed()) throw new IllegalStateException();
+                    String value = "ownerPassword".equals(field)
+                            ? config.ownerPassword() : config.cloudflareTunnelToken();
+                    if (value.isEmpty()) {
+                        pushEvent("credentialCopied", okFailure("请先设置 " + label));
+                        return;
+                    }
+                    ClipboardManager manager = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    if (manager == null) throw new IllegalStateException();
+                    ClipData clip = ClipData.newPlainText(label, value);
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        PersistableBundle extras = new PersistableBundle();
+                        extras.putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true);
+                        clip.getDescription().setExtras(extras);
+                    }
+                    manager.setPrimaryClip(clip);
+                    pushEvent("credentialCopied", ok(label + " 已复制"));
+                } catch (Throwable error) {
+                    pushEvent("credentialCopied", okFailure("无法复制凭据，请重试"));
+                }
+            });
+            return ok("正在复制").toString();
+        }
+
+        @JavascriptInterface public String changeCredential(String field) {
+            if (credentialLabel(field) == null) return okFailure("不支持的凭据类型").toString();
+            runOnUiThread(() -> showCredentialDialog(field));
+            return ok("正在打开凭据设置").toString();
+        }
+
         @JavascriptInterface public String copyText(String value) {
             runOnUiThread(() -> {
                 ClipboardManager manager = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
@@ -250,6 +292,60 @@ public final class MainActivity extends Activity {
             });
             return ok("已复制").toString();
         }
+    }
+
+    private static String credentialLabel(String field) {
+        if ("ownerPassword".equals(field)) return "Owner Password";
+        if ("cloudflareToken".equals(field)) return "Cloudflare Tunnel Token";
+        return null;
+    }
+
+    private void showCredentialDialog(String field) {
+        String label = credentialLabel(field);
+        if (label == null || isFinishing() || isDestroyed()) return;
+        if (credentialDialog != null && credentialDialog.isShowing()) return;
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setSingleLine(true);
+        input.setHint("输入新的 " + label);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("设置 / 更换 " + label)
+                .setMessage("保存后替换当前凭据；取消保留原值。")
+                .setView(input)
+                .setNegativeButton("取消", (ignored, which) -> input.setText(""))
+                .setPositiveButton("保存", null)
+                .create();
+        credentialDialog = dialog;
+        dialog.setOnDismissListener(ignored -> {
+            input.setText("");
+            if (credentialDialog == dialog) credentialDialog = null;
+        });
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            String value = input.getText().toString();
+            if (value.trim().isEmpty()) {
+                input.setError("请输入新凭据，或取消以保留原值");
+                return;
+            }
+            try {
+                if ("ownerPassword".equals(field)) config.ownerPassword(value);
+                else config.cloudflareTunnelToken(value);
+                input.setText("");
+                dialog.dismiss();
+                pushState();
+                pushEvent("credentialChanged", ok("ownerPassword".equals(field)
+                        ? "Owner Password 已保存"
+                        : "Cloudflare Tunnel Token 已保存，下次连接时生效"));
+            } catch (Throwable error) {
+                input.setError("保存失败，请重试；取消可关闭设置");
+            }
+        }));
+        dialog.show();
+    }
+
+    private static JSONObject okFailure(String message) {
+        try { return new JSONObject().put("ok", false).put("message", message); }
+        catch (Exception ignored) { return new JSONObject(); }
     }
 
     private JSONObject stateJson() {

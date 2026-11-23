@@ -1,4 +1,12 @@
-# DevSpace Mobile 1.1.44 Android Standalone MCP
+# DevSpace Mobile Android Standalone MCP
+
+### 1.1.51-android.16：手机端凭据管理
+
+Owner Password 与 Cloudflare Tunnel Token 现在显示固定遮罩和“已配置 / 未配置”标记，并提供“复制”和“设置 / 更换”按钮。窄屏会自动换行排列按钮。
+
+复制由 Android 原生代码从 Keystore 读取保存值并写入剪贴板，Android 13 及以上会标记为敏感内容；只有操作完成后才提示成功。普通状态轮询和 WebView 不接收已保存凭据的明文。
+
+更换时使用空白的原生密码输入框，点击保存只更新所选凭据，取消和空输入保留原值。页面中其他尚未保存的配置继续保留，Cloudflare 新 Token 在下次连接时使用。
 
 ### 1.1.51-android.15：修复旧隧道遗留的 tr 高 CPU 死循环
 
@@ -224,7 +232,8 @@ license: Apache-2.0
 python tools\vendor-cloudflared.py
 python tools\build-ngrok-android.py
 gradlew.bat --no-daemon clean assembleDebug lintDebug
-node ..\..\setup\test-android-standalone-contract.mjs
+node tools\test-credential-ui.cjs
+python tools\test_watchdog_cpu_regression.py
 ```
 
 APK：
