@@ -38,7 +38,7 @@ import urllib.request
 from pathlib import Path
 
 
-AGENT_VERSION = "1.1.48"
+AGENT_VERSION = "1.1.49"
 PROTOCOL_VERSION = 1
 DEFAULT_CONFIG = "/etc/devspace-agent/config.json"
 DEFAULT_STATE_DIR = "/var/lib/devspace-agent"
@@ -230,15 +230,19 @@ def landlock_runtime_device_paths() -> list[str]:
 
 
 def landlock_runtime_device_directories() -> list[str]:
-    """Directories containing dynamic character devices needed at runtime.
+    """Dynamic runtime paths that need only WRITE_FILE under Landlock.
 
     PTY slave nodes under /dev/pts are created after /dev/ptmx is opened, so
     they cannot be enumerated before the Landlock ruleset is applied. Grant
-    WRITE_FILE only to the devpts directory; Unix ownership/mode checks remain
-    authoritative and no create/remove permissions are granted here.
+    WRITE_FILE only to devpts and this process's /proc/self/task subtree.
+    NVIDIA's CUDA driver uses task-specific procfs entries during cuInit and
+    context creation; without this narrow exception, scoped shells can fail
+    with CUDA_ERROR_OPERATING_SYSTEM (304). No general /proc write access,
+    create/remove rights or persistent workspace write rights are granted.
+    Normal Unix ownership/mode checks remain authoritative.
     """
     result: list[str] = []
-    for candidate in ["/dev/pts"]:
+    for candidate in ["/dev/pts", "/proc/self/task"]:
         resolved = os.path.realpath(candidate)
         if os.path.isdir(resolved):
             result.append(resolved)

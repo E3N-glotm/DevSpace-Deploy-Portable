@@ -35,7 +35,7 @@ assert.equal(readFileSync(PACKAGED_AGENT, "utf8"), agent, "installed Portable Ag
 assert.equal(readFileSync(PACKAGED_INSTALLER, "utf8"), installer, "installed Portable installer must match maintained source");
 
 for (const contract of [
-  /AGENT_VERSION = "1\.1\.48"/,
+  /AGENT_VERSION = "1\.1\.49"/,
   /MAX_MESSAGE_BYTES = 8 \* 1024 \* 1024/,
   /TRANSFER_CHUNK_BYTES = 512 \* 1024/,
   /MAX_WATCHES = 64/,
@@ -60,6 +60,7 @@ for (const contract of [
   /landlock_runtime_device_paths/,
   /landlock_runtime_device_directories/,
   /"\/dev\/pts"/,
+  /"\/proc\/self\/task"/,
   /"\/dev\/nvidiactl"/,
   /"\/dev\/nvidia-uvm"/,
   /"\/dev\/nvidia\[0-9\]\*"/,
@@ -121,7 +122,7 @@ assert.match(installer, /elif id ubuntu >\/dev\/null 2>&1; then[\s\S]{0,120}RUN_
   "ordinary root invocation must retain the historical ubuntu fallback when explicit root-service opt-in is absent");
 assert.doesNotMatch(installer, /curl is required/);
 assert.doesNotMatch(installer, /sha256sum is required/);
-assert.match(remoteAgentManager, /DEVSPACE_LINUX_AGENT_VERSION = "1\.1\.48"/);
+assert.match(remoteAgentManager, /DEVSPACE_LINUX_AGENT_VERSION = "1\.1\.49"/);
 assert.match(remoteAgentManager, /message\.agentVersion !== DEVSPACE_LINUX_AGENT_VERSION.*?agent\.selfUpdate/s);
 
 const python = spawnSync("python", ["-c", [
@@ -132,6 +133,23 @@ const python = spawnSync("python", ["-c", [
 ].join("; "), SOURCE_AGENT], { cwd: ROOT, encoding: "utf8" });
 assert.equal(python.status, 0, python.stderr || python.stdout || "Python AST validation failed");
 assert.match(python.stdout, /python-ast-ok/);
+
+// Exercise the real path enumeration, rather than matching a loose source
+// string: permit only the dynamic PTY and current task procfs subtree.
+const cudaLandlock = spawnSync("python", ["-c", [
+  "import ast, os, pathlib, sys, unittest.mock as mock",
+  "p=pathlib.Path(sys.argv[1])",
+  "tree=ast.parse(p.read_text(encoding='utf-8'), filename=str(p))",
+  "fn=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='landlock_runtime_device_directories')",
+  "ns={'os':os}; exec(compile(ast.Module(body=[fn],type_ignores=[]),str(p),'exec'),ns)",
+  "with mock.patch.object(os.path, 'realpath', side_effect=lambda p: p), mock.patch.object(os.path, 'isdir', return_value=True):",
+  "    paths=ns['landlock_runtime_device_directories']()",
+  "assert paths == ['/dev/pts', '/proc/self/task'], paths",
+  "assert '/proc' not in paths and '/dev' not in paths, paths",
+  "print('cuda-landlock-scoped-paths-ok')",
+].join("\n"), SOURCE_AGENT], { cwd: ROOT, encoding: "utf8" });
+assert.equal(cudaLandlock.status, 0, cudaLandlock.stderr || cudaLandlock.stdout || "CUDA Landlock directory contract failed");
+assert.match(cudaLandlock.stdout, /cuda-landlock-scoped-paths-ok/);
 
 const bash = spawnSync(BASH, ["-n", SOURCE_INSTALLER], { cwd: ROOT, encoding: "utf8" });
 assert.equal(
@@ -214,6 +232,7 @@ console.log(JSON.stringify({
   fullAccessMode: true,
   scopedRuntimeScratchCompatibility: true,
   scopedAcceleratorDeviceCompatibility: true,
+  scopedCudaTaskProcfsCompatibility: true,
   noBlockDeviceLandlockException: true,
   generatedInstallCommandRequiresSudo: false,
   installCommandKeepsInteractiveShellOpen: true,

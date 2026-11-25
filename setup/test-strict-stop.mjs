@@ -265,6 +265,9 @@ try {
   // dev11's Portable manager imports an isolated SSH reverse-tunnel
   // supervisor; include it in the disposable strict-stop fixture.
   await copyFile(join(setupDir, "ssh-reverse-tunnel.cjs"), join(sandboxSetupDir, "ssh-reverse-tunnel.cjs"));
+  // 1.1.70 dev1 moved crash-tolerant volatile-state parsing into its own
+  // module. The isolated stop fixture needs the same dependency as Portable.
+  await copyFile(join(setupDir, "runtime-json.cjs"), join(sandboxSetupDir, "runtime-json.cjs"));
   await copyFile(process.execPath, sandboxNode);
   await writeFile(join(configDir, "deployment.json"), JSON.stringify({ port: 17689, tunnelProvider: "ngrok" }), "utf8");
   const launched = spawnSync(sandboxNode, ["-e", launcherCode], {

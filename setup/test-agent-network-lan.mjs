@@ -84,7 +84,7 @@ try{
   assert.equal(script.status,200);
   const bytes=Buffer.from(await script.arrayBuffer());
   assert.equal(script.headers.get("x-content-sha256"),createHash("sha256").update(bytes).digest("hex"));
-  assert.match(bytes.toString("utf8"),/AGENT_VERSION = "1\.1\.48"/);
+  assert.match(bytes.toString("utf8"),/AGENT_VERSION = "1\.1\.49"/);
   assert.equal((await fetch(endpoint+"/mcp")).status,404);
   assert.equal((await fetch(endpoint+"/oauth/authorize")).status,404);
   assert.equal((await fetch(endpoint+"/agent/v1/install.sh")).status,200);
@@ -108,7 +108,7 @@ try{
   const ack=await new Promise((resolve,reject)=>{
     const timer=setTimeout(()=>reject(new Error("LAN hello timeout")),5000);
     ws.on("open",()=>ws.send(JSON.stringify({type:"hello",protocol:1,enrollmentToken:enrollment.token,
-      hostname:"mock-host",platform:"linux-x64",agentVersion:"1.1.48",capabilities:{}})));
+      hostname:"mock-host",platform:"linux-x64",agentVersion:"1.1.49",capabilities:{}})));
     ws.on("message",data=>{clearTimeout(timer);resolve(JSON.parse(data.toString("utf8")));});
     ws.on("error",reject);
   });
@@ -173,7 +173,7 @@ try{
       const timer=setTimeout(()=>reject(new Error("LAN shutdown hello timeout")),5000);
       shutdownSocket.on("open",()=>shutdownSocket.send(JSON.stringify({type:"hello",protocol:1,
         enrollmentToken:shutdownEnrollment.token,hostname:"shutdown-mock",platform:"linux-x64",
-        agentVersion:"1.1.48",capabilities:{}})));
+        agentVersion:"1.1.49",capabilities:{}})));
       shutdownSocket.on("message",data=>{clearTimeout(timer);resolve(JSON.parse(data.toString("utf8")));});
       shutdownSocket.on("error",error=>{clearTimeout(timer);reject(error);});
     });
