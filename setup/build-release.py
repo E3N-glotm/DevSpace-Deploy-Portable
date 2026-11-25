@@ -69,6 +69,28 @@ EXCLUDED_TOP_LEVEL_FILES = {
     # Historical diagnostic shell-redirection artifact, never a release file.
     "datetime('now'",
 }
+# A Portable checkout can share its source root with operator-local files
+# produced by unrelated diagnostics or development sessions. The release
+# must never pick up an arbitrary new root-level file merely because it is
+# not yet present in an exclusion list. Only known, intentional root
+# payloads belong in the distributable. SHA256SUMS.txt is added separately
+# by write_zip(), and is not collected by release_files().
+APPROVED_TOP_LEVEL_RELEASE_FILES = {
+    "BUILD-ACCEPTANCE.md",
+    "DevSpace-Portable-Next.exe",
+    "DevSpace-Portable.cmd",
+    "DevSpace-Portable.exe",
+    "DevSpace-SshAskPass.exe",
+    "LICENSE",
+    "MIGRATION-CHECKLIST.md",
+    "NOTICE",
+    "README-PORTABLE.md",
+    "README.md",
+    "SECURITY.md",
+    "THIRD-PARTY-NOTICES.md",
+    "Update.exe",
+    "VERSION-MANIFEST.json",
+}
 RELEASE_DIRECTORY_PREFIX = "DevSpacePortable-Windows-x64-"
 TEMP_NATIVE_UI_PATTERN = re.compile(r"^[0-9a-fA-F-]{36}_DevSpace-Portable\.exe$")
 FORBIDDEN_RELEASE_BASENAMES = {
@@ -259,6 +281,8 @@ def release_files() -> list[Path]:
         for file_name in sorted(file_names):
             file_path = current / file_name
             relative = file_path.relative_to(ROOT)
+            if relative.parent == Path(".") and file_name not in APPROVED_TOP_LEVEL_RELEASE_FILES:
+                continue
             if next_only and relative == Path("setup/native/DevSpacePortableApp.cs"):
                 continue
             if relative.parent == Path(".") and file_name in EXCLUDED_TOP_LEVEL_FILES:

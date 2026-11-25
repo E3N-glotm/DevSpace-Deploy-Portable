@@ -38,7 +38,7 @@ import urllib.request
 from pathlib import Path
 
 
-AGENT_VERSION = "1.1.49"
+AGENT_VERSION = "1.1.50"
 PROTOCOL_VERSION = 1
 DEFAULT_CONFIG = "/etc/devspace-agent/config.json"
 DEFAULT_STATE_DIR = "/var/lib/devspace-agent"
@@ -230,23 +230,40 @@ def landlock_runtime_device_paths() -> list[str]:
 
 
 def landlock_runtime_device_directories() -> list[str]:
-    """Dynamic runtime paths that need only WRITE_FILE under Landlock.
-
-    PTY slave nodes under /dev/pts are created after /dev/ptmx is opened, so
-    they cannot be enumerated before the Landlock ruleset is applied. Grant
-    WRITE_FILE only to devpts and this process's /proc/self/task subtree.
-    NVIDIA's CUDA driver uses task-specific procfs entries during cuInit and
-    context creation; without this narrow exception, scoped shells can fail
-    with CUDA_ERROR_OPERATING_SYSTEM (304). No general /proc write access,
-    create/remove rights or persistent workspace write rights are granted.
-    Normal Unix ownership/mode checks remain authoritative.
-    """
+    """Dynamic device nodes requiring WRITE_FILE, without create/remove rights."""
     result: list[str] = []
-    for candidate in ["/dev/pts", "/proc/self/task"]:
+    for candidate in ["/dev/pts"]:
         resolved = os.path.realpath(candidate)
         if os.path.isdir(resolved):
             result.append(resolved)
     return result
+
+
+def landlock_cuda_procfs_write_compat(device_paths: list[str]) -> str | None:
+    """Explicit NVIDIA-only compatibility exception for descendant CUDA tasks.
+
+    The NVIDIA driver writes /proc/<pid>/task/<tid>/comm while initializing
+    CUDA. A Landlock rule on /proc/self/task resolves to *one PID's inode*
+    before the command is executed, and thus breaks when Bash, Python or
+    PyTorch later forks a different PID. Landlock cannot match future PIDs.
+
+    The only inheritable procfs path rule covering descendants on Landlock
+    ABI 1 is /proc, so grant WRITE_FILE there only when actual NVIDIA
+    character devices are present. The caller MUST NOT grant MAKE_*, REMOVE_*,
+    REFER or TRUNCATE on /proc. This is broader than the ideal thread-name
+    file only; the operator-facing system status makes the exception visible.
+    Normal Linux DAC, procfs and other LSM checks still apply.
+    """
+    devices = set(device_paths)
+    if "/dev/nvidiactl" not in devices:
+        return None
+    if not any(re.fullmatch(r"/dev/nvidia[0-9]+", device) for device in devices):
+        return None
+    if not os.path.ismount("/proc") or os.path.realpath("/proc") != "/proc":
+        return None
+    if not os.path.isdir("/proc/self/task"):
+        return None
+    return "/proc"
 
 
 def apply_write_landlock(roots: list[str], abi: int) -> None:
@@ -294,7 +311,8 @@ def apply_write_landlock(roots: list[str], abi: int) -> None:
         # devices require that access even though they do not represent durable
         # filesystem writes.  Grant only WRITE_FILE to the allowlisted device
         # inode itself; block devices and arbitrary /dev paths stay denied.
-        for device in landlock_runtime_device_paths():
+        runtime_devices = landlock_runtime_device_paths()
+        for device in runtime_devices:
             fd = os.open(device, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
             opened.append(fd)
             device_attr = LandlockPathBeneathAttr(allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE, parent_fd=fd)
@@ -306,6 +324,17 @@ def apply_write_landlock(roots: list[str], abi: int) -> None:
             directory_attr = LandlockPathBeneathAttr(allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE, parent_fd=fd)
             if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(directory_attr), 0) < 0:
                 raise OSError(ctypes.get_errno(), f"landlock_add_rule failed for runtime device directory {directory}")
+        # CUDA can name threads created by any descendant PID, not just the
+        # initial command. Grant the smallest inheritable procfs Landlock
+        # access bit (WRITE_FILE) only on a host with actual NVIDIA devices.
+        # Never give procfs the wider writableRoots or runtime-scratch bits.
+        cuda_procfs = landlock_cuda_procfs_write_compat(runtime_devices)
+        if cuda_procfs:
+            fd = os.open(cuda_procfs, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+            opened.append(fd)
+            procfs_attr = LandlockPathBeneathAttr(allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE, parent_fd=fd)
+            if libc.syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(procfs_attr), 0) < 0:
+                raise OSError(ctypes.get_errno(), f"landlock_add_rule failed for CUDA procfs compatibility {cuda_procfs}")
         if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
             raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) failed")
         if libc.syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0) < 0:
@@ -1630,7 +1659,14 @@ class AgentRuntime:
                     fields = [value.strip() for value in line.split(",")]
                     if len(fields) >= 6:
                         gpus.append({"index": fields[0], "name": fields[1], "memoryTotalMiB": fields[2], "memoryUsedMiB": fields[3], "utilizationPercent": fields[4], "temperatureC": fields[5]})
-        return {"hostname": socket.gethostname(), "loadAverage": list(os.getloadavg()), "cpuCount": os.cpu_count(), "memory": memory, "gpus": gpus, "agentVersion": AGENT_VERSION}
+        cuda_procfs = None if self.guard.full_access else landlock_cuda_procfs_write_compat(landlock_runtime_device_paths())
+        sandbox = {
+            "accessMode": self.guard.access_mode,
+            "landlockCudaProcfsWriteFile": bool(cuda_procfs),
+            "landlockCudaProcfsWritePath": cuda_procfs,
+            "landlockCudaProcfsAccess": "WRITE_FILE" if cuda_procfs else None,
+        }
+        return {"hostname": socket.gethostname(), "loadAverage": list(os.getloadavg()), "cpuCount": os.cpu_count(), "memory": memory, "gpus": gpus, "agentVersion": AGENT_VERSION, "sandbox": sandbox}
 
     def agent_self_update(self, params: dict) -> dict:
         # A previously installed Windows controller may still advertise an

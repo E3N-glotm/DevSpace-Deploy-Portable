@@ -126,6 +126,8 @@ Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-rescue-overl
 
 Write-Host "==> setup/test-release-plugin-layout.py"
 Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-release-plugin-layout.py") -FailureMessage "Test failed: setup/test-release-plugin-layout.py"
+Write-Host "==> setup/test-release-root-allowlist.py"
+Invoke-NativeChecked -FilePath "python" -ArgumentList @("setup\test-release-root-allowlist.py") -FailureMessage "Test failed: setup/test-release-root-allowlist.py"
 
 $Tests = @(
     "setup/test-runtime-cards.mjs",

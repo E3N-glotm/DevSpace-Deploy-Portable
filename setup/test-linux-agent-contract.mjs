@@ -35,7 +35,7 @@ assert.equal(readFileSync(PACKAGED_AGENT, "utf8"), agent, "installed Portable Ag
 assert.equal(readFileSync(PACKAGED_INSTALLER, "utf8"), installer, "installed Portable installer must match maintained source");
 
 for (const contract of [
-  /AGENT_VERSION = "1\.1\.49"/,
+  /AGENT_VERSION = "1\.1\.50"/,
   /MAX_MESSAGE_BYTES = 8 \* 1024 \* 1024/,
   /TRANSFER_CHUNK_BYTES = 512 \* 1024/,
   /MAX_WATCHES = 64/,
@@ -59,8 +59,9 @@ for (const contract of [
   /"\/dev\/mqueue"/,
   /landlock_runtime_device_paths/,
   /landlock_runtime_device_directories/,
+  /landlock_cuda_procfs_write_compat/,
   /"\/dev\/pts"/,
-  /"\/proc\/self\/task"/,
+  /"\/proc"/,
   /"\/dev\/nvidiactl"/,
   /"\/dev\/nvidia-uvm"/,
   /"\/dev\/nvidia\[0-9\]\*"/,
@@ -122,7 +123,7 @@ assert.match(installer, /elif id ubuntu >\/dev\/null 2>&1; then[\s\S]{0,120}RUN_
   "ordinary root invocation must retain the historical ubuntu fallback when explicit root-service opt-in is absent");
 assert.doesNotMatch(installer, /curl is required/);
 assert.doesNotMatch(installer, /sha256sum is required/);
-assert.match(remoteAgentManager, /DEVSPACE_LINUX_AGENT_VERSION = "1\.1\.49"/);
+assert.match(remoteAgentManager, /DEVSPACE_LINUX_AGENT_VERSION = "1\.1\.50"/);
 assert.match(remoteAgentManager, /message\.agentVersion !== DEVSPACE_LINUX_AGENT_VERSION.*?agent\.selfUpdate/s);
 
 const python = spawnSync("python", ["-c", [
@@ -134,22 +135,33 @@ const python = spawnSync("python", ["-c", [
 assert.equal(python.status, 0, python.stderr || python.stdout || "Python AST validation failed");
 assert.match(python.stdout, /python-ast-ok/);
 
-// Exercise the real path enumeration, rather than matching a loose source
-// string: permit only the dynamic PTY and current task procfs subtree.
+// Exercise the actual GPU-only policy selector, without faking /proc/self's
+// dynamic PID path or claiming a unit test proves descendant CUDA works.
 const cudaLandlock = spawnSync("python", ["-c", [
   "import ast, os, pathlib, sys, unittest.mock as mock",
   "p=pathlib.Path(sys.argv[1])",
   "tree=ast.parse(p.read_text(encoding='utf-8'), filename=str(p))",
-  "fn=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='landlock_runtime_device_directories')",
-  "ns={'os':os}; exec(compile(ast.Module(body=[fn],type_ignores=[]),str(p),'exec'),ns)",
-  "with mock.patch.object(os.path, 'realpath', side_effect=lambda p: p), mock.patch.object(os.path, 'isdir', return_value=True):",
-  "    paths=ns['landlock_runtime_device_directories']()",
-  "assert paths == ['/dev/pts', '/proc/self/task'], paths",
-  "assert '/proc' not in paths and '/dev' not in paths, paths",
-  "print('cuda-landlock-scoped-paths-ok')",
+  "selected=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in ('landlock_runtime_device_directories','landlock_cuda_procfs_write_compat')]",
+  "assert len(selected)==2",
+  "import re",
+  "ns={'os':os,'re':re};exec(compile(ast.Module(body=selected,type_ignores=[]),str(p),'exec'),ns)",
+  "with mock.patch.object(os.path, 'realpath', side_effect=lambda p: p), mock.patch.object(os.path, 'isdir', return_value=True), mock.patch.object(os.path, 'ismount', return_value=True):",
+  "    assert ns['landlock_runtime_device_directories']() == ['/dev/pts']",
+  "    compat=ns['landlock_cuda_procfs_write_compat']",
+  "    assert compat(['/dev/nvidiactl','/dev/nvidia0']) == '/proc'",
+  "    assert compat(['/dev/nvidiactl']) is None",
+  "    assert compat(['/dev/nvidia0']) is None",
+  "    assert compat(['/dev/kfd','/dev/dri/renderD128']) is None",
+  "    assert compat([]) is None",
+  "with mock.patch.object(os.path, 'ismount', return_value=False):",
+  "    assert ns['landlock_cuda_procfs_write_compat'](['/dev/nvidiactl','/dev/nvidia0']) is None",
+  "print('cuda-landlock-gpu-only-policy-ok')",
 ].join("\n"), SOURCE_AGENT], { cwd: ROOT, encoding: "utf8" });
 assert.equal(cudaLandlock.status, 0, cudaLandlock.stderr || cudaLandlock.stdout || "CUDA Landlock directory contract failed");
-assert.match(cudaLandlock.stdout, /cuda-landlock-scoped-paths-ok/);
+assert.match(cudaLandlock.stdout, /cuda-landlock-gpu-only-policy-ok/);
+assert.match(agent, /procfs_attr = LandlockPathBeneathAttr\(allowed_access=LANDLOCK_ACCESS_FS_WRITE_FILE, parent_fd=fd\)/);
+assert.doesNotMatch(agent, /for candidate in \["\/dev\/pts",\s*"\/proc\/self\/task"\]/);
+assert.match(agent, /"landlockCudaProcfsWriteFile": bool\(cuda_procfs\)/);
 
 const bash = spawnSync(BASH, ["-n", SOURCE_INSTALLER], { cwd: ROOT, encoding: "utf8" });
 assert.equal(
@@ -232,7 +244,8 @@ console.log(JSON.stringify({
   fullAccessMode: true,
   scopedRuntimeScratchCompatibility: true,
   scopedAcceleratorDeviceCompatibility: true,
-  scopedCudaTaskProcfsCompatibility: true,
+  scopedCudaDescendantProcfsCompatibility: true,
+  gpuOnlyProcfsWriteFileExceptionAudited: true,
   noBlockDeviceLandlockException: true,
   generatedInstallCommandRequiresSudo: false,
   installCommandKeepsInteractiveShellOpen: true,
